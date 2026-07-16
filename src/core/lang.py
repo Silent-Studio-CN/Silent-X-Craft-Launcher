@@ -156,9 +156,16 @@ lang = Language()
 
 
 def init_language(lang_code: str = "zh-cn"):
-    """Initialise the global language singleton (called once at startup)."""
+    """Initialise the global language singleton.
+
+    Also handles hot-reload: modifies the existing ``lang`` object
+    in-place so that all existing references are updated.
+    """
     if lang_code not in _SUPPORTED:
         lang_code = "zh-cn"
+    # Reset the existing singleton in-place so all references work
     global lang
-    lang = Language(lang_code)
+    lang._code = lang_code
+    lang._data = {}
+    lang._loaded = False
     _ = lang.get("app.name")  # trigger load

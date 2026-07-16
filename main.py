@@ -110,13 +110,8 @@ def main() -> int:
     else:
         qconfig.set(cfg.themeMode, Theme.AUTO)
 
-    lang_str = config.get("language", "zh-CN")
-    qconfig.set(
-        cfg.language,
-        LauncherLanguage.ZH_CN if lang_str == "zh-CN" else LauncherLanguage.EN_US,
-    )
-
-    # ── 初始化语言系统（自动下载缺失的语言文件） ──
+    # ── 从 QConfig 读取语言设置 ──
+    lang_str = cfg.language.value
     init_language(lang_str.lower())
 
     qconfig.set(cfg.autoCheckUpdate, config.get("auto_check_update", True))
