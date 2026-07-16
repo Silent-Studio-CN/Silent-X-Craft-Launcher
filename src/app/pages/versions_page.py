@@ -41,6 +41,7 @@ from qfluentwidgets import (
     CardWidget,
     ComboBox,
     FlowLayout,
+    IndeterminateProgressRing,
     InfoBar,
     InfoBarPosition,
     PrimaryPushButton,
@@ -129,15 +130,35 @@ class VersionsPage(BasePage):
         self.version_layout.setContentsMargins(0, 0, 0, 0)
         self.version_layout.setSpacing(8)
 
-        self.status_label = BodyLabel("正在加载版本清单…", self.view)
+        # ── 加载中（居中旋转圈 + 文字） ──
+        self.loading_widget = QWidget(self.view)
+        lw = QVBoxLayout(self.loading_widget)
+        lw.setAlignment(Qt.AlignCenter)
+        self.loading_spinner = IndeterminateProgressRing(self.loading_widget)
+        self.loading_spinner.setFixedSize(48, 48)
+        self.loading_label = BodyLabel("正在加载版本清单…", self.loading_widget)
+        self.loading_label.setAlignment(Qt.AlignCenter)
+        lw.addStretch(2)
+        lw.addWidget(self.loading_spinner, 0, Qt.AlignCenter)
+        lw.addSpacing(12)
+        lw.addWidget(self.loading_label, 0, Qt.AlignCenter)
+        lw.addStretch(3)
+
+        # ── 统计文字 ──
+        self.status_label = BodyLabel("", self.view)
+        self.status_label.setVisible(False)
 
         self.add_content(toolbar)
+        self.add_content(self.loading_widget)
         self.add_content(self.status_label)
         self.add_content(self.version_container)
         self.add_stretch()
 
     def _load_versions(self) -> None:
-        self.status_label.setText("正在加载版本清单…")
+        self.loading_widget.setVisible(True)
+        self.loading_spinner.startSpin()
+        self.loading_label.setText("正在加载版本清单…")
+        self.status_label.setVisible(False)
         self._clear_version_cards()
         self.refresh_btn.setEnabled(False)
 
@@ -153,6 +174,9 @@ class VersionsPage(BasePage):
         self._last_fs_snapshot = set(self._installed)
         self.refresh_btn.setEnabled(True)
         self._apply_filters()
+        self.loading_widget.setVisible(False)
+        self.loading_spinner.stopSpin()
+        self.status_label.setVisible(True)
         self.status_label.setText(f"共 {len(self._versions)} 个版本，已安装 {len(self._installed)} 个")
         self._show_versions(self._filtered)
 
@@ -166,10 +190,14 @@ class VersionsPage(BasePage):
             self._last_fs_snapshot = current
             self._installed = list(current)
             self._show_versions(self._filtered)
+            self.status_label.setVisible(True)
             self.status_label.setText(f"共 {len(self._versions)} 个版本，已安装 {len(self._installed)} 个")
 
     def _on_load_error(self, error: str) -> None:
         self.refresh_btn.setEnabled(True)
+        self.loading_widget.setVisible(False)
+        self.loading_spinner.stopSpin()
+        self.status_label.setVisible(True)
         self.status_label.setText("加载失败")
         InfoBar.error(
             title="加载失败",
