@@ -50,6 +50,13 @@ class LauncherLanguage(Enum):
     ZH_CN = "zh-CN"
     EN_US = "en-US"
 
+    @property
+    def display(self) -> str:
+        return {
+            "zh-CN": "简体中文",
+            "en-US": "English",
+        }.get(self.value, self.value)
+
 
 class WindowSizePreset(Enum):
     SIZE_854x480 = "854x480"

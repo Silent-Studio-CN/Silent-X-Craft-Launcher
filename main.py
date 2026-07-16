@@ -117,7 +117,7 @@ def main() -> int:
     )
 
     # ── 初始化语言系统（自动下载缺失的语言文件） ──
-    init_language("zh-cn" if lang_str == "zh-CN" else "en-us")
+    init_language(lang_str.lower())
 
     qconfig.set(cfg.autoCheckUpdate, config.get("auto_check_update", True))
     qconfig.set(cfg.debugMode, config.get("debug_mode", False))

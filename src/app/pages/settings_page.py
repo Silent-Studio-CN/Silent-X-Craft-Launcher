@@ -182,9 +182,10 @@ class SettingsPage(BasePage):
             cfg.language,
             FIF.LANGUAGE,
             "语言",
-            texts=["zh-CN", "en-US"],
+            texts=[LauncherLanguage.ZH_CN.display, LauncherLanguage.EN_US.display],
             parent=general_group,
         )
+        cfg.language.valueChanged.connect(self._on_language_changed)
         self.source_card = ComboBoxSettingCard(
             cfg.downloadSource,
             FIF.DOWNLOAD,
@@ -388,6 +389,23 @@ class SettingsPage(BasePage):
         self.source_card.setValue(cfg.downloadSource.value)
         self.window_card.setValue(cfg.windowSize.value)
         self._on_theme_changed(cfg.themeMode.value)
+
+    def _on_language_changed(self, lang: LauncherLanguage) -> None:
+        """语言切换 — 提示重启生效"""
+        from src.core.lang import init_language
+        # LauncherLanguage: "zh-CN" / "en-US" → lang: "zh-cn" / "en-us"
+        code = lang.value.lower()
+        init_language(code)
+        qconfig.set(cfg.language, lang)
+        save_config()
+        InfoBar.success(
+            title="语言已切换",
+            content=f"已切换至 {lang.display}，部分界面需要重启应用后完全生效",
+            orient=InfoBarPosition.TOP,
+            isClosable=True,
+            duration=5000,
+            parent=self,
+        )
 
     def _on_theme_changed(self, theme) -> None:
         setTheme(theme)
