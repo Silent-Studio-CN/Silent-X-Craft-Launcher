@@ -22,176 +22,201 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""Home page — show installed versions and launch."""
+"""Home page — installed versions browser with launch support."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget, QLineEdit
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (
+    QHBoxLayout, QVBoxLayout, QWidget, QPushButton, QFileDialog,
+)
 from qfluentwidgets import (
-    BodyLabel,
-    CardWidget,
-    IconWidget,
-    PrimaryPushButton,
-    PushButton,
-    StrongBodyLabel,
-    InfoBar,
-    InfoBarPosition,
-    ComboBox,
+    BodyLabel, CardWidget, PrimaryPushButton, PushButton,
+    InfoBar, InfoBarPosition, ComboBox,
 )
 
 from src.app.common.base_page import BasePage
 from src.app.common.config import APP_NAME, APP_VERSION
 from src.app.common.launcher_config import cfg
-from src.app.services.download_service import get_installed_versions
+from src.app.services.download_service import get_installed_versions, get_version_info
 from src.app.services.version_manifest import GameVersion
 
 
 class HomePage(BasePage):
+    """主页 — 已安装版本列表 + 快速启动."""
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(
-            title="欢迎回来",
-            subtitle=f"{APP_NAME} v{APP_VERSION} — 轻量、优雅的 Minecraft 启动器",
+            title="主页",
+            subtitle=f"{APP_NAME} v{APP_VERSION}",
             parent=parent,
         )
-        self._installed_versions = []
-        self._selected_version = None
+        self._installed: list[str] = []
         self._build_content()
-        self._load_versions()
-    
+        self._refresh_installed()
+        # 每 8 秒检测文件变化
+        self._watch = QTimer(self)
+        self._watch.setInterval(8000)
+        self._watch.timeout.connect(self._check_fs)
+        self._watch.start()
+
     def _build_content(self) -> None:
-        # ---- 用户信息 ----
-        user_card = CardWidget(self.view)
-        user_layout = QHBoxLayout(user_card)
-        user_layout.setContentsMargins(20, 16, 20, 16)
-        user_layout.setSpacing(16)
-        
-        avatar = IconWidget(":/qfluentwidgets/images/logo.png", user_card)
-        avatar.setFixedSize(48, 48)
-        user_layout.addWidget(avatar)
-        
-        user_info_layout = QVBoxLayout()
-        user_info_layout.setSpacing(4)
-        
-        self.username_input = QLineEdit(user_card)
-        self.username_input.setPlaceholderText("输入游戏内名称")
-        self.username_input.setText("Player")
-        user_info_layout.addWidget(self.username_input)
-        
-        status_label = BodyLabel("离线模式", user_card)
-        status_label.setTextColor("#888888", "#888888")
-        user_info_layout.addWidget(status_label)
-        
-        user_layout.addLayout(user_info_layout, 1)
-        
-        login_btn = PushButton("正版登录 (即将支持)", user_card)
-        login_btn.setEnabled(False)
-        user_layout.addWidget(login_btn)
-        
-        self.add_content(user_card)
-        
-        # ---- 版本选择 ----
-        version_card = CardWidget(self.view)
-        version_layout = QHBoxLayout(version_card)
-        version_layout.setContentsMargins(20, 16, 20, 16)
-        version_layout.setSpacing(16)
-        
-        version_label = StrongBodyLabel("游戏版本", version_card)
-        version_layout.addWidget(version_label)
-        
-        self.version_combo = ComboBox(version_card)
-        self.version_combo.setMinimumWidth(200)
-        self.version_combo.currentTextChanged.connect(self._on_version_selected)
-        version_layout.addWidget(self.version_combo)
-        
-        version_layout.addStretch(1)
-        
-        self.launch_btn = PrimaryPushButton("启动游戏", version_card)
-        self.launch_btn.clicked.connect(self._on_launch)
-        self.launch_btn.setEnabled(False)
-        version_layout.addWidget(self.launch_btn)
-        
-        self.add_content(version_card)
-        
-        # ---- 快速操作 ----
-        quick_card = CardWidget(self.view)
-        quick_layout = QHBoxLayout(quick_card)
-        quick_layout.setContentsMargins(20, 16, 20, 16)
-        quick_layout.setSpacing(12)
-        
-        versions_btn = PushButton("浏览版本", quick_card)
-        versions_btn.clicked.connect(lambda: self.window().switchTo(self.window().versions_page))
-        quick_layout.addWidget(versions_btn)
-        
-        settings_btn = PushButton("设置", quick_card)
-        settings_btn.clicked.connect(lambda: self.window().switchTo(self.window().settings_page))
-        quick_layout.addWidget(settings_btn)
-        
-        quick_layout.addStretch(1)
-        
-        self.add_content(quick_card)
+        # ── 游戏目录 ──
+        dir_card = CardWidget(self.view)
+        dir_layout = QHBoxLayout(dir_card)
+        dir_layout.setContentsMargins(20, 12, 20, 12)
+
+        dir_label = BodyLabel("游戏目录", dir_card)
+        dir_layout.addWidget(dir_label)
+
+        self.dir_display = BodyLabel(str(cfg.gameDirectory.value), dir_card)
+        self.dir_display.setTextColor("#888888", "#888888")
+        dir_layout.addWidget(self.dir_display, 1)
+
+        change_dir_btn = PushButton("更改", dir_card)
+        change_dir_btn.clicked.connect(self._change_directory)
+        dir_layout.addWidget(change_dir_btn)
+
+        open_dir_btn = PushButton("打开", dir_card)
+        open_dir_btn.clicked.connect(self._open_directory)
+        dir_layout.addWidget(open_dir_btn)
+
+        self.add_content(dir_card)
+
+        # ── 已安装版本（卡片网格） ──
+        self._grid = QWidget(self.view)
+        self._grid_layout = QVBoxLayout(self._grid)
+        self._grid_layout.setContentsMargins(0, 0, 0, 0)
+        self._grid_layout.setSpacing(8)
+
+        self._empty_hint = BodyLabel("暂无已安装的版本\n前往「版本」页下载", self.view)
+        self._empty_hint.setAlignment(Qt.AlignCenter)
+        self._empty_hint.setStyleSheet("color: #888; font-size: 14px; margin: 60px 0;")
+
+        self.add_content(self._empty_hint)
+        self.add_content(self._grid)
         self.add_stretch()
-    
-    def _load_versions(self):
-        self._installed_versions = get_installed_versions()
-        self.version_combo.clear()
-        
-        if self._installed_versions:
-            for v in self._installed_versions:
-                self.version_combo.addItem(v)
-            self.version_combo.setCurrentIndex(0)
-            self._selected_version = self._installed_versions[0]
-            self.launch_btn.setEnabled(True)
-        else:
-            self.version_combo.addItem("未安装任何版本")
-            self.launch_btn.setEnabled(False)
-    
-    def _on_version_selected(self, text: str):
-        self._selected_version = text
-    
-    def _on_launch(self):
-        """启动游戏 - 跳转到启动进度页"""
-        if not self._selected_version:
-            InfoBar.warning(
-                title="未选择版本",
-                content="请先选择要启动的游戏版本",
-                orient=InfoBarPosition.TOP,
-                isClosable=True,
-                duration=3000,
-                parent=self,
-            )
+
+    # ── 版本刷新 ────────────────────────────────────────────
+
+    def _refresh_installed(self):
+        """刷新已安装版本列表."""
+        self._installed = get_installed_versions()
+        self._render_cards()
+
+    def _render_cards(self):
+        """根据 _installed 重建版本卡片."""
+        # 清除旧卡片
+        while self._grid_layout.count():
+            item = self._grid_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        if not self._installed:
+            self._empty_hint.setVisible(True)
+            self._grid.setVisible(False)
             return
-        
-        # 检查 Java 是否设置
+
+        self._empty_hint.setVisible(False)
+        self._grid.setVisible(True)
+
+        for vid in self._installed:
+            card = self._create_version_card(vid)
+            self._grid_layout.addWidget(card)
+
+    def _create_version_card(self, version_id: str) -> CardWidget:
+        card = CardWidget(self._grid)
+        card.setFixedHeight(56)
+        card.setCursor(Qt.PointingHandCursor)
+
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(20, 0, 16, 0)
+        layout.setSpacing(16)
+
+        # 版本名
+        name = BodyLabel(version_id, card)
+        name.setStyleSheet("font-size: 15px; font-weight: 600;")
+        layout.addWidget(name)
+
+        # 版本信息
+        info = self._get_version_info(version_id)
+        if info:
+            detail = BodyLabel(info, card)
+            detail.setTextColor("#888888", "#888888")
+            detail.setStyleSheet("font-size: 12px;")
+            layout.addWidget(detail)
+
+        layout.addStretch()
+
+        # 启动按钮
+        launch_btn = PrimaryPushButton("启动", card)
+        launch_btn.setFixedSize(80, 32)
+        launch_btn.clicked.connect(lambda checked, v=version_id: self._launch(v))
+        layout.addWidget(launch_btn)
+
+        card.launch_btn = launch_btn
+        return card
+
+    def _get_version_info(self, version_id: str) -> str:
+        """获取版本简要信息."""
+        try:
+            data = get_version_info(version_id)
+            if not data:
+                return ""
+            players = data.get("mainClass", "")
+            loader = ""
+            if "forge" in version_id.lower():
+                loader = "Forge"
+            elif "neoforge" in version_id.lower():
+                loader = "NeoForge"
+            elif "fabric" in version_id.lower():
+                loader = "Fabric"
+            if loader:
+                return loader
+            return ""
+        except Exception:
+            return ""
+
+    # ── 文件监控 ────────────────────────────────────────────
+
+    def _check_fs(self):
+        """检测文件系统变化（用户手动增删版本后自动刷新）."""
+        current = set(get_installed_versions())
+        last = set(getattr(self, "_last_snapshot", []))
+        if current != last:
+            self._last_snapshot = list(current)
+            self._installed = list(current)
+            self._render_cards()
+
+    # ── 操作 ────────────────────────────────────────────────
+
+    def _launch(self, version_id: str):
+        """启动指定版本."""
         if not cfg.javaPath.value:
-            InfoBar.warning(
-                title="未选择 Java",
-                content="请先在设置中选择 Java 运行时",
-                orient=InfoBarPosition.TOP,
-                isClosable=True,
-                duration=4000,
-                parent=self,
-            )
+            InfoBar.warning(title="未选择 Java", content="请先在设置中选择 Java 运行时",
+                            orient=InfoBarPosition.TOP, isClosable=True, duration=4000, parent=self)
             return
-        
-        # 构造 GameVersion 对象
-        version_obj = GameVersion(
-            id=self._selected_version,
-            version_type="release",
-            url="",
-            release_time=""
-        )
-        
-        # 跳转到启动进度页
-        main_window = self.window()
-        if hasattr(main_window, 'switch_to_launch'):
-            main_window.switch_to_launch(version_obj)
+
+        v = GameVersion(id=version_id, version_type="release", url="", release_time="")
+        mw = self.window()
+        if hasattr(mw, 'switch_to_launch'):
+            mw.switch_to_launch(v)
         else:
-            InfoBar.error(
-                title="错误",
-                content="版本页面未初始化",
-                orient=InfoBarPosition.TOP,
-                isClosable=True,
-                duration=3000,
-                parent=self,
-            )
+            InfoBar.error(title="错误", content="启动器未初始化",
+                          orient=InfoBarPosition.TOP, isClosable=True, duration=3000, parent=self)
+
+    def _change_directory(self):
+        """更改游戏目录."""
+        d = QFileDialog.getExistingDirectory(self, "选择 .minecraft 目录", str(cfg.gameDirectory.value))
+        if d:
+            from qfluentwidgets import qconfig
+            qconfig.set(cfg.gameDirectory, d)
+            self.dir_display.setText(d)
+            self._refresh_installed()
+
+    def _open_directory(self):
+        """打开游戏目录."""
+        import subprocess
+        subprocess.Popen(["explorer", str(cfg.gameDirectory.value)])
