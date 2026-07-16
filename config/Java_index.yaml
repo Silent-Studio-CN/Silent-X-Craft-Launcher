@@ -1,0 +1,138 @@
+# JDK 下载索引 — Silent X Craft Launcher
+# 更新此文件后自动同步到: SXCL/Java_index.yaml
+schema_version: 1
+up_time: "2026-07-16"
+description: "JDK 下载索引 — 用于 Silent X Craft Launcher 自动安装 Java"
+update_url: "https://raw.githubusercontent.com/Silent-Studio-CN/index/main/SXCL/Java_index.yaml"
+mirror_url: "https://gh-proxy.com/https://raw.githubusercontent.com/Silent-Studio-CN/index/main/SXCL/Java_index.yaml"
+
+versions:
+  21:
+    name: "JDK 21 (LTS)"
+    recommended: true
+    platforms:
+      windows:
+        x64: &win_x64_21
+          format: exe
+          size_mb: 166.91
+          sha256: "https://download.oracle.com/java/21/latest/jdk-21_windows-x64_bin.exe.sha256"
+          url: "https://download.oracle.com/java/21/latest/jdk-21_windows-x64_bin.exe"
+          mirrors:
+            - "https://gh-proxy.com/https://download.oracle.com/java/21/latest/jdk-21_windows-x64_bin.exe"
+          install_args: ["/s", "INSTALLDIR={target}", "STATIC=1", "SPONSORS=0"]
+        arm64:
+          <<: *win_x64_21
+          note: "ARM64 Windows 使用 x64 安装器（ARM64 模拟兼容）"
+      macos:
+        x64:
+          format: tar.gz
+          size_mb: 184.97
+          sha256: "https://download.oracle.com/java/21/latest/jdk-21_macos-x64_bin.tar.gz.sha256"
+          url: "https://download.oracle.com/java/21/latest/jdk-21_macos-x64_bin.tar.gz"
+          mirrors: []
+          install_args: []
+        arm64:
+          format: tar.gz
+          size_mb: 182.78
+          sha256: "https://download.oracle.com/java/21/latest/jdk-21_macos-aarch64_bin.tar.gz.sha256"
+          url: "https://download.oracle.com/java/21/latest/jdk-21_macos-aarch64_bin.tar.gz"
+          mirrors: []
+          install_args: []
+      linux:
+        x64:
+          format: tar.gz
+          size_mb: 189.66
+          sha256: "https://download.oracle.com/java/21/latest/jdk-21_linux-x64_bin.tar.gz.sha256"
+          url: "https://download.oracle.com/java/21/latest/jdk-21_linux-x64_bin.tar.gz"
+          mirrors: []
+          install_args: []
+        arm64:
+          format: tar.gz
+          size_mb: 187.87
+          sha256: "https://download.oracle.com/java/21/latest/jdk-21_linux-aarch64_bin.tar.gz.sha256"
+          url: "https://download.oracle.com/java/21/latest/jdk-21_linux-aarch64_bin.tar.gz"
+          mirrors: []
+          install_args: []
+
+  25:
+    name: "JDK 25 (LTS)"
+    recommended: false
+    platforms:
+      windows:
+        x64: &win_x64_25
+          format: exe
+          size_mb: 184.51
+          sha256: "https://download.oracle.com/java/25/latest/jdk-25_windows-x64_bin.exe.sha256"
+          url: "https://download.oracle.com/java/25/latest/jdk-25_windows-x64_bin.exe"
+          mirrors: []
+          install_args: ["/s", "INSTALLDIR={target}", "STATIC=1", "SPONSORS=0"]
+        arm64:
+          <<: *win_x64_25
+          note: "ARM64 Windows 使用 x64 安装器"
+      macos:
+        x64:
+          format: tar.gz
+          size_mb: 201.79
+          url: "https://download.oracle.com/java/25/latest/jdk-25_macos-x64_bin.tar.gz"
+          mirrors: []
+          install_args: []
+        arm64:
+          format: tar.gz
+          size_mb: 199.60
+          url: "https://download.oracle.com/java/25/latest/jdk-25_macos-aarch64_bin.tar.gz"
+          mirrors: []
+          install_args: []
+      linux:
+        x64:
+          format: tar.gz
+          size_mb: 206.82
+          url: "https://download.oracle.com/java/25/latest/jdk-25_linux-x64_bin.tar.gz"
+          mirrors: []
+          install_args: []
+        arm64:
+          format: tar.gz
+          size_mb: 204.68
+          url: "https://download.oracle.com/java/25/latest/jdk-25_linux-aarch64_bin.tar.gz"
+          mirrors: []
+          install_args: []
+
+  26:
+    name: "JDK 26 (Latest)"
+    recommended: false
+    platforms:
+      windows:
+        x64: &win_x64_26
+          format: exe
+          size_mb: 188.65
+          url: "https://download.oracle.com/java/26/latest/jdk-26_windows-x64_bin.exe"
+          mirrors: []
+          install_args: ["/s", "INSTALLDIR={target}", "STATIC=1", "SPONSORS=0"]
+        arm64:
+          <<: *win_x64_26
+          note: "ARM64 Windows 使用 x64 安装器"
+      macos:
+        x64:
+          format: tar.gz
+          size_mb: 206.01
+          url: "https://download.oracle.com/java/26/latest/jdk-26_macos-x64_bin.tar.gz"
+          mirrors: []
+          install_args: []
+        arm64:
+          format: tar.gz
+          size_mb: 203.74
+          url: "https://download.oracle.com/java/26/latest/jdk-26_macos-aarch64_bin.tar.gz"
+          mirrors: []
+          install_args: []
+      linux:
+        x64:
+          format: tar.gz
+          size_mb: 211.05
+          url: "https://download.oracle.com/java/26/latest/jdk-26_linux-x64_bin.tar.gz"
+          mirrors: []
+          install_args: []
+        arm64:
+          format: tar.gz
+          size_mb: 208.96
+          url: "https://download.oracle.com/java/26/latest/jdk-26_linux-aarch64_bin.tar.gz"
+          mirrors: []
+          install_args: []
