@@ -39,6 +39,7 @@ from typing import Optional
 import requests
 
 from src.core.constants import DownloadSource, VersionType
+from src.core.logger import log
 
 # ── Manifest cache ────────────────────────────────────────────────
 
@@ -125,6 +126,9 @@ def _do_fetch(
     )
 
     response = requests.get(url, timeout=timeout)
+    if response.status_code in (403, 429):
+        log.warning("版本清单 | HTTP %d 获取失败 (URL: %s), 稍后重试可恢复",
+                    response.status_code, url[:80])
     response.raise_for_status()
     payload = response.json()
 

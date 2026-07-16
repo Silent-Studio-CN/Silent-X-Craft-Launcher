@@ -106,6 +106,7 @@ class VersionsPage(BasePage):
 
         self.category_combo = ComboBox(toolbar)
         self.category_combo.addItems(["全部", "正式版", "快照", "旧版"])
+        self.category_combo.setCurrentIndex(1)  # 默认"正式版"
         self.category_combo.currentIndexChanged.connect(self._on_category_changed)
 
         self.refresh_btn = PushButton("刷新", toolbar)
@@ -263,7 +264,7 @@ class VersionsPage(BasePage):
 
         is_installed = version.id in self._installed
 
-        # 已安装 -> 显示"启动"；未安装 -> 显示"下载"（点击进入配置页）
+        # 已安装 -> 显示"启动"；未安装 -> 点击卡片进入配置页（不显示下载按钮）
         if is_installed:
             status_label.setText("✅ 已安装")
             status_label.setTextColor("#52c41a", "#73d13d")
@@ -273,13 +274,8 @@ class VersionsPage(BasePage):
             launch_btn.clicked.connect(lambda checked, v=version: self._on_launch(v))
             button_layout.addWidget(launch_btn)
         else:
-            status_label.setText("未安装")
-            status_label.setTextColor("#888888", "#888888")
-            download_btn = QPushButton("下载")
-            download_btn.setFixedSize(60, 28)
-            download_btn.setProperty('type', 'primary')
-            download_btn.clicked.connect(lambda checked, v=version: self._on_version_card_clicked(v))
-            button_layout.addWidget(download_btn)
+            status_label.setText("⚙ 配置下载")
+            status_label.setTextColor("#0078d4", "#0078d4")
 
         # "版本日志"按钮
         log_btn = QPushButton("📜 版本日志")
@@ -337,12 +333,14 @@ class VersionsPage(BasePage):
 
     def _open_version_wiki(self, version: GameVersion):
         """根据地区打开对应的 Minecraft Wiki"""
+        from urllib.parse import quote
         country_code = cfg.countryCode.value
         version_number = version.id
         if country_code and country_code.upper() != "CN":
             url = f"https://minecraft.wiki/w/Java_Edition_{version_number}"
         else:
-            url = f"https://zh.minecraft.wiki/w/Java版_{version_number}"
+            # 注意: 中文"版"字后面直接跟版本号，无下划线
+            url = f"https://zh.minecraft.wiki/w/Java版{quote(version_number, safe='')}"
         webbrowser.open(url)
 
     def _show_server_placeholder(self, version: GameVersion):
