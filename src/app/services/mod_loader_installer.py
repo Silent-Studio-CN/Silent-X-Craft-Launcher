@@ -40,6 +40,7 @@ class ModLoaderInstaller:
     def __init__(self, game_dir: Path):
         self.game_dir = game_dir
         self._progress_callback: Optional[Callable] = None
+        self._manual_mode = False  # True 时跳过 _handle_generated_files
     
     def set_progress_callback(self, callback: Callable):
         self._progress_callback = callback
@@ -56,7 +57,7 @@ class ModLoaderInstaller:
         installer_path: Path,
         custom_name: str
     ) -> bool:
-        """安装模组加载器"""
+        """安装模组加载器。先尝试子进程 CLI，失败后回退到手动安装。"""
         try:
             # 1. 获取 Java
             java_path = cfg.javaPath.value
@@ -65,61 +66,102 @@ class ModLoaderInstaller:
                 java_path = shutil.which("java")
                 if not java_path:
                     raise RuntimeError("未找到 Java 运行时")
-            
-            # 2. 构建命令并尝试执行
+
+            # 2. 尝试 CLI 静默安装
             self._notify_progress(0, 100, f"执行 {loader_type} 安装器")
-            
-            cmd_variants = self._build_command_variants(
-                java_path, installer_path, mc_version, loader_version, custom_name
-            )
-            
-            success = False
-            last_error = None
-            
-            for cmd, desc in cmd_variants:
-                try:
-                    log.info(f"[ModLoaderInstaller] 尝试 {desc}: {' '.join(cmd)}")
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=300,
-                        cwd=str(self.game_dir)
-                    )
-                    
-                    if result.returncode == 0:
-                        log.info(f"[ModLoaderInstaller] 安装成功 (使用 {desc})")
-                        success = True
-                        break
-                    else:
-                        error_output = result.stderr or result.stdout or "无输出"
-                        log.warning(f"[ModLoaderInstaller] {desc} 失败: {error_output[:200]}")
-                        last_error = error_output
-                        continue
-                except subprocess.TimeoutExpired:
-                    log.warning(f"[ModLoaderInstaller] {desc} 超时")
-                    last_error = "超时"
-                    continue
-                except Exception as e:
-                    log.warning(f"[ModLoaderInstaller] {desc} 异常: {e}")
-                    last_error = str(e)
-                    continue
-            
+            success, gui_used = self._try_cli_install(java_path, installer_path, mc_version, loader_version, custom_name)
+
+            # 3. 若 CLI 全失败，回退到手动安装（绕过安装器 GUI）
+            if not success:
+                self._notify_progress(30, 100, f"{loader_type} CLI 失败，尝试手动安装")
+                success = self._manual_install(installer_path, mc_version, loader_type, loader_version, custom_name)
+
             if not success:
                 self._notify_progress(100, 100, f"{loader_type} 安装失败")
-                log.error(f"[ModLoaderInstaller] 所有方案均失败: {last_error}")
                 return False
-            
-            # 3. 处理生成的文件
-            self._notify_progress(80, 100, f"整理 {loader_type} 文件")
-            self._handle_generated_files(mc_version, loader_type, loader_version, custom_name)
-            
+
+            # 4. 处理生成的文件（手动模式已生成，跳过）
+            if not self._manual_mode:
+                self._notify_progress(80, 100, f"整理 {loader_type} 文件")
+                self._handle_generated_files(mc_version, loader_type, loader_version, custom_name)
+
             self._notify_progress(100, 100, f"{loader_type} 安装完成")
             return True
-            
+
         except Exception as e:
             log_exception(log, f"[ModLoaderInstaller] 安装失败: {e}")
             self._notify_progress(100, 100, f"安装失败: {str(e)}")
+            return False
+
+    def _try_cli_install(self, java_path, installer_path, mc_version, loader_version, custom_name):
+        """尝试 CLI 静默安装，返回 (success, gui_used)。"""
+        cmd_variants = self._build_command_variants(
+            java_path, installer_path, mc_version, loader_version, custom_name
+        )
+
+        for cmd, desc in cmd_variants:
+            try:
+                log.info(f"[ModLoaderInstaller] 尝试 {desc}: {' '.join(cmd)}")
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=300,
+                    cwd=str(self.game_dir),
+                )
+
+                if result.returncode == 0:
+                    log.info(f"[ModLoaderInstaller] 安装成功 (使用 {desc})")
+                    return True, False
+                else:
+                    error_output = (result.stderr or result.stdout or "无输出")[:200]
+                    log.warning(f"[ModLoaderInstaller] {desc} 失败: {error_output}")
+                    continue
+            except subprocess.TimeoutExpired:
+                log.warning(f"[ModLoaderInstaller] {desc} 超时")
+                continue
+            except Exception as e:
+                log.warning(f"[ModLoaderInstaller] {desc} 异常: {e}")
+                continue
+
+        return False, False
+
+    def _manual_install(self, installer_path, mc_version, loader_type, loader_version, custom_name):
+        """绕过安装器 GUI，通过分析 install_profile.json 手动生成版本文件。"""
+        log.info(f"[ModLoaderInstaller] 手动安装 {loader_type} {loader_version}")
+        try:
+            from src.app.services.installer.forge_analyzer import ForgeAnalyzer, NeoForgeAnalyzer
+
+            if loader_type == "forge":
+                analyzer = ForgeAnalyzer(installer_path)
+            elif loader_type == "neoforge":
+                analyzer = NeoForgeAnalyzer(installer_path)
+            else:
+                return False
+
+            version_info = analyzer.get_version_info()
+            if not version_info:
+                log.error("[ModLoaderInstaller] 无法从安装器中提取版本信息")
+                return False
+
+            # 生成版本 JSON（patched by loader）
+            version_dir = self.game_dir / "versions" / custom_name
+            version_dir.mkdir(parents=True, exist_ok=True)
+
+            json_path = version_dir / f"{custom_name}.json"
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(version_info, f, indent=2, ensure_ascii=False)
+
+            # 复制 client jar（从原版版本目录中取）
+            client_jar = version_dir / f"{custom_name}.jar"
+            if not client_jar.exists():
+                vanilla_jar = self.game_dir / "versions" / mc_version / f"{mc_version}.jar"
+                if vanilla_jar.exists():
+                    shutil.copy2(vanilla_jar, client_jar)
+                    log.info(f"[ModLoaderInstaller] client.jar 已复制: {client_jar}")
+
+            self._manual_mode = True
+            log.info(f"[ModLoaderInstaller] 手动安装完成: {custom_name}")
+            return True
+        except Exception as e:
+            log_exception(log, f"[ModLoaderInstaller] 手动安装失败: {e}")
             return False
     
     def _build_command_variants(
@@ -141,11 +183,14 @@ class ModLoaderInstaller:
                 ([java_path, "-jar", str(installer_path)], "无参数"),
             ]
         elif "neoforge" in loader_lower:
+            # 新 NeoForge: --nogui 加 = 语法；最后再试无参数（会弹 GUI，做最后保底）
+            d = str(self.game_dir)
             variants = [
-                ([java_path, "-jar", str(installer_path), "--installClient", "--installDir", str(self.game_dir)], "标准 --installClient --installDir"),
-                ([java_path, "-jar", str(installer_path), "--installDir", str(self.game_dir)], "仅 --installDir"),
-                ([java_path, "-jar", str(installer_path), "--installClient", "--installDir", str(self.game_dir), "--headless"], "带 --headless"),
-                ([java_path, "-jar", str(installer_path)], "无参数"),
+                ([java_path, "-jar", str(installer_path), "--installClient", f"--installDir={d}", "--nogui"], "新 --installClient --installDir= --nogui"),
+                ([java_path, "-jar", str(installer_path), "--installClient", "--installDir", d, "--nogui"], "新 --installClient --installDir --nogui"),
+                ([java_path, "-jar", str(installer_path), "--installClient", f"--installDir={d}"], "新 --installClient --installDir="),
+                ([java_path, "-jar", str(installer_path), "--installClient", "--installDir", d], "旧 --installClient --installDir"),
+                ([java_path, "-jar", str(installer_path), "--installDir", d], "仅 --installDir"),
             ]
         elif "fabric" in loader_lower:
             variants = [
