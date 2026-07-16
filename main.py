@@ -111,8 +111,8 @@ def main() -> int:
         qconfig.set(cfg.themeMode, Theme.AUTO)
 
     # ── 从 QConfig 读取语言设置 ──
-    lang_str = cfg.language.value
-    init_language(lang_str.lower())
+    lang_code = cfg.language.value.value.lower()  # LauncherLanguage.ZH_CN → "zh-cn"
+    init_language(lang_code)
 
     qconfig.set(cfg.autoCheckUpdate, config.get("auto_check_update", True))
     qconfig.set(cfg.debugMode, config.get("debug_mode", False))
