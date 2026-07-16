@@ -25,6 +25,7 @@
 """下载引擎 - 多线程分片下载"""
 
 import os
+import platform
 import threading
 import queue
 import time
@@ -36,6 +37,10 @@ from typing import Optional, Callable, List
 import requests
 
 from src.app.common.logger import log
+
+
+# macOS ARM64 Python 3.14 多线程 SSL 会导致 segfault，禁用分片
+_MACOS_ARM64 = platform.system() == "Darwin" and platform.machine() == "arm64"
 
 
 class TaskStatus:
@@ -265,9 +270,16 @@ class DownloadEngine:
                         log.info(f"文件已存在，跳过: {path.name}")
                         return True
             
-            # 判断是否分片
-            if expected_size >= self.MIN_FILE_SIZE_FOR_CHUNK:
+            # 判断是否分片（macOS ARM64 禁用分片，避免 segfault）
+            if not _MACOS_ARM64 and expected_size >= self.MIN_FILE_SIZE_FOR_CHUNK:
+                use_chunks = True
                 log.info(f"大文件 ({expected_size / 1024 / 1024:.1f}MB) 使用分片下载: {path.name}")
+            else:
+                use_chunks = False
+                if _MACOS_ARM64 and expected_size >= self.MIN_FILE_SIZE_FOR_CHUNK:
+                    log.info(f"macOS ARM64 禁用分片，改用单线程: {path.name}")
+
+            if use_chunks:
                 return self._download_with_chunks(url, path, expected_size, sha1)
             else:
                 return self._download_single(url, path, expected_size, sha1)
