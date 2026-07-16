@@ -156,7 +156,6 @@ class VersionsPage(BasePage):
 
     def _load_versions(self) -> None:
         self.loading_widget.setVisible(True)
-        self.loading_spinner.startSpin()
         self.loading_label.setText("正在加载版本清单…")
         self.status_label.setVisible(False)
         self._clear_version_cards()
@@ -175,7 +174,6 @@ class VersionsPage(BasePage):
         self.refresh_btn.setEnabled(True)
         self._apply_filters()
         self.loading_widget.setVisible(False)
-        self.loading_spinner.stopSpin()
         self.status_label.setVisible(True)
         self.status_label.setText(f"共 {len(self._versions)} 个版本，已安装 {len(self._installed)} 个")
         self._show_versions(self._filtered)
@@ -196,7 +194,6 @@ class VersionsPage(BasePage):
     def _on_load_error(self, error: str) -> None:
         self.refresh_btn.setEnabled(True)
         self.loading_widget.setVisible(False)
-        self.loading_spinner.stopSpin()
         self.status_label.setVisible(True)
         self.status_label.setText("加载失败")
         InfoBar.error(
