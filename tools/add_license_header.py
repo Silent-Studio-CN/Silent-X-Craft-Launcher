@@ -1,5 +1,5 @@
 # Silent X Craft Launcher (SXCL)
-# Copyright (C) SilentStudio / SilentCodeTeams / Silent X Craft Launcher
+# Copyright (C) SilentStudio / SilentCodeTeams / Silent X Craft Launcher Dev.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published
@@ -20,7 +20,7 @@
 from pathlib import Path
 
 HEADER = """# Silent X Craft Launcher (SXCL)
-# Copyright (C) SilentStudio / SilentCodeTeams / Silent X Craft Launcher
+# Copyright (C) SilentStudio / SilentCodeTeams / Silent X Craft Launcher Dev.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published
