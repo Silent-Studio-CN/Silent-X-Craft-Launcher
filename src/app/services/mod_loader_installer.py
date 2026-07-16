@@ -98,6 +98,7 @@ class ModLoaderInstaller:
         cmd_variants = self._build_command_variants(
             java_path, installer_path, mc_version, loader_version, custom_name
         )
+        installer_dir = installer_path.parent
 
         for cmd, desc in cmd_variants:
             try:
@@ -111,8 +112,17 @@ class ModLoaderInstaller:
                     log.info(f"[ModLoaderInstaller] 安装成功 (使用 {desc})")
                     return True, False
                 else:
+                    # 捕获安装器输出和 .log 文件
                     error_output = (result.stderr or result.stdout or "无输出")[:200]
-                    log.warning(f"[ModLoaderInstaller] {desc} 失败: {error_output}")
+                    log.warning(f"[ModLoaderInstaller] {desc} 失败 (rc={result.returncode}): {error_output}")
+                    # Forge/NeoForge 安装器会把错误写入 jar 同目录的 .log 文件
+                    for log_file in installer_dir.glob("*.log"):
+                        try:
+                            log_content = log_file.read_text(encoding="utf-8", errors="replace")[:500]
+                            if log_content.strip():
+                                log.warning(f"[ModLoaderInstaller] {desc} Java 日志:\n{log_content}")
+                        except Exception:
+                            pass
                     continue
             except subprocess.TimeoutExpired:
                 log.warning(f"[ModLoaderInstaller] {desc} 超时")
@@ -176,14 +186,8 @@ class ModLoaderInstaller:
         loader_lower = str(installer_path).lower()
         variants = []
         
-        if "forge" in loader_lower:
-            variants = [
-                ([java_path, "-jar", str(installer_path), "--installDir", str(self.game_dir)], "新版 --installDir"),
-                ([java_path, "-jar", str(installer_path), "--installClient", "--target", str(self.game_dir)], "旧版 --installClient --target"),
-                ([java_path, "-jar", str(installer_path)], "无参数"),
-            ]
-        elif "neoforge" in loader_lower:
-            # 新 NeoForge: --nogui 加 = 语法；最后再试无参数（会弹 GUI，做最后保底）
+        # ⚠️ neoforge 必须先于 forge 检查，因为 "neoforge" 包含 "forge"
+        if "neoforge" in loader_lower:
             d = str(self.game_dir)
             variants = [
                 ([java_path, "-jar", str(installer_path), "--installClient", f"--installDir={d}", "--nogui"], "新 --installClient --installDir= --nogui"),
@@ -191,6 +195,11 @@ class ModLoaderInstaller:
                 ([java_path, "-jar", str(installer_path), "--installClient", f"--installDir={d}"], "新 --installClient --installDir="),
                 ([java_path, "-jar", str(installer_path), "--installClient", "--installDir", d], "旧 --installClient --installDir"),
                 ([java_path, "-jar", str(installer_path), "--installDir", d], "仅 --installDir"),
+            ]
+        elif "forge" in loader_lower:
+            variants = [
+                ([java_path, "-jar", str(installer_path), "--installDir", str(self.game_dir)], "新版 --installDir"),
+                ([java_path, "-jar", str(installer_path), "--installClient", "--target", str(self.game_dir)], "旧版 --installClient --target"),
             ]
         elif "fabric" in loader_lower:
             variants = [
