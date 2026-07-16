@@ -81,12 +81,18 @@ src/
 
 ## 📄 许可证
 
-本项目采用 **GNU Affero General Public License v3.0 (AGPL-3.0)**。
+本项目采用 **GNU Affero General Public License v3.0 (AGPL-3.0)**，
+并附加 SXCL 特别条款（禁止收费、轻度/重度使用划分、禁止碰瓷命名）。
 
-> 本项目使用 PySide6（LGPL-3.0 许可）作为 Qt 绑定库。
-> LGPL 明确允许 LGPL 库被 AGPL 程序使用，二者兼容。
+详见 [LICENSE](LICENSE) 文件。
+
+> 本项目使用 PySide6（LGPL-3.0 许可）作为 Qt 绑定库，
+> LGPL 与 AGPL 兼容。
 >
-> 中文版许可优先。如中英文版本存在歧义，以中文版本为准。
+> **中文版许可优先。如中英文版本存在歧义，以中文版本为准。**
+>
+> 版权所有 © SilentStudio
+> 开发所属：SilentStudio → SilentCodeTeams → Silent X Craft Launcher Dev
 
 ---
 

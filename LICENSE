@@ -1,5 +1,7 @@
+
 # GNU AFFERO GENERAL PUBLIC LICENSE (AGPL-3.0)
 ## GNU AFFERO 通用公共许可证（AGPL-3.0）
+## 及 Silent X Craft Launcher 附加条款
 
 > **重要声明 / Important Notice**
 >
@@ -9,89 +11,162 @@
 
 ---
 
-## GNU AFFERO 通用公共许可证
+**版权所有 © SilentStudio**
+**开发所属：SilentStudio → SilentCodeTeams → Silent X Craft Launcher Dev**
+
+---
+
+## 第一部分：AGPL-3.0 标准条款
+
+### GNU AFFERO 通用公共许可证
 
 **版本 3, 2007年11月19日**
 版权所有 © 2007 Free Software Foundation, Inc. <https://fsf.org/>
 
-任何人皆可复制和发布本许可证的完整副本，但不允许修改它。
-
-### 序言
-
-GNU Affero 通用公共许可证是专为确保与社区合作开发软件的自由而设计的、**基于 GPL 的增强版本**。
-
-我们将其应用于所有由本组织发布的程序，同时也适用于基于这些程序的衍生作品。
-
-**AGPL 与 GPL 的主要区别**：AGPL 增加了第13条，要求通过网络与用户交互的程序必须向用户提供源代码。这一条款专门针对网络服务场景。
-
 ### 与本项目相关的重要说明
 
-本项目 **Silent X Craft Launcher** 使用 PySide6 作为 Qt 绑定库。
-PySide6 基于 **LGPL-3.0** 许可证发布。
+本项目 **Silent X Craft Launcher (SXCL)** 使用 PySide6 作为 Qt 绑定库，
+PySide6 基于 **LGPL-3.0** 许可证发布。根据 LGPL-3.0 第2条和第5条的规定：
+LGPL 库可以被 AGPL 程序链接和使用，二者兼容。
 
-根据 LGPL-3.0 第2条和第5条的规定：
-- LGPL 库可以被 AGPL 程序链接和使用
-- 您不需要因为使用未修改的 PySide6 而改变本项目的许可证
-- 您对本项目的修改必须以 AGPL-3.0 发布
+AGPL-3.0 完整条款请参见：<https://www.gnu.org/licenses/agpl-3.0.zh-cn.html>
 
 ---
 
-## GNU AFFERO GENERAL PUBLIC LICENSE
+## 第二部分：SXCL 附加条款（依据 AGPL-3.0 第7条添加）
 
+依据 GNU AGPL-3.0 第7条，Silent X Craft Launcher 的许可附加以下条款。
+这些附加条款优先于 AGPL-3.0 标准条款中与之冲突的部分。
+
+---
+
+### 第1条：核心保护 — 禁止以软件为收费主体
+
+**禁止以 SXCL 本身为收费主体。** 任何人不得以直接或间接方式，
+以获得、下载、复制、分发、安装、预装或使用 SXCL 本身为主要对价或条件，
+向接收者收取费用，包括但不限于：
+
+- 付费下载 SXCL 本体
+- 会员才能使用 SXCL
+- 强制赞助 / 打赏才能解锁 SXCL
+- 其他任何以 SXCL 本身为收费对象的变相收费
+
+> **例外**：若 SXCL 仅作为其他具有完全独立价值的内容/产品/服务的
+> 附带组成部分，且收费主要针对该内容/产品/服务本身，则不视为违反本条。
+> 承载平台通过一般广告、一般赞助或平台服务取得收入，亦不视为违反本条。
+
+---
+
+### 第2条：轻度使用 — 引用代码
+
+若您仅参考了本项目中极小部分的内容，则视为轻度使用。
+
+**要求：**
+1. 以适当形式给出署名：`Powered by Silent X Craft Launcher (SXCL)`
+2. 不得将您的作品与 SXCL 混淆，或暗示您的作品与 SXCL 官方有关
+
+---
+
+### 第3条：重度使用 — 二创与衍生
+
+若您基于本项目进行修改，或参考了较大量的内容以重新实现 SXCL 的部分
+实质功能（如启动 Minecraft、下载管理、模组安装等），则视为重度使用。
+
+**要求：**
+1. **必须改名** — 您的作品名称必须以明确方式表明是第三方二创，
+   不得使用可能被误认为官方版本或官方续作的名称
+2. **必须开源** — 您的作品必须在 AGPL-3.0 及本附加条款下公开源代码
+3. **必须署名** — 在关于页面或 README 首位给出以下内容：
+   ```
+   本作品基于 Silent X Craft Launcher (SXCL) 二次开发
+   原作：© SilentStudio / SilentCodeTeams
+   原项目：https://github.com/Silent-Studio-CN/Silent-X-Craft-Launcher
+   ```
+4. **保持许可** — 必须继续使用 AGPL-3.0 + 本附加条款作为许可
+
+---
+
+### 第4条：禁止碰瓷与误导
+
+**绝对禁止以下行为：**
+
+- 二创作者使用 `SXCL Pro`、`SXCL 手机版`、`SXCL 魔改版`、
+  `SXCL++`、`SXCL 某服务器特供版` 等可能造成混淆的名称
+  （即可能导致用户误认为是官方版本或官方授权的名称）
+- 任何暗示您的作品与 SilentStudio 或 SilentCodeTeams 有官方关系的行为
+- 利用 SXCL 的品牌知名度进行欺诈或误导性宣传
+
+---
+
+### 第5条：AGPL-3.0 通用条款
+
+在以上附加条款未覆盖的范围内，GNU AGPL-3.0 的通用条款完全适用。
+具体包括但不限于：
+
+- 您可以自由使用、修改和分发 SXCL
+- 您必须公开您对 SXCL 所做的修改的源代码
+- 本软件按"原样"提供，无任何明示或暗示的担保
+
+---
+
+## 第三部分：全文对照
+
+### GNU AFFERO GENERAL PUBLIC LICENSE
 **Version 3, 19 November 2007**
 Copyright © 2007 Free Software Foundation, Inc. <https://fsf.org/>
 
-Everyone is permitted to copy and distribute verbatim copies of this license document, but changing it is not allowed.
-
-### Preamble
-
-The GNU Affero General Public License is a free, copyleft license for software
-and other kinds of works, specifically designed to ensure cooperation with the
-community in the case of network server software.
-
-The GNU General Public License permits making a modified version and letting the
-public access it on a server without ever releasing its source code. The GNU
-Affero General Public License is designed specifically to ensure that, in such
-cases, the modified source code becomes available to the community. It requires
-the operator of a network server to provide the source code of the modified
-version running there to the users of that server.
-
-Therefore, the GNU Affero General Public License is intended for software that
-is run on servers, and it has an additional term (Section 13) that ensures that
-users who interact with the software over a network receive the source code.
-
 ### Applicability to This Project
 
-**Silent X Craft Launcher** uses PySide6 as its Qt binding library.
-PySide6 is licensed under the **LGPL-3.0**.
+**Silent X Craft Launcher (SXCL)** uses PySide6 (LGPL-3.0) as its
+Qt binding library. LGPL-3.0 is compatible with AGPL-3.0.
 
-In accordance with LGPL-3.0 Sections 2 and 5:
-- LGPL-licensed libraries may be linked by AGPL-licensed programs
-- You are not required to change this project's license simply because
-  you use unmodified PySide6
-- Any modifications to this project itself must be distributed under AGPL-3.0
+Full AGPL-3.0 terms: <https://www.gnu.org/licenses/agpl-3.0.en.html>
 
 ---
 
-## TERMS AND CONDITIONS / 条款和条件
+### SXCL Additional Terms (per AGPL-3.0 Section 7)
 
-完整的 AGPL-3.0 条款和条件请参见以下链接：
+**Section 1 — Core Protection: No Charging for Software**
 
-**英文完整版：**
-https://www.gnu.org/licenses/agpl-3.0.en.html
+Charging for the software itself is strictly prohibited. No one may
+directly or indirectly require payment for obtaining, downloading,
+copying, distributing, installing, or using SXCL.
 
-**中文参考翻译：**
-https://www.gnu.org/licenses/agpl-3.0.zh-cn.html
+**Section 2 — Light Use (Code Snippets)**
+
+If you only reference a small portion of this project:
+1. Provide credit: `Powered by Silent X Craft Launcher (SXCL)`
+2. Do not create confusion with the official project
+
+**Section 3 — Heavy Use (Derivative Works)**
+
+If you modify this project or substantially reimplement its functionality:
+1. **Rename** — Your work must clearly indicate it is a third-party derivative
+2. **Open Source** — Your work must be open source under AGPL-3.0 + these terms
+3. **Credit** — Prominently display original author attribution
+4. **Same License** — Must use AGPL-3.0 + these Additional Terms
+
+**Section 4 — Anti-Fraud**
+
+The following are strictly forbidden:
+- Names like `SXCL Pro`, `SXCL Mobile`, `SXCL++` that cause confusion
+- Any implication of official affiliation with SilentStudio or SilentCodeTeams
+- Using the SXCL brand for fraudulent or misleading purposes
+
+**Section 5 — General AGPL-3.0 Provisions**
+
+The standard terms of GNU AGPL-3.0 apply to all aspects not covered above.
 
 ---
 
-**Silent X Craft Launcher**
-Copyright (C) 2026 Silent Studio
+**Silent X Craft Launcher (SXCL)**
+Copyright © SilentStudio
+Developed by SilentStudio → SilentCodeTeams → Silent X Craft Launcher Dev
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
 by the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+(at your option) any later version, with the Additional Terms described above.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
