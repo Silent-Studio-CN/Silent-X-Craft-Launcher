@@ -22,10 +22,11 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""Main window — navigation and page management."""
+"""Main window — session-aware navigation with persistent page state."""
+
+from __future__ import annotations
 
 import sys
-import importlib
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
@@ -44,70 +45,60 @@ from qfluentwidgets import FluentIcon as FIF
 from src.app.common.config import APP_NAME, APP_VERSION
 from src.app.common.launcher_config import cfg
 
-# 只导入实际存在的页面（不导入 VersionsPage）
-from src.app.pages.home_page import HomePage
-from src.app.pages.settings_page import SettingsPage
-
 
 class MainWindow(FluentWindow):
-    """主窗口 — 管理所有页面和导航"""
+    """主窗口 — 会话保持，页面切换不丢失状态."""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
-
-        # 窗口尺寸
         self.resize(1100, 750)
         self.setMinimumSize(900, 600)
-        
-        # 下载配置页引用
-        self._download_config_page = None
-        self._download_progress_page = None
-        # 启动页引用
-        self._launch_page = None
-        
+
+        # ── 会话页面池（页面创建后一直存活，不被销毁） ──
+        self._session_pages: dict[str, QWidget] = {}
+        # 当前激活的"临时页面"（配置页 / 进度页 / 启动页）
+        self._active_temp_page: QWidget | None = None
+        self._temp_page_key: str | None = None  # 对应 _session_pages 的 key
+        self._session_active = False             # 用户未主动关闭临时页面时保持 True
+        # 之前是哪个导航项（切回时恢复）
+        self._last_nav_item: str | None = None
+
         self._init_pages()
         self._init_navigation()
 
-        # 应用全局样式
         self._apply_global_style()
-
-        # 主题变化时更新样式
         cfg.themeMode.valueChanged.connect(self._on_theme_changed)
-
-        # 检查更新（异步）
         QTimer.singleShot(3000, self._check_updates)
 
+    # ──────────────────────────────────────────────────────────
+    # 页面初始化
+    # ──────────────────────────────────────────────────────────
+
     def _init_pages(self):
-        """创建所有页面实例"""
+        """创建所有常驻页面（只在启动时创建一次）."""
+        from src.app.pages.home_page import HomePage
+        from src.app.pages.versions_page import VersionsPage
+        from src.app.pages.tasks_page import TasksPage
+        from src.app.pages.settings_page import SettingsPage
+
         self.home_page = HomePage(self)
-        
-        # 动态加载 VersionsPage，强制使用最新版本
-        self._load_versions_page()
-        
+        self.versions_page = VersionsPage(self)
+        self.tasks_page = TasksPage(self)
         self.settings_page = SettingsPage(self)
 
-    def _load_versions_page(self):
-        """动态加载 VersionsPage，确保使用最新代码"""
-        # 彻底清除缓存
-        if 'src.app.pages.versions_page' in sys.modules:
-            del sys.modules['src.app.pages.versions_page']
-            print("✅ 已从 sys.modules 中删除 versions_page")
-        
-        # 重新导入
-        from src.app.pages.versions_page import VersionsPage
-        self.versions_page = VersionsPage(self)
-        print("✅ VersionsPage 实例创建完成")
+        self._session_pages = {
+            "home": self.home_page,
+            "versions": self.versions_page,
+            "tasks": self.tasks_page,
+            "settings": self.settings_page,
+        }
 
     def _init_navigation(self):
-        """配置导航栏"""
-        # 主页
         self.addSubInterface(self.home_page, FIF.HOME, "主页")
-
-        # 游戏版本
         self.addSubInterface(self.versions_page, FIF.GAME, "版本")
+        self.addSubInterface(self.tasks_page, FIF.UPDATE, "任务")
 
-        # 设置（底部）
         self.addSubInterface(
             self.settings_page,
             FIF.SETTING,
@@ -115,19 +106,151 @@ class MainWindow(FluentWindow):
             NavigationItemPosition.BOTTOM,
         )
 
-        # 默认选中主页
         self.navigationInterface.setCurrentItem(self.home_page.objectName())
+        self.navigationInterface.currentItemChanged.connect(self._on_nav_changed)
+
+    # ──────────────────────────────────────────────────────────
+    # 导航事件 — 恢复/隐藏临时页面
+    # ──────────────────────────────────────────────────────────
+
+    def _on_nav_changed(self, item):
+        """导航切换时，自动恢复会话状态."""
+        nav_name = item.routeKey() if item else ""
+        if not nav_name:
+            return
+
+        # 切换到"版本"时，如果会话未关闭，恢复临时页面
+        if nav_name == "versions" and self._session_active and self._active_temp_page:
+            self.stackedWidget.setCurrentWidget(self._active_temp_page)
+            self.navigationInterface.setCurrentItem(None)
+            return
+
+        # 离开时记录导航项
+        self._last_nav_item = nav_name
+
+    # ──────────────────────────────────────────────────────────
+    # 会话保持 — 临时页面管理
+    # ──────────────────────────────────────────────────────────
+
+    def _show_temp_page(self, page: QWidget, key: str = ""):
+        """显示一个临时页面（配置/进度/启动页），保持其在后台存活."""
+        if self._active_temp_page is not None and self._active_temp_page is not page:
+            self._active_temp_page.setParent(None)
+            self.stackedWidget.removeWidget(self._active_temp_page)
+
+        if self.stackedWidget.indexOf(page) < 0:
+            self.stackedWidget.addWidget(page)
+
+        self._active_temp_page = page
+        self._temp_page_key = key
+        self._session_active = True
+        self.stackedWidget.setCurrentWidget(page)
+        self.navigationInterface.setCurrentItem(None)
+
+    def _hide_temp_page(self, end_session: bool = False):
+        """隐藏当前临时页面，回到导航项. end_session=True 时结束会话."""
+        if self._active_temp_page is None:
+            return
+        if end_session:
+            self._session_active = False
+
+        target = self._last_nav_item or "versions"
+        for name, page in self._session_pages.items():
+            if name == target:
+                self.switchTo(page)
+                self.navigationInterface.setCurrentItem(page.objectName())
+                return
+        self.switchTo(self.versions_page)
+        self.navigationInterface.setCurrentItem(self.versions_page.objectName())
+
+    # ──────────────────────────────────────────────────────────
+    # 页面切换 API
+    # ──────────────────────────────────────────────────────────
+
+    def switch_to_download_config(self, version):
+        """切换到下载配置页（会话保持：只创建一次，切换不丢失状态）."""
+        from src.app.pages.download_config_page import DownloadConfigPage
+
+        key = f"download_config_{id(version)}"
+        if key in self._session_pages:
+            page = self._session_pages[key]
+        else:
+            page = DownloadConfigPage(version, self)
+            self._session_pages[key] = page
+
+        self._show_temp_page(page, key=key)
+
+    def switch_to_download_progress(
+        self, version, version_name: str,
+        loader_type: str = "none", loader_version: str = None,
+    ):
+        """切换到下载进度页."""
+        from src.app.pages.download_progress_page import DownloadProgressPage
+
+        key = f"download_progress_{version_name}"
+        if key in self._session_pages:
+            page = self._session_pages[key]
+        else:
+            page = DownloadProgressPage(
+                version=version, version_name=version_name,
+                loader_type=loader_type, loader_version=loader_version,
+                parent=self,
+            )
+            self._session_pages[key] = page
+
+        # 在任务页注册
+        self.tasks_page.add_or_update_task(
+            task_id=key, title=f"下载 {version_name}",
+            progress=0, status="准备中",
+        )
+
+        self._show_temp_page(page, key=key)
+
+    def switch_to_launch(self, version):
+        """切换到启动进度页."""
+        from src.app.pages.launch_page import LaunchProgressPage
+
+        key = f"launch_{version.id}"
+        if key in self._session_pages:
+            page = self._session_pages[key]
+        else:
+            page = LaunchProgressPage(version, self)
+            self._session_pages[key] = page
+
+        self.tasks_page.add_or_update_task(
+            task_id=key, title=f"启动 {version.id}",
+            progress=0, status="启动中",
+        )
+
+        self._show_temp_page(page, key=key)
+
+    def go_back_to_versions(self):
+        """返回版本列表，结束会话."""
+        self._hide_temp_page(end_session=True)
+
+    def go_back_from_launch(self):
+        """从启动页返回，结束会话."""
+        self._hide_temp_page(end_session=True)
+
+    def navigate_to_task(self, task_id: str):
+        """任务页点击任务卡片时的回调 — 导航到对应的临时页面."""
+        page = self._session_pages.get(task_id)
+        if page:
+            self._show_temp_page(page)
+
+    def on_download_source_changed(self, source):
+        pass
+
+    # ──────────────────────────────────────────────────────────
+    # 样式
+    # ──────────────────────────────────────────────────────────
 
     def _apply_global_style(self):
-        """应用全局样式表 — 使导航栏与内容区背景统一"""
         self._update_global_style()
 
     def _update_global_style(self):
-        """根据当前主题更新全局样式 — 仅设置内容区域背景，不干预 QFluentWidgets 内部主题。"""
         dark = isDarkTheme()
         bg = "#1e1e1e" if dark else "#f5f5f5"
-
-        # 只设置内容区域的背景色，不重写 CardWidget/QScrollArea 等 QFluentWidgets 内部组件
         self.setStyleSheet(f"""
             FluentWindow {{
                 background-color: {bg};
@@ -135,149 +258,7 @@ class MainWindow(FluentWindow):
         """)
 
     def _on_theme_changed(self, theme):
-        """主题变更时更新全局样式"""
         self._update_global_style()
 
     def _check_updates(self):
-        """检查更新（占位）"""
         pass
-
-    # ================================================================
-    # 页面切换
-    # ================================================================
-
-    def switch_to_download_config(self, version):
-        """切换到下载配置页面"""
-        print(f"[MainWindow] 切换到下载配置: {version.id}")
-        from src.app.pages.download_config_page import DownloadConfigPage
-        
-        # 如果已存在，移除旧的
-        if self._download_config_page is not None:
-            try:
-                idx = self.stackedWidget.indexOf(self._download_config_page)
-                if idx >= 0:
-                    self.stackedWidget.removeWidget(self._download_config_page)
-                self._download_config_page.deleteLater()
-            except:
-                pass
-            self._download_config_page = None
-        
-        # 创建新的下载配置页
-        self._download_config_page = DownloadConfigPage(version, self)
-        self.stackedWidget.addWidget(self._download_config_page)
-        self.stackedWidget.setCurrentWidget(self._download_config_page)
-        
-        # 清除导航高亮（因为是临时页面）
-        self.navigationInterface.setCurrentItem(None)
-
-    def switch_to_download_progress(
-        self,
-        version,
-        version_name: str,
-        loader_type: str = "none",
-        loader_version: str = None
-    ):
-        """切换到下载进度页"""
-        from src.app.pages.download_progress_page import DownloadProgressPage
-        
-        # 移除旧的进度页
-        if self._download_progress_page is not None:
-            try:
-                idx = self.stackedWidget.indexOf(self._download_progress_page)
-                if idx >= 0:
-                    self.stackedWidget.removeWidget(self._download_progress_page)
-                self._download_progress_page.deleteLater()
-            except:
-                pass
-            self._download_progress_page = None
-        
-        # 创建新的进度页
-        self._download_progress_page = DownloadProgressPage(
-            version=version,
-            version_name=version_name,
-            loader_type=loader_type,
-            loader_version=loader_version,
-            parent=self,
-        )
-        self.stackedWidget.addWidget(self._download_progress_page)
-        self.stackedWidget.setCurrentWidget(self._download_progress_page)
-        self.navigationInterface.setCurrentItem(None)
-
-    def go_back_to_versions(self):
-        """返回版本列表 - 同时清除下载配置页和进度页"""
-        # 移除进度页
-        if self._download_progress_page is not None:
-            try:
-                idx = self.stackedWidget.indexOf(self._download_progress_page)
-                if idx >= 0:
-                    self.stackedWidget.removeWidget(self._download_progress_page)
-                self._download_progress_page.deleteLater()
-            except:
-                pass
-            self._download_progress_page = None
-        
-        # 移除下载配置页
-        if self._download_config_page is not None:
-            try:
-                idx = self.stackedWidget.indexOf(self._download_config_page)
-                if idx >= 0:
-                    self.stackedWidget.removeWidget(self._download_config_page)
-                self._download_config_page.deleteLater()
-            except:
-                pass
-            self._download_config_page = None
-        
-        self.switchTo(self.versions_page)
-        self.navigationInterface.setCurrentItem(self.versions_page.objectName())
-
-    # ================================================================
-    # 启动流程
-    # ================================================================
-
-    def switch_to_launch(self, version):
-        """切换到启动进度页"""
-        from src.app.pages.launch_page import LaunchProgressPage
-
-        # 移除旧的启动页
-        if self._launch_page is not None:
-            try:
-                idx = self.stackedWidget.indexOf(self._launch_page)
-                if idx >= 0:
-                    self.stackedWidget.removeWidget(self._launch_page)
-                self._launch_page.deleteLater()
-            except Exception:
-                pass
-            self._launch_page = None
-
-        self._launch_page = LaunchProgressPage(version, self)
-        self.stackedWidget.addWidget(self._launch_page)
-        self.stackedWidget.setCurrentWidget(self._launch_page)
-        self.navigationInterface.setCurrentItem(None)
-
-    def go_back_from_launch(self):
-        """从启动页返回版本列表，同时清除临时页面"""
-        if self._launch_page is not None:
-            try:
-                idx = self.stackedWidget.indexOf(self._launch_page)
-                if idx >= 0:
-                    self.stackedWidget.removeWidget(self._launch_page)
-                self._launch_page.deleteLater()
-            except Exception:
-                pass
-            self._launch_page = None
-
-        self.switchTo(self.versions_page)
-        self.navigationInterface.setCurrentItem(self.versions_page.objectName())
-
-    # ================================================================
-    # 下载源变更通知
-    # ================================================================
-
-    def on_download_source_changed(self, source):
-        """下载源变更时的回调"""
-        print(f"[MainWindow] 下载源变更为: {source.value}")
-
-
-def create_splash(window: MainWindow):
-    """创建启动画面（占位，暂时返回 None）"""
-    return None
