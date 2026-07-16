@@ -457,6 +457,8 @@ class DownloadConfigPage(BasePage):
     def _on_name_manual_edit(self, text: str):
         ph = self.name_input.placeholderText()
         self._user_edited_name = bool(text and text != ph and text != self.version.id)
+        # 每次用户打字都检测重名
+        self._check_version_exists(text.strip())
 
     def _go_back(self):
         mw = self.window()
