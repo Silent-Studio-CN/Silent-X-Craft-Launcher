@@ -1,0 +1,101 @@
+name: Build SXCL
+
+on:
+  push:
+    tags: ["v*"]  # 推送标签时自动构建，如 v1.0.0
+  workflow_dispatch:  # 也可手动触发
+
+jobs:
+  build-windows-arm64:
+    runs-on: windows-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          architecture: "arm64"
+      - run: pip install -r requirements.txt nuitka
+      - run: python -m nuitka --onefile --enable-plugin=pyside6
+              --windows-console-mode=disable
+              --include-data-dir=config=config
+              --output-dir=dist main.py
+      - run: move dist\main.exe dist\SXCL-windows-arm64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SXCL-windows-arm64
+          path: dist/SXCL-windows-arm64.exe
+
+  build-windows-x64:
+    runs-on: windows-latest  # x64 runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          architecture: "x64"
+      - run: pip install -r requirements.txt nuitka
+      - run: python -m nuitka --onefile --enable-plugin=pyside6
+              --windows-console-mode=disable
+              --include-data-dir=config=config
+              --output-dir=dist main.py
+      - run: move dist\main.exe dist\SXCL-windows-x64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SXCL-windows-x64
+          path: dist/SXCL-windows-x64.exe
+
+  build-macos-arm64:
+    runs-on: macos-latest  # macOS ARM64 (M1/M2)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt nuitka
+      - run: python -m nuitka --onefile --enable-plugin=pyside6
+              --macos-target-arch=arm64
+              --include-data-dir=config=config
+              --output-dir=dist main.py
+      - run: mv dist/main.bin dist/SXCL-macos-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SXCL-macos-arm64
+          path: dist/SXCL-macos-arm64
+
+  build-macos-x64:
+    runs-on: macos-13  # Intel macOS runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt nuitka
+      - run: python -m nuitka --onefile --enable-plugin=pyside6
+              --macos-target-arch=x86_64
+              --include-data-dir=config=config
+              --output-dir=dist main.py
+      - run: mv dist/main.bin dist/SXCL-macos-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SXCL-macos-x64
+          path: dist/SXCL-macos-x64
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-xinerama0 libegl1 libgl1-mesa-glx
+          pip install -r requirements.txt nuitka
+      - run: python -m nuitka --onefile --enable-plugin=pyside6
+              --include-data-dir=config=config
+              --output-dir=dist main.py
+      - run: mv dist/main.bin dist/SXCL-linux-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SXCL-linux-x64
+          path: dist/SXCL-linux-x64
