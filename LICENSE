@@ -1,0 +1,102 @@
+# GNU AFFERO GENERAL PUBLIC LICENSE (AGPL-3.0)
+## GNU AFFERO 通用公共许可证（AGPL-3.0）
+
+> **重要声明 / Important Notice**
+>
+> 中文版本优先。如中英文版本存在歧义，以中文版本为准。
+> The Chinese version takes precedence. In case of any discrepancy between
+> the Chinese and English versions, the Chinese version shall prevail.
+
+---
+
+## GNU AFFERO 通用公共许可证
+
+**版本 3, 2007年11月19日**
+版权所有 © 2007 Free Software Foundation, Inc. <https://fsf.org/>
+
+任何人皆可复制和发布本许可证的完整副本，但不允许修改它。
+
+### 序言
+
+GNU Affero 通用公共许可证是专为确保与社区合作开发软件的自由而设计的、**基于 GPL 的增强版本**。
+
+我们将其应用于所有由本组织发布的程序，同时也适用于基于这些程序的衍生作品。
+
+**AGPL 与 GPL 的主要区别**：AGPL 增加了第13条，要求通过网络与用户交互的程序必须向用户提供源代码。这一条款专门针对网络服务场景。
+
+### 与本项目相关的重要说明
+
+本项目 **Silent X Craft Launcher** 使用 PySide6 作为 Qt 绑定库。
+PySide6 基于 **LGPL-3.0** 许可证发布。
+
+根据 LGPL-3.0 第2条和第5条的规定：
+- LGPL 库可以被 AGPL 程序链接和使用
+- 您不需要因为使用未修改的 PySide6 而改变本项目的许可证
+- 您对本项目的修改必须以 AGPL-3.0 发布
+
+---
+
+## GNU AFFERO GENERAL PUBLIC LICENSE
+
+**Version 3, 19 November 2007**
+Copyright © 2007 Free Software Foundation, Inc. <https://fsf.org/>
+
+Everyone is permitted to copy and distribute verbatim copies of this license document, but changing it is not allowed.
+
+### Preamble
+
+The GNU Affero General Public License is a free, copyleft license for software
+and other kinds of works, specifically designed to ensure cooperation with the
+community in the case of network server software.
+
+The GNU General Public License permits making a modified version and letting the
+public access it on a server without ever releasing its source code. The GNU
+Affero General Public License is designed specifically to ensure that, in such
+cases, the modified source code becomes available to the community. It requires
+the operator of a network server to provide the source code of the modified
+version running there to the users of that server.
+
+Therefore, the GNU Affero General Public License is intended for software that
+is run on servers, and it has an additional term (Section 13) that ensures that
+users who interact with the software over a network receive the source code.
+
+### Applicability to This Project
+
+**Silent X Craft Launcher** uses PySide6 as its Qt binding library.
+PySide6 is licensed under the **LGPL-3.0**.
+
+In accordance with LGPL-3.0 Sections 2 and 5:
+- LGPL-licensed libraries may be linked by AGPL-licensed programs
+- You are not required to change this project's license simply because
+  you use unmodified PySide6
+- Any modifications to this project itself must be distributed under AGPL-3.0
+
+---
+
+## TERMS AND CONDITIONS / 条款和条件
+
+完整的 AGPL-3.0 条款和条件请参见以下链接：
+
+**英文完整版：**
+https://www.gnu.org/licenses/agpl-3.0.en.html
+
+**中文参考翻译：**
+https://www.gnu.org/licenses/agpl-3.0.zh-cn.html
+
+---
+
+**Silent X Craft Launcher**
+Copyright (C) 2026 Silent Studio
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
