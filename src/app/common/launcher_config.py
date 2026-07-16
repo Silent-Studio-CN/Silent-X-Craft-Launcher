@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from qfluentwidgets import (
     BoolValidator,
@@ -162,16 +163,96 @@ def get_config_path() -> Path:
     return config_dir / "config.json"
 
 
+# ── Config items that should be serialised (lowercase = actual attr names) ──
+_SAVED_KEYS = {
+    "language", "downloadSource", "versionRefreshInterval",
+    "countryCode",
+    "javaPath", "maxMemoryMb", "windowSize", "gameDirectory", "versionIsolation",
+    "username",
+    "debugMode", "useDownloadEngine",
+    "autoCheckUpdate",
+}
+
+
 def load_config() -> None:
     qconfig.file = get_config_path()
     if qconfig.file.exists():
         qconfig.load()
-    _apply_language_from_country()
+        _restore_config()
+    else:
+        # 首次启动：根据国家代码设置默认语言
+        _apply_language_from_country()
 
 
 def save_config() -> None:
-    qconfig.file = get_config_path()
-    qconfig.save()
+    """Persist all custom config items to the JSON file.
+
+    QFluentWidgets' ``qconfig.save()`` only saves items registered on the
+    **global** ``qconfig`` instance (Theme/Font/etc.), NOT items on our
+    ``cfg`` (LauncherConfig) instance.  This function serialises both.
+    """
+    import json
+    path = get_config_path()
+
+    # Load existing (QFluentWidgets' own items)
+    existing: dict = {}
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+
+    # Merge our custom items group by group
+    for group_name in ("General", "Game", "Advanced"):
+        group: dict = existing.setdefault(group_name, {})
+        for attr_name in dir(cfg):
+            if attr_name.startswith("_"):
+                continue
+            cls_attr = getattr(type(cfg), attr_name, None)
+            if isinstance(cls_attr, ConfigItem) and cls_attr.group == group_name:
+                if attr_name in _SAVED_KEYS:
+                    item = getattr(cfg, attr_name)
+                    val = item.value if hasattr(item, 'value') else item
+                    if isinstance(val, Enum):
+                        val = val.value
+                    group[attr_name] = val
+
+    path.write_text(json.dumps(existing, indent=4, ensure_ascii=False), encoding="utf-8")
+
+
+def _restore_config():
+    """Restore custom config items from JSON into ``cfg`` after ``load_config``.
+
+    ``qconfig.load()`` only restores QFluentWidgets' own items.  Our custom
+    items (Language, JavaPath, …) need explicit deserialisation.
+    """
+    path = get_config_path()
+    if not path.exists():
+        return
+    import json
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    # Map section → item name → LauncherConfig attribute name
+    for group_name in ("General", "Game", "Advanced"):
+        group_data = data.get(group_name, {})
+        for attr_name in dir(cfg):
+            if attr_name.startswith("_"):
+                continue
+            cls_attr = getattr(type(cfg), attr_name, None)
+            if isinstance(cls_attr, ConfigItem) and cls_attr.group == group_name:
+                raw = group_data.get(attr_name)
+                if raw is not None:
+                    try:
+                        item = getattr(cfg, attr_name)
+                        # Deserialize via serializer if available
+                        serializer = getattr(item, 'serializer', None)
+                        if serializer and hasattr(serializer, 'deserialize'):
+                            value = serializer.deserialize(raw)
+                        else:
+                            value = raw
+                        qconfig.set(item, value)
+                    except Exception:
+                        pass
 
 
 def _apply_language_from_country() -> None:
