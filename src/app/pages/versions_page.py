@@ -253,29 +253,13 @@ class VersionsPage(BasePage):
         # 弹簧撑开
         layout.addStretch(1)
 
-        # --- 状态与操作按钮（默认显示状态，悬停显示按钮） ---
-        status_label = BodyLabel("", card)
-        status_label.setFixedWidth(80)
+        # --- 操作按钮（"版本日志"和"获取服务端"） ---
+        # 单击卡片任意位置进入配置页（card_click_btn 处理）
         button_widget = QWidget(card)
         button_widget.setVisible(False)
         button_layout = QHBoxLayout(button_widget)
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(8)
-
-        is_installed = version.id in self._installed
-
-        # 已安装 -> 显示"启动"；未安装 -> 点击卡片进入配置页（不显示下载按钮）
-        if is_installed:
-            status_label.setText("✅ 已安装")
-            status_label.setTextColor("#52c41a", "#73d13d")
-            launch_btn = QPushButton("启动")
-            launch_btn.setFixedSize(60, 28)
-            launch_btn.setProperty('type', 'primary')
-            launch_btn.clicked.connect(lambda checked, v=version: self._on_launch(v))
-            button_layout.addWidget(launch_btn)
-        else:
-            status_label.setText("⚙ 配置下载")
-            status_label.setTextColor("#0078d4", "#0078d4")
 
         # "版本日志"按钮
         log_btn = QPushButton("📜 版本日志")
@@ -292,10 +276,8 @@ class VersionsPage(BasePage):
         # 把按钮容器放在透明按钮上面
         button_widget.raise_()
 
-        layout.addWidget(status_label)
         layout.addWidget(button_widget)
 
-        card.status_label = status_label
         card.button_widget = button_widget
         card.card_click_btn = card_click_btn
 
@@ -304,16 +286,12 @@ class VersionsPage(BasePage):
         return card
 
     def eventFilter(self, obj, event):
-        """事件过滤器：处理卡片悬停显示/隐藏按钮"""
-        if isinstance(obj, CardWidget):
+        """事件过滤器：处理卡片悬停显示按钮"""
+        if isinstance(obj, CardWidget) and hasattr(obj, 'button_widget'):
             if event.type() == QEvent.Enter:
-                if hasattr(obj, 'status_label') and hasattr(obj, 'button_widget'):
-                    obj.status_label.setVisible(False)
-                    obj.button_widget.setVisible(True)
+                obj.button_widget.setVisible(True)
             elif event.type() == QEvent.Leave:
-                if hasattr(obj, 'status_label') and hasattr(obj, 'button_widget'):
-                    obj.status_label.setVisible(True)
-                    obj.button_widget.setVisible(False)
+                obj.button_widget.setVisible(False)
         return super().eventFilter(obj, event)
 
     def _on_version_card_clicked(self, version: GameVersion):

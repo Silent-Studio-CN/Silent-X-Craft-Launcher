@@ -393,15 +393,11 @@ class SettingsPage(BasePage):
         setTheme(theme)
 
     def _on_download_source_changed(self, source: DownloadSource) -> None:
-        from src.app.common.config_manager import config
-        config.set('download_source', source.value)
         window = self.window()
         if hasattr(window, "on_download_source_changed"):
             window.on_download_source_changed(source)
 
     def _on_isolation_changed(self, value: bool) -> None:
         """版本隔离变更"""
-        from src.app.common.config_manager import config
         qconfig.set(cfg.versionIsolation, value)
-        config.set('version_isolation', value)
         save_config()

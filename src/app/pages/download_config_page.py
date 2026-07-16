@@ -38,7 +38,6 @@ from qfluentwidgets import (
 )
 
 from src.app.common.base_page import BasePage
-from src.app.common.config_manager import config
 from src.app.services.version_manifest import GameVersion
 from src.app.services.mod_loader_service import (
     fetch_forge_versions,

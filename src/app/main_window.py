@@ -43,7 +43,6 @@ from qfluentwidgets import FluentIcon as FIF
 
 from src.app.common.config import APP_NAME, APP_VERSION
 from src.app.common.launcher_config import cfg
-from src.app.common.config_manager import config as config_manager
 
 # 只导入实际存在的页面（不导入 VersionsPage）
 from src.app.pages.home_page import HomePage
@@ -67,14 +66,8 @@ class MainWindow(FluentWindow):
         # 启动页引用
         self._launch_page = None
         
-        # 初始化页面
         self._init_pages()
-
-        # 设置导航
         self._init_navigation()
-
-        # 应用配置
-        self._apply_config()
 
         # 应用全局样式
         self._apply_global_style()
@@ -144,17 +137,6 @@ class MainWindow(FluentWindow):
     def _on_theme_changed(self, theme):
         """主题变更时更新全局样式"""
         self._update_global_style()
-
-    def _apply_config(self):
-        """应用配置到窗口"""
-        # 从配置管理器读取主题
-        theme = config_manager.get("theme", "auto")
-        if theme == "light":
-            qconfig.set(cfg.themeMode, Theme.LIGHT)
-        elif theme == "dark":
-            qconfig.set(cfg.themeMode, Theme.DARK)
-        else:
-            qconfig.set(cfg.themeMode, Theme.AUTO)
 
     def _check_updates(self):
         """检查更新（占位）"""
