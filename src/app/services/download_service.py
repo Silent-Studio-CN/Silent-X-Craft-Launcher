@@ -30,21 +30,18 @@ import json
 import os
 import shutil
 import subprocess
-import threading
-import time
 import socket
-import traceback
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
-
-import requests
 
 from src.app.common.config import DownloadSource
 from src.app.common.launcher_config import cfg
 from src.app.common.logger import log, log_exception
 from src.app.services.version_manifest import GameVersion
 from src.app.services.mod_loader_service import ForgeAPI, FabricAPI, NeoForgeAPI
+from src.app.services.download.download_engine import DownloadEngine
 
 
 @dataclass
@@ -52,6 +49,18 @@ class DownloadTask:
     url: str
     path: Path
     size: int = 0
+
+
+# 模块级共享下载引擎（连接池跨实例复用）
+_shared_engine: Optional[DownloadEngine] = None
+_domain_cache: dict = {}
+
+
+def _get_engine() -> DownloadEngine:
+    global _shared_engine
+    if _shared_engine is None:
+        _shared_engine = DownloadEngine()
+    return _shared_engine
 
 
 class VersionInstaller:
@@ -76,7 +85,6 @@ class VersionInstaller:
             
             self._temp_files: List[Path] = []
             self._created_version_dir: Optional[Path] = None
-            self._domain_reachable_cache: dict = {}
             
             log.info(f"VersionInstaller 初始化: game_dir={self.game_dir}, source={self.source}")
         except Exception as e:
@@ -84,14 +92,15 @@ class VersionInstaller:
             raise
     
     # ================================================================
-    # Ping 检测
+    # 域名可达性（模块级缓存）
     # ================================================================
     
     def _is_domain_reachable(self, domain: str, timeout: float = 2.0) -> bool:
-        """检测域名是否可访问"""
+        """检测域名是否可访问（模块级缓存，避免重复探测）"""
+        global _domain_cache
         try:
-            if domain in self._domain_reachable_cache:
-                return self._domain_reachable_cache[domain]
+            if domain in _domain_cache:
+                return _domain_cache[domain]
             
             clean_domain = domain.replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
             ip = socket.gethostbyname(clean_domain)
@@ -104,13 +113,13 @@ class VersionInstaller:
             sock.close()
             
             reachable = (result == 0)
-            self._domain_reachable_cache[domain] = reachable
+            _domain_cache[domain] = reachable
             log.info(f"Ping {clean_domain}: {'✅ 可达' if reachable else '❌ 不可达'}")
             return reachable
             
         except Exception as e:
             log_exception(log, f"Ping 检测失败: {domain}")
-            self._domain_reachable_cache[domain] = False
+            _domain_cache[domain] = False
             return False
     
     def _get_mirror_url(self, url: str) -> str:
@@ -146,42 +155,19 @@ class VersionInstaller:
             return False
     
     def _download_single(self, url: str, path: Path, expected_size: int = 0) -> bool:
-        """单线程下载"""
-        try:
-            if self._cancel:
-                return False
-            
-            if path.exists():
-                if expected_size > 0 and path.stat().st_size == expected_size:
-                    log.debug(f"文件已存在且大小匹配，跳过: {path.name}")
-                    return True
-                path.unlink()
-            
-            path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 使用 requests 下载
-            response = requests.get(url, stream=True, timeout=60)
-            response.raise_for_status()
-            
-            downloaded = 0
-            with open(path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if self._cancel:
-                        return False
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        self._byte_count += len(chunk)
-                        # 通知进度
-                        if self._file_progress_callback and expected_size > 0:
-                            self._notify_file_progress(downloaded, expected_size)
-            
-            log.debug(f"下载完成: {path.name} ({downloaded} bytes)")
-            return True
-            
-        except Exception as e:
-            log.error(f"下载失败 {path.name}: {e}")
+        """使用共享 DownloadEngine 下载（连接池 + 重试）"""
+        if self._cancel:
             return False
+        
+        if path.exists():
+            if expected_size > 0 and path.stat().st_size == expected_size:
+                log.debug(f"文件已存在且大小匹配，跳过: {path.name}")
+                return True
+            path.unlink()
+        
+        path.parent.mkdir(parents=True, exist_ok=True)
+        engine = _get_engine()
+        return engine.download(url, path, expected_size)
     
     def _notify_file_progress(self, downloaded: int, total: int) -> None:
         """通知文件进度"""
@@ -265,7 +251,7 @@ class VersionInstaller:
             log_exception(log, "_cleanup 失败")
     
     def _check_version_exists(self, version_name: str) -> bool:
-        """检查版本是否已存在"""
+        """检查版本是否已完整安装"""
         try:
             version_dir = self.game_dir / "versions" / version_name
             if not version_dir.exists():
@@ -273,12 +259,10 @@ class VersionInstaller:
             
             jar_path = version_dir / f"{version_name}.jar"
             json_path = version_dir / f"{version_name}.json"
-            if jar_path.exists() and json_path.exists():
-                return True
-            return True
+            return jar_path.exists() and json_path.exists()
         except Exception as e:
             log_exception(log, "_check_version_exists 失败")
-            return True
+            return False  # 出错时视为不存在，让安装重试
     
     def install_version(
         self,

@@ -694,7 +694,7 @@ class InstallWorker(QThread):
             
             from src.app.services.installer.forge_analyzer import ForgeAnalyzer
             from src.app.services.installer.fabric_analyzer import FabricAnalyzer
-            from src.app.services.installer.neoforge_analyzer import NeoForgeAnalyzer
+            from src.app.services.installer.forge_analyzer import NeoForgeAnalyzer
             
             if self.loader_type == "forge":
                 analyzer = ForgeAnalyzer(self._installer_path)
