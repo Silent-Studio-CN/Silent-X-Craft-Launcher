@@ -210,27 +210,14 @@ class VersionsPage(BasePage):
         card = CardWidget(self.version_container)
         card.setFixedHeight(52)
         card.setAttribute(Qt.WA_Hover, True)
+        card.setCursor(Qt.PointingHandCursor)
         card.version_id = version.id
 
         layout = QHBoxLayout(card)
         layout.setContentsMargins(16, 6, 16, 6)
         layout.setSpacing(12)
 
-        # ---- 整个卡片作为点击区域（用透明按钮覆盖） ----
-        card_click_btn = QPushButton(card)
-        card_click_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                border: none;
-            }
-            QPushButton:hover {
-                background: rgba(255, 255, 255, 0.05);
-            }
-        """)
-        card_click_btn.setCursor(Qt.PointingHandCursor)
-        card_click_btn.clicked.connect(lambda: self._on_version_card_clicked(version))
-        # 把透明按钮放在最底层
-        card_click_btn.lower()
+        # ---- 点击事件由 eventFilter 处理 ----
 
         # 版本号
         name_label = StrongBodyLabel(version.id, card)
@@ -279,19 +266,26 @@ class VersionsPage(BasePage):
         layout.addWidget(button_widget)
 
         card.button_widget = button_widget
-        card.card_click_btn = card_click_btn
 
         card.installEventFilter(self)
 
         return card
 
     def eventFilter(self, obj, event):
-        """事件过滤器：处理卡片悬停显示按钮"""
-        if isinstance(obj, CardWidget) and hasattr(obj, 'button_widget'):
-            if event.type() == QEvent.Enter:
-                obj.button_widget.setVisible(True)
-            elif event.type() == QEvent.Leave:
-                obj.button_widget.setVisible(False)
+        """事件过滤器：处理卡片点击和悬停显示按钮"""
+        if isinstance(obj, CardWidget):
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                # 点击卡片进入配置页（排除按钮点击）
+                if hasattr(obj, 'version_id'):
+                    v = next((v for v in self._versions if v.id == obj.version_id), None)
+                    if v and not self._on_version_card_clicked(v):
+                        pass
+                return True
+            if hasattr(obj, 'button_widget'):
+                if event.type() == QEvent.Enter:
+                    obj.button_widget.setVisible(True)
+                elif event.type() == QEvent.Leave:
+                    obj.button_widget.setVisible(False)
         return super().eventFilter(obj, event)
 
     def _on_version_card_clicked(self, version: GameVersion):
