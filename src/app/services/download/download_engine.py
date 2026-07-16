@@ -175,33 +175,49 @@ class DownloadEngine:
     # ── Single-threaded download (small files) ──────────────────
 
     def _download_single(self, url: str, path: Path, expected_size: int = 0, sha1: str | None = None) -> bool:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            resp = self._session.get(url, stream=True, timeout=self.timeout)
-            resp.raise_for_status()
+        # Try up to 2 times (CDN 5xx → fallback to original)
+        for attempt in range(2):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                resp = self._session.get(url, stream=True, timeout=self.timeout)
+                resp.raise_for_status()
 
-            cl = resp.headers.get("content-length")
-            total = int(cl) if cl else expected_size
+                # Log CDN redirect info (helps debug 525 errors)
+                if "bmclapi" in url.lower() and resp.history:
+                    final_url = str(resp.url)[:100]
+                    log.info("CDN 重定向: %s → %s", url[:60], final_url)
 
-            downloaded = 0
-            with open(path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    if not self._running:
-                        return False
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total > 0:
-                            self._notify_progress(downloaded, total, f"下载 {path.name}")
+                cl = resp.headers.get("content-length")
+                total = int(cl) if cl else expected_size
 
-            if sha1 and not self._verify_sha1(path, sha1):
-                log.error("SHA1 校验失败: %s | %s", path.name, url[:80])
-                path.unlink()
+                downloaded = 0
+                with open(path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if not self._running:
+                            return False
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total > 0:
+                                self._notify_progress(downloaded, total, f"下载 {path.name}")
+
+                if sha1 and not self._verify_sha1(path, sha1):
+                    log.error("SHA1 校验失败: %s | %s", path.name, url[:80])
+                    path.unlink()
+                    return False
+                return True
+
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else 0
+                if attempt == 0 and status in (500, 502, 503, 504, 525, 526):
+                    log.warning("下载失败 (HTTP %d), 重试一次: %s | %s", status, path.name, url[:80])
+                    continue
+                log.error("下载失败: %s - HTTP %d | %s", path.name, status, url[:80])
                 return False
-            return True
-        except Exception as e:
-            log.error("单线程下载失败: %s - %s | %s", path.name, e, url[:80])
-            return False
+            except Exception as e:
+                log.error("下载失败: %s - %s | %s", path.name, e, url[:80])
+                return False
+        return False
 
     # ── Chunked download (large files, multi-threaded) ──────────
 
