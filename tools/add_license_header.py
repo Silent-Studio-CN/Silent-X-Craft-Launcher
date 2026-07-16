@@ -19,8 +19,16 @@
 
 from pathlib import Path
 
-HEADER = """# Silent X Craft Launcher (SXCL)
-# Copyright (C) SilentStudio / SilentCodeTeams / Silent X Craft Launcher Dev.
+HEADER = """# 版权所有 © Silent X Craft Launcher Dev 开发团队
+#
+# Silent X Craft Launcher (SXCL) 是一款由 Silent X Craft Launcher Dev 团队开发，
+# 隶属于 SilentCodeTeams 旗下，并由 SilentStudio 管理的 Minecraft 第三方启动器。
+#
+# Copyright © Silent X Craft Launcher Development Team
+#
+# Silent X Craft Launcher (SXCL) is a third-party Minecraft launcher developed
+# by the Silent X Craft Launcher Dev team, operating under the management of
+# SilentCodeTeams, and overseen by SilentStudio.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published
