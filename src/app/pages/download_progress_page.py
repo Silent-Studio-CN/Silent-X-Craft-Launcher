@@ -277,6 +277,14 @@ class DownloadProgressPage(BasePage):
         self._worker.progress.connect(self._on_progress)
         self._worker.detail.connect(self._on_detail)
         self._worker.finished.connect(self._on_finished)
+
+        # ── 进度节流：最多 10 次/秒，避免 UI 闪烁 ──
+        self._throttle_progress = (0, 0)
+        self._throttle_timer = QTimer(self)
+        self._throttle_timer.setInterval(100)
+        self._throttle_timer.timeout.connect(self._flush_progress)
+        self._throttle_timer.start()
+
         self._worker.start()
     
     def _on_stage_changed(self, index: int, total: int, name: str):
@@ -302,6 +310,12 @@ class DownloadProgressPage(BasePage):
         self.status_badge.setStyleSheet("color: #0078d4; font-weight: 500;")
     
     def _on_progress(self, current: int, total: int):
+        # 节流：只存值，由 QTimer 统一刷新
+        self._throttle_progress = (current, total)
+
+    def _flush_progress(self):
+        """每 100ms 刷新一次进度，防止 UI 闪烁"""
+        current, total = self._throttle_progress
         if total > 0:
             percent = int(current / total * 100)
             self.progress_bar.setValue(percent)
@@ -314,6 +328,15 @@ class DownloadProgressPage(BasePage):
         self._is_finished = True
         self.cancel_btn.setEnabled(False)
         self.back_btn.setEnabled(True)
+
+        # 更新任务页状态
+        task_key = f"download_progress_{self.version_name}"
+        mw = self.window()
+        if hasattr(mw, 'tasks_page'):
+            if success:
+                mw.tasks_page.set_task_done(task_key)
+            else:
+                mw.tasks_page.set_task_failed(task_key)
         
         if success:
             # 所有阶段标记完成

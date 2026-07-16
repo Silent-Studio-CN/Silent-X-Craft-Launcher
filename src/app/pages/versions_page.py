@@ -282,6 +282,16 @@ class VersionsPage(BasePage):
         date_label.setFixedWidth(150)
         layout.addWidget(date_label)
 
+        # 已安装标识
+        is_installed = version.id in self._installed
+        badge = BodyLabel("✓ 已安装" if is_installed else "", card)
+        if is_installed:
+            badge.setStyleSheet("color: #52c41a; font-weight: 600; font-size: 12px;")
+        else:
+            badge.setFixedWidth(0)
+        badge.setFixedWidth(60)
+        layout.addWidget(badge)
+
         # 弹簧撑开
         layout.addStretch(1)
 
