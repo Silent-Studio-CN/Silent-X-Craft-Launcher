@@ -403,6 +403,17 @@ class InstallWorker(QThread):
     
     def cancel(self):
         self._cancel = True
+
+    def _cleanup_on_failure(self):
+        """安装失败时清理版本目录（只删本次安装创建的，不碰 versions/ 和其他版本）"""
+        import shutil
+        version_dir = self.game_dir / "versions" / self.version_name
+        if version_dir.exists():
+            try:
+                shutil.rmtree(version_dir)
+                log.info("安装失败，已清理版本目录: %s", version_dir)
+            except Exception as e:
+                log.warning("安装失败后清理版本目录出错: %s", e)
     
     def run(self):
         try:
@@ -435,6 +446,8 @@ class InstallWorker(QThread):
                 success = func()
                 
                 if not success:
+                    # 安装失败 → 清理本次创建的版本目录
+                    self._cleanup_on_failure()
                     self.finished.emit(False, f"{name} 失败")
                     return
             
@@ -442,6 +455,7 @@ class InstallWorker(QThread):
             
         except Exception as e:
             log_exception(log, f"安装异常: {e}")
+            self._cleanup_on_failure()
             self.finished.emit(False, f"安装异常: {str(e)}")
     
     # ================================================================

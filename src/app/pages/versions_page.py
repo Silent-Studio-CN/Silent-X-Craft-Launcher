@@ -92,6 +92,13 @@ class VersionsPage(BasePage):
         self._build_content()
         self._load_versions()
 
+        # ── 定时检测文件变化 ──
+        from PySide6.QtCore import QTimer
+        self._fs_watch_timer = QTimer(self)
+        self._fs_watch_timer.setInterval(8000)  # 每 8 秒
+        self._fs_watch_timer.timeout.connect(self._check_fs_changes)
+        self._fs_watch_timer.start()
+
     def _build_content(self) -> None:
         # ---- 工具栏 ----
         toolbar = QWidget(self.view)
@@ -143,10 +150,23 @@ class VersionsPage(BasePage):
     def _on_versions_loaded(self, versions: list[GameVersion]) -> None:
         self._versions = versions
         self._installed = get_installed_versions()
+        self._last_fs_snapshot = set(self._installed)
         self.refresh_btn.setEnabled(True)
         self._apply_filters()
         self.status_label.setText(f"共 {len(self._versions)} 个版本，已安装 {len(self._installed)} 个")
         self._show_versions(self._filtered)
+
+    def _check_fs_changes(self):
+        """每 8 秒检测文件系统变化（用户手动删/增版本后自动刷新）"""
+        if not self._versions:
+            return
+        current = set(get_installed_versions())
+        last = getattr(self, "_last_fs_snapshot", None)
+        if last is not None and current != last:
+            self._last_fs_snapshot = current
+            self._installed = list(current)
+            self._show_versions(self._filtered)
+            self.status_label.setText(f"共 {len(self._versions)} 个版本，已安装 {len(self._installed)} 个")
 
     def _on_load_error(self, error: str) -> None:
         self.refresh_btn.setEnabled(True)

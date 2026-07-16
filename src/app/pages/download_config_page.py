@@ -306,9 +306,11 @@ class DownloadConfigPage(BasePage):
         self.name_input.textChanged.connect(self._on_name_manual_edit)
         name_layout.addWidget(self.name_input)
         
-        hint_label = BodyLabel(f"游戏版本: {self.version.id} (固定)", name_card)
-        hint_label.setTextColor("#888888", "#888888")
-        name_layout.addWidget(hint_label)
+        # 版本名重复警告（默认隐藏）
+        self.warning_label = BodyLabel("⚠ 此版本名称已存在，安装后会覆盖已有文件", name_card)
+        self.warning_label.setTextColor("#ff4d4f", "#ff7875")
+        self.warning_label.setVisible(False)
+        name_layout.addWidget(self.warning_label)
         
         self.add_content(name_card)
         
@@ -470,7 +472,7 @@ class DownloadConfigPage(BasePage):
         self._check_version_exists(version_name)
 
     def _check_version_exists(self, version_name: str):
-        """检查版本是否已存在，更新输入框样式"""
+        """检查版本是否已存在，显示文字提示"""
         from pathlib import Path
         from src.app.common.launcher_config import cfg
     
@@ -488,12 +490,13 @@ class DownloadConfigPage(BasePage):
                 }
             """)
             self.name_input.setToolTip(f"版本 '{version_name}' 已存在")
-            # 禁用下载按钮
+            self.warning_label.setVisible(True)
             self.download_btn.setEnabled(False)
             self.download_btn.setText("⚠️ 版本已存在")
         else:
             self.name_input.setStyleSheet("")
             self.name_input.setToolTip("")
+            self.warning_label.setVisible(False)
             self.download_btn.setEnabled(True)
             self.download_btn.setText("开始下载")
     
