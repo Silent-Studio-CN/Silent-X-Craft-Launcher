@@ -107,15 +107,22 @@ class MainWindow(FluentWindow):
         )
 
         self.navigationInterface.setCurrentItem(self.home_page.objectName())
-        self.navigationInterface.currentItemChanged.connect(self._on_nav_changed)
 
     # ──────────────────────────────────────────────────────────
     # 导航事件 — 恢复/隐藏临时页面
     # ──────────────────────────────────────────────────────────
 
-    def _on_nav_changed(self, item):
-        """导航切换时，自动恢复会话状态."""
-        nav_name = item.routeKey() if item else ""
+    def _onCurrentInterfaceChanged(self, widget):
+        """FluentWindow 内置回调 — 导航切换时自动恢复会话."""
+        if widget is None:
+            return
+
+        # 找到对应的导航项名称
+        nav_name = ""
+        for name, page in self._session_pages.items():
+            if page is widget:
+                nav_name = name
+                break
         if not nav_name:
             return
 
@@ -125,7 +132,6 @@ class MainWindow(FluentWindow):
             self.navigationInterface.setCurrentItem(None)
             return
 
-        # 离开时记录导航项
         self._last_nav_item = nav_name
 
     # ──────────────────────────────────────────────────────────
