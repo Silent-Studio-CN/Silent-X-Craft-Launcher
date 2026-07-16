@@ -22,210 +22,116 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""下载引擎 - 多线程分片下载"""
+"""Download engine — multi-threaded chunk download with cross-platform safety.
 
-import os
-import platform
-import threading
-import queue
-import time
-import shutil
+Architecture
+────────────
+- Single shared ``requests.Session`` with connection pooling for all chunks.
+- ``ThreadPoolExecutor`` for worker management (no raw thread/queue).
+- Platform-aware concurrency: macOS ARM64 = 3, others = 8.
+- Retry adapter with exponential backoff.
+"""
+
+from __future__ import annotations
+
 import hashlib
+import platform
+import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional, Callable, List
+from threading import Lock
+from typing import Callable, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from src.app.common.logger import log
 
+# ── Platform-aware concurrency ───────────────────────────────────
+# macOS ARM64 Python 3.14 has threading + SSL issues with too many
+# concurrent connections.  Reduce worker count but KEEP chunking.
+_PLATFORM = platform.system()
+_ARCH = platform.machine()
+_IS_MACOS_ARM64 = _PLATFORM == "Darwin" and _ARCH == "arm64"
 
-# macOS ARM64 Python 3.14 多线程 SSL 会导致 segfault，禁用分片
-_MACOS_ARM64 = platform.system() == "Darwin" and platform.machine() == "arm64"
-
-
-class TaskStatus:
-    """任务状态"""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
+DEFAULT_MAX_WORKERS = 3 if _IS_MACOS_ARM64 else 8
+CHUNK_SIZE = 512 * 1024       # 512 KB per chunk
+MIN_FILE_SIZE_FOR_CHUNK = 5 * 1024 * 1024  # 5 MB
 
 
-class DownloadChunk:
-    """下载分片"""
-    def __init__(self, chunk_id: int, start_byte: int, end_byte: int, temp_path: Path):
-        self.chunk_id = chunk_id
-        self.start_byte = start_byte
-        self.end_byte = end_byte
-        self.temp_path = temp_path
-        self.downloaded = 0
-        self.status = TaskStatus.PENDING
-        self.retry_count = 0
-        self.task = None  # 反向引用
+# ── Shared session factory ───────────────────────────────────────
+
+def _make_session() -> requests.Session:
+    """Create a session with connection pooling and retry support."""
+    retry = Retry(
+        total=2,
+        backoff_factor=0.5,
+        status_forcelist={500, 502, 503, 504},
+        allowed_methods={"GET"},
+    )
+    adapter = HTTPAdapter(
+        pool_connections=8,
+        pool_maxsize=16,
+        max_retries=retry,
+    )
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({
+        "User-Agent": "SilentXCraftLauncher/1.0",
+    })
+    return session
 
 
-class DownloadTask:
-    """下载任务"""
-    def __init__(self, url: str, path: Path, expected_size: int = 0, sha1: str = None):
-        self.url = url
-        self.path = path
-        self.expected_size = expected_size
-        self.sha1 = sha1
-        self.chunks: List[DownloadChunk] = []
-        self.downloaded_bytes = 0
-        self.status = TaskStatus.PENDING
-        self.progress_callback: Optional[Callable] = None
-
-
-class DownloadWorker(threading.Thread):
-    """下载工作线程 - 处理单个分片"""
-    
-    def __init__(
-        self,
-        worker_id: int,
-        task_queue: queue.Queue,
-        result_queue: queue.Queue,
-        max_retries: int = 3,
-        timeout: int = 30
-    ):
-        super().__init__(daemon=True)
-        self.worker_id = worker_id
-        self.task_queue = task_queue
-        self.result_queue = result_queue
-        self.max_retries = max_retries
-        self.timeout = timeout
-        self._running = True
-        
-    def run(self):
-        while self._running:
-            try:
-                chunk = self.task_queue.get(timeout=1)
-                if chunk is None:
-                    continue
-                
-                self._download_chunk(chunk)
-                self.result_queue.put(chunk)
-                
-            except queue.Empty:
-                continue
-            except Exception as e:
-                log.error(f"Worker {self.worker_id} 异常: {e}")
-                time.sleep(0.1)
-    
-    def _download_chunk(self, chunk: DownloadChunk):
-        """下载单个分片"""
-        task = chunk.task
-        url = task.url
-        start = chunk.start_byte
-        end = chunk.end_byte
-        temp_path = chunk.temp_path
-        
-        headers = {
-            'Range': f'bytes={start}-{end}',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        for attempt in range(self.max_retries):
-            try:
-                chunk.status = TaskStatus.RUNNING
-                
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    stream=True,
-                    timeout=self.timeout
-                )
-                response.raise_for_status()
-                
-                # 写入临时文件
-                temp_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(temp_path, 'wb') as f:
-                    for data in response.iter_content(chunk_size=8192):
-                        if not self._running:
-                            chunk.status = TaskStatus.CANCELLED
-                            return
-                        f.write(data)
-                        chunk.downloaded += len(data)
-                        
-                        # 更新任务进度
-                        task.downloaded_bytes += len(data)
-                        if task.progress_callback:
-                            task.progress_callback(
-                                task.downloaded_bytes,
-                                task.expected_size,
-                                f"下载分片 {chunk.chunk_id + 1}"
-                            )
-                
-                chunk.status = TaskStatus.COMPLETED
-                log.debug(f"分片 {chunk.chunk_id} 下载完成")
-                return
-                
-            except Exception as e:
-                log.warning(f"分片 {chunk.chunk_id} 下载失败 (尝试 {attempt + 1}/{self.max_retries}): {e}")
-                chunk.retry_count += 1
-                time.sleep(1)
-        
-        chunk.status = TaskStatus.FAILED
-        log.error(f"分片 {chunk.chunk_id} 最终失败")
-    
-    def stop(self):
-        self._running = False
+# ── Download Engine ──────────────────────────────────────────────
 
 
 class DownloadEngine:
-    """多线程分片下载引擎"""
-    
-    # 默认配置
-    DEFAULT_WORKERS = 8
-    DEFAULT_CHUNK_SIZE = 1024 * 1024  # 1MB
-    MIN_FILE_SIZE_FOR_CHUNK = 5 * 1024 * 1024  # 5MB 以上才分片
-    
+    """Multi-threaded chunk download engine.
+
+    Uses a single shared ``requests.Session`` so SSL connections are
+    pooled across all chunk threads — this avoids the macOS ARM64
+    threading + SSL segfault without disabling chunking.
+    """
+
     def __init__(
         self,
-        max_workers: int = None,
-        chunk_size: int = None,
+        max_workers: int | None = None,
         timeout: int = 30,
-        max_retries: int = 3
     ):
-        self.max_workers = max_workers or self.DEFAULT_WORKERS
-        self.chunk_size = chunk_size or self.DEFAULT_CHUNK_SIZE
+        self.max_workers = max_workers or DEFAULT_MAX_WORKERS
         self.timeout = timeout
-        self.max_retries = max_retries
-        
-        self._task_queue = queue.Queue()
-        self._result_queue = queue.Queue()
-        self._workers: List[DownloadWorker] = []
-        self._running = False
-        self._current_task: Optional[DownloadTask] = None
-        
-        # 进度回调
-        self._progress_callback: Optional[Callable] = None
-        self._total_tasks = 0
-        self._completed_tasks = 0
-        
+        self._session = _make_session()
+        self._progress_callback: Callable[[int, int, str], None] | None = None
+        self._running = True
+
+        # Speed tracking
+        self._speed_lock = Lock()
+        self._speed_start = 0.0
+        self._speed_bytes = 0
+
     def set_progress_callback(self, callback: Callable[[int, int, str], None]):
-        """设置总体进度回调"""
         self._progress_callback = callback
 
-    def _notify_progress(self, current: int, total: int, status: str, *, is_bytes: bool = True):
-        """通知进度（含网速和 ETA）。
+    def cancel(self):
+        self._running = False
 
-        Args:
-            is_bytes: ``True`` 表示 current/total 是字节数, ``False`` 表示是文件数。
-        """
+    # ── Progress helpers ────────────────────────────────────────
+
+    def _notify_progress(self, current: int, total: int, status: str, *, is_bytes: bool = True):
         if total <= 0 or current <= 0:
             if self._progress_callback:
                 self._progress_callback(current, total, status)
             return
 
         now = time.time()
-        if not hasattr(self, "_speed_start"):
-            self._speed_start = now
-            self._speed_bytes = 0
-
-        elapsed = now - self._speed_start
-        self._speed_bytes = current
+        with self._speed_lock:
+            if not self._speed_start:
+                self._speed_start = now
+            elapsed = now - self._speed_start
+            self._speed_bytes = current
 
         if elapsed >= 1.0:
             rate = current / elapsed if elapsed > 0 else 0
@@ -247,293 +153,219 @@ class DownloadEngine:
 
     @staticmethod
     def _format_speed(bps: float) -> str:
-        if bps >= 10 * 1024 * 1024:
-            return f"{bps / 1024 / 1024:.1f}MB"
         if bps >= 1024 * 1024:
             return f"{bps / 1024 / 1024:.1f}MB"
         if bps >= 1024:
             return f"{bps / 1024:.0f}KB"
         return f"{bps:.0f}B"
-    
-    def download(self, url: str, path: Path, expected_size: int = 0, sha1: str = None) -> bool:
-        """
-        下载单个文件 - 自动判断是否分片
-        """
-        try:
-            # 检查文件是否已存在
-            if path.exists():
-                if expected_size > 0 and path.stat().st_size == expected_size:
-                    if sha1 and self._verify_sha1(path, sha1):
-                        log.info(f"文件已存在且校验通过: {path.name}")
-                        return True
-                    elif not sha1:
-                        log.info(f"文件已存在，跳过: {path.name}")
-                        return True
-            
-            # 判断是否分片（macOS ARM64 禁用分片，避免 segfault）
-            if not _MACOS_ARM64 and expected_size >= self.MIN_FILE_SIZE_FOR_CHUNK:
-                use_chunks = True
-                log.info(f"大文件 ({expected_size / 1024 / 1024:.1f}MB) 使用分片下载: {path.name}")
-            else:
-                use_chunks = False
-                if _MACOS_ARM64 and expected_size >= self.MIN_FILE_SIZE_FOR_CHUNK:
-                    log.info(f"macOS ARM64 禁用分片，改用单线程: {path.name}")
 
-            if use_chunks:
-                return self._download_with_chunks(url, path, expected_size, sha1)
-            else:
-                return self._download_single(url, path, expected_size, sha1)
-                
-        except Exception as e:
-            log.error(f"下载失败 {path.name}: {e} | {url[:120]}")
-            return False
-    
-    def _download_single(self, url: str, path: Path, expected_size: int = 0, sha1: str = None) -> bool:
-        """单线程下载（小文件）"""
+    # ── SHA1 verification ───────────────────────────────────────
+
+    @staticmethod
+    def _verify_sha1(path: Path, expected: str) -> bool:
         try:
-            log.debug(f"单线程下载: {path.name}")
+            h = hashlib.sha1()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    h.update(chunk)
+            return h.hexdigest().lower() == expected.lower()
+        except Exception:
+            return False
+
+    # ── Single-threaded download (small files) ──────────────────
+
+    def _download_single(self, url: str, path: Path, expected_size: int = 0, sha1: str | None = None) -> bool:
+        try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            
-            response = requests.get(url, stream=True, timeout=self.timeout)
-            response.raise_for_status()
-            
-            # 获取实际文件大小（如果未提供）
-            content_length = response.headers.get('content-length')
-            if expected_size == 0 and content_length:
-                expected_size = int(content_length)
-            
+            resp = self._session.get(url, stream=True, timeout=self.timeout)
+            resp.raise_for_status()
+
+            cl = resp.headers.get("content-length")
+            total = int(cl) if cl else expected_size
+
             downloaded = 0
-            with open(path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
+            with open(path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
                     if not self._running:
                         return False
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-                        # 只有 expected_size > 0 时才通知进度
-                        if self._progress_callback and expected_size > 0:
-                            self._progress_callback(
-                                downloaded, expected_size,
-                                f"下载 {path.name}"
-                            )
-            
-            # 校验
+                        if total > 0:
+                            self._notify_progress(downloaded, total, f"下载 {path.name}")
+
             if sha1 and not self._verify_sha1(path, sha1):
-                log.error(f"SHA1 校验失败: {path.name} | {url[:80]}")
+                log.error("SHA1 校验失败: %s | %s", path.name, url[:80])
                 path.unlink()
                 return False
-            
             return True
-            
         except Exception as e:
-            log.error(f"单线程下载失败: {path.name} - {e} | {url[:80]}")
+            log.error("单线程下载失败: %s - %s | %s", path.name, e, url[:80])
             return False
-    
-    def _download_with_chunks(self, url: str, path: Path, expected_size: int = 0, sha1: str = None) -> bool:
-        """多线程分片下载（大文件）"""
-        temp_dir = None
+
+    # ── Chunked download (large files, multi-threaded) ──────────
+
+    def _download_chunk(self, session: requests.Session, url: str, start: int, end: int,
+                        temp_path: Path) -> bool:
+        """Download a single byte-range chunk; used by _download_with_chunks."""
+        try:
+            headers = {"Range": f"bytes={start}-{end}"}
+            resp = session.get(url, headers=headers, stream=True, timeout=self.timeout)
+            resp.raise_for_status()
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(temp_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if not self._running:
+                        return False
+                    if chunk:
+                        f.write(chunk)
+            return True
+        except Exception as e:
+            log.warning("分片下载失败 %s-%s: %s", start, end, e)
+            return False
+
+    def _download_with_chunks(self, url: str, path: Path, expected_size: int = 0, sha1: str | None = None) -> bool:
+        temp_dir = path.parent / f".{path.name}.tmp"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            temp_dir = path.parent / f".{path.name}.tmp"
             temp_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 创建任务
-            task = DownloadTask(
-                url=url,
-                path=path,
-                expected_size=expected_size,
-                sha1=sha1
-            )
-            task.progress_callback = self._progress_callback
-            self._current_task = task
-            
-            # 计算分片 - 根据文件大小和 worker 数量动态调整
-            num_chunks = min(
-                self.max_workers * 2,
-                max(1, (expected_size + self.chunk_size - 1) // self.chunk_size)
-            )
-            chunk_size = (expected_size + num_chunks - 1) // num_chunks
-            
-            log.info(f"分片下载: {path.name} -> {num_chunks} 片, 每片 ~{chunk_size // 1024}KB")
-            
-            # 创建分片
-            chunks = []
+
+            # Determine file size
+            file_size = expected_size
+            if file_size <= 0:
+                head = self._session.head(url, timeout=self.timeout)
+                head.raise_for_status()
+                cl = head.headers.get("content-length")
+                file_size = int(cl) if cl else 0
+            if file_size <= 0:
+                return self._download_single(url, path, 0, sha1)
+
+            # Calculate chunks
+            num_chunks = min(self.max_workers * 2, max(1, file_size // CHUNK_SIZE + 1))
+            actual_chunk = (file_size + num_chunks - 1) // num_chunks
+            log.info("分片下载: %s -> %d 片, 每片 ~%dKB", path.name, num_chunks, actual_chunk // 1024)
+
+            chunks: list[tuple[int, int, Path]] = []
             for i in range(num_chunks):
-                start = i * chunk_size
-                end = min(start + chunk_size - 1, expected_size - 1)
-                chunk = DownloadChunk(
-                    chunk_id=i,
-                    start_byte=start,
-                    end_byte=end,
-                    temp_path=temp_dir / f"chunk_{i:04d}.tmp"
-                )
-                chunk.task = task
-                chunks.append(chunk)
-                self._task_queue.put(chunk)
-            
-            # 启动工作线程
-            self._running = True
-            self._total_tasks = num_chunks
-            self._completed_tasks = 0
-            
-            actual_workers = min(self.max_workers, num_chunks)
-            for i in range(actual_workers):
-                worker = DownloadWorker(
-                    i, self._task_queue, self._result_queue,
-                    self.max_retries, self.timeout
-                )
-                worker.start()
-                self._workers.append(worker)
-            
-            # 等待完成
-            completed = 0
-            failed = 0
-            
-            while completed + failed < num_chunks:
-                try:
-                    chunk = self._result_queue.get(timeout=1)
-                    if chunk.status == TaskStatus.COMPLETED:
+                start = i * actual_chunk
+                end = min(start + actual_chunk - 1, file_size - 1)
+                t = temp_dir / f"chunk_{i:04d}.tmp"
+                chunks.append((start, end, t))
+
+            # Download chunks via thread pool (shared session)
+            with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+                futures = {}
+                for i, (start, end, t) in enumerate(chunks):
+                    fut = pool.submit(self._download_chunk, self._session, url, start, end, t)
+                    futures[fut] = i
+
+                completed = 0
+                failed = 0
+                for fut in as_completed(futures):
+                    if fut.result():
                         completed += 1
-                        self._completed_tasks = completed
-                        self._notify_progress(completed, num_chunks, f"分片 {completed}/{num_chunks}")
-                    elif chunk.status == TaskStatus.FAILED:
+                    else:
                         failed += 1
-                    elif chunk.status == TaskStatus.CANCELLED:
-                        self._stop_workers()
+                    self._notify_progress(completed, num_chunks, f"分片 {completed}/{num_chunks}",
+                                          is_bytes=False)
+                    if not self._running:
+                        pool.shutdown(wait=False, cancel_futures=True)
                         return False
-                except queue.Empty:
-                    continue
-            
-            # 停止 workers
-            self._stop_workers()
-            
+
             if failed > 0:
-                log.error(f"分片下载失败: {failed}/{num_chunks} 片失败")
-                if temp_dir and temp_dir.exists():
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                return False
-            
-            # 合并分片
-            log.info(f"合并分片: {path.name}")
-            with open(path, 'wb') as out_f:
-                for chunk in chunks:
-                    chunk_path = chunk.temp_path
-                    if chunk_path.exists():
-                        with open(chunk_path, 'rb') as in_f:
-                            shutil.copyfileobj(in_f, out_f)
-                        chunk_path.unlink()
-            
-            # 删除临时目录
-            if temp_dir and temp_dir.exists():
+                log.error("分片下载失败: %d/%d 片失败 | %s", failed, num_chunks, path.name)
                 shutil.rmtree(temp_dir, ignore_errors=True)
-            
-            # 校验
+                return False
+
+            # Merge chunks
+            log.info("合并分片: %s", path.name)
+            with open(path, "wb") as out:
+                for _, _, t in chunks:
+                    if t.exists():
+                        with open(t, "rb") as f:
+                            shutil.copyfileobj(f, out)
+                        t.unlink()
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
             if sha1 and not self._verify_sha1(path, sha1):
-                log.error(f"SHA1 校验失败: {path.name}")
+                log.error("SHA1 校验失败: %s | %s", path.name, url[:80])
                 path.unlink()
                 return False
-            
-            log.info(f"分片下载完成: {path.name}")
+
+            log.info("分片下载完成: %s", path.name)
             return True
-            
+
         except Exception as e:
-            log.error(f"分片下载失败: {path.name} - {e}")
-            if temp_dir and temp_dir.exists():
+            log.error("分片下载失败: %s - %s", path.name, e)
+            if temp_dir.exists():
                 shutil.rmtree(temp_dir, ignore_errors=True)
             return False
-    
-    def _stop_workers(self):
-        """停止所有工作线程"""
-        self._running = False
-        for worker in self._workers:
-            worker.stop()
-        self._workers.clear()
-    
-    def _verify_sha1(self, path: Path, expected_sha1: str) -> bool:
-        """验证 SHA1"""
+
+    # ── Public API ──────────────────────────────────────────────
+
+    def download(self, url: str, path: Path, expected_size: int = 0, sha1: str | None = None) -> bool:
+        """Download a single file — auto-selects chunked or single-thread."""
         try:
-            sha1_hash = hashlib.sha1()
-            with open(path, 'rb') as f:
-                for chunk in iter(lambda: f.read(8192), b''):
-                    sha1_hash.update(chunk)
-            return sha1_hash.hexdigest().lower() == expected_sha1.lower()
+            if path.exists():
+                if expected_size > 0 and path.stat().st_size == expected_size:
+                    if sha1 and self._verify_sha1(path, sha1):
+                        log.info("文件已存在且校验通过: %s", path.name)
+                        return True
+                    if not sha1:
+                        log.info("文件已存在，跳过: %s", path.name)
+                        return True
+
+            if expected_size >= MIN_FILE_SIZE_FOR_CHUNK:
+                log.info("大文件 (%dMB) 使用分片下载: %s", expected_size // 1024 // 1024, path.name)
+                return self._download_with_chunks(url, path, expected_size, sha1)
+            else:
+                return self._download_single(url, path, expected_size, sha1)
+
         except Exception as e:
-            log.error(f"SHA1 校验异常: {e}")
+            log.error("下载失败 %s: %s | %s", path.name, e, url[:120])
             return False
-    
+
+    # ── Batch downloads ─────────────────────────────────────────
+
     def download_batch(
         self,
         items: list[tuple[str, Path, int, str | None]],
-        max_concurrent: int = 8,
+        max_concurrent: int | None = None,
     ) -> list[bool]:
-        """批量下载多个文件，使用共享线程池并行下载。
-
-        Args:
-            items: 列表每个元素为 ``(url, path, expected_size, sha1)``
-            max_concurrent: 最大并发数
-
-        Returns:
-            每个文件对应的成功/失败状态列表。
-        """
+        """Download multiple files concurrently via thread pool."""
+        max_workers = max_concurrent or DEFAULT_MAX_WORKERS
         results: list[bool] = [False] * len(items)
-        lock = threading.Lock()
-        completed = [0]
         failed_urls: list[str] = []
+        lock = Lock()
+        done = [0]
 
-        def _download_one(index: int, url: str, path: Path, size: int, sha1: str | None):
+        def _work(index: int, url: str, path: Path, size: int, sha1: str | None):
             ok = self.download(url, path, size, sha1)
             with lock:
                 results[index] = ok
-                completed[0] += 1
+                done[0] += 1
                 if not ok:
                     failed_urls.append(url)
-                self._notify_progress(
-                    completed[0], len(items),
-                    f"批量下载 ({completed[0]}/{len(items)})",
-                    is_bytes=False,
-                )
+                self._notify_progress(done[0], len(items), f"批量下载 ({done[0]}/{len(items)})",
+                                      is_bytes=False)
+            return ok
 
-        threads: list[threading.Thread] = []
-        sem = threading.Semaphore(max_concurrent)
-
-        def _worker(index: int, url: str, path: Path, size: int, sha1: str | None):
-            try:
-                _download_one(index, url, path, size, sha1)
-            finally:
-                sem.release()
-
-        for i, (url, path, size, sha1) in enumerate(items):
-            sem.acquire()
-            t = threading.Thread(
-                target=_worker,
-                args=(i, url, path, size, sha1),
-                daemon=True,
-            )
-            t.start()
-            threads.append(t)
-
-        for t in threads:
-            t.join()
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = []
+            for i, (url, path, size, sha1) in enumerate(items):
+                futs.append(pool.submit(_work, i, url, path, size, sha1))
+            for _ in as_completed(futs):
+                pass  # handled inside _work via lock
 
         if failed_urls:
             log.warning("批量下载 | %d/%d 个文件失败 (前 5 个): %s",
-                        len(failed_urls), len(items),
-                        failed_urls[:5])
+                        len(failed_urls), len(items), failed_urls[:5])
 
-        self._notify_progress(
-            len(items), len(items),
-            "批量下载完成",
-            is_bytes=False,
-        )
+        self._notify_progress(len(items), len(items), "批量下载完成", is_bytes=False)
         return results
 
-    def cancel(self):
-        """取消所有下载"""
-        self._running = False
-        while not self._task_queue.empty():
-            try:
-                self._task_queue.get_nowait()
-            except:
-                break
-        self._stop_workers()
-        log.info("下载已取消")
+    def __del__(self):
+        try:
+            self._session.close()
+        except Exception:
+            pass
