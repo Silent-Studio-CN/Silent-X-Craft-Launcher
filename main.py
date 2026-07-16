@@ -79,6 +79,7 @@ from qfluentwidgets import setTheme, Theme, qconfig
 QLoggingCategory.setFilterRules("*.warning=false\n*.critical=false")
 
 from src.core.constants import APP_NAME, ORGANIZATION, DownloadSource
+from src.core.lang import init_language
 from src.app.common.launcher_config import load_config, cfg, LauncherLanguage
 from src.app.main_window import MainWindow
 
@@ -114,6 +115,9 @@ def main() -> int:
         cfg.language,
         LauncherLanguage.ZH_CN if lang_str == "zh-CN" else LauncherLanguage.EN_US,
     )
+
+    # ── 初始化语言系统（自动下载缺失的语言文件） ──
+    init_language("zh-cn" if lang_str == "zh-CN" else "en-us")
 
     qconfig.set(cfg.autoCheckUpdate, config.get("auto_check_update", True))
     qconfig.set(cfg.debugMode, config.get("debug_mode", False))

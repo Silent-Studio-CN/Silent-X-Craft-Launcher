@@ -307,7 +307,7 @@ class DownloadConfigPage(BasePage):
         name_layout.addWidget(self.name_input)
         
         # 版本名重复警告（默认隐藏）
-        self.warning_label = BodyLabel("⚠ 此版本名称已存在，安装后会覆盖已有文件", name_card)
+        self.warning_label = BodyLabel("⚠ 不能与现有版本名相同", name_card)
         self.warning_label.setTextColor("#ff4d4f", "#ff7875")
         self.warning_label.setVisible(False)
         name_layout.addWidget(self.warning_label)

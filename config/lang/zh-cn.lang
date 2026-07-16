@@ -1,0 +1,97 @@
+# Silent X Craft Launcher — 中文语言包
+# 格式: key = value
+# 以 # 开头的行是注释
+
+# ── 通用 ──
+app.name = Silent X Craft Launcher
+app.title = 静音 X 飞船发射器
+
+# ── 版本页面 ──
+page.versions.title = 游戏版本
+page.versions.subtitle = 选择要启动的 Minecraft 版本
+page.versions.search = 搜索版本号…
+page.versions.all = 全部
+page.versions.release = 正式版
+page.versions.snapshot = 快照
+page.versions.old = 旧版
+page.versions.refresh = 刷新
+page.versions.log = 📜 版本日志
+page.versions.server = 🖥 获取服务端
+page.versions.loading = 正在加载版本清单…
+page.versions.count = 共 {total} 个版本，已安装 {installed} 个
+page.versions.load_failed = 加载失败
+page.versions.config = 配置下载
+
+# ── 下载配置页 ──
+page.config.title = 配置下载
+page.config.subtitle = 配置版本名称和模组加载器
+page.config.name_label = 版本名称
+page.config.name_placeholder = 输入自定义版本名称…
+page.config.name_duplicate = ⚠ 不能与现有版本名相同
+page.config.loader_title = 模组加载器 (三选一)
+page.config.loader_none = 无
+page.config.download = 开始下载
+page.config.version_exists = ⚠️ 版本已存在
+
+# ── 下载进度页 ──
+page.progress.stage_json = 下载原版 json 文件
+page.progress.stage_jar = 下载原版 client.jar
+page.progress.stage_libs = 下载原版支持库文件
+page.progress.stage_assets = 下载原版资源文件
+page.progress.stage_loader = 下载加载器
+page.progress.stage_analyze = 分析加载器依赖
+page.progress.stage_loader_libs = 下载加载器依赖库
+page.progress.stage_install = 执行加载器安装
+page.progress.stage_finish = 整理文件
+page.progress.success = 安装成功
+page.progress.failed = 安装失败
+page.progress.cancel = 取消
+page.progress.back = 返回
+
+# ── 启动页 ──
+page.launch.check_java = 检测 Java 运行时
+page.launch.build_cmd = 构建启动命令
+page.launch.start_process = 启动游戏进程
+page.launch.wait_window = 等待游戏窗口
+page.launch.running = 游戏运行中
+page.launch.done = 启动完成
+
+# ── 设置页 ──
+page.settings.title = 设置
+page.settings.game_group = 游戏
+page.settings.java_path = Java 路径
+page.settings.memory = 最大内存
+page.settings.game_dir = 游戏目录
+page.settings.version_isolation = 版本隔离
+page.settings.download_group = 下载
+page.settings.download_source = 下载源
+page.settings.appearance_group = 外观
+page.settings.theme = 主题
+page.settings.language = 语言
+page.settings.about_group = 关于
+
+# ── Java ──
+java.not_found = 未检测到 Java 运行时，请前往设置页面手动选择或下载
+java.detected = 自动检测到 Java: {path}
+java.downloading = 正在下载 {name}…
+java.installing = 正在安装 {name}…
+java.success = {name} 安装完成
+java.failed = {name} 下载失败，请检查网络
+
+# ── 下载引擎 ──
+download.start = 下载 {name}
+download.batch = 批量下载 ({done}/{total})
+download.batch_done = 批量下载完成
+download.chunk = 分片 ({done}/{total})
+download.chunk_merge = 合并分片: {name}
+download.cache_hit = 文件已存在且校验通过: {name}
+download.cache_skip = 文件已存在，跳过: {name}
+download.failed = 下载失败: {name} - {error}
+download.cdn_redirect = CDN 重定向: {from} → {to}
+download.retry = 下载失败 (HTTP {code}), 重试一次: {name}
+
+# ── 错误 ──
+error.generic = 发生错误
+error.network = 网络错误
+error.not_found = 未找到
+error.timeout = 请求超时

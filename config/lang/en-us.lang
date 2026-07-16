@@ -1,0 +1,97 @@
+# Silent X Craft Launcher — English Language Pack
+# Format: key = value
+# Lines starting with # are comments
+
+# ── General ──
+app.name = Silent X Craft Launcher
+app.title = Silent X Craft Launcher
+
+# ── Versions Page ──
+page.versions.title = Game Versions
+page.versions.subtitle = Select a Minecraft version to launch
+page.versions.search = Search version…
+page.versions.all = All
+page.versions.release = Release
+page.versions.snapshot = Snapshot
+page.versions.old = Old
+page.versions.refresh = Refresh
+page.versions.log = 📜 Changelog
+page.versions.server = 🖥 Get Server
+page.versions.loading = Loading version manifest…
+page.versions.count = {total} versions, {installed} installed
+page.versions.load_failed = Load Failed
+page.versions.config = Configure Download
+
+# ── Config Page ──
+page.config.title = Configure Download
+page.config.subtitle = Configure version name and mod loader
+page.config.name_label = Version Name
+page.config.name_placeholder = Enter custom version name…
+page.config.name_duplicate = ⚠ Cannot use an existing version name
+page.config.loader_title = Mod Loader (choose one)
+page.config.loader_none = None
+page.config.download = Start Download
+page.config.version_exists = ⚠️ Version Exists
+
+# ── Progress Page ──
+page.progress.stage_json = Downloading vanilla JSON
+page.progress.stage_jar = Downloading client.jar
+page.progress.stage_libs = Downloading libraries
+page.progress.stage_assets = Downloading assets
+page.progress.stage_loader = Downloading loader
+page.progress.stage_analyze = Analyzing dependencies
+page.progress.stage_loader_libs = Downloading loader libraries
+page.progress.stage_install = Running installer
+page.progress.stage_finish = Finishing up
+page.progress.success = Installation Successful
+page.progress.failed = Installation Failed
+page.progress.cancel = Cancel
+page.progress.back = Back
+
+# ── Launch Page ──
+page.launch.check_java = Checking Java Runtime
+page.launch.build_cmd = Building Launch Command
+page.launch.start_process = Starting Game Process
+page.launch.wait_window = Waiting for Game Window
+page.launch.running = Game Running
+page.launch.done = Launch Complete
+
+# ── Settings Page ──
+page.settings.title = Settings
+page.settings.game_group = Game
+page.settings.java_path = Java Path
+page.settings.memory = Max Memory
+page.settings.game_dir = Game Directory
+page.settings.version_isolation = Version Isolation
+page.settings.download_group = Download
+page.settings.download_source = Download Source
+page.settings.appearance_group = Appearance
+page.settings.theme = Theme
+page.settings.language = Language
+page.settings.about_group = About
+
+# ── Java ──
+java.not_found = No Java runtime detected. Please select or download Java in Settings.
+java.detected = Java auto-detected: {path}
+java.downloading = Downloading {name}…
+java.installing = Installing {name}…
+java.success = {name} installed successfully
+java.failed = {name} download failed. Please check your network.
+
+# ── Download Engine ──
+download.start = Downloading {name}
+download.batch = Batch download ({done}/{total})
+download.batch_done = Batch download complete
+download.chunk = Chunk ({done}/{total})
+download.chunk_merge = Merging chunks: {name}
+download.cache_hit = File exists and verified: {name}
+download.cache_skip = File exists, skipping: {name}
+download.failed = Download failed: {name} - {error}
+download.cdn_redirect = CDN redirect: {from} → {to}
+download.retry = Download failed (HTTP {code}), retrying: {name}
+
+# ── Errors ──
+error.generic = An error occurred
+error.network = Network error
+error.not_found = Not found
+error.timeout = Request timed out
