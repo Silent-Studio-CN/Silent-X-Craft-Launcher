@@ -88,7 +88,25 @@ UI 需要 Qt 6.11.2（WS2025 已装，含 4 套安卓套件）与 `libqf`；纯�
 | **断点续传** | 限速 50KB/s 下到 52,035 B 时强杀进程；重跑续传完成，产物 SHA-256 与完整下载**逐字节一致** |
 | Range 兑现检查 | 实测 Mojang CDN 在带 `Accept-Encoding: gzip` 时**放弃 Range**（返回 200 全量）。传输层因此对 Range 请求强制 `identity`，引擎另有一层"服务端没兑现就全量重下"的保护 |
 
-四平台编译验证见 `docs/02-迁移路线.md` 与 CI 配置。
+## 四平台编译验证（CI 全绿）
+
+| 平台 | 作业 | 状态 |
+| --- | --- | --- |
+| Windows | `windows-msvc`（VS2026，不硬写生成器） | 通过 |
+| Linux | `linux-gcc`（gcc + Ninja） | 通过 |
+| macOS | `macos-universal`（`arm64;x86_64` 通用二进制） | 通过 |
+| Android | `android-arm64`（NDK 交叉编译） | 通过 |
+| Qt 传输后端 | `qt-transport-linux`（install-qt-action） | 通过 |
+
+**CI 一次就抓出 5 个本机 MSVC 完全掩盖的真实缺陷**（值得记住，别删）：
+
+1. `include/sxcl/fs.h` 用了 `size_t` 却没 include `<stddef.h>`（本机因为包含顺序恰好先引入了 stdio.h 而侥幸通过）。
+2. `src/platform/platform_posix.c` 缺 `<fcntl.h>`：`open`/`O_WRONLY`/`O_CREAT` 未声明。
+3. macOS 的 `struct stat` 与 Linux 不同：顶部定义 `_POSIX_C_SOURCE` 会让 macOS SDK 把 `st_mtim` 与 `st_mtimespec` **一起收窄掉**，去掉该宏即可（CMake 用 `-std=gnu11`，不需要它）。
+4. Android 的 pthread 在 libc 里，`find_package(Threads REQUIRED)` 必然失败，要单独分支。
+5. 不带 Qt 构建时，CLI 里 `#else` 分支的 `return` 让后续代码变成 unreachable，MSVC `C4702` 在 `/WX` 下直接打挂（本机装了 Qt，走的是另一个分支，看不出来）。
+
+另有一条是测试自身的跨平台缺陷：元数据层测试的"期望总字节"写死成 windows/linux 两种，漏了 macOS 的 `natives-osx` 大小不同，现已改成按平台分别计算。
 
 ## 许可
 
