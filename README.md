@@ -1,99 +1,63 @@
-# Silent X Craft Launcher (静音 X 飞船发射器)
+# Silent-X-Craft-Launcher C 版（SXCL-C）
 
-一款跨平台、开源的 Minecraft 启动器，采用 PCL2 风格界面，支持 BMCLAPI 镜像加速。
+SXCL 的 C/C++ 重写工程。Python/PySide6 版在 `../Silent-X-Craft-Launcher`，两版功能对等、数据格式互通
+（共用 `PCL\Setup.ini`、`launcher_profiles.json`、`sxcl.keymap.v1` 等既有契约）。
 
----
+## 为什么重写
 
-## ✨ 特性
+- 启动器冷启动内存与耗时：Python 版实测常驻 >200 MB、启动数秒；C 版目标常驻 <40 MB、冷启动 <300 ms。
+- 一份源码产出三端：Windows 安装包 / 便携包 / 安卓 APK（Python 版受 PySide6 无 android wheel 限制）。
+- 下载引擎需要精确控制 socket、io_uring/IOCP 与限速节拍，语言层抽象越薄越好。
 
-- **跨平台** — 支持 Windows / macOS / Linux，x64 与 ARM64 架构
-- **PCL2 风格界面** — 基于 PySide6 + QFluentWidgets，扁平卡片式设计，明暗主题跟随系统
-- **BMCLAPI 镜像加速** — 自动切换国内镜像源，解决 Minecraft 资源下载慢问题
-- **多线程分片下载** — 大文件自动分片并行下载，支持断点续传和 SHA1 校验
-- **模组加载器支持** — 一键安装 Forge / Fabric / NeoForge，自动处理版本兼容
-- **智能 Java 管理** — 自动扫描系统 Java 运行时，支持从 Oracle CDN 一键下载 JDK 21 LTS
-- **启动进度可视化** — 启动游戏时实时显示各阶段状态，自动检测游戏窗口
-- **崩溃日志收集** — 游戏崩溃后自动收集 crash-reports / hs_err 日志
+## 三条技术线
 
-## 📦 安装
+| 线 | 语言 | 内容 | 依赖 |
+| --- | --- | --- | --- |
+| `libsxcl` 核心 | C11 | 下载引擎（多连接 Range、`.part` 断点续传、令牌桶限速、流式 SHA-1/SHA-256 校验）、双路线路与熔断、优先级调度、设置与实例存档、版本清单解析、Java 运行时探测 | 仅 OS API + zlib |
+| `sxcl-ui` 界面 | C++17 / Qt 6 Widgets | 直接消费 `D:\SilentStudio\PyQf to C`（qf 的 C/C++ 重写）作为 Fluent 控件层 | libsxcl、libqf |
+| `sxcl-net` 基岩与联机 | Rust（C ABI 导出） | 基岩版本管理、微软 / 离线登录、联机（复用 WebRTC / NetherNet）、协议加解密与解析 | libsxcl |
 
-### 前提条件
+分层规则与 Python 版一致：**core ← services ← ui**，core 不得反向依赖 UI；跨层只经 C ABI 或稳定头文件。
 
-- Python 3.11+
-- Git
-
-### 从源码运行
-
-```bash
-git clone https://github.com/Silent-Studio-CN/Silent-X-Craft-Launcher.git
-cd Silent-X-Craft-Launcher
-pip install -r requirements.txt
-python main.py
-```
-
-### 打包为可执行文件
-
-```bash
-pip install pyinstaller
-pyinstaller --name "SXCL" --onefile --windowed --add-data "config:config" main.py
-```
-
-## 🏗 项目架构
+## 目录
 
 ```
-src/
-├── main.py                 # 应用入口
-├── core/                   # 跨平台核心层（纯 Python，无 UI 依赖）
-│   ├── platform.py         # 系统检测 / 路径 / 架构抽象
-│   ├── constants.py        # 常量与枚举
-│   ├── exceptions.py       # 异常体系
-│   ├── logger.py           # 日志系统
-│   └── mirror.py           # BMCLAPI URL 镜像映射
-├── services/               # 业务逻辑层
-│   ├── java/               # Java 发现 / 兼容性 / 自动下载
-│   ├── minecraft/          # 版本清单 / 启动命令构建
-│   ├── mod_loader/         # 模组加载器 API 客户端
-│   └── download/           # 多线程分片下载引擎
-├── app/                    # UI 层
-│   ├── common/             # 基础组件
-│   ├── pages/              # 页面：主页 / 版本 / 下载 / 设置 / 启动
-│   └── widgets/            # 自定义控件
-└── config/                 # 配置文件
+include/sxcl/    公共 C 头（唯一对外契约）
+src/core/        下载引擎、限速、校验、线路、设置、缓存
+src/services/    版本清单、模组加载器静默安装、账户、实例管理
+src/ui/          Qt 界面（消费 libqf）
+src/platform/    win32 / linux / android 平台封装
+crates/          Rust：基岩与联机（C ABI）
+docs/            设计与迁移文档
+tests/           单元测试与对拍（与 Python 版逐字段比对）
+tools/           构建、打包（Inno Setup）、资源导出脚本
 ```
 
-## ⚙ 配置
+## 构建
 
-所有设置通过图形界面完成：
+本机（Windows，i5-11320H，无 C/C++ 编译器）不承担编译；C/C++ 编译在编译机 WS2025 上做：
 
-| 设置项 | 说明 |
-|--------|------|
-| Java 路径 | 手动选择或自动检测 |
-| 最大内存 | 滑块调节，范围 20%–75% 系统内存 |
-| 下载源 | Mojang 官方源 / BMCLAPI 镜像源 |
-| 版本隔离 | 每个版本独立运行目录 |
-| 主题 | 浅色 / 深色 / 跟随系统 |
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSXCL_BUILD_UI=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
 
-## 🔗 相关资源
+UI 需要 Qt 6.11.2（WS2025 已装，含 4 套安卓套件）与 `libqf`；纯核心库构建可 `-DSXCL_BUILD_UI=OFF`。
 
-- [BMCLAPI 文档](https://bmclapidoc.bangbang93.com/) — 镜像 API 说明
-- [PCL2 源码](https://github.com/Meloong-Git/PCL) — 界面设计参考
-- [QFluentWidgets](https://qfluentwidgets.com/) — UI 组件库
+## 不变量（改代码前先读）
 
-## 📄 许可证
+- **本工程不含 Python**：没有 `.py` 文件、不依赖 Python 运行时、不调用 Python 脚本；
+  构建、测试、打包一律 CMake + MSVC + `.bat`/PowerShell。Python 版只作为**语义与数据格式的参考**，
+  阅读它可以，但它的代码、脚本、生成流程都不进这个仓库。
+- 跨平台代码默认不写平台专有 API；必须写时收敛到 `src/platform/`，并在文件头注明支持的平台。
+- 面向用户的行为改动，先在 Python 版确认语义，再在 C 版实现（避免两版分叉），但实现与验证都在 C 侧完成。
 
-本项目采用 **GNU Affero General Public License v3.0 (AGPL-3.0)**，
-并附加 SXCL 特别条款（禁止收费、轻度/重度使用划分、禁止碰瓷命名）。
+## 现状
 
-详见 [LICENSE](LICENSE) 文件。
+阶段 0（骨架与编译机验证）进行中。见 `docs/02-迁移路线.md`。
 
-> 本项目使用 PySide6（LGPL-3.0 许可）作为 Qt 绑定库，
-> LGPL 与 AGPL 兼容。
->
-> **中文版许可优先。如中英文版本存在歧义，以中文版本为准。**
->
-> 版权所有 © SilentStudio
-> 开发所属：SilentStudio → SilentCodeTeams → Silent X Craft Launcher Dev
+## 许可
 
----
-
-**Silent X Craft Launcher** — 让启动更快，让游戏更静。
+AGPL-3.0 + SXCL 附加条款，与 Python 版一致（`LICENSE` 从 Python 版复制，勿改动条款）。
+PCL 素材的署名与不混淆规则见 Python 版 `assets/icons/NOTICE.md`；基岩 APK 不参与分发。

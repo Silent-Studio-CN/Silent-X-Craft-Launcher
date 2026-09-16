@@ -1,14 +1,18 @@
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
+# 构建产物
 build/
-.venv/
-venv/
-.env
-.idea/
-.vscode/
-*.log
-.minecraft/
-launcher-data/
+build-*/
+out/
+.vs/
+*.user
+*.suo
+*.VC.db
+CMakeCache.txt
+CMakeFiles/
+
+# 平台杂物
+.DS_Store
+Thumbs.db
+*.swp
+
+# 测试临时文件
+_verify_tmp/

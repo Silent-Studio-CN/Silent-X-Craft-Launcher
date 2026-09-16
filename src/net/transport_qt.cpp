@@ -1,0 +1,266 @@
+/* Qt Network 传输后端 —— 四平台通用(Win/Android/macOS/Linux)。
+ *
+ * 为什么用它打头阵:
+ *   - 零新增依赖:Qt 已经是 UI 层依赖,四平台都有官方包;
+ *   - TLS 走平台后端(Windows SChannel / macOS Secure Transport / Linux+Android OpenSSL),
+ *     不必为 macOS 单独构建 OpenSSL;
+ *   - 系统代理与 PAC 由 Qt 自动处理(libcurl 不解析 PAC,这是它的短板);
+ *   - HTTP/2 在 Qt 6 默认开启,几千个小文件能省掉大量握手。
+ *
+ * 调用模型:net.h 的接口是"阻塞式"的(request 拿头,read 逐段取正文),
+ * 这里用嵌套 QEventLoop 把 Qt 的异步信号转成阻塞调用,正好对上引擎的
+ * "一个工作线程一条传输"模型;将来要换成单线程 multi 模型,只需换后端。
+ *
+ * 线程约束:一个实例只属于创建它的线程(QNetworkAccessManager 有线程亲和性)。
+ */
+#include "sxcl/net.h"
+
+#include <QByteArray>
+#include <QEventLoop>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QSet>
+#include <QTimer>
+#include <QUrl>
+
+#include <cstring>
+
+namespace {
+
+constexpr int kDefaultTimeoutMs = 30000;
+
+struct QtBody {
+    QNetworkReply *reply = nullptr;
+    QByteArray pending;   // 已到达但还没被 read() 取走的字节
+    bool finished = false;
+    bool aborted = false;
+    bool ioError = false;
+};
+
+struct QtTransport {
+    sxcl_transport pub{};
+    QNetworkAccessManager *nam = nullptr;
+    QSet<QtBody *> bodies;
+    bool cancelled = false;
+};
+
+QtTransport *asTransport(void *ctx) { return static_cast<QtTransport *>(ctx); }
+QtBody *asBody(sxcl_http_body *body) { return reinterpret_cast<QtBody *>(body); }
+
+/* 把一个信号的到达转成"跳出嵌套事件循环" */
+void waitForReply(QNetworkReply *reply, int timeoutMs) {
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QObject::connect(reply, &QNetworkReply::metaDataChanged, &loop, &QEventLoop::quit);
+    QObject::connect(reply, &QNetworkReply::readyRead, &loop, &QEventLoop::quit);
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QObject::connect(reply, &QNetworkReply::errorOccurred, &loop, &QEventLoop::quit);
+    timer.start(timeoutMs);
+    loop.exec();
+}
+
+/* 从 Content-Range: bytes a-b/total 里取 a/b/total;解析不出返回 false */
+bool parseContentRange(const QByteArray &value, int64_t *start, int64_t *end, int64_t *total) {
+    const QByteArray v = value.trimmed();
+    // Qt6 去掉了 startsWith 的大小写重载,自己比
+    if (v.size() < 6 || v.left(6).toLower() != QByteArrayLiteral("bytes "))
+        return false;
+    const QList<QByteArray> parts = v.mid(6).split('/');
+    if (parts.size() != 2)
+        return false;
+    const QList<QByteArray> range = parts.at(0).split('-');
+    if (range.size() != 2)
+        return false;
+    bool ok1 = false, ok2 = false;
+    const qint64 a = range.at(0).toLongLong(&ok1);
+    const qint64 b = range.at(1).toLongLong(&ok2);
+    if (!ok1 || !ok2)
+        return false;
+    *start = a;
+    *end = b;
+    *total = (parts.at(1) == "*") ? -1 : parts.at(1).toLongLong();
+    return true;
+}
+
+int qtRequest(void *ctx, const sxcl_http_request *req, sxcl_http_response *resp, sxcl_http_body **body) {
+    QtTransport *t = asTransport(ctx);
+    if (!t || !req || !req->url || !resp || !body)
+        return SXCL_NET_ERR_BAD_ARG;
+    *body = nullptr;
+    std::memset(resp, 0, sizeof(*resp));
+    resp->content_length = -1;
+    resp->total_length = -1;
+    resp->range_start = -1;
+    resp->range_end = -1;
+    if (t->cancelled)
+        return SXCL_NET_ERR_CANCELLED;
+
+    const QUrl url(QString::fromUtf8(req->url));
+    if (!url.isValid() || url.scheme().isEmpty())
+        return SXCL_NET_ERR_BAD_ARG;
+    // 只允许 http/https:版本元数据来自网络,不能让 file:// 之类混进来
+    if (url.scheme() != QLatin1String("http") && url.scheme() != QLatin1String("https")) {
+        return SXCL_NET_ERR_UNSUPPORTED;
+    }
+
+    QNetworkRequest qreq(url);
+    qreq.setAttribute(QNetworkRequest::Http2AllowedAttribute, req->force_http1 ? false : true);
+    qreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    qreq.setTransferTimeout(req->timeout_ms > 0 ? int(req->timeout_ms) : kDefaultTimeoutMs);
+    if (req->extra_headers) {
+        for (const char *const *h = req->extra_headers; *h; ++h) {
+            const QByteArray line(*h);
+            const int colon = line.indexOf(':');
+            if (colon > 0) {
+                qreq.setRawHeader(line.left(colon).trimmed(), line.mid(colon + 1).trimmed());
+            }
+        }
+    }
+    if (req->range_start >= 0) {
+        QByteArray range = "bytes=" + QByteArray::number(qlonglong(req->range_start)) + "-";
+        if (req->range_end >= req->range_start)
+            range += QByteArray::number(qlonglong(req->range_end));
+        qreq.setRawHeader("Range", range);
+        // 关键:Range 请求必须禁用压缩。
+        // 实测 Mojang CDN(Fastly/Azure):带 Accept-Encoding: gzip 时它会放弃 Range,
+        // 返回 200 + 全量压缩正文(curl 带 gzip 拿到 200/42376 字节,不带拿到 206/256 字节)。
+        // 不写这一行,续传与多连接分片会静默退化成"每次全量重下"——功能看着正常,带宽全浪费。
+        qreq.setRawHeader("Accept-Encoding", QByteArrayLiteral("identity"));
+    }
+
+    const QByteArray method = (req->method && *req->method) ? QByteArray(req->method) : QByteArray("GET");
+    QNetworkReply *reply = (method == "HEAD") ? t->nam->head(qreq) : t->nam->get(qreq);
+
+    // 等到"有响应头"或出错/超时。注意:超时时 reply 可能还在跑,下面统一 abort。
+    waitForReply(reply, req->timeout_ms > 0 ? int(req->timeout_ms) + 1000 : kDefaultTimeoutMs + 1000);
+
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (status == 0) {
+        // 连响应头都没拿到:DNS/连接/TLS/超时,或用户取消
+        reply->abort();
+        reply->deleteLater();
+        return t->cancelled ? SXCL_NET_ERR_CANCELLED : SXCL_NET_ERR_CONNECT;
+    }
+
+    if (!qEnvironmentVariableIsEmpty("SXCL_NET_DEBUG")) {
+        qInfo("QT %s (h2=%d range=%lld) -> %d", req->url, req->force_http1 ? 0 : 1,
+              static_cast<long long>(req->range_start), status);
+        const QList<QPair<QByteArray, QByteArray>> pairs = reply->rawHeaderPairs();
+        for (const QPair<QByteArray, QByteArray> &p : pairs) {
+            qInfo("   %s: %s", p.first.constData(), p.second.constData());
+        }
+    }
+
+    resp->status = status;
+    resp->is_range_response = (status == 206) ? 1 : 0;
+    resp->content_length = reply->header(QNetworkRequest::ContentLengthHeader).isValid()
+                               ? reply->header(QNetworkRequest::ContentLengthHeader).toLongLong()
+                               : -1;
+    const QByteArray acceptRanges = reply->rawHeader("Accept-Ranges").trimmed().toLower();
+    resp->accept_ranges = (acceptRanges == QByteArrayLiteral("bytes")) ? 1 : 0;
+    int64_t rs = -1, re = -1, total = -1;
+    if (parseContentRange(reply->rawHeader("Content-Range"), &rs, &re, &total)) {
+        resp->range_start = rs;
+        resp->range_end = re;
+        resp->total_length = total;
+    }
+
+    QtBody *b = new QtBody();
+    b->reply = reply;
+    b->pending = reply->readAll(); // 头到达时往往已经带了第一批正文
+    t->bodies.insert(b);
+    *body = reinterpret_cast<sxcl_http_body *>(b);
+    return SXCL_NET_OK;
+}
+
+int64_t qtRead(void *ctx, sxcl_http_body *body, void *buf, size_t len) {
+    QtTransport *t = asTransport(ctx);
+    QtBody *b = asBody(body);
+    if (!t || !b || !buf)
+        return SXCL_NET_ERR_BAD_ARG;
+    if (b->aborted || t->cancelled)
+        return SXCL_NET_ERR_CANCELLED;
+    if (len == 0)
+        return 0;
+
+    for (;;) {
+        if (!b->pending.isEmpty()) {
+            const int take = int(qMin<qint64>(qint64(len), qint64(b->pending.size())));
+            std::memcpy(buf, b->pending.constData(), size_t(take));
+            b->pending.remove(0, take);
+            return take;
+        }
+        if (b->finished)
+            return 0;
+        if (b->ioError)
+            return SXCL_NET_ERR_IO;
+
+        waitForReply(b->reply, kDefaultTimeoutMs);
+        b->pending += b->reply->readAll();
+        if (b->reply->isFinished()) {
+            b->finished = true;
+            if (b->reply->error() != QNetworkReply::NoError && b->reply->error() != QNetworkReply::OperationCanceledError)
+                b->ioError = true;
+            b->pending += b->reply->readAll();
+        }
+        if (b->pending.isEmpty() && b->finished && !b->ioError)
+            return 0;
+        if (t->cancelled)
+            return SXCL_NET_ERR_CANCELLED;
+    }
+}
+
+void qtCloseBody(void *ctx, sxcl_http_body *body) {
+    QtTransport *t = asTransport(ctx);
+    QtBody *b = asBody(body);
+    if (!t || !b)
+        return;
+    t->bodies.remove(b);
+    if (b->reply) {
+        if (!b->reply->isFinished())
+            b->reply->abort();
+        b->reply->deleteLater();
+    }
+    delete b;
+}
+
+void qtCancelAll(void *ctx) {
+    QtTransport *t = asTransport(ctx);
+    if (!t)
+        return;
+    t->cancelled = true;
+    const QSet<QtBody *> snapshot = t->bodies; // abort 会触发信号,复制一份再遍历
+    for (QtBody *b : snapshot) {
+        if (b->reply && !b->reply->isFinished())
+            b->reply->abort();
+    }
+}
+
+void qtDestroy(void *ctx) {
+    QtTransport *t = asTransport(ctx);
+    if (!t)
+        return;
+    qtCancelAll(t);
+    const QSet<QtBody *> snapshot = t->bodies;
+    for (QtBody *b : snapshot)
+        qtCloseBody(t, reinterpret_cast<sxcl_http_body *>(b));
+    delete t->nam;
+    delete t;
+}
+
+} // namespace
+
+extern "C" sxcl_transport *sxcl_transport_qt_create(void) {
+    QtTransport *t = new QtTransport();
+    t->nam = new QNetworkAccessManager();
+    t->pub.ctx = t;
+    t->pub.request = &qtRequest;
+    t->pub.read = &qtRead;
+    t->pub.close_body = &qtCloseBody;
+    t->pub.cancel_all = &qtCancelAll;
+    t->pub.destroy = &qtDestroy;
+    return &t->pub;
+}
