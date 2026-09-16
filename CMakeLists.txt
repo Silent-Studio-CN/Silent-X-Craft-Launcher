@@ -86,6 +86,14 @@ if(SXCL_BUILD_CLI)
   endif()
 endif()
 
+# ---- 图标管线(开发工具,默认不编:只有重新抽图标时才需要) ----
+option(SXCL_BUILD_ICON_TOOLS "构建 SVG 归一化工具" OFF)
+if(SXCL_BUILD_ICON_TOOLS)
+  find_package(Qt6 REQUIRED COMPONENTS Gui Svg)
+  add_executable(sxcl-svgnorm tools/svg_normalize/main.cpp)
+  target_link_libraries(sxcl-svgnorm PRIVATE Qt6::Gui Qt6::Svg)
+endif()
+
 # ---- 测试 ----
 if(SXCL_BUILD_TESTS)
   enable_testing()
