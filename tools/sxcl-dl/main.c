@@ -20,6 +20,7 @@
 #include "sxcl/limiter.h"
 #include "sxcl/manifest.h"
 #include "sxcl/net.h"
+#include "sxcl/options.h"
 
 static const char *kManifestUrl = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
@@ -160,7 +161,8 @@ static int usage(void)
            "  sxcl-dl get <url> <dest> [--sha1 HEX] [--size N] [--rate 5MB] [--workers N] [--mirror URL]\n"
            "  sxcl-dl manifest <dest> [--rate 5MB]\n"
            "  sxcl-dl version <版本号|latest> <游戏目录> [--rate 5MB] [--workers N] [--verbose]\n"
-           "  sxcl-dl list [--limit N]\n");
+           "  sxcl-dl list [--limit N]\n"
+           "  sxcl-dl options <options.txt> [--get KEY] [--set KEY=VALUE] [--remove KEY] [--dump]\n");
     return 2;
 }
 
@@ -331,6 +333,68 @@ static int cmd_list(const cli_opts *o)
     sxcl_version_list_free(list);
     sxcl_json_free(doc);
     return 0;
+}
+
+/* options.txt 读写:启动器要在每次启动前把渲染后端写进去,并在启动后核对游戏有没有把它改回去 */
+static int cmd_options(int argc, char **argv)
+{
+    if (argc < 3) {
+        return usage();
+    }
+    const char *path = argv[2];
+    sxcl_options *opts = sxcl_options_load(path);
+    if (!opts) {
+        fprintf(stderr, "打开失败: %s\n", path);
+        return 1;
+    }
+    int changed = 0, failed = 0;
+    for (int i = 3; i < argc; ++i) {
+        const char *a = argv[i];
+        if (strcmp(a, "--get") == 0 && i + 1 < argc) {
+            const char *v = sxcl_options_get(opts, argv[++i]);
+            printf("%s\n", v ? v : "(不存在)");
+        } else if (strcmp(a, "--set") == 0 && i + 1 < argc) {
+            const char *kv = argv[++i];
+            const char *eq = strchr(kv, '=');
+            if (!eq) {
+                fprintf(stderr, "--set 需要 KEY=VALUE\n");
+                ++failed;
+                continue;
+            }
+            char key[160];
+            const size_t n = (size_t)(eq - kv);
+            if (n == 0 || n >= sizeof(key)) {
+                fprintf(stderr, "键名非法\n");
+                ++failed;
+                continue;
+            }
+            memcpy(key, kv, n);
+            key[n] = '\0';
+            if (sxcl_options_set(opts, key, eq + 1) != 0) {
+                ++failed;
+            } else {
+                ++changed;
+                printf("%s=%s\n", key, eq + 1);
+            }
+        } else if (strcmp(a, "--remove") == 0 && i + 1 < argc) {
+            sxcl_options_remove(opts, argv[++i]);
+            ++changed;
+            printf("已删除 %s\n", argv[i]);
+        } else if (strcmp(a, "--dump") == 0) {
+            for (size_t k = 0; k < sxcl_options_count(opts); ++k) {
+                printf("%s=%s\n", sxcl_options_key_at(opts, k), sxcl_options_value_at(opts, k));
+            }
+        } else {
+            fprintf(stderr, "未知参数: %s\n", a);
+            ++failed;
+        }
+    }
+    if (changed > 0 && sxcl_options_save(opts, path) != 0) {
+        fprintf(stderr, "保存失败: %s\n", path);
+        ++failed;
+    }
+    sxcl_options_free(opts);
+    return failed == 0 ? 0 : 1;
 }
 
 static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
@@ -566,6 +630,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "version") == 0) {
         return cmd_version(argc, argv, &o);
+    }
+    if (strcmp(argv[1], "options") == 0) {
+        return cmd_options(argc, argv);
     }
     return usage();
 }
