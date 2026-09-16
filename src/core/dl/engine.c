@@ -32,6 +32,7 @@ typedef struct sxcl_worker {
 struct sxcl_engine {
     sxcl_engine_opts opts;
     sxcl_limiter *limiter;
+    sxcl_hash_cache *cache;   /**< 可空;见 opts.cache_path */
     sxcl_lock_t lock;
     sxcl_task **tasks;
     int task_count;
@@ -109,6 +110,7 @@ sxcl_engine *sxcl_engine_create(const sxcl_engine_opts *opts)
         free(e);
         return NULL;
     }
+    e->cache = sxcl_hash_cache_open(e->opts.cache_path); /* 打不开就当没有缓存,不影响下载 */
     sxcl_lock_init(&e->lock);
     return e;
 }
@@ -119,6 +121,10 @@ void sxcl_engine_destroy(sxcl_engine *e)
         return;
     }
     sxcl_engine_cancel(e);
+    if (e->cache) {
+        sxcl_hash_cache_close(e->cache); /* 内部会原子落盘 */
+        e->cache = NULL;
+    }
     sxcl_limiter_destroy(e->limiter);
     sxcl_lock_destroy(&e->lock);
     free(e->tasks);
@@ -200,6 +206,18 @@ static sxcl_task *take_next(sxcl_engine *e)
         best->state = SXCL_TASK_RUNNING;
     }
     sxcl_lock_release(&e->lock);
+    /* 加固:必填字段不全的任务直接判失败,绝不把 NULL/垃圾 URL 交给传输层
+     * (Qt 侧 QString::fromUtf8(NULL) 会崩在 strlen) */
+    if (best && (!best->dest || !best->urls[0])) {
+        sxcl_lock_acquire(&e->lock);
+        best->state = SXCL_TASK_FAILED;
+        snprintf(best->error, sizeof(best->error), "任务字段不全(缺 dest 或 urls[0])");
+        sxcl_lock_release(&e->lock);
+        if (e->opts.on_progress) {
+            e->opts.on_progress(e->opts.userdata, best);
+        }
+        return take_next(e);
+    }
     return best;
 }
 
@@ -293,6 +311,17 @@ static int try_source(sxcl_worker *w, sxcl_task *t, const char *part, int src, i
             snprintf(t->error, sizeof(t->error), "连接失败(候选 #%d): %s", src + 1,
                      rc == SXCL_NET_ERR_CONNECT ? "拿不到响应" : "IO 错误");
             continue; /* 同一路再试一次 */
+        }
+        if (resp.status == 416 && offset > 0) {
+            /* 残片比真实文件还长(上次运行崩溃留下的 .part):Range 不可满足,丢掉重下。
+             * 不处理的话这些文件会永远卡在 416 上失败 —— 实测 12 个文件就是这么挂的。 */
+            tr->close_body(tr->ctx, body);
+            sxcl_fs_remove(part);
+            offset = 0;
+            *offset_io = 0;
+            t->bytes_done = 0;
+            snprintf(t->error, sizeof(t->error), "残留分片过大(416),已丢弃重下");
+            continue;
         }
         if (resp.status != 200 && resp.status != 206) {
             tr->close_body(tr->ctx, body);
@@ -397,9 +426,19 @@ static int try_source(sxcl_worker *w, sxcl_task *t, const char *part, int src, i
 
         /* 读完 → 强校验(大小 + 摘要)。续传过的文件无法边下边算,这里统一读回校验 */
         sxcl_verify_result vr;
-        const sxcl_verify_status st = sxcl_verify_file(part, t->size, t->sha1, t->algo, &vr);
+        const sxcl_verify_status st = sxcl_verify_file_cached(part, t->size, t->sha1, t->algo,
+                                                              e->cache, &vr);
         if (st == SXCL_VERIFY_OK) {
             if (sxcl_fs_rename_replace(part, t->dest) == 0) {
+                /* 把 .part 的校验结果按"改名后的路径 + 对应大小/修改时间"登记进缓存:
+                 * 改名不改内容与时间戳,下次运行就能直接命中,不必重算这几百 MB */
+                if (e->cache && vr.actual_hex[0] != '\0') {
+                    int64_t fsize = 0;
+                    int64_t fmtime = 0;
+                    if (sxcl_fs_stat(t->dest, &fsize, &fmtime) == 0) {
+                        sxcl_hash_cache_put(e->cache, t->dest, fsize, fmtime, vr.actual_hex);
+                    }
+                }
                 t->bytes_done = offset;
                 if (t->total_bytes <= 0) {
                     t->total_bytes = offset;
@@ -429,7 +468,9 @@ static int try_source(sxcl_worker *w, sxcl_task *t, const char *part, int src, i
 
 static int run_task(sxcl_worker *w, sxcl_task *t)
 {
-    if (sxcl_verify_file(t->dest, t->size, t->sha1, t->algo, NULL) == SXCL_VERIFY_OK) {
+    sxcl_engine *e = w->engine;
+    /* 快路径:目标文件已存在且校验通过(有缓存时走查表,不重读文件)*/
+    if (sxcl_verify_file_cached(t->dest, t->size, t->sha1, t->algo, e->cache, NULL) == SXCL_VERIFY_OK) {
         t->bytes_done = t->size > 0 ? t->size : 0;
         t->total_bytes = t->bytes_done;
         snprintf(t->error, sizeof(t->error), "%s", "已存在且校验通过");

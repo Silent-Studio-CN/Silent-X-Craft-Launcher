@@ -70,6 +70,94 @@ int sxcl_hash_file(const char *path, sxcl_hash_algo algo, char *out_hex, size_t 
     return sxcl_hash_final_hex(&ctx, out_hex, out_len);
 }
 
+sxcl_verify_status sxcl_verify_file_cached(const char *path, int64_t expected_size,
+                                           const char *expected_hex, sxcl_hash_algo algo,
+                                           sxcl_hash_cache *cache, sxcl_verify_result *out)
+{
+    if (out) {
+        out->from_cache = 0;
+    }
+    if (!cache) {
+        return sxcl_verify_file(path, expected_size, expected_hex, algo, out);
+    }
+    if (!path) {
+        if (out) {
+            out->status = SXCL_VERIFY_BAD_ARG;
+        }
+        return SXCL_VERIFY_BAD_ARG;
+    }
+
+    int64_t size = 0;
+    int64_t mtime_ns = 0;
+    const int st = sxcl_fs_stat(path, &size, &mtime_ns);
+    if (out) {
+        out->size = (st == 0) ? size : -1;
+    }
+    if (st == -1) {
+        if (out) {
+            out->status = SXCL_VERIFY_MISSING;
+        }
+        return SXCL_VERIFY_MISSING;
+    }
+    if (st != 0) {
+        if (out) {
+            out->status = SXCL_VERIFY_IO;
+        }
+        return SXCL_VERIFY_IO;
+    }
+    if (expected_size > 0 && size != expected_size) {
+        if (out) {
+            out->status = SXCL_VERIFY_SIZE;
+        }
+        return SXCL_VERIFY_SIZE;
+    }
+    if (!expected_hex || expected_hex[0] == '\0') {
+        return SXCL_VERIFY_OK; /* 只校验大小 */
+    }
+
+    /* 缓存命中:路径 + 大小 + 修改时间三者一致就复用摘要(不重读文件) */
+    const char *cached = sxcl_hash_cache_get(cache, path, size, mtime_ns);
+    if (cached) {
+        if (out) {
+            snprintf(out->actual_hex, sizeof(out->actual_hex), "%s", cached);
+            out->from_cache = 1;
+        }
+        if (sxcl_hash_hex_equal(cached, expected_hex) == 0) {
+            if (out) {
+                out->status = SXCL_VERIFY_HASH;
+            }
+            return SXCL_VERIFY_HASH;
+        }
+        return SXCL_VERIFY_OK;
+    }
+
+    const size_t hex_len = sxcl_hash_hex_len(algo);
+    char actual[65];
+    if (hex_len + 1 > sizeof(actual)) {
+        if (out) {
+            out->status = SXCL_VERIFY_BAD_ARG;
+        }
+        return SXCL_VERIFY_BAD_ARG;
+    }
+    if (sxcl_hash_file(path, algo, actual, sizeof(actual)) != 0) {
+        if (out) {
+            out->status = SXCL_VERIFY_IO;
+        }
+        return SXCL_VERIFY_IO;
+    }
+    sxcl_hash_cache_put(cache, path, size, mtime_ns, actual);
+    if (out) {
+        memcpy(out->actual_hex, actual, hex_len + 1);
+    }
+    if (sxcl_hash_hex_equal(actual, expected_hex) == 0) {
+        if (out) {
+            out->status = SXCL_VERIFY_HASH;
+        }
+        return SXCL_VERIFY_HASH;
+    }
+    return SXCL_VERIFY_OK;
+}
+
 sxcl_verify_status sxcl_verify_file(const char *path, int64_t expected_size,
                                     const char *expected_hex, sxcl_hash_algo algo,
                                     sxcl_verify_result *out)

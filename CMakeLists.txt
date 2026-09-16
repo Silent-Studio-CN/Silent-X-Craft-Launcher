@@ -37,6 +37,7 @@ add_library(sxcl STATIC
   src/core/dl/limiter.c
   src/core/dl/verify.c
   src/core/dl/engine.c
+  src/core/dl/hashcache.c
   src/services/metadata/manifest.c
 )
 target_include_directories(sxcl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -79,6 +80,10 @@ if(SXCL_BUILD_CLI)
     target_link_libraries(sxcl-dl PRIVATE sxcl_net_qt)
     target_compile_definitions(sxcl-dl PRIVATE SXCL_HAVE_QT_TRANSPORT=1)
   endif()
+  if(WIN32)
+    # 崩溃处理器要解析符号:链 DbgHelp(WER 在这台机器上不记录我们的崩溃)
+    target_link_libraries(sxcl-dl PRIVATE Dbghelp)
+  endif()
 endif()
 
 # ---- 测试 ----
@@ -91,6 +96,7 @@ if(SXCL_BUILD_TESTS)
     verify_test  tests/verify_test.c
     json_test    tests/json_test.c
     manifest_test tests/manifest_test.c
+    hashcache_test tests/hashcache_test.c
   )
   list(LENGTH SXCL_TESTS _n)
   math(EXPR _last "${_n} - 1")

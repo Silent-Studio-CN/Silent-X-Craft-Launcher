@@ -17,6 +17,7 @@
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -49,18 +50,41 @@ struct QtTransport {
 QtTransport *asTransport(void *ctx) { return static_cast<QtTransport *>(ctx); }
 QtBody *asBody(sxcl_http_body *body) { return reinterpret_cast<QtBody *>(body); }
 
-/* 把一个信号的到达转成"跳出嵌套事件循环" */
-void waitForReply(QNetworkReply *reply, int timeoutMs) {
+/* 把异步回复转成阻塞等待。两条规矩都是实测踩出来的:
+ *  1) **进入等待前先查状态**:信号是"一次性"的,若回复在我们 connect 之前就结束了,
+ *     那些信号永远不会再来,光 connect 就得白等整个超时。症状:每个 10KB 资源文件卡满
+ *     30 秒(相邻落盘间隔中位数 30116ms),5147 个文件要 40 小时。
+ *  2) 等待期间放 50ms 心跳兜底,真漏了信号也不会卡死。 */
+/* 泵一次事件循环:某个信号到了、或有数据可读、或最多等 maxWaitMs 毫秒就返回。
+ *
+ * 语义刻意做成"最多等一小会儿",由调用方循环 + 自己判超时:
+ * 把超时判断放在这里、让调用方只看一次状态,是错的 —— 心跳一唤醒调用方就以为"没响应",
+ * 实测导致 30/30 全部报"拿不到响应"(而系统 curl 同一个 URL 是 200)。 */
+void pumpReply(QNetworkReply *reply, int maxWaitMs) {
     QEventLoop loop;
-    QTimer timer;
-    timer.setSingleShot(true);
-    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QTimer wake;
+    wake.setSingleShot(true);
+    QObject::connect(&wake, &QTimer::timeout, &loop, &QEventLoop::quit);
     QObject::connect(reply, &QNetworkReply::metaDataChanged, &loop, &QEventLoop::quit);
     QObject::connect(reply, &QNetworkReply::readyRead, &loop, &QEventLoop::quit);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     QObject::connect(reply, &QNetworkReply::errorOccurred, &loop, &QEventLoop::quit);
-    timer.start(timeoutMs);
+    wake.start(maxWaitMs);
     loop.exec();
+}
+
+/* 把回复里已经到达的字节收进 pending,并在结束时置上 finished/ioError */
+void harvestReply(QtBody *b) {
+    b->pending += b->reply->readAll();
+    if (!b->reply->isFinished()) {
+        return;
+    }
+    b->finished = true;
+    const QNetworkReply::NetworkError err = b->reply->error();
+    if (err != QNetworkReply::NoError && err != QNetworkReply::OperationCanceledError) {
+        b->ioError = true;
+    }
+    b->pending += b->reply->readAll();
 }
 
 /* 从 Content-Range: bytes a-b/total 里取 a/b/total;解析不出返回 false */
@@ -135,12 +159,22 @@ int qtRequest(void *ctx, const sxcl_http_request *req, sxcl_http_response *resp,
     const QByteArray method = (req->method && *req->method) ? QByteArray(req->method) : QByteArray("GET");
     QNetworkReply *reply = (method == "HEAD") ? t->nam->head(qreq) : t->nam->get(qreq);
 
-    // 等到"有响应头"或出错/超时。注意:超时时 reply 可能还在跑,下面统一 abort。
-    waitForReply(reply, req->timeout_ms > 0 ? int(req->timeout_ms) + 1000 : kDefaultTimeoutMs + 1000);
-
-    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    // 循环等"有响应头":每轮最多泵 50ms,超时由这里判(不让心跳误判成没响应)
+    QElapsedTimer clock;
+    clock.start();
+    const int deadlineMs = req->timeout_ms > 0 ? int(req->timeout_ms) + 1000 : kDefaultTimeoutMs + 1000;
+    int status = 0;
+    for (;;) {
+        status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (status != 0 || reply->isFinished() || clock.elapsed() >= deadlineMs) {
+            break;
+        }
+        pumpReply(reply, 50);
+    }
     if (status == 0) {
-        // 连响应头都没拿到:DNS/连接/TLS/超时,或用户取消
+        // 连响应头都没拿到:DNS/连接/TLS/超时,或用户取消。把 Qt 的错误码打出来便于定位
+        qWarning("QT 无响应: %s  error=%d (%s) elapsed=%lldms", req->url, int(reply->error()),
+                 qPrintable(reply->errorString()), static_cast<long long>(clock.elapsed()));
         reply->abort();
         reply->deleteLater();
         return t->cancelled ? SXCL_NET_ERR_CANCELLED : SXCL_NET_ERR_CONNECT;
@@ -198,19 +232,17 @@ int64_t qtRead(void *ctx, sxcl_http_body *body, void *buf, size_t len) {
             return 0;
         if (b->ioError)
             return SXCL_NET_ERR_IO;
-
-        waitForReply(b->reply, kDefaultTimeoutMs);
-        b->pending += b->reply->readAll();
-        if (b->reply->isFinished()) {
-            b->finished = true;
-            if (b->reply->error() != QNetworkReply::NoError && b->reply->error() != QNetworkReply::OperationCanceledError)
-                b->ioError = true;
-            b->pending += b->reply->readAll();
-        }
-        if (b->pending.isEmpty() && b->finished && !b->ioError)
+        /* 先把回复的当前状态同步过来:信号是一次性的,已经结束的回复不会再发信号 */
+        harvestReply(b);
+        if (b->ioError)
+            return SXCL_NET_ERR_IO;
+        if (!b->pending.isEmpty())
+            continue;
+        if (b->finished)
             return 0;
         if (t->cancelled)
             return SXCL_NET_ERR_CANCELLED;
+        pumpReply(b->reply, 50); /* 每轮最多 50ms,由上面的状态判断决定是否继续 */
     }
 }
 

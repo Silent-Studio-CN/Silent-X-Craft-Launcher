@@ -202,8 +202,11 @@ const sxcl_version_entry *sxcl_version_list_find(const sxcl_version_list *list, 
 
 /* ── 下载计划 ── */
 
+/* 任务逐个 malloc:计划是"边下边扩"的(先版本 JSON,后资源索引展开 5000+ 条),
+ * 而引擎提交后持有的是任务指针 —— 若用连续数组 + realloc,扩容会把地址搬走,
+ * 引擎手里的指针立刻变野指针(实测崩在 0xC0000005)。地址稳定是硬要求。 */
 struct sxcl_version_plan {
-    sxcl_task *tasks;
+    sxcl_task **tasks;
     size_t count;
     size_t capacity;
     char **owned; /* 每个任务持有的字符串(路径/URL/摘要/label),释放时统一 free */
@@ -234,15 +237,18 @@ static int plan_add(sxcl_version_plan *plan, const char *url, const char *dest, 
     }
     if (plan->count == plan->capacity) {
         const size_t next = plan->capacity ? plan->capacity * 2 : 64;
-        sxcl_task *grown = (sxcl_task *)realloc(plan->tasks, next * sizeof(sxcl_task));
+        sxcl_task **grown = (sxcl_task **)realloc(plan->tasks, next * sizeof(sxcl_task *));
         if (!grown) {
             return -1;
         }
         plan->tasks = grown;
         plan->capacity = next;
     }
-    sxcl_task *t = &plan->tasks[plan->count];
-    memset(t, 0, sizeof(*t));
+    sxcl_task *t = (sxcl_task *)calloc(1, sizeof(sxcl_task));
+    if (!t) {
+        return -1;
+    }
+    plan->tasks[plan->count] = t;
     t->dest = plan_intern(plan, dest);
     t->urls[0] = plan_intern(plan, url);
     t->urls[1] = mirror_url ? plan_intern(plan, mirror_url) : NULL;
@@ -381,6 +387,126 @@ sxcl_version_plan *sxcl_version_plan_build(const sxcl_json *version_json, const 
     return plan;
 }
 
+/* ── 资源对象展开(assets/objects) ── */
+
+static uint64_t fnv1a64(const char *s)
+{
+    uint64_t h = 1469598103934665603ULL;
+    for (const unsigned char *p = (const unsigned char *)s; *p; ++p) {
+        h ^= (uint64_t)(*p);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/* 5,147 条规模:定容开放寻址集合做"同哈希只入队一次"。装不下就退化为不去重(不会错,只是可能重复下载) */
+typedef struct asset_seen {
+    uint64_t *slots;
+    size_t cap;
+    size_t used;
+} asset_seen;
+
+static int asset_seen_init(asset_seen *set, size_t cap)
+{
+    set->slots = (uint64_t *)calloc(cap, sizeof(uint64_t));
+    set->cap = set->slots ? cap : 0;
+    set->used = 0;
+    return set->slots ? 0 : -1;
+}
+
+static void asset_seen_free(asset_seen *set)
+{
+    free(set->slots);
+    set->slots = NULL;
+}
+
+/** 返回 1 = 新插入,0 = 已存在,-1 = 装不下 */
+static int asset_seen_add(asset_seen *set, uint64_t key)
+{
+    if (!set->slots || set->used * 10 >= set->cap * 7) {
+        return -1;
+    }
+    size_t i = (size_t)(key & (uint64_t)(set->cap - 1));
+    while (set->slots[i] != 0) {
+        if (set->slots[i] == key) {
+            return 0;
+        }
+        i = (i + 1) & (set->cap - 1);
+    }
+    set->slots[i] = key;
+    ++set->used;
+    return 1;
+}
+
+int sxcl_version_plan_add_asset_objects(sxcl_version_plan *plan, const sxcl_json *asset_index,
+                                        const char *game_dir, const char *base_url,
+                                        const char *mirror_base, char *err, size_t err_len)
+{
+    if (err && err_len) {
+        err[0] = '\0';
+    }
+    if (!plan || !asset_index || !game_dir) {
+        if (err) {
+            snprintf(err, err_len, "参数不完整");
+        }
+        return -1;
+    }
+    const sxcl_json_value *objects = sxcl_json_get(sxcl_json_root(asset_index), "objects");
+    if (!objects || sxcl_json_type_of(objects) != SXCL_JSON_OBJECT) {
+        if (err) {
+            snprintf(err, err_len, "资源索引里没有 objects 对象");
+        }
+        return -1;
+    }
+    const size_t n = sxcl_json_member_count(objects);
+    if (n == 0) {
+        if (err) {
+            snprintf(err, err_len, "objects 为空");
+        }
+        return -1;
+    }
+    const char *base = (base_url && *base_url) ? base_url : SXCL_ASSET_OBJECTS_BASE;
+    asset_seen seen;
+    if (asset_seen_init(&seen, 16384) != 0) {
+        seen.slots = NULL;
+        seen.cap = 0;
+        seen.used = 0;
+    }
+
+    int added = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const char *name = sxcl_json_member_key(objects, i);
+        const sxcl_json_value *entry = sxcl_json_member_value(objects, i);
+        const char *hash = sxcl_json_get_string(entry, "hash", NULL);
+        const int64_t size = sxcl_json_get_int64(entry, "size", 0);
+        if (!hash || strlen(hash) < 4 || size <= 0) {
+            continue; /* 索引里的坏条目:跳过而不是整体失败 */
+        }
+        if (seen.slots && asset_seen_add(&seen, fnv1a64(hash) | 1ULL) == 0) {
+            continue; /* 同一份内容已被别的名字引用过 */
+        }
+        char rel[160];
+        snprintf(rel, sizeof(rel), "assets/objects/%.2s/%s", hash, hash);
+        char *dest = join_path(game_dir, rel);
+        if (!dest) {
+            continue;
+        }
+        char url[512];
+        snprintf(url, sizeof(url), "%s/%.2s/%s", base, hash, hash);
+        char mirror[512];
+        const char *mirror_url = NULL;
+        if (mirror_base && *mirror_base) {
+            snprintf(mirror, sizeof(mirror), "%s/%.2s/%s", mirror_base, hash, hash);
+            mirror_url = mirror;
+        }
+        plan_add(plan, url, dest, hash, size, SXCL_ASSET_OBJECTS_PRIORITY, name, mirror_url);
+        ++added;
+        free(dest);
+    }
+    asset_seen_free(&seen);
+    return added;
+}
+
 void sxcl_version_plan_free(sxcl_version_plan *plan)
 {
     if (!plan) {
@@ -388,6 +514,9 @@ void sxcl_version_plan_free(sxcl_version_plan *plan)
     }
     for (size_t i = 0; i < plan->owned_count; ++i) {
         free(plan->owned[i]);
+    }
+    for (size_t i = 0; i < plan->count; ++i) {
+        free(plan->tasks[i]);
     }
     free(plan->owned);
     free(plan->tasks);
@@ -404,14 +533,14 @@ sxcl_task *sxcl_version_plan_task(sxcl_version_plan *plan, size_t index)
     if (!plan || index >= plan->count) {
         return NULL;
     }
-    return &plan->tasks[index];
+    return plan->tasks[index];
 }
 
 int64_t sxcl_version_plan_total_bytes(const sxcl_version_plan *plan)
 {
     int64_t total = 0;
     for (size_t i = 0; plan && i < plan->count; ++i) {
-        total += plan->tasks[i].size;
+        total += plan->tasks[i]->size;
     }
     return total;
 }

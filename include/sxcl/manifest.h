@@ -56,11 +56,29 @@ void sxcl_version_plan_free(sxcl_version_plan *plan);
 /** 计划里的任务数(数组,不是链表;供引擎批量提交)。 */
 size_t sxcl_version_plan_count(const sxcl_version_plan *plan);
 
-/** 第 index 个任务(归计划所有,计划释放前有效)。 */
+/** 第 index 个任务(归计划所有,计划释放前有效)。
+ *  契约:任务地址**稳定** —— 后续再往计划里追加条目(例如展开资源对象)不会搬动已取出的指针,
+ *  所以可以把任务指针直接交给引擎,之后再继续追加。 */
 sxcl_task *sxcl_version_plan_task(sxcl_version_plan *plan, size_t index);
 
 /** 计划里所有任务的期望字节总数(进度显示用)。 */
 int64_t sxcl_version_plan_total_bytes(const sxcl_version_plan *plan);
+
+/* ── 资源对象(assets/objects) ── */
+
+/** 官方资源对象 CDN:路径规则 <base>/<哈希前2位>/<哈希>。
+ *  这个"文件名即内容哈希"的设计意味着校验不需要任何额外元数据。 */
+#define SXCL_ASSET_OBJECTS_BASE "https://resources.download.minecraft.net"
+
+/** 资源对象的任务优先级:排在客户端 jar 与依赖库之后。 */
+#define SXCL_ASSET_OBJECTS_PRIORITY 20
+
+/** 把资源索引里的 objects 追加进已有计划(按哈希去重;目标 <game_dir>/assets/objects/xx/hash)。
+ *  base_url 为空则用官方 CDN;mirror_base 非空时作为第二候选路(镜像站)。
+ *  返回新增条目数,<0 表示失败(此时 err 有原因)。 */
+int sxcl_version_plan_add_asset_objects(sxcl_version_plan *plan, const sxcl_json *asset_index,
+                                        const char *game_dir, const char *base_url,
+                                        const char *mirror_base, char *err, size_t err_len);
 
 /** 本机平台名,与 Mojang rules 里的 os.name 一致:"windows" / "linux" / "osx"。 */
 const char *sxcl_platform_os_name(void);

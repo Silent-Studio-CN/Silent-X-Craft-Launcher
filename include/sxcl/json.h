@@ -49,6 +49,15 @@ const sxcl_json_value *sxcl_json_get(const sxcl_json_value *object, const char *
 /** 数组长度;非数组返回 0。 */
 size_t sxcl_json_size(const sxcl_json_value *array);
 
+/** 对象成员数;非对象返回 0。(资源索引的 objects 有 5000+ 成员,必须能遍历) */
+size_t sxcl_json_member_count(const sxcl_json_value *object);
+
+/** 第 index 个成员的键;越界或非对象返回 NULL。 */
+const char *sxcl_json_member_key(const sxcl_json_value *object, size_t index);
+
+/** 第 index 个成员的值;越界或非对象返回 NULL。 */
+const sxcl_json_value *sxcl_json_member_value(const sxcl_json_value *object, size_t index);
+
 /** 数组元素;越界返回 NULL。 */
 const sxcl_json_value *sxcl_json_at(const sxcl_json_value *array, size_t index);
 

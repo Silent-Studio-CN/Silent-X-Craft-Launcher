@@ -61,6 +61,9 @@ typedef struct sxcl_engine_opts {
     double rate_bps;        /**< 全局限速(字节/秒);0 = 不限速 */
     const char *user_agent; /**< User-Agent(可空,用默认值) */
     int retry_per_source;   /**< 每条候选路的额外重试次数;<=0 视为 1 */
+    /** 哈希缓存文件路径(可空 = 不用缓存)。有缓存时重复校验走查表:
+     *  启动器第二次运行要核对 5000+ 个资源文件,不缓存就得把几百 MB 重新读一遍。 */
+    const char *cache_path;
     /** 为每个工作线程创建一个传输后端(Qt 后端有线程亲和性,必须每线程一个)。
      *  返回 NULL 视为该线程不可用,对应任务会失败并给出原因。 */
     sxcl_transport *(*transport_factory)(void *userdata);
@@ -73,7 +76,12 @@ typedef struct sxcl_engine_opts {
 sxcl_engine *sxcl_engine_create(const sxcl_engine_opts *opts);
 void sxcl_engine_destroy(sxcl_engine *engine);
 
-/** 入队(不阻塞)。任务结构体的生命周期由调用方负责,必须活到 run() 返回之后。 */
+/** 入队(不阻塞)。
+ *
+ *  生命周期契约(踩过坑,别用栈变量):任务结构体必须活到 `sxcl_engine_destroy` 之后,
+ *  而不是"活到 run() 返回" —— 引擎会一直持有指针,且 **run() 可以多次调用**
+ *  (例如先下版本 JSON,再展开资源对象)。用栈上局部变量传进来,函数返回后地址被复用,
+ *  第二次 run() 会把它当成待办任务,拿着垃圾 URL 去请求(实测崩在 Qt 的 strlen)。 */
 int sxcl_engine_submit(sxcl_engine *engine, sxcl_task *task);
 
 /** 跑完队列(阻塞)。返回 0 表示全部成功,>0 表示失败任务数,<0 参数错误。 */

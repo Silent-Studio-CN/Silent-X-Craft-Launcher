@@ -1007,6 +1007,30 @@ const sxcl_json_value *sxcl_json_get(const sxcl_json_value *object, const char *
     return NULL;
 }
 
+size_t sxcl_json_member_count(const sxcl_json_value *object)
+{
+    if (!object || object->type != SXCL_JSON_OBJECT) {
+        return 0;
+    }
+    return object->u.object.count;
+}
+
+const char *sxcl_json_member_key(const sxcl_json_value *object, size_t index)
+{
+    if (!object || object->type != SXCL_JSON_OBJECT || index >= object->u.object.count) {
+        return NULL;
+    }
+    return object->u.object.members[index].key;
+}
+
+const sxcl_json_value *sxcl_json_member_value(const sxcl_json_value *object, size_t index)
+{
+    if (!object || object->type != SXCL_JSON_OBJECT || index >= object->u.object.count) {
+        return NULL;
+    }
+    return object->u.object.members[index].value;
+}
+
 size_t sxcl_json_size(const sxcl_json_value *array)
 {
     return (array && array->type == SXCL_JSON_ARRAY) ? array->u.array.count : 0;

@@ -32,7 +32,9 @@ typedef struct cli_state {
 static void on_progress(void *userdata, const sxcl_task *task)
 {
     cli_state *st = (cli_state *)userdata;
-    const char *name = task->label ? task->label : task->dest;
+    /* 两个都可能为空(任务结构被写坏时):UCRT 下 printf("%s", NULL) 会直接崩在 strnlen */
+    const char *name = (task->label && task->label[0]) ? task->label
+                                                       : (task->dest ? task->dest : "(未知任务)");
     if (task->state == SXCL_TASK_DONE) {
         ++st->done;
         if (st->verbose) {
@@ -45,7 +47,11 @@ static void on_progress(void *userdata, const sxcl_task *task)
         if (!st->verbose) {
             printf("\n");
         }
-        printf("  [失败] %s  %s\n", name, task->error);
+        /* 诊断用:失败时把 label/dest/err 与指针全打出来,空字段也能一眼看出是"指针坏了"还是"本来就是空" */
+        printf("  [失败] label='%s' dest='%s' err='%s'  (task=%p label=%p dest=%p)\n",
+               task->label ? task->label : "(null)", task->dest ? task->dest : "(null)",
+               task->error, (const void *)task, (const void *)task->label,
+               (const void *)task->dest);
     } else if (st->verbose) {
         printf("  [%5.1f%%] %s  %.2f MB  %.2f MB/s\n",
                task->total_bytes > 0 ? (double)task->bytes_done * 100.0 / (double)task->total_bytes : 0.0,
@@ -68,8 +74,85 @@ typedef struct cli_opts {
     int workers;
     int verbose;
     int limit;
+    int skip_assets;
     const char *mirror;
+    const char *asset_mirror;
+    const char *cache;
 } cli_opts;
+
+#if defined(_WIN32)
+/* ── 崩溃处理器:打印异常码、出错地址、以及每一帧的"模块+偏移(+符号)" ──
+ * 这台机器上 WER 不记录我们的崩溃(其他程序都有记录),没有它就只能靠猜。 */
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#  include <dbghelp.h>
+#  include <stdio.h>
+
+static void crash_frame_name(HANDLE proc, DWORD64 addr, char *out, size_t out_len)
+{
+    out[0] = '\0';
+    HMODULE mod = NULL;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)(uintptr_t)addr, &mod) &&
+        mod) {
+        char path[MAX_PATH];
+        if (GetModuleFileNameA(mod, path, MAX_PATH)) {
+            const char *base = strrchr(path, '\\');
+            base = base ? base + 1 : path;
+            snprintf(out, out_len, "%s+0x%llx", base, (unsigned long long)(addr - (DWORD64)(uintptr_t)mod));
+        }
+    }
+    char sym_buf[sizeof(SYMBOL_INFO) + 256];
+    SYMBOL_INFO *sym = (SYMBOL_INFO *)sym_buf;
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen = 255;
+    DWORD64 disp = 0;
+    if (SymFromAddr(proc, addr, &disp, sym)) {
+        const size_t used = strlen(out);
+        snprintf(out + used, out_len > used ? out_len - used : 0, "  %s+0x%llx", sym->Name,
+                 (unsigned long long)disp);
+    }
+}
+
+static LONG WINAPI sxcl_crash_handler(EXCEPTION_POINTERS *info);
+
+/* 向量异常处理器(第一现场):SetUnhandledExceptionFilter 是在栈展开之后才跑的,
+ * 那时原始调用帧已经没了 —— 实测只抓到处理器自己的栈,看不到真正的调用者。 */
+static LONG CALLBACK sxcl_veh_handler(EXCEPTION_POINTERS *info)
+{
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION &&
+        code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_INT_DIVIDE_BY_ZERO) {
+        return EXCEPTION_CONTINUE_SEARCH; /* 其它异常(C++ 异常等)不插手 */
+    }
+    sxcl_crash_handler(info);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static LONG WINAPI sxcl_crash_handler(EXCEPTION_POINTERS *info)
+{
+    fprintf(stderr, "\n=========== 崩溃 ===========\n");
+    fprintf(stderr, "异常码: 0x%08lX   地址: %p\n", info->ExceptionRecord->ExceptionCode,
+            info->ExceptionRecord->ExceptionAddress);
+    const HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+    SymInitialize(proc, NULL, TRUE);
+
+    void *frames[48];
+    const USHORT n = CaptureStackBackTrace(0, 48, frames, NULL);
+    for (USHORT i = 0; i < n; ++i) {
+        char desc[512];
+        crash_frame_name(proc, (DWORD64)(uintptr_t)frames[i], desc, sizeof(desc));
+        fprintf(stderr, "  #%02u  %p  %s\n", i, frames[i], desc);
+    }
+    fflush(stderr);
+    SymCleanup(proc);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 
 static int usage(void)
 {
@@ -88,6 +171,7 @@ static int make_engine(const cli_opts *o, cli_state *st, sxcl_engine **out)
     opts.workers = o->workers;
     opts.rate_bps = o->rate;
     opts.retry_per_source = 2;
+    opts.cache_path = o->cache;
     opts.on_progress = on_progress;
     opts.userdata = st;
 #if defined(SXCL_HAVE_QT_TRANSPORT)
@@ -169,7 +253,10 @@ static int cmd_get(int argc, char **argv, const cli_opts *o)
 /** 下载并解析版本清单,返回文档与路径(调用方负责 free)。 */
 static sxcl_json *fetch_manifest(sxcl_engine *engine, const char *path, size_t path_len)
 {
-    sxcl_task task;
+    /* 必须是静态存储:引擎会一直持有这个任务指针(后面还要跑资源那一批),
+     * 用栈上局部变量的话函数一返回地址就被复用了 —— 引擎第二次 run() 扫描任务表时会读到
+     * 被覆盖的"状态"和垃圾 URL 指针,然后崩在 Qt 的 strlen 上(实测就是这个,查了很久)。 */
+    static sxcl_task task;
     memset(&task, 0, sizeof(task));
     task.dest = path;
     task.urls[0] = kManifestUrl;
@@ -246,16 +333,27 @@ static int cmd_list(const cli_opts *o)
     return 0;
 }
 
-static int cmd_version(int argc, char **argv, const cli_opts *o)
+static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
 {
     if (argc < 4) {
         return usage();
     }
+    /* 参数可能要在里面补默认值(缓存路径),所以用一份可写副本 */
+    cli_opts opts_local = *opts_in;
+    cli_opts *o = &opts_local;
     const char *want = argv[2];
     const char *game_dir = argv[3];
 
     char cache_dir[512];
     snprintf(cache_dir, sizeof(cache_dir), "%s/sxcl-cache", game_dir);
+    /* 哈希缓存默认落在游戏目录下:第二次运行核对 5000+ 个资源文件时几乎零成本 */
+    char hash_cache_path[600];
+    if (!o->cache) {
+        snprintf(hash_cache_path, sizeof(hash_cache_path), "%s/hashes.txt", cache_dir);
+        o->cache = hash_cache_path;
+    } else if (o->cache[0] == '\0') {
+        o->cache = NULL; /* --no-cache */
+    }
     char manifest_path[600];
     snprintf(manifest_path, sizeof(manifest_path), "%s/version_manifest_v2.json", cache_dir);
 
@@ -336,9 +434,9 @@ static int cmd_version(int argc, char **argv, const cli_opts *o)
         return 1;
     }
 
-    /* 4) 批量提交并跑完 */
-    const size_t total = sxcl_version_plan_count(plan);
-    printf("下载计划: %zu 个文件, 共 %.2f MB\n", total,
+    /* 4) 第一批:客户端 jar + 资源索引 + 依赖库(优先级已保证索引先下完) */
+    size_t total = sxcl_version_plan_count(plan);
+    printf("第一批计划: %zu 个文件, 共 %.2f MB\n", total,
            (double)sxcl_version_plan_total_bytes(plan) / (1024.0 * 1024.0));
     for (size_t i = 0; i < total; ++i) {
         sxcl_task *t = sxcl_version_plan_task(plan, i);
@@ -347,14 +445,61 @@ static int cmd_version(int argc, char **argv, const cli_opts *o)
         }
     }
     const double t0 = sxcl_limiter_now();
-    const int failed = sxcl_engine_run(engine);
-    const double elapsed = sxcl_limiter_now() - t0;
+    int failed = sxcl_engine_run(engine);
     if (!o->verbose && st.done > 0) {
         printf("\n");
     }
-    printf("完成 %d 个, 失败 %d 个, 耗时 %.1fs, 平均 %.2f MB/s\n", st.done, st.failed, elapsed,
+    printf("第一批完成 %d 个, 失败 %d 个\n", st.done, st.failed);
+
+    /* 5) 展开资源对象(索引在上一步已经下好并做过 SHA-1 强校验) */
+    size_t assets_added = 0;
+    if (!o->skip_assets) {
+        const sxcl_json_value *ai = sxcl_json_get(sxcl_json_root(vdoc), "assetIndex");
+        const char *index_id = sxcl_json_get_string(ai, "id", "assets");
+        char index_path[700];
+        snprintf(index_path, sizeof(index_path), "%s/assets/indexes/%s.json", game_dir, index_id);
+        char aerr[256];
+        sxcl_json *idoc = sxcl_json_parse_file(index_path, aerr, sizeof(aerr));
+        if (!idoc) {
+            fprintf(stderr, "读资源索引失败(%s): %s\n", index_path, aerr);
+            ++failed;
+        } else {
+            const int before = st.done + st.failed;
+            const int added = sxcl_version_plan_add_asset_objects(plan, idoc, game_dir, NULL,
+                                                                  o->asset_mirror, aerr, sizeof(aerr));
+            if (added < 0) {
+                fprintf(stderr, "展开资源对象失败: %s\n", aerr);
+                ++failed;
+            } else {
+                assets_added = (size_t)added;
+                int64_t asset_bytes = 0;
+                const size_t now = sxcl_version_plan_count(plan);
+                for (size_t i = total; i < now; ++i) {
+                    sxcl_task *t = sxcl_version_plan_task(plan, i);
+                    asset_bytes += t->size;
+                    if (sxcl_engine_submit(engine, t) != 0) {
+                        fprintf(stderr, "任务入队失败: %s\n", t->label);
+                    }
+                }
+                printf("资源对象: %zu 个, 共 %.2f MB\n", assets_added,
+                       (double)asset_bytes / (1024.0 * 1024.0));
+                failed += sxcl_engine_run(engine);
+                (void)before;
+                if (!o->verbose && st.done > 0) {
+                    printf("\n");
+                }
+            }
+            sxcl_json_free(idoc);
+            total = sxcl_version_plan_count(plan);
+        }
+    }
+    const double elapsed = sxcl_limiter_now() - t0;
+    printf("全部完成 %d 个, 失败 %d 个, 耗时 %.1fs, 平均 %.2f MB/s, 合计 %.2f MB\n", st.done,
+           st.failed, elapsed,
            elapsed > 0.0 ? ((double)sxcl_engine_bytes_done(engine) / elapsed) / (1024.0 * 1024.0)
-                         : 0.0);
+                         : 0.0,
+           (double)sxcl_engine_bytes_done(engine) / (1024.0 * 1024.0));
+    (void)assets_added;
 
     sxcl_version_plan_free(plan);
     sxcl_json_free(vdoc);
@@ -366,6 +511,12 @@ static int cmd_version(int argc, char **argv, const cli_opts *o)
 
 int main(int argc, char **argv)
 {
+    /* 无缓冲输出:崩溃时不会把最后一段输出留在缓冲区里丢掉(排查跨平台崩溃吃过这个亏) */
+    setvbuf(stdout, NULL, _IONBF, 0);
+#if defined(_WIN32)
+    AddVectoredExceptionHandler(1, sxcl_veh_handler); /* 第一现场,栈还没展开 */
+    SetUnhandledExceptionFilter(sxcl_crash_handler);
+#endif
     if (argc < 2) {
         return usage();
     }
@@ -388,6 +539,16 @@ int main(int argc, char **argv)
             ++i;
         } else if (strcmp(a, "--verbose") == 0) {
             o.verbose = 1;
+        } else if (strcmp(a, "--skip-assets") == 0) {
+            o.skip_assets = 1;
+        } else if (strcmp(a, "--asset-mirror") == 0 && v) {
+            o.asset_mirror = v;
+            ++i;
+        } else if (strcmp(a, "--cache") == 0 && v) {
+            o.cache = v;
+            ++i;
+        } else if (strcmp(a, "--no-cache") == 0) {
+            o.cache = ""; /* 空串 = 明确不要缓存(与"未指定,取默认路径"区分) */
         }
     }
 

@@ -191,6 +191,50 @@ int main(void) {
         sxcl_version_plan_free(plan);
     }
 
+    /* 4) 资源对象展开:按哈希去重,落盘路径 = 官方哈希 */
+    {
+        const char *kAssetIndex =
+            "{\"objects\":{"
+            "\"minecraft/sounds/a.ogg\":{\"hash\":\"1111111111111111111111111111111111111111\",\"size\":10},"
+            "\"minecraft/sounds/b.ogg\":{\"hash\":\"2222222222222222222222222222222222222222\",\"size\":20},"
+            "\"minecraft/sounds/c.ogg\":{\"hash\":\"1111111111111111111111111111111111111111\",\"size\":10}}}";
+        sxcl_json *adoc = sxcl_json_parse(kAssetIndex, strlen(kAssetIndex), err, sizeof(err));
+        check(adoc != NULL, "解析资源索引样本");
+        if (adoc) {
+            sxcl_version_plan *p2 = sxcl_version_plan_build(vdoc, "C:/mc", "1.21.4", err, sizeof(err));
+            check(p2 != NULL, "为资源展开建计划");
+            if (p2) {
+                const size_t before = sxcl_version_plan_count(p2);
+                const int added = sxcl_version_plan_add_asset_objects(p2, adoc, "C:/mc", NULL, NULL,
+                                                                     err, sizeof(err));
+                check(added == 2, "同一哈希被两个名字引用时只入队一次");
+                check(sxcl_version_plan_count(p2) == before + 2, "计划条目数按去重后增加");
+
+                const char *want_path = "assets/objects/11/1111111111111111111111111111111111111111";
+                check(plan_has(p2, want_path), "对象落盘路径 = assets/objects/<前2位>/<哈希>");
+
+                /* 找到那个任务,检查 URL/摘要/优先级/大小 */
+                int found = 0;
+                for (size_t i = 0; i < sxcl_version_plan_count(p2); ++i) {
+                    const sxcl_task *t = sxcl_version_plan_task(p2, i);
+                    if (t->dest && strstr(t->dest, want_path) != NULL) {
+                        found = 1;
+                        check(t->sha1 && strcmp(t->sha1, "1111111111111111111111111111111111111111") == 0,
+                              "对象任务的期望摘要 = 文件名");
+                        check(t->priority == SXCL_ASSET_OBJECTS_PRIORITY, "对象任务优先级 = 20(排在库之后)");
+                        check(t->size == 10, "对象任务大小来自索引");
+                        check(t->urls[0] && strstr(t->urls[0], "resources.download.minecraft.net/11/") != NULL,
+                              "对象 URL 用官方 CDN 规则");
+                        check(t->urls[1] == NULL, "未指定镜像时没有第二候选");
+                    }
+                }
+                check(found == 1, "能在计划里找到该对象任务");
+                sxcl_version_plan_free(p2);
+            }
+            sxcl_json_free(adoc);
+        }
+    }
+
     sxcl_json_free(vdoc);
     sxcl_version_list_free(list);
     sxcl_json_free(doc);
