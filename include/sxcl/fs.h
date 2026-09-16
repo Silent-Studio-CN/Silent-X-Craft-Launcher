@@ -3,6 +3,7 @@
 #ifndef SXCL_FS_H
 #define SXCL_FS_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus

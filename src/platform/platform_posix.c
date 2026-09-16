@@ -7,6 +7,7 @@
 #include "sxcl/fs.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +31,12 @@ int sxcl_fs_stat(const char *path, int64_t *size, int64_t *mtime_ns)
         *size = (int64_t)st.st_size;
     }
     if (mtime_ns) {
+#if defined(__APPLE__)
+        /* macOS 的 struct stat 用 st_mtimespec,没有 st_mtim */
+        *mtime_ns = (int64_t)st.st_mtimespec.tv_sec * 1000000000LL + (int64_t)st.st_mtimespec.tv_nsec;
+#else
         *mtime_ns = (int64_t)st.st_mtime * 1000000000LL + (int64_t)st.st_mtim.tv_nsec;
+#endif
     }
     return 0;
 }

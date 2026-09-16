@@ -120,13 +120,13 @@ static int cmd_get(int argc, char **argv, const cli_opts *o)
     }
     sxcl_task task;
     memset(&task, 0, sizeof(task));
-    task.dest = argv[2];
-    task.urls[0] = argv[3];
+    task.urls[0] = argv[2]; /* get <url> <dest> */
+    task.dest = argv[3];
     task.urls[1] = o->mirror;
     task.urls[2] = NULL;
     task.algo = SXCL_HASH_SHA1;
     task.priority = 0;
-    task.label = argv[2];
+    task.label = argv[3];
 
     for (int i = 4; i < argc; ++i) {
         const char *a = argv[i];

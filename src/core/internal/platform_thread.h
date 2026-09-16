@@ -20,6 +20,7 @@ static __inline void sxcl_thread_sleep_ms(unsigned ms) { Sleep(ms); }
 #define SXCL_THREAD_FN(name) static DWORD WINAPI name(LPVOID arg)
 #define SXCL_THREAD_RETURN(n) return (DWORD)(n)
 #else
+#  include <time.h>
 typedef pthread_t sxcl_thread_t;
 typedef void *(*sxcl_thread_fn_t)(void *);
 

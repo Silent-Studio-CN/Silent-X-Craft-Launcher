@@ -16,7 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: windows-msvc, os: windows-latest, gen: "Visual Studio 17 2022", config: Release }
+          # 不硬写生成器:windows runner 现在装的是 VS2026,硬写 "Visual Studio 17 2022" 会
+          # 直接报 "could not find any instance of Visual Studio"(2026-09 实测踩过)
+          - { name: windows-msvc, os: windows-latest, config: Release }
           - { name: linux-gcc,   os: ubuntu-latest,  gen: Ninja }
           - { name: macos-universal, os: macos-latest, gen: Ninja }
     steps:
@@ -24,7 +26,7 @@ jobs:
 
       - name: 配置 (Windows / MSVC)
         if: runner.os == 'Windows'
-        run: cmake -S . -B build -G "${{ matrix.gen }}" -A x64 -DSXCL_BUILD_TESTS=ON -DSXCL_WERROR=ON
+        run: cmake -S . -B build -A x64 -DSXCL_BUILD_TESTS=ON -DSXCL_WERROR=ON
 
       - name: 配置 (Linux / macOS)
         if: runner.os != 'Windows'
