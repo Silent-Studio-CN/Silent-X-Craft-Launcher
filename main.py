@@ -73,7 +73,7 @@ for name in list(sys.modules.keys()):
 
 from PySide6.QtCore import Qt, QLoggingCategory
 from PySide6.QtWidgets import QApplication
-from qfluentwidgets import setTheme, Theme, qconfig
+from qfluentwidgets import isDarkTheme, qconfig
 
 # ── Suppress Qt warning noise from QFluentWidgets internals on ARM64 ──
 QLoggingCategory.setFilterRules("*.warning=false\n*.critical=false")
@@ -92,31 +92,43 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORGANIZATION)
+    # Fusion 样式会老老实实跟随调色板（Windows 默认样式在深色下会忽略部分调色板项）
+    app.setStyle("Fusion")
 
+    # ── 配置：只认 config.json（QFluentWidgets QConfig） ──
+    # 历史遗留的 C:\ProgramData\sxcl\config.ini 曾在这里反向覆盖 8 项设置，
+    # 而 UI 从不写那个文件，导致"设置重启后失效"。现在彻底不再读取它。
     load_config()
-
-    from src.app.common.config_manager import config
-
-    qconfig.set(cfg.downloadSource, DownloadSource(config.get("download_source", "bmclapi")))
-    qconfig.set(cfg.javaPath, config.get("java_path", ""))
-    qconfig.set(cfg.maxMemoryMb, config.get("max_memory", 4096))
-    qconfig.set(cfg.gameDirectory, config.get("game_directory", str(Path.home() / ".minecraft")))
-
-    theme_str = config.get("theme", "auto")
-    if theme_str == "light":
-        qconfig.set(cfg.themeMode, Theme.LIGHT)
-    elif theme_str == "dark":
-        qconfig.set(cfg.themeMode, Theme.DARK)
-    else:
-        qconfig.set(cfg.themeMode, Theme.AUTO)
 
     # ── 从 QConfig 读取语言设置 ──
     lang_code = cfg.language.value.value.lower()  # LauncherLanguage.ZH_CN → "zh-cn"
     init_language(lang_code)
 
-    qconfig.set(cfg.autoCheckUpdate, config.get("auto_check_update", True))
-    qconfig.set(cfg.debugMode, config.get("debug_mode", False))
-    qconfig.set(cfg.versionIsolation, config.get("version_isolation", False))
+    # ── 游戏目录：没配 / 配的目录不存在 -> 自动检测一个 ──
+    try:
+        from pathlib import Path as _Path
+        from src.services.minecraft.folders import best_game_folder, describe
+        _current = cfg.gameDirectory.value
+        if not _current or not _Path(_current).is_dir():
+            _best = best_game_folder()
+            if _best is not None:
+                qconfig.set(cfg.gameDirectory, str(_best.path))
+                save_config()
+                log.info("自动检测到游戏目录: %s", describe(_best))
+    except Exception as e:
+        log.warning("游戏目录检测失败: %s", e)
+
+    # ── 下载引擎：把限速/并发同步给全局引擎 ──
+    try:
+        from src.core.download import limiter
+        limiter().set_rate(float(cfg.speedLimitKbps.value or 0) * 1024.0)
+        from src.core.source_stats import stats as _source_stats
+        log.info("下载引擎: 并发=%s, 限速=%sKB/s, 校验SHA1=%s, 下载源=%s",
+                 cfg.maxConnections.value, cfg.speedLimitKbps.value, cfg.verifySha1.value,
+                 cfg.downloadSource.value.label)
+        log.info("下载源实测偏好: %s", _source_stats().snapshot() or "（暂无数据，默认镜像优先）")
+    except Exception as e:
+        log.warning("下载引擎初始化参数失败: %s", e)
 
     # ── Auto-detect Java if none configured ──
     if not cfg.javaPath.value:
@@ -131,13 +143,12 @@ def main() -> int:
         except Exception as e:
             log.warning("Java 自动检测异常: %s", e)
 
-    theme = cfg.themeMode.value
-    if theme == Theme.LIGHT:
-        setTheme(Theme.LIGHT)
-    elif theme == Theme.DARK:
-        setTheme(Theme.DARK)
-    else:
-        setTheme(Theme.AUTO)
+    # ── 主题：只认库内置项 qconfig.themeMode ──
+    # 之前自定义了一个 cfg.themeMode，和库的主题状态是两套东西，切换时各改各的，
+    # 结果就是"导航栏变深色、内容区还是浅色"。现在统一走 apply_theme()。
+    from src.app.theme import apply_theme
+    apply_theme(qconfig.themeMode.value, app)
+    log.info("主题: %s (当前深色=%s)", qconfig.themeMode.value.name, isDarkTheme())
 
     window = MainWindow()
     window.show()

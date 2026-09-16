@@ -1,0 +1,244 @@
+{
+  "schema": "sxcl.keymap.v1",
+  "name": "极简",
+  "screen": "portrait",
+  "mc_version": "",
+  "description": "只留四个必用键，屏幕最干净（新手先用这套）",
+  "meta": {
+    "builtin": true,
+    "recommended_for": "newbie",
+    "guide": [
+      {
+        "order": 1,
+        "title": "会走路",
+        "instruction": "推住左边的摇杆/方向键往前走",
+        "why": "键盘上是 W。推到底会快走",
+        "control_id": "move",
+        "keys": [
+          "KEY_W"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 2,
+        "title": "会跳",
+        "instruction": "点一下「跳」",
+        "why": "键盘是空格。长按可以连续跳，跳一格高的坎不用手忙脚乱",
+        "control_id": "jump",
+        "keys": [
+          "KEY_SPACE"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 3,
+        "title": "会挖方块/打怪",
+        "instruction": "长按「挖」，对着方块/怪物",
+        "why": "键盘是鼠标左键。长按=一直挖，别一下一下点，手指会累",
+        "control_id": "mine",
+        "keys": [
+          "MOUSE_LEFT"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 4,
+        "title": "会放方块/用东西",
+        "instruction": "点一下「放」",
+        "why": "键盘是鼠标右键。开门、喂动物、吃食物都是它",
+        "control_id": "place",
+        "keys": [
+          "MOUSE_RIGHT"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 5,
+        "title": "不会掉下去",
+        "instruction": "按住「潜行」再走到方块边缘",
+        "why": "键盘是 Shift。边缘不会掉下去，搭桥必备；双击可以切成常驻潜行",
+        "control_id": "sneak",
+        "keys": [
+          "KEY_LEFT_SHIFT"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 6,
+        "title": "会开背包",
+        "instruction": "点一下「背包」",
+        "why": "键盘是 E。长按一般是聊天",
+        "control_id": "inventory",
+        "keys": [
+          "KEY_E"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 7,
+        "title": "会看四周",
+        "instruction": "在屏幕空白处滑动 = 转动视角；两根手指滑动 = 移动（如果布局开了双区）",
+        "why": "这是 FCL 里最容易卡住的一步：很多人以为要点了按钮才能转身",
+        "control_id": "",
+        "keys": [],
+        "tap": "press",
+        "optional": true
+      }
+    ],
+    "generator": "SXCL 0.1.0",
+    "screen_label": "竖屏",
+    "preset": "minimal"
+  },
+  "buttons": [
+    {
+      "id": "jump",
+      "label": "跳",
+      "hint": "空格键：跳跃。按住可以连续跳（跑酷常用）",
+      "icon": "",
+      "x": 0.78,
+      "y": 0.66,
+      "w": 0.16,
+      "h": 0.09,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "right",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "jump",
+          "keys": [
+            "KEY_SPACE"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "mine",
+      "label": "挖",
+      "hint": "左键：攻击 / 挖掘。按住就是一直挖，不用反复点",
+      "icon": "",
+      "x": 0.6,
+      "y": 0.78,
+      "w": 0.16,
+      "h": 0.09,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "right",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "attack",
+          "keys": [
+            "MOUSE_LEFT"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "place",
+      "label": "放",
+      "hint": "右键：放置方块 / 使用物品 / 开门 / 喂动物",
+      "icon": "",
+      "x": 0.78,
+      "y": 0.78,
+      "w": 0.16,
+      "h": 0.09,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "right",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "use",
+          "keys": [
+            "MOUSE_RIGHT"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "sneak",
+      "label": "潜行",
+      "hint": "Shift：潜行（不会掉下方块）。双击可以切换成常驻潜行",
+      "icon": "",
+      "x": 0.42,
+      "y": 0.78,
+      "w": 0.16,
+      "h": 0.09,
+      "shape": "pill",
+      "opacity": 0.55,
+      "group": "right",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "sneak",
+          "keys": [
+            "KEY_LEFT_SHIFT"
+          ],
+          "behavior": "hold"
+        },
+        "double_click": {
+          "action": "sneak",
+          "keys": [
+            "KEY_LEFT_SHIFT"
+          ],
+          "behavior": "toggle"
+        }
+      }
+    },
+    {
+      "id": "inventory",
+      "label": "背包",
+      "hint": "E：背包",
+      "icon": "",
+      "x": 0.62,
+      "y": 0.62,
+      "w": 0.09,
+      "h": 0.14,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "right",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "inventory",
+          "keys": [
+            "KEY_E"
+          ],
+          "behavior": "hold"
+        }
+      }
+    }
+  ],
+  "directions": [
+    {
+      "id": "move",
+      "label": "移动",
+      "hint": "推到底可以快走，配合潜行键=疾跑",
+      "x": 0.06,
+      "y": 0.62,
+      "w": 0.34,
+      "h": 0.22,
+      "style": "rocker",
+      "opacity": 0.5,
+      "dead_zone": 0.18,
+      "group": "left",
+      "keys": {
+        "up": "KEY_W",
+        "down": "KEY_S",
+        "left": "KEY_A",
+        "right": "KEY_D"
+      },
+      "sprint_key": "KEY_LEFT_SHIFT"
+    }
+  ]
+}

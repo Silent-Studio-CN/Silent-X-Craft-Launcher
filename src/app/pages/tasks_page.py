@@ -57,26 +57,39 @@ class _StatusIcon(QWidget):
         self._label = BodyLabel("⠋", self)
         self._label.setAlignment(Qt.AlignCenter)
         self._label.setStyleSheet("font-size: 16px;")
+        from src.app.theme import on_theme_changed
+        on_theme_changed(self._refresh_theme)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._label)
+
+    def _refresh_theme(self):
+        """按当前主题令牌重刷（主题切换时会被再次调用）。"""
+        from src.app.theme import token
+        styles = {
+            self.STATE_RUNNING: ("⠋", token("accent"), "normal"),
+            self.STATE_DONE: ("✓", token("success"), "bold"),
+            self.STATE_FAILED: ("✕", token("danger"), "bold"),
+        }
+        text, color, weight = styles.get(self._state, styles[self.STATE_RUNNING])
+        if self._state != self.STATE_RUNNING and self._label.text() not in ("✓", "✕"):
+            self._label.setText(text)
+        self._label.setStyleSheet(f"color: {color}; font-size: 16px; font-weight: {weight};")
 
     def set_state(self, state: int):
         self._state = state
         if state == self.STATE_RUNNING:
             self._timer.start(120)
-            self._label.setStyleSheet("color: #1890ff; font-size: 16px;")
             self.setCursor(Qt.ArrowCursor)
         elif state == self.STATE_DONE:
             self._timer.stop()
             self._label.setText("✓")
-            self._label.setStyleSheet("color: #52c41a; font-size: 16px; font-weight: bold;")
             self.setCursor(Qt.ArrowCursor)
         elif state == self.STATE_FAILED:
             self._timer.stop()
             self._label.setText("✕")
-            self._label.setStyleSheet("color: #ff4d4f; font-size: 16px; font-weight: bold;")
             self.setCursor(Qt.PointingHandCursor)
+        self._refresh_theme()
 
     def _tick(self):
         self._spin = (self._spin + 1) % len(self._spin_chars)
@@ -90,10 +103,15 @@ class _DeleteBtn(QPushButton):
         super().__init__("×", parent)
         self.setFixedSize(20, 20)
         self.setVisible(False)
-        self.setStyleSheet("""
-            QPushButton { border: none; color: #ff4d4f; font-size: 18px; font-weight: bold;
-                          background: transparent; }
-            QPushButton:hover { color: #ff0000; }
+        from src.app.theme import on_theme_changed
+        on_theme_changed(self._refresh_theme)
+
+    def _refresh_theme(self):
+        from src.app.theme import token
+        self.setStyleSheet(f"""
+            QPushButton {{ border: none; color: {token('danger')}; font-size: 18px;
+                          font-weight: bold; background: transparent; }}
+            QPushButton:hover {{ color: {token('danger')}; }}
         """)
 
 
@@ -110,16 +128,8 @@ class TaskCard(QWidget):
         self.setFixedHeight(80)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet("""
-            TaskCard {
-                background: rgba(128, 128, 128, 0.06);
-                border-radius: 8px;
-                margin: 2px 0;
-            }
-            TaskCard:hover {
-                background: rgba(128, 128, 128, 0.12);
-            }
-        """)
+        from src.app.theme import on_theme_changed
+        on_theme_changed(self._refresh_theme)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 12)
@@ -155,6 +165,13 @@ class TaskCard(QWidget):
 
         # Hover → show delete button (only for done/failed)
         self._hover_shows_delete = False
+
+    def _refresh_theme(self):
+        from src.app.theme import token
+        self.setStyleSheet(f"""
+            TaskCard {{ background: {token('hover_bg')}; border-radius: 8px; margin: 2px 0; }}
+            TaskCard:hover {{ background: {token('hover_bg_strong')}; }}
+        """)
 
     def update_progress(self, value: int, status: str, detail: str = ""):
         self.progress_bar.setValue(value)

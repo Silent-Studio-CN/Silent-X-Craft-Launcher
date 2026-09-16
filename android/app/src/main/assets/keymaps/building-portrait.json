@@ -1,0 +1,459 @@
+{
+  "schema": "sxcl.keymap.v1",
+  "name": "建造",
+  "screen": "portrait",
+  "mc_version": "",
+  "description": "搭建筑/红石用：带快捷栏 1-9 与飞行上下",
+  "meta": {
+    "builtin": true,
+    "recommended_for": "building",
+    "guide": [
+      {
+        "order": 1,
+        "title": "会走路",
+        "instruction": "推住左边的摇杆/方向键往前走",
+        "why": "键盘上是 W。推到底会快走",
+        "control_id": "move",
+        "keys": [
+          "KEY_W"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 2,
+        "title": "会跳",
+        "instruction": "点一下「跳」",
+        "why": "键盘是空格。长按可以连续跳，跳一格高的坎不用手忙脚乱",
+        "control_id": "jump",
+        "keys": [
+          "KEY_SPACE"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 3,
+        "title": "会挖方块/打怪",
+        "instruction": "长按「挖」，对着方块/怪物",
+        "why": "键盘是鼠标左键。长按=一直挖，别一下一下点，手指会累",
+        "control_id": "mine",
+        "keys": [
+          "MOUSE_LEFT"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 4,
+        "title": "会放方块/用东西",
+        "instruction": "点一下「放」",
+        "why": "键盘是鼠标右键。开门、喂动物、吃食物都是它",
+        "control_id": "place",
+        "keys": [
+          "MOUSE_RIGHT"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 5,
+        "title": "不会掉下去",
+        "instruction": "按住「潜行」再走到方块边缘",
+        "why": "键盘是 Shift。边缘不会掉下去，搭桥必备；双击可以切成常驻潜行",
+        "control_id": "sneak",
+        "keys": [
+          "KEY_LEFT_SHIFT"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 6,
+        "title": "会开背包",
+        "instruction": "点一下「背包」",
+        "why": "键盘是 E。长按一般是聊天",
+        "control_id": "inventory",
+        "keys": [
+          "KEY_E"
+        ],
+        "tap": "press",
+        "optional": false
+      },
+      {
+        "order": 7,
+        "title": "会疾跑",
+        "instruction": "按住「疾跑」同时往前推",
+        "why": "键盘是 Ctrl；也可以双击前进方向",
+        "control_id": "sprint",
+        "keys": [
+          "KEY_LEFT_CTRL"
+        ],
+        "tap": "press",
+        "optional": true
+      },
+      {
+        "order": 8,
+        "title": "会换物品",
+        "instruction": "点底部 1-5 切换手上的物品",
+        "why": "键盘就是数字键 1-9；建造时不用开背包翻",
+        "control_id": "slot1",
+        "keys": [
+          "KEY_1"
+        ],
+        "tap": "press",
+        "optional": true
+      },
+      {
+        "order": 9,
+        "title": "会看四周",
+        "instruction": "在屏幕空白处滑动 = 转动视角；两根手指滑动 = 移动（如果布局开了双区）",
+        "why": "这是 FCL 里最容易卡住的一步：很多人以为要点了按钮才能转身",
+        "control_id": "",
+        "keys": [],
+        "tap": "press",
+        "optional": true
+      }
+    ],
+    "generator": "SXCL 0.1.0",
+    "screen_label": "竖屏",
+    "preset": "building"
+  },
+  "buttons": [
+    {
+      "id": "jump",
+      "label": "跳",
+      "hint": "空格键：跳跃。按住可以连续跳（跑酷常用）",
+      "icon": "",
+      "x": 0.78,
+      "y": 0.66,
+      "w": 0.16,
+      "h": 0.09,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "right",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "jump",
+          "keys": [
+            "KEY_SPACE"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "mine",
+      "label": "挖",
+      "hint": "左键：攻击 / 挖掘。按住就是一直挖，不用反复点",
+      "icon": "",
+      "x": 0.6,
+      "y": 0.78,
+      "w": 0.16,
+      "h": 0.09,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "right",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "attack",
+          "keys": [
+            "MOUSE_LEFT"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "place",
+      "label": "放",
+      "hint": "右键：放置方块 / 使用物品 / 开门 / 喂动物",
+      "icon": "",
+      "x": 0.78,
+      "y": 0.78,
+      "w": 0.16,
+      "h": 0.09,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "right",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "use",
+          "keys": [
+            "MOUSE_RIGHT"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "sneak",
+      "label": "潜行",
+      "hint": "Shift：潜行（不会掉下方块）。双击可以切换成常驻潜行",
+      "icon": "",
+      "x": 0.42,
+      "y": 0.78,
+      "w": 0.16,
+      "h": 0.09,
+      "shape": "pill",
+      "opacity": 0.55,
+      "group": "right",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "sneak",
+          "keys": [
+            "KEY_LEFT_SHIFT"
+          ],
+          "behavior": "hold"
+        },
+        "double_click": {
+          "action": "sneak",
+          "keys": [
+            "KEY_LEFT_SHIFT"
+          ],
+          "behavior": "toggle"
+        }
+      }
+    },
+    {
+      "id": "slot1",
+      "label": "1",
+      "hint": "快捷栏第 1 格（键盘 1）",
+      "icon": "",
+      "x": 0.259,
+      "y": 0.45,
+      "w": 0.09,
+      "h": 0.06,
+      "shape": "square",
+      "opacity": 0.45,
+      "group": "center",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "hotbar_1",
+          "keys": [
+            "KEY_1"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "slot2",
+      "label": "2",
+      "hint": "快捷栏第 2 格（键盘 2）",
+      "icon": "",
+      "x": 0.357,
+      "y": 0.45,
+      "w": 0.09,
+      "h": 0.06,
+      "shape": "square",
+      "opacity": 0.45,
+      "group": "center",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "hotbar_2",
+          "keys": [
+            "KEY_2"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "slot3",
+      "label": "3",
+      "hint": "快捷栏第 3 格（键盘 3）",
+      "icon": "",
+      "x": 0.455,
+      "y": 0.45,
+      "w": 0.09,
+      "h": 0.06,
+      "shape": "square",
+      "opacity": 0.45,
+      "group": "center",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "hotbar_3",
+          "keys": [
+            "KEY_3"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "slot4",
+      "label": "4",
+      "hint": "快捷栏第 4 格（键盘 4）",
+      "icon": "",
+      "x": 0.553,
+      "y": 0.45,
+      "w": 0.09,
+      "h": 0.06,
+      "shape": "square",
+      "opacity": 0.45,
+      "group": "center",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "hotbar_4",
+          "keys": [
+            "KEY_4"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "slot5",
+      "label": "5",
+      "hint": "快捷栏第 5 格（键盘 5）",
+      "icon": "",
+      "x": 0.651,
+      "y": 0.45,
+      "w": 0.09,
+      "h": 0.06,
+      "shape": "square",
+      "opacity": 0.45,
+      "group": "center",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "hotbar_5",
+          "keys": [
+            "KEY_5"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "inventory",
+      "label": "背包",
+      "hint": "E：背包；长按 = 聊天",
+      "icon": "",
+      "x": 0.62,
+      "y": 0.6,
+      "w": 0.09,
+      "h": 0.14,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "right",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "inventory",
+          "keys": [
+            "KEY_E"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "fly_up",
+      "label": "升",
+      "hint": "创造模式飞行上升（双击空格开始/停止飞行）",
+      "icon": "",
+      "x": 0.5,
+      "y": 0.44,
+      "w": 0.08,
+      "h": 0.1,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "center",
+      "alias_of": "jump",
+      "events": {
+        "press": {
+          "action": "jump",
+          "keys": [
+            "KEY_SPACE"
+          ],
+          "behavior": "hold"
+        },
+        "double_click": {
+          "action": "jump",
+          "keys": [
+            "KEY_SPACE"
+          ],
+          "behavior": "toggle"
+        }
+      }
+    },
+    {
+      "id": "fly_down",
+      "label": "降",
+      "hint": "创造模式飞行下降",
+      "icon": "",
+      "x": 0.5,
+      "y": 0.56,
+      "w": 0.08,
+      "h": 0.1,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "center",
+      "alias_of": "sneak",
+      "events": {
+        "press": {
+          "action": "sneak",
+          "keys": [
+            "KEY_LEFT_SHIFT"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "sprint",
+      "label": "疾跑",
+      "hint": "Ctrl：疾跑（也可以双击前进）",
+      "icon": "",
+      "x": 0.3,
+      "y": 0.86,
+      "w": 0.1,
+      "h": 0.09,
+      "shape": "pill",
+      "opacity": 0.55,
+      "group": "left",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "sprint",
+          "keys": [
+            "KEY_LEFT_CTRL"
+          ],
+          "behavior": "hold"
+        }
+      }
+    }
+  ],
+  "directions": [
+    {
+      "id": "move",
+      "label": "移动",
+      "hint": "推到底可以快走，配合潜行键=疾跑",
+      "x": 0.06,
+      "y": 0.62,
+      "w": 0.34,
+      "h": 0.22,
+      "style": "rocker",
+      "opacity": 0.5,
+      "dead_zone": 0.18,
+      "group": "left",
+      "keys": {
+        "up": "KEY_W",
+        "down": "KEY_S",
+        "left": "KEY_A",
+        "right": "KEY_D"
+      },
+      "sprint_key": "KEY_LEFT_SHIFT"
+    }
+  ]
+}

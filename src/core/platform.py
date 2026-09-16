@@ -110,6 +110,16 @@ def classpath_separator() -> str:
     return ";" if is_windows() else ":"
 
 
+def supports_window_detection() -> bool:
+    """是否能可靠地枚举"游戏窗口"。
+
+    只有 Windows 用 user32.FindWindow 做到了（launch_page 里）。macOS 要读
+    CoreGraphics 窗口列表（需要 pyobjc / 辅助功能权限），Linux 要 xdotool/wmctrl
+    （不一定装），所以这两个平台一律返回 False，UI 改成"等待游戏启动"。
+    """
+    return is_windows()
+
+
 def create_no_window_flag():
     """Return ``subprocess.CREATE_NO_WINDOW`` on Windows, 0 otherwise."""
     if is_windows():

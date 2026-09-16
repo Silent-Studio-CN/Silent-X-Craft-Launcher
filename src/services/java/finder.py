@@ -193,7 +193,7 @@ def _macos_java_candidates() -> list[Path]:
     if jvm_root.exists():
         for bundle in jvm_root.glob("*.jdk"):
             candidates.append(bundle / "Contents" / "Home" / "bin" / "java")
-    usr_java = Path("/usr/bin/java")
+    usr_java = Path("/usr/bin") / java_executable_name()
     if usr_java.exists():
         candidates.append(usr_java)
     return candidates
@@ -222,7 +222,7 @@ def _linux_java_candidates() -> list[Path]:
     except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
-    usr_java = Path("/usr/bin/java")
+    usr_java = Path("/usr/bin") / java_executable_name()
     if usr_java.exists():
         candidates.append(usr_java)
     return candidates
@@ -270,6 +270,13 @@ def discover_java_installations() -> list[JavaInstallation]:
         install = inspect_java(resolved)
         if install:
             installations.append(install)
+
+    # 自研下载器安装的官方 JRE（%APPDATA%/SilentXCraftLauncher/runtime/...）
+    try:
+        from src.services.java.mojang_runtime import find_installed_runtimes
+        installations.extend(find_installed_runtimes())
+    except Exception:
+        pass
 
     return _dedupe_installations(installations)
 

@@ -36,8 +36,12 @@ from qfluentwidgets import (
 )
 
 from src.app.common.base_page import BasePage
-from src.app.services.version_manifest import GameVersion
-from src.app.services.mod_loader_service import (
+from src.app.widgets.loader_row import LoaderRow
+from src.app.widgets.section_card import SectionCard as AccordionSection
+from src.app.theme import token
+from src.services.mod_loader.compat import check_selection
+from src.services.minecraft.manifest import GameVersion
+from src.services.mod_loader.api import (
     fetch_forge_versions, fetch_fabric_versions,
     filter_neoforge_by_mc_version, check_optifine,
 )
@@ -54,13 +58,57 @@ class LoaderFetchWorker(QThread):
         super().__init__()
         self.mc_version = mc_version
 
-    def run(self):
+    def _with_fallback(self, name: str, primary) -> list:
+        """某个加载器在主源搜出空列表时，换源再搜一遍。
+
+        「无可用版本」多数是那个源抽了/接口挂了，不该直接告诉用户「这个版本没有它」——
+        所以对 Forge / Fabric / NeoForge 都补一条官方源的路子（OptiFine 只有 BMCLAPI 有接口，
+        没得换，就如实返回空）。
+        """
+        from src.core.logger import log
+
         try:
+            items = primary() or []
+        except Exception as exc:
+            log.warning("[加载器] %s 主源失败: %s，换源重试", name, exc)
+            items = []
+        if items:
+            return items
+
+        log.info("[加载器] %s 主源没有版本，换源重搜（%s）", name, self.mc_version)
+        try:
+            if name == 'fabric':
+                from src.core.net import fetch_json
+                data = fetch_json("https://meta.fabricmc.net/v2/versions/loader/" + self.mc_version)
+                return data if isinstance(data, list) else []
+            if name == 'forge':
+                from src.services.mod_loader.api import ForgeAPI
+                versions = ForgeAPI._xml_versions(
+                    "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml")
+                prefix = self.mc_version + '-'
+                return [{'version': v.split('-', 1)[1]} for v in versions if v.startswith(prefix)]
+            if name == 'neoforge':
+                from src.services.mod_loader.api import fetch_neoforge_versions
+                return [item for item in fetch_neoforge_versions()
+                        if str(item.get('version', '')).startswith(self.mc_version + '.')]
+        except Exception as exc:
+            log.warning("[加载器] %s 换源重搜也失败: %s", name, exc)
+        return []
+
+    def run(self):
+        """抓四个加载器的版本列表。
+
+        optifine 必须给**列表**：以前给的是 bool，页面拿去迭代直接炸
+        （TypeError: bool object is not iterable）。
+        """
+        try:
+            from src.services.mod_loader.api import fetch_optifine_versions
+
             result = {
-                'forge': fetch_forge_versions(self.mc_version),
-                'fabric': fetch_fabric_versions(self.mc_version, only_stable=False),
-                'neoforge': filter_neoforge_by_mc_version(self.mc_version),
-                'optifine': check_optifine(self.mc_version),
+                'forge': self._with_fallback('forge', lambda: fetch_forge_versions(self.mc_version)),
+                'fabric': self._with_fallback('fabric', lambda: fetch_fabric_versions(self.mc_version, only_stable=False)),
+                'neoforge': self._with_fallback('neoforge', lambda: filter_neoforge_by_mc_version(self.mc_version)),
+                'optifine': fetch_optifine_versions(self.mc_version),
             }
             self.finished.emit(result)
         except Exception as e:
@@ -68,209 +116,6 @@ class LoaderFetchWorker(QThread):
 
 
 # ── Accordion Section ────────────────────────────────────────────
-
-
-class AccordionSection(QWidget):
-    """A single collapsible section in the accordion."""
-
-    def __init__(self, title: str, icon: str = "", parent=None):
-        super().__init__(parent)
-        self._expanded = False
-        self._content: QWidget | None = None
-
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet("""
-            AccordionSection {
-                background: transparent;
-                border-radius: 8px;
-            }
-        """)
-
-        vbox = QVBoxLayout(self)
-        vbox.setContentsMargins(0, 0, 0, 0)
-        vbox.setSpacing(0)
-
-        # ── Toggle button ──
-        self._header = QPushButton(self)
-        self._header.setFixedHeight(44)
-        self._header.setCursor(Qt.PointingHandCursor)
-        self._header.setStyleSheet("""
-            QPushButton {
-                text-align: left;
-                border: none;
-                border-radius: 8px;
-                padding: 0 16px;
-                font-size: 14px;
-                font-weight: 600;
-                background: rgba(128, 128, 128, 0.06);
-            }
-            QPushButton:hover {
-                background: rgba(128, 128, 128, 0.12);
-            }
-        """)
-        self._header.setText(f"{icon}  {title}")
-
-        # Arrow indicator
-        self._arrow = BodyLabel("▼", self._header)
-        self._arrow.setStyleSheet("color: #888; font-size: 10px;")
-        header_layout = QHBoxLayout(self._header)
-        header_layout.setContentsMargins(16, 0, 16, 0)
-        header_layout.addStretch()
-        header_layout.addWidget(self._arrow)
-
-        vbox.addWidget(self._header)
-
-        # ── Content container ──
-        self._content_container = QWidget(self)
-        self._content_layout = QVBoxLayout(self._content_container)
-        self._content_layout.setContentsMargins(16, 8, 16, 12)
-        self._content_layout.setSpacing(8)
-        self._content_container.setVisible(False)
-        vbox.addWidget(self._content_container)
-
-        self._header.clicked.connect(self._toggle)
-
-    def set_content_widget(self, widget: QWidget):
-        """Replace the content area with a custom widget."""
-        self._content_layout.addWidget(widget)
-
-    def add_content(self, widget: QWidget):
-        self._content_layout.addWidget(widget)
-
-    def add_layout(self, layout):
-        self._content_layout.addLayout(layout)
-
-    def _toggle(self):
-        self.set_expanded(not self._expanded)
-
-    def set_expanded(self, expanded: bool, animate: bool = True):
-        self._expanded = expanded
-        self._arrow.setText("▲" if expanded else "▼")
-        self._content_container.setVisible(expanded)
-        # Update header style
-        bg = "rgba(128, 128, 128, 0.12)" if expanded else "rgba(128, 128, 128, 0.06)"
-        self._header.setStyleSheet(f"""
-            QPushButton {{
-                text-align: left; border: none; border-radius: 8px;
-                padding: 0 16px; font-size: 14px; font-weight: 600;
-                background: {bg};
-            }}
-            QPushButton:hover {{
-                background: rgba(128, 128, 128, 0.12);
-            }}
-        """)
-
-    def is_expanded(self) -> bool:
-        return self._expanded
-
-
-# ── Loader Card (version dropdown row) ───────────────────────────
-
-
-class LoaderRow(QWidget):
-    """Single loader row with a version combo box."""
-
-    loader_selected = Signal(str, str)
-    loader_cleared = Signal(str)
-
-    def __init__(self, loader_type: str, display_name: str, parent=None):
-        super().__init__(parent)
-        self.loader_type = loader_type
-        self.display_name = display_name
-        self._selected_version = None
-        self._versions = []
-        self.is_loading = True
-
-        self.setFixedHeight(36)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 0, 8, 0)
-        layout.setSpacing(12)
-
-        self.name_label = BodyLabel(display_name, self)
-        self.name_label.setFixedWidth(64)
-        layout.addWidget(self.name_label)
-
-        self.combo = ComboBox(self)
-        self.combo.setMinimumWidth(200)
-        self.combo.setFixedHeight(28)
-        self.combo.addItem("加载中...")
-        self.combo.setEnabled(False)
-        self.combo.currentTextChanged.connect(self._on_combo_changed)
-        layout.addWidget(self.combo)
-
-        layout.addStretch()
-
-        self.check_label = BodyLabel("", self)
-        self.check_label.setVisible(False)
-        self.check_label.setStyleSheet("color: #52c41a; font-weight: 600;")
-        layout.addWidget(self.check_label)
-
-        self.clear_btn = QPushButton("✕", self)
-        self.clear_btn.setFixedSize(20, 20)
-        self.clear_btn.setStyleSheet("""
-            QPushButton { border: none; color: #999; font-size: 14px; font-weight: bold; }
-            QPushButton:hover { color: #ff4d4f; }
-        """)
-        self.clear_btn.setVisible(False)
-        self.clear_btn.clicked.connect(self._clear)
-        layout.addWidget(self.clear_btn)
-
-    def set_loading(self, loading: bool):
-        self.is_loading = loading
-        if loading:
-            self.combo.clear(); self.combo.addItem("加载中...")
-            self.combo.setEnabled(False)
-            self.check_label.setVisible(False)
-            self.clear_btn.setVisible(False)
-
-    def set_versions(self, versions: list, version_key: str = 'version'):
-        self._versions = versions
-        self.combo.clear()
-        self.combo.setEnabled(True)
-        self.is_loading = False
-        if not versions:
-            self.combo.addItem("无可用版本"); self.combo.setEnabled(False)
-            return
-        for v in versions:
-            ver = v.get(version_key, v.get('version', ''))
-            if isinstance(ver, dict):
-                ver = ver.get('version', '')
-            label = str(ver)
-            is_beta = 'beta' in label.lower()
-            self.combo.addItem(f"{label} {'(Beta)' if is_beta else ''}", userData=ver)
-        if self.combo.count() > 0:
-            self.combo.setCurrentIndex(0)
-            self._select(self.combo.itemData(0))
-
-    def _on_combo_changed(self, text: str):
-        if not text or text in ("加载中...", "无可用版本"):
-            return
-        idx = self.combo.currentIndex()
-        if idx >= 0:
-            ver = self.combo.itemData(idx)
-            if ver:
-                self._select(ver)
-
-    def _select(self, version: str):
-        self._selected_version = version
-        self.check_label.setText("✓ 已选"); self.check_label.setVisible(True)
-        self.clear_btn.setVisible(True)
-        self.loader_selected.emit(self.loader_type, version)
-
-    def _clear(self):
-        self._selected_version = None
-        self.check_label.setVisible(False); self.clear_btn.setVisible(False)
-        self.loader_cleared.emit(self.loader_type)
-
-    def get_selected_version(self) -> str | None:
-        return self._selected_version
-
-    def is_selected(self) -> bool:
-        return self._selected_version is not None
-
-
-# ── Download Config Page ─────────────────────────────────────────
 
 
 class DownloadConfigPage(BasePage):
@@ -283,19 +128,37 @@ class DownloadConfigPage(BasePage):
         self._fabric_versions = []
         self._neoforge_versions = []
         self._worker = None
+        self._loader_failed = set()      # 哪些加载器的列表没取到
+        self._compat_issues = []         # 兼容性判定结果
+        # 四个加载器的版本列表：兼容性判定会用，加载完成前先给空列表
+        self._forge_versions: list = []
+        self._fabric_versions: list = []
+        self._neoforge_versions: list = []
+        self._optifine_versions: list = []
+        self._name_taken = False
+        self._user_edited_name = False
         self._selected_loader = None
         self._selected_loader_version = None
 
         self._build_content()
+        self._style_name_input("normal")
+        from src.app.theme import on_theme_changed
+        on_theme_changed(self._apply_theme_styles)
         self._load_loader_versions_async()
+
+    def _apply_theme_styles(self) -> None:
+        """主题切换时把本页那些"要按状态重算"的样式再套一遍。"""
+        self._style_name_input("error" if self.warning_label.isVisible() else "normal")
 
     def _build_content(self):
         # ── Back button ──
         back = QPushButton("←  返回版本列表", self.view)
         back.setCursor(Qt.PointingHandCursor)
-        back.setStyleSheet("""
-            QPushButton { border: none; color: #0078d4; font-size: 13px; padding: 8px 0; text-align: left; }
-            QPushButton:hover { color: #005a9e; }
+        from src.app.theme import token
+        back.setStyleSheet(f"""
+            QPushButton {{ border: none; color: {token('accent')}; font-size: 13px;
+                          padding: 8px 0; text-align: left; }}
+            QPushButton:hover {{ color: {token('accent')}; }}
         """)
         back.clicked.connect(self._go_back)
         self.vBoxLayout.insertWidget(0, back)
@@ -304,15 +167,12 @@ class DownloadConfigPage(BasePage):
         self._name_section = AccordionSection("版本名称", "📝", self.view)
         self.name_input = QLineEdit(self.view)
         self.name_input.setPlaceholderText("输入自定义版本名称…")
-        self.name_input.setText(self.version.id)
+        self.name_input.setText(self.version.id)      # 选了加载器后会按 PCL 规则重算默认名
         self.name_input.textChanged.connect(self._on_name_manual_edit)
-        self.name_input.setStyleSheet("""
-            QLineEdit { border: 1px solid #d0d0d0; border-radius: 6px; padding: 8px 12px;
-                        font-size: 13px; background: transparent; }
-            QLineEdit:focus { border-color: #0078d4; }
-        """)
+
         self.warning_label = BodyLabel("⚠ 不能与现有版本名相同", self.view)
-        self.warning_label.setTextColor("#ff4d4f", "#ff7875")
+        from src.app.theme import token as _tk
+        self.warning_label.setTextColor(_tk("danger"))
         self.warning_label.setVisible(False)
         self._name_section.add_content(self.name_input)
         self._name_section.add_content(self.warning_label)
@@ -328,7 +188,6 @@ class DownloadConfigPage(BasePage):
         self.forge_row.loader_cleared.connect(self._on_loader_cleared)
         self._loader_section.add_content(self.forge_row)
 
-        self._add_separator()
 
         # NeoForge
         self.neoforge_row = LoaderRow("neoforge", "NeoForge", self.view)
@@ -336,15 +195,17 @@ class DownloadConfigPage(BasePage):
         self.neoforge_row.loader_cleared.connect(self._on_loader_cleared)
         self._loader_section.add_content(self.neoforge_row)
 
-        self._add_separator()
 
         # Fabric
         self.fabric_row = LoaderRow("fabric", "Fabric", self.view)
         self.fabric_row.loader_selected.connect(self._on_loader_selected)
         self.fabric_row.loader_cleared.connect(self._on_loader_cleared)
         self._loader_section.add_content(self.fabric_row)
+        self.optifine_row = LoaderRow("optifine", "OptiFine", self.view)
+        self.optifine_row.loader_selected.connect(self._on_loader_selected)
+        self.optifine_row.loader_cleared.connect(self._on_loader_cleared)
+        self._loader_section.add_content(self.optifine_row)
 
-        self._add_separator()
 
         # OptiFine
         of_layout = QHBoxLayout()
@@ -358,12 +219,24 @@ class DownloadConfigPage(BasePage):
         self._loader_section.add_layout(of_layout)
 
         self._loader_section.set_expanded(False)
+        self._loader_rows = [self.forge_row, self.neoforge_row, self.fabric_row, self.optifine_row]
+        for row in self._loader_rows:
+            row.set_group(self._loader_rows)
+            row.expanded.connect(self._on_loader_expanded)
+
         self.add_content(self._loader_section)
 
         # ── Section 3: 下载按钮 ──
         download_card = CardWidget(self.view)
         dl_layout = QHBoxLayout(download_card)
         dl_layout.setContentsMargins(0, 0, 0, 0)
+        # 兼容性提示区：不兼容时这里写清原因，按钮同时禁用（不允许进入下一步）
+        self.compat_box = QWidget(download_card)
+        self._compat_layout = QVBoxLayout(self.compat_box)
+        self._compat_layout.setContentsMargins(0, 0, 0, 6)
+        self._compat_layout.setSpacing(4)
+        dl_layout.addWidget(self.compat_box)
+
         self.download_btn = PrimaryPushButton("开始下载", download_card)
         self.download_btn.setFixedHeight(44)
         self.download_btn.clicked.connect(self._on_download)
@@ -372,11 +245,11 @@ class DownloadConfigPage(BasePage):
 
         self.add_stretch()
 
-    def _add_separator(self):
-        line = QFrame(self.view)
-        line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("background: rgba(128,128,128,0.15); max-height: 1px; margin: 0 8px;")
-        self._loader_section.add_content(line)
+    def _on_loader_expanded(self, row) -> None:
+        """展开一行就把别的收起来（手风琴），避免好几个列表同时撑开页面。"""
+        for other in self._loader_rows:
+            if other is not row and other._expanded:
+                other.set_expanded(False)
 
     # ── Loader data ─────────────────────────────────────────────
 
@@ -390,69 +263,174 @@ class DownloadConfigPage(BasePage):
         self._forge_versions = result.get('forge', [])
         self._fabric_versions = result.get('fabric', [])
         self._neoforge_versions = result.get('neoforge', [])
-        has_opti = result.get('optifine', False)
+        self._optifine_versions = result.get('optifine', []) or []
+        has_opti = bool(self._optifine_versions)
 
         self.forge_row.set_versions(self._forge_versions, 'version')
         self.fabric_row.set_versions(self._fabric_versions, 'loader.version')
         self.neoforge_row.set_versions(self._neoforge_versions, 'version')
+        # OptiFine 的版本号要拼成 PCL 那种 HD_U_J8_pre12（type_patch），
+        # 只给 pre12 的话版本名会变成 1.21.11-OptiFine_pre12，和 PCL 对不上
+        opti_normalized = []
+        for item in self._optifine_versions:
+            if not isinstance(item, dict):
+                continue
+            type_name = str(item.get('type') or '').strip()
+            patch = str(item.get('patch') or '').strip()
+            label = f'{type_name}_{patch}' if type_name and patch else (patch or type_name)
+            if not label:
+                continue
+            entry = dict(item)
+            entry['version'] = label
+            opti_normalized.append(entry)
+        self.optifine_row.set_versions(opti_normalized, 'version')
+        self._loader_failed = set()
+        self._refresh_compat()
 
         self.optifine_status.setText("✅ 支持" if has_opti else "—")
+        from src.app.theme import token
         self.optifine_status.setStyleSheet(
-            "color: #52c41a;" if has_opti else "color: #999;"
+            f"color: {token('success')};" if has_opti else f"color: {token('text_tertiary')};"
         )
 
     def _on_loader_error(self, error):
-        for r in [self.forge_row, self.neoforge_row, self.fabric_row]:
-            r.combo.clear(); r.combo.addItem("加载失败"); r.combo.setEnabled(False)
+        for row in self._loader_rows:
+            row.set_error("加载失败")
+        self._loader_failed = {'forge', 'fabric', 'neoforge', 'optifine'}
+        self._refresh_compat()
 
     # ── Loader selection ────────────────────────────────────────
 
     def _on_loader_selected(self, ltype: str, version: str):
-        for r in [self.forge_row, self.neoforge_row, self.fabric_row]:
-            if r.loader_type != ltype and r.is_selected():
-                r._clear()
+        for row in self._loader_rows:
+            if row.loader_type != ltype and row.is_selected():
+                row._clear()
         self._selected_loader = ltype
         self._selected_loader_version = version
         self._update_version_name()
 
     def _on_loader_cleared(self, ltype: str):
+        self._compat_issues = []
         self._selected_loader = None
         self._selected_loader_version = None
         self._update_version_name()
 
     def _update_version_name(self):
+        """默认版本名按 PCL 的规则拼（GetSelectName）。
+
+        以前是 f"{原版}-{加载器}-{版本号}"，和 PCL 装出来的名字不一样 ——
+        从 PCL 迁过来的用户会看到两套命名，同一个版本像是装了两次。
+        现在逐字对齐它：Fabric 后面是空格、Forge/NeoForge/OptiFine 用下划线、
+        LiteLoader 不带版本号、顺序固定 Fabric -> Forge -> NeoForge -> LiteLoader -> OptiFine。
+        """
         base = self.version.id
-        if self._selected_loader and self._selected_loader_version:
-            vn = f"{base}-{self._selected_loader}-{self._selected_loader_version}"
-        else:
-            vn = base
+        try:
+            from src.services.minecraft.loaders import LoaderKind, default_version_name
+            loaders = {}
+            if self._selected_loader and self._selected_loader_version:
+                key = {LoaderKind.FORGE: LoaderKind.FORGE, LoaderKind.NEOFORGE: LoaderKind.NEOFORGE,
+                       LoaderKind.FABRIC: LoaderKind.FABRIC, LoaderKind.OPTIFINE: LoaderKind.OPTIFINE,
+                       LoaderKind.LITELOADER: LoaderKind.LITELOADER,
+                       "forge": LoaderKind.FORGE, "neoforge": LoaderKind.NEOFORGE,
+                       "fabric": LoaderKind.FABRIC, "optifine": LoaderKind.OPTIFINE,
+                       "liteloader": LoaderKind.LITELOADER}.get(self._selected_loader)
+                if key:
+                    loaders[key] = str(self._selected_loader_version)
+            vn = default_version_name(base, loaders) if loaders else base
+        except Exception:
+            vn = (f"{base}-{self._selected_loader}-{self._selected_loader_version}"
+                  if self._selected_loader and self._selected_loader_version else base)
         if not getattr(self, '_user_edited_name', False):
             self.name_input.blockSignals(True)
             self.name_input.setText(vn)
             self.name_input.blockSignals(False)
         self.name_input.setPlaceholderText(f"自动生成: {vn}")
         self._check_version_exists(vn)
+        self._refresh_compat()
+
+    def _style_name_input(self, state: str = "normal") -> None:
+        """版本名输入框的三种状态（普通 / 获得焦点 / 重名错误），全部走主题令牌。"""
+        from src.app.theme import token
+        border = {"normal": token("input_border"), "error": token("danger")}.get(state, token("input_border"))
+        width = "2px" if state == "error" else "1px"
+        self.name_input.setStyleSheet(
+            f"QLineEdit {{ border: {width} solid {border}; border-radius: 6px; padding: 8px 12px;"
+            f" font-size: 13px; background: {token('input_bg')}; color: {token('text')}; }}"
+            f"QLineEdit:focus {{ border-color: {token('accent')}; }}")
+
+    def _refresh_compat(self) -> None:
+        """重新算一遍兼容性，并把结论画到提示区（有 error 就不能点下载）。"""
+        try:
+            from src.services.minecraft.loaders import installed_for_base
+            installed = installed_for_base(self.version.id)
+        except Exception:
+            installed = []
+
+        meta = None
+        if self._selected_loader == 'optifine' and self._selected_loader_version:
+            for item in getattr(self, '_optifine_versions', []):
+                if isinstance(item, dict) and item.get('version') == self._selected_loader_version:
+                    meta = item
+                    break
+
+        self._compat_issues = check_selection(
+            base_version=self.version.id,
+            loader_type=self._selected_loader,
+            loader_version=self._selected_loader_version,
+            loader_versions={
+                'forge': getattr(self, '_forge_versions', []),
+                'fabric': getattr(self, '_fabric_versions', []),
+                'neoforge': getattr(self, '_neoforge_versions', []),
+                'optifine': getattr(self, '_optifine_versions', []),
+            },
+            loader_failed=self._loader_failed,
+            optifine_meta=meta,
+            installed_for_base=installed,
+        )
+
+        while self._compat_layout.count():
+            item = self._compat_layout.takeAt(0)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.deleteLater()
+
+        for issue in self._compat_issues:
+            label = BodyLabel(('✗ ' if issue.is_error else '⚠ ') + issue.message
+                              + (('（' + issue.fix + '）') if issue.fix else ''), self.compat_box)
+            label.setWordWrap(True)
+            color = token('danger') if issue.is_error else token('warning')
+            label.setStyleSheet(f'color: {color};')
+            self._compat_layout.addWidget(label)
+        self.compat_box.setVisible(bool(self._compat_issues))
+        self._refresh_download_button()
+
+    def _refresh_download_button(self) -> None:
+        """按钮状态只在一处决定：重名 / 不兼容 / 正常。"""
+        if any(issue.is_error for issue in self._compat_issues):
+            self.download_btn.setEnabled(False)
+            self.download_btn.setText('⚠ 不兼容，无法安装')
+            return
+        if getattr(self, '_name_taken', False):
+            self.download_btn.setEnabled(False)
+            self.download_btn.setText('⚠ 版本已存在')
+            return
+        self.download_btn.setEnabled(True)
+        self.download_btn.setText('开始下载')
 
     def _check_version_exists(self, version_name: str):
+        """目录里有 JSON 就算已存在 —— Forge 1.13+/Fabric 装的版本没有自己的 jar。"""
         from pathlib import Path
         from src.app.common.launcher_config import cfg
         d = Path(cfg.gameDirectory.value) / "versions" / version_name
-        if d.exists() and (d / f"{version_name}.jar").exists() and (d / f"{version_name}.json").exists():
-            self.name_input.setStyleSheet("""
-                QLineEdit { border: 2px solid #ff4d4f; border-radius: 6px; padding: 8px 12px; font-size: 13px; }
-            """)
+        has_json = d.is_dir() and any(p.suffix == ".json" for p in d.glob("*.json"))
+        self._name_taken = bool(has_json or (d / f"{version_name}.jar").exists())
+        if self._name_taken:
+            self._style_name_input("error")
             self.warning_label.setVisible(True)
-            self.download_btn.setEnabled(False)
-            self.download_btn.setText("⚠️ 版本已存在")
         else:
-            self.name_input.setStyleSheet("""
-                QLineEdit { border: 1px solid #d0d0d0; border-radius: 6px; padding: 8px 12px;
-                            font-size: 13px; background: transparent; }
-                QLineEdit:focus { border-color: #0078d4; }
-            """)
+            self._style_name_input("normal")
             self.warning_label.setVisible(False)
-            self.download_btn.setEnabled(True)
-            self.download_btn.setText("开始下载")
+        self._refresh_download_button()
 
     def _on_name_manual_edit(self, text: str):
         ph = self.name_input.placeholderText()
@@ -467,6 +445,57 @@ class DownloadConfigPage(BasePage):
         else:
             self.parent().switchTo(self.parent().versions_page)
 
+    def _confirm_same_loader(self, loader_type: str, loader_version) -> bool:
+        """已装了同类加载器时问一句：直接启动旧的，还是再装一个？
+
+        返回 True 表示「用户选择启动已装的，这次不要装了」。
+        用户经常在同一个原版下装好几套（Forge + OptiFine、Fabric + OptiFine…），
+        所以这里不阻止，只把"已经装了什么"摆出来，并给出直接启动的快捷方式。
+        """
+        try:
+            from src.services.minecraft.loaders import installed_for_base
+            existing = installed_for_base(self.version.id)
+        except Exception as exc:
+            log.debug("同版本加载器检测跳过: %s", exc)
+            return False
+
+        same = [item for item in existing if item.has_loader(loader_type)]
+        if not same:
+            return False
+
+        from PySide6.QtWidgets import QMessageBox
+        summary = "、".join(item.summary() for item in same)
+        box = QMessageBox(self)
+        box.setWindowTitle("这个版本已经装了同类加载器")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"{self.version.id} 下已经有：{summary}")
+        box.setInformativeText(
+            "两个选择：\n"
+            "· 直接启动已经装好的那一个（不再下载任何东西）\n"
+            "· 继续再装一个：会在 versions/ 下新建独立目录，两套互不影响")
+        launch_btn = box.addButton("直接启动已装的", QMessageBox.AcceptRole)
+        box.addButton("继续再装一个", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is launch_btn:
+            self._launch_installed(same[0])
+            return True
+        return False
+
+    def _launch_installed(self, installed) -> None:
+        """直接启动已经装好的那一份（不再重新下载）。"""
+        try:
+            mw = self.window()
+            if hasattr(mw, "switch_to_launch"):
+                mw.switch_to_launch(self.version)
+                InfoBar.success(title="启动已装好的版本", content=installed.summary(),
+                                orient=InfoBarPosition.TOP, isClosable=True, duration=3000,
+                                parent=self)
+                return
+        except Exception as exc:
+            log.warning("启动已装版本失败: %s", exc)
+        InfoBar.info(title="已经装好了", content=f"去版本列表启动 {installed.id}",
+                     orient=InfoBarPosition.TOP, isClosable=True, duration=4000, parent=self)
+
     def _on_download(self):
         vn = self.name_input.text().strip()
         if not vn:
@@ -477,19 +506,12 @@ class DownloadConfigPage(BasePage):
         from pathlib import Path
         from src.app.common.launcher_config import cfg
         d = Path(cfg.gameDirectory.value) / "versions" / vn
-        if d.exists() and (d / f"{vn}.jar").exists() and (d / f"{vn}.json").exists():
+        has_json = d.is_dir() and any(p.suffix == ".json" for p in d.glob("*.json"))
+        if has_json or (d / f"{vn}.jar").exists():
             InfoBar.warning(title="版本已存在", content=f"版本 '{vn}' 已经安装，请使用不同的版本名称",
                             orient=InfoBarPosition.TOP, isClosable=True, duration=5000, parent=self)
-            self.name_input.setStyleSheet("""
-                QLineEdit { border: 2px solid #ff4d4f; border-radius: 6px; padding: 8px 12px; font-size: 13px; }
-            """)
+            self._style_name_input("error")
             return
-
-        self.name_input.setStyleSheet("""
-            QLineEdit { border: 1px solid #d0d0d0; border-radius: 6px; padding: 8px 12px;
-                        font-size: 13px; background: transparent; }
-            QLineEdit:focus { border-color: #0078d4; }
-        """)
 
         lt, lv = "none", None
         if self._selected_loader == 'forge':
@@ -501,40 +523,27 @@ class DownloadConfigPage(BasePage):
         elif self._selected_loader == 'fabric':
             lv = self.fabric_row.get_selected_version()
             if lv: lt = 'fabric'
+        elif self._selected_loader == 'optifine':
+            lv = self.optifine_row.get_selected_version()
+            if lv: lt = 'optifine'
+
+        # 装之前先看一眼：同一个原版下是不是已经有同类加载器了
+        if lt != "none" and self._confirm_same_loader(lt, lv):
+            return
+
+        # 最后一道闸：有 error 一律不许进下一步（界面禁用之外再兜一次）
+        errors = [issue for issue in self._compat_issues if issue.is_error]
+        if errors:
+            InfoBar.error(title='无法开始安装', content=errors[0].message,
+                          orient=InfoBarPosition.TOP, isClosable=True, duration=6000, parent=self)
+            return
 
         mw = self.window()
         if hasattr(mw, 'switch_to_download_progress'):
             mw.switch_to_download_progress(version=self.version, version_name=vn,
                                            loader_type=lt, loader_version=lv)
         else:
-            self._do_download_fallback(vn, lt, lv)
-
-    def _do_download_fallback(self, vn: str, lt: str, lv: str):
-        self.download_btn.setEnabled(False)
-        self.download_btn.setText("安装中…")
-        InfoBar.info(title="开始安装", content=f"正在安装 {vn}，请稍候…",
-                     orient=InfoBarPosition.TOP, isClosable=True, duration=3000, parent=self)
-
-        def work():
-            from src.app.services.download_service import VersionInstaller
-            from PySide6.QtCore import QTimer
-            inst = VersionInstaller()
-            inst.set_progress_callback(lambda c, t, s: QTimer.singleShot(0, lambda: self._update_progress(c, t, s)))
-            ok = inst.install_version(self.version, loader_type=lt, loader_version=lv, version_name=vn)
-            QTimer.singleShot(0, lambda: self._on_install_finished(ok, vn))
-        threading.Thread(target=work, daemon=True).start()
-
-    def _update_progress(self, cur: int, total: int, status: str):
-        if total > 0:
-            self.download_btn.setText(f"{status} ({cur * 100 // total}%)")
-
-    def _on_install_finished(self, ok: bool, vn: str):
-        self.download_btn.setEnabled(True)
-        if ok:
-            self.download_btn.setText("✅ 安装完成")
-            InfoBar.success(title="安装成功", content=f"{vn} 安装完成！",
-                            orient=InfoBarPosition.TOP, isClosable=True, duration=3000, parent=self)
-        else:
-            self.download_btn.setText("❌ 安装失败")
-            InfoBar.error(title="安装失败", content=f"{vn} 安装失败，请查看控制台日志",
-                          orient=InfoBarPosition.TOP, isClosable=True, duration=5000, parent=self)
+            # 旧版"就地安装"回退路径已删除：它依赖已被移除的 VersionInstaller。
+            InfoBar.error(title="无法开始下载", content="主窗口未提供下载进度页接口",
+                          orient=InfoBarPosition.TOP, isClosable=True,
+                          duration=5000, parent=self)

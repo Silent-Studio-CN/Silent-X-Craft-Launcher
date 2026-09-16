@@ -49,12 +49,20 @@ BMCLAPI_VERSION_MANIFEST_URL = (
 
 
 class DownloadSource(Enum):
+    """下载源。
+
+    AUTO 是"智能"模式：按实测速度/失败记录自动决定先走哪条路
+    （记录见 src/core/source_stats.py），镜像恢复后会自动切回来。
+    """
+
+    AUTO = "auto"
     MOJANG = "mojang"
     BMCLAPI = "bmclapi"
 
     @property
     def label(self) -> str:
         return {
+            DownloadSource.AUTO: "智能（自动选更快的源）",
             DownloadSource.MOJANG: "Mojang 官方源",
             DownloadSource.BMCLAPI: "BMCLAPI 镜像源",
         }[self]
@@ -62,6 +70,7 @@ class DownloadSource(Enum):
     @property
     def manifest_url(self) -> str:
         return {
+            DownloadSource.AUTO: MOJANG_VERSION_MANIFEST_URL,
             DownloadSource.MOJANG: MOJANG_VERSION_MANIFEST_URL,
             DownloadSource.BMCLAPI: BMCLAPI_VERSION_MANIFEST_URL,
         }[self]

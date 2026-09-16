@@ -30,18 +30,21 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QHBoxLayout, QVBoxLayout, QWidget, QPushButton, QFileDialog,
+    QHBoxLayout, QVBoxLayout, QWidget, QPushButton, QFileDialog, QLabel,
 )
 from qfluentwidgets import (
-    BodyLabel, CardWidget, PrimaryPushButton, PushButton,
-    InfoBar, InfoBarPosition, ComboBox,
+    BodyLabel, CardWidget, PrimaryPushButton, PushButton, StrongBodyLabel,
+    InfoBar, InfoBarPosition, ComboBox, FluentIcon as FIF,
 )
 
+from src.app.theme import token
+
 from src.app.common.base_page import BasePage
-from src.app.common.config import APP_NAME, APP_VERSION
+from src.app.theme import token as _token
+from src.core.constants import APP_NAME, APP_VERSION
 from src.app.common.launcher_config import cfg
-from src.app.services.download_service import get_installed_versions, get_version_info
-from src.app.services.version_manifest import GameVersion
+from src.services.minecraft.installed import get_installed_versions, get_version_info
+from src.services.minecraft.manifest import GameVersion
 
 
 class HomePage(BasePage):
@@ -72,18 +75,25 @@ class HomePage(BasePage):
         dir_layout.addWidget(dir_label)
 
         self.dir_display = BodyLabel(str(cfg.gameDirectory.value), dir_card)
-        self.dir_display.setTextColor("#888888", "#888888")
+        self.dir_display.setTextColor(_token("text_tertiary"), _token("text_tertiary"))
         dir_layout.addWidget(self.dir_display, 1)
 
         change_dir_btn = PushButton("更改", dir_card)
         change_dir_btn.clicked.connect(self._change_directory)
         dir_layout.addWidget(change_dir_btn)
 
+        detect_btn = PushButton("自动检测", dir_card)
+        detect_btn.clicked.connect(self._auto_detect_folder)
+        dir_layout.addWidget(detect_btn)
+
         open_dir_btn = PushButton("打开", dir_card)
         open_dir_btn.clicked.connect(self._open_directory)
         dir_layout.addWidget(open_dir_btn)
 
         self.add_content(dir_card)
+
+        # ── 联机入口（功能开发中，先把位置留出来 —— 首页要能直达） ──
+        self.add_content(self._multiplayer_entry())
 
         # ── 已安装版本（卡片网格） ──
         self._grid = QWidget(self.view)
@@ -98,6 +108,46 @@ class HomePage(BasePage):
         self.add_content(self._empty_hint)
         self.add_content(self._grid)
         self.add_stretch()
+
+    def _multiplayer_entry(self) -> CardWidget:
+        """首页的"联机"入口：功能还没上线，但入口先占住。"""
+        card = CardWidget(self.view)
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setSpacing(12)
+
+        icon = QLabel(card)
+        icon.setPixmap(FIF.GLOBE.icon().pixmap(28, 28))
+        layout.addWidget(icon)
+
+        text_box = QVBoxLayout()
+        text_box.setSpacing(2)
+        text_box.addWidget(StrongBodyLabel("联机 · 和朋友一起玩", card))
+        desc = BodyLabel("房间码加入 / P2P 打洞 / 中继兜底（开发中，先留入口）", card)
+        desc.setTextColor(token("text_tertiary"), token("text_tertiary"))
+        text_box.addWidget(desc)
+        layout.addLayout(text_box, 1)
+
+        look_btn = PushButton("看看方案", card)
+        look_btn.clicked.connect(self._open_multiplayer)
+        layout.addWidget(look_btn)
+
+        card.setCursor(Qt.PointingHandCursor)
+        return card
+
+    def _open_multiplayer(self) -> None:
+        """跳到联机页（页面还没上线时给个明确提示，不做假动作）。"""
+        mw = self.window()
+        page = getattr(mw, "multiplayer_page", None)
+        if page is not None and hasattr(mw, "switchTo"):
+            mw.switchTo(page)
+            try:
+                mw.navigationInterface.setCurrentItem(page.objectName())
+            except Exception:
+                pass
+            return
+        InfoBar.info(title="联机", content="联机页即将上线", orient=InfoBarPosition.TOP,
+                     isClosable=True, duration=2500, parent=self)
 
     # ── 版本刷新 ────────────────────────────────────────────
 
@@ -144,7 +194,7 @@ class HomePage(BasePage):
         info = self._get_version_info(version_id)
         if info:
             detail = BodyLabel(info, card)
-            detail.setTextColor("#888888", "#888888")
+            detail.setTextColor(_token("text_tertiary"), _token("text_tertiary"))
             detail.setStyleSheet("font-size: 12px;")
             layout.addWidget(detail)
 
@@ -207,16 +257,58 @@ class HomePage(BasePage):
             InfoBar.error(title="错误", content="启动器未初始化",
                           orient=InfoBarPosition.TOP, isClosable=True, duration=3000, parent=self)
 
+    def _auto_detect_folder(self) -> None:
+        """自动检测游戏目录：挑版本最多的那个，并告诉用户还发现了哪些候选。"""
+        from src.services.minecraft.folders import best_game_folder, describe, detect_game_folders
+
+        folders = detect_game_folders()
+        best = best_game_folder()
+        if best is None:
+            InfoBar.warning(title="没找到游戏目录",
+                            content="点「更改」手动选一个 .minecraft 目录",
+                            orient=InfoBarPosition.TOP, isClosable=True, duration=5000, parent=self)
+            return
+
+        from qfluentwidgets import qconfig
+        from src.app.common.launcher_config import save_config
+        qconfig.set(cfg.gameDirectory, str(best.path))
+        save_config()
+        self.dir_display.setText(str(best.path))
+        self._refresh_installed()
+
+        others = [item for item in folders if item.path != best.path]
+        content = describe(best)
+        if others:
+            content += "；还发现：" + "、".join(f"{item.path}({item.versions} 个版本)" for item in others[:3])
+        InfoBar.success(title="已切换游戏目录", content=content,
+                        orient=InfoBarPosition.TOP, isClosable=True, duration=6000, parent=self)
+
     def _change_directory(self):
         """更改游戏目录."""
         d = QFileDialog.getExistingDirectory(self, "选择 .minecraft 目录", str(cfg.gameDirectory.value))
         if d:
             from qfluentwidgets import qconfig
+            from src.app.common.launcher_config import save_config
             qconfig.set(cfg.gameDirectory, d)
+            save_config()          # 以前只改内存，重启就丢
             self.dir_display.setText(d)
             self._refresh_installed()
 
     def _open_directory(self):
-        """打开游戏目录."""
+        """打开游戏目录（跨平台，以前硬编码 explorer 在 macOS/Linux 下不可用）。"""
+        import os
         import subprocess
-        subprocess.Popen(["explorer", str(cfg.gameDirectory.value)])
+        from src.core.platform import is_windows, is_macos
+
+        path = str(cfg.gameDirectory.value)
+        try:
+            if is_windows():
+                os.startfile(path)  # noqa: S606
+            elif is_macos():
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as exc:
+            InfoBar.warning(title="无法打开目录", content=str(exc),
+                            orient=InfoBarPosition.TOP, isClosable=True, duration=4000,
+                            parent=self)

@@ -42,7 +42,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets import FluentIcon as FIF
 
-from src.app.common.config import APP_NAME, APP_VERSION
+from src.core.constants import APP_NAME, APP_VERSION
 from src.app.common.launcher_config import cfg
 
 
@@ -68,7 +68,8 @@ class MainWindow(FluentWindow):
         self._init_navigation()
 
         self._apply_global_style()
-        cfg.themeMode.valueChanged.connect(self._on_theme_changed)
+        from src.app.theme import theme_bus
+        theme_bus.changed.connect(self._on_theme_changed)
         QTimer.singleShot(3000, self._check_updates)
 
     # ──────────────────────────────────────────────────────────
@@ -80,24 +81,35 @@ class MainWindow(FluentWindow):
         from src.app.pages.home_page import HomePage
         from src.app.pages.versions_page import VersionsPage
         from src.app.pages.tasks_page import TasksPage
+        from src.app.pages.keymap_page import KeymapPage
+        from src.app.pages.multiplayer_page import MultiplayerPage
         from src.app.pages.settings_page import SettingsPage
 
         self.home_page = HomePage(self)
         self.versions_page = VersionsPage(self)
         self.tasks_page = TasksPage(self)
+        self.keymap_page = KeymapPage(self)
+        self.multiplayer_page = MultiplayerPage(self)
         self.settings_page = SettingsPage(self)
 
         self._session_pages = {
             "home": self.home_page,
             "versions": self.versions_page,
             "tasks": self.tasks_page,
+            "keymap": self.keymap_page,
+            "multiplayer": self.multiplayer_page,
             "settings": self.settings_page,
         }
 
     def _init_navigation(self):
         self.addSubInterface(self.home_page, FIF.HOME, "主页")
-        self.addSubInterface(self.versions_page, FIF.GAME, "版本")
+        # 版本这一项的图标用草方块（代码现画，不引第三方图片资源）
+        from src.app.icons import grass_block_icon
+        self.addSubInterface(self.versions_page, grass_block_icon(24), "版本")
         self.addSubInterface(self.tasks_page, FIF.UPDATE, "任务")
+        self.addSubInterface(self.keymap_page, FIF.LAYOUT, "按键映射")
+        # 联机：首页留了入口，侧栏也给一个（功能在开发中，页面上如实说明）
+        self.addSubInterface(self.multiplayer_page, FIF.GLOBE, "联机")
 
         self.addSubInterface(
             self.settings_page,
@@ -177,12 +189,12 @@ class MainWindow(FluentWindow):
         """切换到下载配置页（会话保持：只创建一次，切换不丢失状态）."""
         from src.app.pages.download_config_page import DownloadConfigPage
 
-        key = f"download_config_{id(version)}"
+        key = f"download_config_{getattr(version, 'id', id(version))}"
         if key in self._session_pages:
             page = self._session_pages[key]
         else:
             page = DownloadConfigPage(version, self)
-            self._session_pages[key] = page
+            self._register_page(key, page)
 
         self._show_temp_page(page, key=key)
 
@@ -202,7 +214,7 @@ class MainWindow(FluentWindow):
                 loader_type=loader_type, loader_version=loader_version,
                 parent=self,
             )
-            self._session_pages[key] = page
+            self._register_page(key, page)
 
         # 在任务页注册
         self.tasks_page.add_or_update_task(
@@ -221,7 +233,7 @@ class MainWindow(FluentWindow):
             page = self._session_pages[key]
         else:
             page = LaunchProgressPage(version, self)
-            self._session_pages[key] = page
+            self._register_page(key, page)
 
         self.tasks_page.add_or_update_task(
             task_id=key, title=f"启动 {version.id}",
@@ -230,8 +242,34 @@ class MainWindow(FluentWindow):
 
         self._show_temp_page(page, key=key)
 
+    def _register_page(self, key: str, page) -> None:
+        """登记会话页，并限制总数（以前只增不减，长时间使用会一直涨内存）。"""
+        self._session_pages[key] = page
+        persistent = {"home", "versions", "tasks", "settings"}
+        if len(self._session_pages) > 24:
+            for old_key in list(self._session_pages):
+                if old_key in persistent or old_key == key:
+                    continue
+                stale = self._session_pages.pop(old_key, None)
+                if stale is None:
+                    continue
+                if self._active_temp_page is stale:
+                    self._active_temp_page = None
+                try:
+                    self.stackedWidget.removeWidget(stale)
+                    stale.setParent(None)
+                    stale.deleteLater()
+                except Exception:
+                    pass
+                break
+
     def go_back_to_versions(self):
-        """返回版本列表，结束会话."""
+        """返回**版本列表页**并结束会话。
+
+        以前是回到"上一次点过的导航项"：从主页点启动、启动完却回到主页，
+        用户会找不到刚装好的版本。下载/安装/启动都发生在版本页，回它就对了。
+        """
+        self._last_nav_item = "versions"
         self._hide_temp_page(end_session=True)
 
     def go_back_from_launch(self):
@@ -255,15 +293,11 @@ class MainWindow(FluentWindow):
         self._update_global_style()
 
     def _update_global_style(self):
-        dark = isDarkTheme()
-        bg = "#1e1e1e" if dark else "#f5f5f5"
-        self.setStyleSheet(f"""
-            FluentWindow {{
-                background-color: {bg};
-            }}
-        """)
+        """窗口底色走主题令牌（以前写死 #1e1e1e / #f5f5f5，与库的 #202020 / #f3f3f3 打架）。"""
+        from src.app.theme import token
+        self.setStyleSheet(f"FluentWindow {{ background-color: {token('bg')}; }}")
 
-    def _on_theme_changed(self, theme):
+    def _on_theme_changed(self, *_args):
         self._update_global_style()
 
     def _check_updates(self):

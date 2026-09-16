@@ -3,9 +3,12 @@
         "FontFamilies": [
             "Segoe UI",
             "Microsoft YaHei",
-            "PingFang SC"
+            "PingFang SC",
+            "Noto Sans CJK SC",
+            "WenQuanYi Micro Hei",
+            "Source Han Sans SC"
         ],
-        "ThemeColor": "#ff009faa",
-        "ThemeMode": "Light"
+        "ThemeColor": "#0067c0",
+        "ThemeMode": "Auto"
     }
 }

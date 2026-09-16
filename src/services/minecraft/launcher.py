@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from src.core.platform import classpath_separator, is_macos, is_linux, is_windows
-from src.app.common.launcher_config import cfg
+from src.core.settings import settings
 from src.services.java.finder import JavaInstallation
 from src.services.java.compatibility import get_supported_jvm_args
 
@@ -126,7 +126,7 @@ def build_command(
     """Build a complete launch command list."""
     version_dir = game_dir / "versions" / version_id
     natives_path = version_dir / f"{version_id}-natives"
-    run_dir = version_dir if cfg.versionIsolation.value else game_dir
+    run_dir = version_dir if settings.version_isolation() else game_dir
 
     classpath_entries, cp_sep = build_classpath(version_info, game_dir)
     classpath = cp_sep.join(classpath_entries)

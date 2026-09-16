@@ -48,12 +48,13 @@ from qfluentwidgets import (
 )
 
 from src.app.common.base_page import BasePage
+from src.app.theme import token as _token
 from src.app.common.launcher_config import cfg
-from src.app.services.version_manifest import GameVersion
+from src.services.minecraft.manifest import GameVersion
 from src.services.java.finder import inspect_java
 from src.services.java.compatibility import detect_java_version, get_supported_jvm_args, is_java_compatible
 from src.services.minecraft.launcher import build_command, launch_process, load_version_info
-from src.core.platform import is_windows, is_macos, is_linux
+from src.core.platform import is_windows, is_macos, is_linux, supports_window_detection
 
 
 # ── Window Detection Helpers ──────────────────────────────────────
@@ -80,7 +81,21 @@ def _find_minecraft_window() -> bool:
 
 
 def _poll_game_window(process: subprocess.Popen, timeout: float = 30.0, interval: float = 0.5) -> bool:
-    """Poll for game window; return True if found within *timeout* seconds."""
+    """等待游戏起来。
+
+    Windows：真的去枚举窗口（LWJGL/GLFW 类名）。
+    其他平台：没有可靠的窗口枚举手段，退化为"进程存活即视为启动成功"，
+    最多等 GRACE 秒，避免让用户白等 30 秒。
+    """
+    if not supports_window_detection():
+        grace = min(8.0, timeout)
+        deadline = time.time() + grace
+        while time.time() < deadline:
+            if process.poll() is not None:
+                return False
+            time.sleep(interval)
+        return process.poll() is None
+
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process.poll() is not None:
@@ -147,8 +162,8 @@ class LaunchWorker(QThread):
                 self.finished.emit(False, message)
                 return
 
-        # ── Post-exit: collect crash reports ──
-        self._collect_crash_reports()
+        # ── 退出后收集崩溃日志：后台等进程结束（旧实现在启动瞬间就收集，等于没收集）──
+        self._watch_process_exit()
 
         self.finished.emit(True, "游戏已启动")
 
@@ -169,28 +184,55 @@ class LaunchWorker(QThread):
             issues.append(f"版本 JSON 缺失: {json_f}")
         elif not jar.exists():
             issues.append(f"客户端 JAR 缺失: {jar}")
+        natives_dir = version_dir / f"{version_id}-natives"
+        if not natives_dir.exists() or not any(natives_dir.iterdir()):
+            issues.append(f"natives 未解压: {natives_dir}（游戏会因 LWJGL 原生库缺失而崩溃）")
 
         # 检查关键库是否存在
         if json_f.exists():
             import json
             try:
                 info = json.loads(json_f.read_text(encoding="utf-8"))
+                from src.core.download.spec import rules_allow
                 libs_dir = game_dir / "libraries"
                 missing = 0
+                expected = 0
                 for lib in info.get("libraries", []):
+                    # 只统计当前平台真正需要的库（natives / 平台专有库会被规则过滤掉）
+                    if not rules_allow(lib):
+                        continue
                     art = lib.get("downloads", {}).get("artifact", {})
-                    lib_path = libs_dir / art.get("path", "")
-                    if art.get("path") and not lib_path.exists():
+                    path = art.get("path")
+                    if not path:
+                        continue
+                    expected += 1
+                    if not (libs_dir / path).exists():
                         missing += 1
                 if missing > 0:
-                    issues.append(f"缺失 {missing}/{len(info.get('libraries', []))} 个依赖库")
+                    issues.append(f"缺失 {missing}/{expected} 个依赖库")
             except Exception:
                 issues.append("版本 JSON 解析失败")
 
         return issues
 
+    def _resolve_java_path(self) -> str:
+        """这个版本该用哪个 Java。
+
+        先看 PCL 给这个版本单独钉过的（PCL/config.json 的 InstanceForcedJava），再退回全局设置 ——
+        同一个版本目录被两个启动器共用时行为才一致，否则会出现 PCL 能启动、SXCL 报 Java 不对。
+        """
+        try:
+            from src.services.minecraft.pcl_compat import read_instance_java
+            pinned = read_instance_java(Path(cfg.gameDirectory.value) / "versions" / self.version.id)
+            if pinned:
+                log.info("启动 | 使用 PCL 为 %s 指定的 Java: %s", self.version.id, pinned)
+                return pinned
+        except Exception as exc:
+            log.debug("读取 PCL 实例 Java 失败: %s", exc)
+        return cfg.javaPath.value or ""
+
     def _phase_check_java(self):
-        java_path = cfg.javaPath.value
+        java_path = self._resolve_java_path()
         if not java_path:
             return False, "未设置 Java 路径"
         if not Path(java_path).exists():
@@ -205,7 +247,7 @@ class LaunchWorker(QThread):
         return True, ""
 
     def _phase_build_command(self):
-        java_path = cfg.javaPath.value
+        java_path = self._resolve_java_path()
         java_major, _ = detect_java_version(java_path)
         game_dir = Path(cfg.gameDirectory.value)
         version_id = self.version.id
@@ -334,6 +376,26 @@ class LaunchWorker(QThread):
         log.info("启动 | 游戏运行中")
         return True, ""
 
+    def _watch_process_exit(self):
+        """后台等待游戏进程退出，再收集崩溃日志。"""
+        proc = self._process
+        if proc is None:
+            return
+
+        def waiter():
+            try:
+                code = proc.wait()
+            except Exception:
+                return
+            log.info("启动 | 游戏进程已退出 (exit code: %s)", code)
+            self.log_line.emit(f"游戏已退出 (exit code: {code})")
+            try:
+                self._collect_crash_reports()
+            except Exception as exc:
+                log.warning("启动 | 崩溃日志收集失败: %s", exc)
+
+        threading.Thread(target=waiter, daemon=True).start()
+
     def _collect_crash_reports(self):
         """After game exit, scan for crash logs and copy them to launcher logs."""
         if not self._run_dir or not self._run_dir.exists():
@@ -441,9 +503,31 @@ class LaunchProgressPage(BasePage):
         self.subtitleLabel.hide()
         self.version = version
         self._worker: LaunchWorker | None = None
+        self._bar_state = "running"          # running / done / failed
 
         self._build_content()
+        from src.app.theme import on_theme_changed
+        on_theme_changed(self._apply_theme_styles)
         self._start_launch()
+
+    def _style_progress(self, state: str = "normal") -> None:
+        from src.app.theme import token
+        color = {"normal": token("accent"), "failed": token("danger"),
+                 "done": token("success")}.get(state, token("accent"))
+        self.progress_bar.setStyleSheet(
+            f"QProgressBar {{ border: none; background: {token('track')}; border-radius: 2px; }}"
+            f"QProgressBar::chunk {{ background: {color}; border-radius: 2px; }}")
+
+    def _badge_color(self) -> str:
+        from src.app.theme import token
+        return {"running": token("accent"), "done": token("success"),
+                "failed": token("danger")}.get(self._bar_state, token("text_secondary"))
+
+    def _apply_theme_styles(self) -> None:
+        from src.app.theme import token
+        self._style_progress(self._bar_state)
+        self.status_badge.setStyleSheet(f"color: {self._badge_color()}; font-weight: 500;")
+        self.log_output.setStyleSheet(f"color: {token('text_tertiary')};")
 
     def _build_content(self):
         card = CardWidget(self.view)
@@ -458,7 +542,6 @@ class LaunchProgressPage(BasePage):
         title_row.addWidget(self.phase_label)
         title_row.addStretch(1)
         self.status_badge = BodyLabel("● 准备中", card)
-        self.status_badge.setStyleSheet("color: #888888; font-weight: 500;")
         title_row.addWidget(self.status_badge)
         layout.addLayout(title_row)
 
@@ -468,10 +551,6 @@ class LaunchProgressPage(BasePage):
         self.progress_bar.setValue(0)
         self.progress_bar.setFixedHeight(4)
         self.progress_bar.setTextVisible(False)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar { border: none; background: rgba(128,128,128,0.2); border-radius: 2px; }
-            QProgressBar::chunk { background: #0078d4; border-radius: 2px; }
-        """)
         layout.addWidget(self.progress_bar)
 
         # ── Phase list ──
@@ -479,7 +558,7 @@ class LaunchProgressPage(BasePage):
             "检测 Java 运行时",
             "构建启动命令",
             "启动游戏进程",
-            "等待游戏窗口",
+            "等待游戏窗口" if supports_window_detection() else "等待游戏启动",
             "运行完成",
         ]
         self._phase_widgets: list[tuple[BodyLabel, LaunchIndicator]] = []
@@ -490,7 +569,7 @@ class LaunchProgressPage(BasePage):
             dot = LaunchIndicator(card)
             row.addWidget(dot)
             label = BodyLabel(name, card)
-            label.setTextColor("#999999", "#666666")
+            label.setTextColor(_token("text_tertiary"), _token("text_disabled"))
             row.addWidget(label)
             row.addStretch(1)
             layout.addLayout(row)
@@ -499,7 +578,7 @@ class LaunchProgressPage(BasePage):
         # ── Log output ──
         self.log_output = BodyLabel("", card)
         self.log_output.setWordWrap(True)
-        self.log_output.setTextColor("#888888", "#888888")
+        self.log_output.setTextColor(_token("text_tertiary"), _token("text_tertiary"))
         self.log_output.setFixedHeight(40)
         layout.addWidget(self.log_output)
 
@@ -531,19 +610,20 @@ class LaunchProgressPage(BasePage):
         if idx > 0 and idx - 1 < len(self._phase_widgets):
             prev_label, prev_dot = self._phase_widgets[idx - 1]
             prev_dot.set_state(LaunchIndicator.DONE)
-            prev_label.setTextColor("#52c41a", "#73d13d")
+            prev_label.setTextColor(_token("success"), _token("success"))
 
         # Mark current as active
         if idx < len(self._phase_widgets):
             label, dot = self._phase_widgets[idx]
             dot.set_state(LaunchIndicator.ACTIVE)
-            label.setTextColor("#0078d4", "#00bcf2")
+            label.setTextColor(_token("accent"), _token("accent"))
             self.phase_label.setText(name)
 
         progress = int((idx / total) * 100) if total > 0 else 0
         self.progress_bar.setValue(progress)
+        self._bar_state = "running"
         self.status_badge.setText("● 进行中")
-        self.status_badge.setStyleSheet("color: #0078d4; font-weight: 500;")
+        self._apply_theme_styles()
 
     def _on_log_line(self, line: str):
         self.log_output.setText(line[:80])
@@ -552,37 +632,36 @@ class LaunchProgressPage(BasePage):
         # Auto close after 2 seconds
         from PySide6.QtCore import QTimer
         self.status_badge.setText("✓ 已启动")
-        self.status_badge.setStyleSheet("color: #52c41a; font-weight: 500;")
+        self._bar_state = "done"
+        self._apply_theme_styles()
         QTimer.singleShot(2000, self._auto_close)
 
     def _on_finished(self, success: bool, message: str):
         self.cancel_btn.setEnabled(False)
         self.back_btn.setEnabled(True)
+        self._bar_state = "done" if success else "failed"
 
         for label, dot in self._phase_widgets:
             if dot._state == LaunchIndicator.ACTIVE:
                 if success:
                     dot.set_state(LaunchIndicator.DONE)
-                    label.setTextColor("#52c41a", "#73d13d")
+                    label.setTextColor(_token("success"), _token("success"))
                 else:
                     dot.set_state(LaunchIndicator.FAILED)
-                    label.setTextColor("#ff4d4f", "#ff7875")
+                    label.setTextColor(_token("danger"), _token("danger"))
 
         if success:
             self.progress_bar.setValue(100)
+            self._bar_state = "done"
+            self._apply_theme_styles()
             self.phase_label.setText("启动完成")
             self.status_badge.setText("✓ 完成")
-            self.status_badge.setStyleSheet("color: #52c41a; font-weight: 500;")
             from PySide6.QtCore import QTimer
             QTimer.singleShot(2000, self._auto_close)
         else:
-            self.progress_bar.setStyleSheet("""
-                QProgressBar { border: none; background: rgba(128,128,128,0.2); border-radius: 2px; }
-                QProgressBar::chunk { background: #ff4d4f; border-radius: 2px; }
-            """)
+            self._apply_theme_styles()
             self.phase_label.setText(message)
             self.status_badge.setText("✗ 失败")
-            self.status_badge.setStyleSheet("color: #ff4d4f; font-weight: 500;")
             self.log_output.setText(message)
 
     def _on_cancel(self):

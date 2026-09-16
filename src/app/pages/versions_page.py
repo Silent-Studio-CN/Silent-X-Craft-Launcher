@@ -26,16 +26,17 @@
 
 from __future__ import annotations
 
-import threading
 import webbrowser
-import sys
-import platform
-import re
-import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QMetaObject, QEvent
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget, QPushButton
+from PySide6.QtCore import (
+    Qt, QThread, Signal, QEvent, QTimer, QModelIndex, QRect, QSize, QAbstractListModel,
+)
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen
+from PySide6.QtWidgets import (
+    QAbstractItemView, QHBoxLayout, QListView, QPushButton, QStyle, QStyledItemDelegate,
+    QVBoxLayout, QWidget,
+)
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
@@ -48,17 +49,21 @@ from qfluentwidgets import (
     PushButton,
     SearchLineEdit,
     StrongBodyLabel,
+    isDarkTheme,
 )
 
 from src.app.common.base_page import BasePage
+from src.app.theme import token as _token
 from src.app.common.launcher_config import cfg
-from src.app.services.version_manifest import (
+from src.services.minecraft.manifest import (
     fetch_version_manifest,
     filter_versions,
     VersionType,
     GameVersion,
 )
-from src.app.services.download_service import VersionInstaller, get_installed_versions, get_version_info
+from src.app.icons import grass_block_pixmap, loader_chip_text, loader_color
+from src.services.minecraft.installed import get_installed_versions, get_version_info
+from src.services.minecraft.loaders import scan_installed
 
 
 class FetchWorker(QThread):
@@ -78,6 +83,224 @@ class FetchWorker(QThread):
             self.error.emit(str(e))
 
 
+class VersionListModel(QAbstractListModel):
+    """版本列表模型 —— 只存数据不建控件，这是列表不卡的关键。"""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._items: list[GameVersion] = []
+        self._installed: set[str] = set()
+        self._loaders: dict = {}      # 版本 id -> [(kind, version)]
+        self._problems: dict = {}     # 版本 id -> 不能启动的原因
+
+    def set_versions(self, versions, installed=None) -> None:
+        self.beginResetModel()
+        self._items = list(versions)
+        if installed is not None:
+            self._installed = set(installed)
+        self.endResetModel()
+
+    def set_loaders(self, mapping: dict) -> None:
+        """版本 id -> [(加载器种类, 版本号)]；只放已安装且带加载器的版本。"""
+        self._loaders = dict(mapping or {})
+        if self._items:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self._items) - 1, 0),
+                                  [self.LoadersRole, self.ProblemRole])
+
+    def set_problems(self, mapping: dict) -> None:
+        """版本 id -> 不能启动的原因（挂在原版那一行上，用户才看得到）。"""
+        self._problems = dict(mapping or {})
+        if self._items:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self._items) - 1, 0),
+                                  [self.ProblemRole])
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._items)
+
+    RowRole = Qt.UserRole                 # 该行的 GameVersion
+    InstalledRole = Qt.UserRole + 1
+    LoadersRole = Qt.UserRole + 2
+    ProblemRole = Qt.UserRole + 3      # 不能启动的原因（缺前置/JSON 坏）
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid() or not (0 <= index.row() < len(self._items)):
+            return None
+        version = self._items[index.row()]
+        if role == Qt.DisplayRole:
+            return version.id
+        if role == Qt.UserRole:
+            return version
+        if role == self.InstalledRole:
+            return version.id in self._installed
+        if role == self.LoadersRole:
+            return self._loaders.get(version.id, [])
+        if role == self.ProblemRole:
+            return self._problems.get(version.id, "")
+        if role == Qt.ToolTipRole:
+            state = "已安装" if version.id in self._installed else "未安装"
+            return f"{version.id}\n{version.version_type} | {version.release_label} | {state}"
+        return None
+
+
+class VersionRowDelegate(QStyledItemDelegate):
+    """一行一个版本：名称 / 类型 / 日期；悬停时右侧出现「版本日志 / 获取服务端」。"""
+
+    action_triggered = Signal(object, str)
+
+    ROW_HEIGHT = 52
+    BTN_H = 28
+    LOG_W = 84
+    SRV_W = 96
+    GAP = 8
+    MARGIN = 16
+
+    def sizeHint(self, option, index) -> QSize:
+        return QSize(0, self.ROW_HEIGHT)
+
+    def _button_rects(self, rect: QRect):
+        y = rect.top() + (rect.height() - self.BTN_H) // 2
+        srv = QRect(rect.right() - self.MARGIN - self.SRV_W, y, self.SRV_W, self.BTN_H)
+        log = QRect(srv.left() - self.GAP - self.LOG_W, y, self.LOG_W, self.BTN_H)
+        return log, srv
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        version = index.data(Qt.UserRole)
+        if version is None:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = option.rect.adjusted(0, 2, 0, -2)
+        hovered = bool(option.state & QStyle.State_MouseOver)
+        dark = isDarkTheme()
+
+        painter.setPen(Qt.NoPen)
+        from src.app.theme import qcolor as _tc
+        painter.setBrush(QBrush(_tc("hover_strong") if hovered else _tc("hover")))
+        painter.drawRoundedRect(rect, 6, 6)
+
+        from src.app.theme import qcolor as theme_color
+        text_color = theme_color("text")
+        sub_color = theme_color("text_tertiary")
+        type_map = {"release": "正式版", "snapshot": "快照", "old": "旧版"}
+
+        left = rect.left() + 16
+        font = painter.font()
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QPen(text_color))
+        painter.drawText(QRect(left, rect.top(), 144, rect.height()),
+                         Qt.AlignVCenter | Qt.AlignLeft, version.id)
+
+        font.setBold(False)
+        painter.setFont(font)
+        painter.setPen(QPen(sub_color))
+        painter.drawText(QRect(left + 152, rect.top(), 64, rect.height()),
+                         Qt.AlignVCenter | Qt.AlignLeft,
+                         type_map.get(version.version_type, version.version_type))
+        painter.drawText(QRect(left + 226, rect.top(), 110, rect.height()),
+                         Qt.AlignVCenter | Qt.AlignLeft, version.release_label)
+
+        if index.data(VersionListModel.InstalledRole):
+            from PySide6.QtGui import QColor as _QColor
+            from src.app.theme import qcolor as _ok
+            # 草方块 = Minecraft 版本的通用符号，一眼看出这条是装好的
+            from src.app.icons import block_pixmap, state_icon_kind
+            icon_kind = state_icon_kind(version.version_type,
+                                        index.data(VersionListModel.LoadersRole),
+                                        bool(index.data(VersionListModel.ProblemRole)))
+            painter.drawPixmap(QRect(left + 340, rect.top() + (rect.height() - 14) // 2, 14, 14),
+                               block_pixmap(icon_kind, 28))
+            painter.setPen(QPen(_ok("success")))
+            painter.drawText(QRect(left + 360, rect.top(), 60, rect.height()),
+                             Qt.AlignVCenter | Qt.AlignLeft, "已安装")
+            # 同一个原版下装了哪些模组加载器（用户经常一个版本装好几套）
+            chip_x = left + 424
+            metrics = painter.fontMetrics()
+            for kind, version_text in (index.data(VersionListModel.LoadersRole) or [])[:3]:
+                text = loader_chip_text(kind, version_text)
+                width = metrics.horizontalAdvance(text) + 16
+                if chip_x + width > rect.right() - 8:
+                    break
+                chip = QRect(chip_x, rect.top() + (rect.height() - 20) // 2, width, 20)
+                color = _QColor(loader_color(kind))
+                fill = _QColor(color)
+                fill.setAlpha(48)
+                painter.setPen(QPen(color, 1))
+                painter.setBrush(QBrush(fill))
+                painter.drawRoundedRect(chip, 4, 4)
+                painter.setPen(QPen(color))
+                painter.drawText(chip, Qt.AlignCenter, text)
+                chip_x += width + 6
+
+            # 不能启动的原因直接贴在行里（缺前置/JSON 坏），别等用户点启动才报错
+            problem = index.data(VersionListModel.ProblemRole) or ""
+            if problem:
+                text = "⚠ " + problem
+                width = metrics.horizontalAdvance(text) + 16
+                if chip_x + width <= rect.right() - 8:
+                    chip = QRect(chip_x, rect.top() + (rect.height() - 20) // 2, width, 20)
+                    color = _QColor(_ok("danger"))
+                    fill = _QColor(color)
+                    fill.setAlpha(48)
+                    painter.setPen(QPen(color, 1))
+                    painter.setBrush(QBrush(fill))
+                    painter.drawRoundedRect(chip, 4, 4)
+                    painter.setPen(QPen(color))
+                    painter.drawText(chip, Qt.AlignCenter, text)
+            painter.setBrush(Qt.NoBrush)
+
+        if hovered:
+            log_rect, srv_rect = self._button_rects(rect)
+            from src.app.theme import qcolor as _ac
+            painter.setPen(QPen(_ac("accent")))
+            painter.setBrush(Qt.NoBrush)
+            for btn_rect, label in ((log_rect, "版本日志"), (srv_rect, "获取服务端")):
+                painter.drawRoundedRect(btn_rect, 4, 4)
+                painter.drawText(btn_rect, Qt.AlignCenter, label)
+        painter.restore()
+
+    def button_rects(self, index, view) -> tuple:
+        """给视图做命中测试用：这一行两个按钮的屏幕矩形。
+
+        以前是在 editorEvent 里判的，而那里依赖 option.state 的 MouseOver —— 实测
+        **松开鼠标时 Qt 并不给 MouseOver**，于是「版本日志」永远点不动（事件被当成整行点击，
+        结果打开了下载配置页）。现在把命中测试交给视图自己（见 VersionListView）。
+        """
+        rect = view.visualRect(index).adjusted(0, 2, 0, -2)
+        return self._button_rects(rect)
+
+
+class VersionListView(QListView):
+    """版本列表：把行内那两个按钮（版本日志 / 获取服务端）的点击接住。
+
+    为什么不放在 delegate 的 editorEvent 里：那条路要求 option.state 带 MouseOver，
+    而松手时 Qt 不给这个状态 —— 实测点「版本日志」会落空并退化成整行点击。
+    在 mouseReleaseEvent 里直接算矩形最稳，而且能在按钮命中时**不调用 super()**，
+    从而保证"点按钮就只是点按钮"，不会再触发整行的下载配置页。
+    """
+
+    action_triggered = Signal(object, str)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            index = self.indexAt(event.position().toPoint())
+            delegate = self.itemDelegate()
+            if index.isValid() and hasattr(delegate, "button_rects"):
+                version = index.data(VersionListModel.RowRole)
+                if version is not None:
+                    log_rect, srv_rect = delegate.button_rects(index, self)
+                    pos = event.position().toPoint()
+                    if log_rect.contains(pos):
+                        self.action_triggered.emit(version, "wiki")
+                        event.accept()
+                        return
+                    if srv_rect.contains(pos):
+                        self.action_triggered.emit(version, "server")
+                        event.accept()
+                        return
+        super().mouseReleaseEvent(event)
+
+
 class VersionsPage(BasePage):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(
@@ -89,6 +312,7 @@ class VersionsPage(BasePage):
         self._filtered: list[GameVersion] = []
         self._worker: FetchWorker | None = None
         self._installed: list[str] = []
+        self._installed_versions: list = []
 
         self._build_content()
         self._load_versions()
@@ -105,6 +329,12 @@ class VersionsPage(BasePage):
         self.search_box.setClearButtonEnabled(True)
         self.search_box.textChanged.connect(self._on_search)
 
+        # 搜索防抖：以前每敲一个字符就重建全部卡片（实测 0.6~0.8 秒/字符）
+        self._reload_timer = QTimer(self)
+        self._reload_timer.setSingleShot(True)
+        self._reload_timer.setInterval(260)
+        self._reload_timer.timeout.connect(self._reload_list)
+
         self.category_combo = ComboBox(toolbar)
         self.category_combo.addItems(["全部", "正式版", "快照", "旧版"])
         self.category_combo.setCurrentIndex(1)  # 默认"正式版"
@@ -118,12 +348,7 @@ class VersionsPage(BasePage):
         toolbar_layout.addWidget(self.refresh_btn)
 
         # ---- 版本列表 ----
-        self.version_container = QWidget(self.view)
-        self.version_layout = QVBoxLayout(self.version_container)
-        self.version_layout.setContentsMargins(0, 0, 0, 0)
-        self.version_layout.setSpacing(8)
-
-        # ── 加载中（居中旋转圈 + 文字） ──
+        # ── 加载中（居中旋转圈 + 文字）──
         self.loading_widget = QWidget(self.view)
         lw = QVBoxLayout(self.loading_widget)
         lw.setAlignment(Qt.AlignCenter)
@@ -141,17 +366,41 @@ class VersionsPage(BasePage):
         self.status_label = BodyLabel("", self.view)
         self.status_label.setVisible(False)
 
+        # 虚拟化列表：只渲染可见行，几千个版本也是瞬间完成
+        self.version_list = VersionListView(self.view)
+        self.version_list.setObjectName("versionList")
+        self.version_list.setUniformItemSizes(True)
+        self.version_list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.version_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.version_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.version_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.version_list.setMouseTracking(True)
+        self.version_list.setAttribute(Qt.WA_Hover, True)
+        self.version_list.viewport().setAttribute(Qt.WA_Hover, True)
+        self.version_list.setMinimumHeight(260)
+        self.version_list.setStyleSheet("QListView { background: transparent; border: none; }")
+
+        self._model = VersionListModel(self.version_list)
+        self._delegate = VersionRowDelegate(self.version_list)
+        self.version_list.setModel(self._model)
+        self.version_list.setItemDelegate(self._delegate)
+        self.version_list.clicked.connect(self._on_row_clicked)
+        # 行内按钮的点击由视图接（delegate 的 editorEvent 那条路点不动，见 VersionListView）
+        self.version_list.action_triggered.connect(self._on_row_action)
+        from src.app.theme import on_theme_changed
+        on_theme_changed(lambda: (self.version_list.viewport().update(),
+                                  self.status_label.update()))
+
         self.add_content(toolbar)
         self.add_content(self.loading_widget)
         self.add_content(self.status_label)
-        self.add_content(self.version_container)
-        self.add_stretch()
+        self.vBoxLayout.addWidget(self.version_list, 1)
 
     def _load_versions(self) -> None:
         self.loading_widget.setVisible(True)
         self.loading_label.setText("正在加载版本清单…")
         self.status_label.setVisible(False)
-        self._clear_version_cards()
+        self._model.set_versions([])
         self.refresh_btn.setEnabled(False)
 
         source = cfg.downloadSource.value
@@ -160,15 +409,72 @@ class VersionsPage(BasePage):
         self._worker.error.connect(self._on_load_error)
         self._worker.start()
 
+    def _refresh_installed(self) -> None:
+        """扫描已安装版本（含模组加载器），并把结果同步给列表模型。
+
+        只要求 JSON：Forge 1.13+ / Fabric 装的版本没有自己的 jar（继承原版），
+        以前按"jar + json 都在"判断会把它们全漏掉。
+        """
+        try:
+            self._installed_versions = scan_installed()
+        except Exception:
+            self._installed_versions = []
+
+        # "已安装"只认精确匹配（原版目录在不在是事实，不能糊弄）
+        self._installed = [item.id for item in self._installed_versions]
+
+        # 加载器标签要挂到**原版那一行**上：列表里显示的是原版版本号，
+        # 用户关心的是"1.21.11 这个版本下我已经装了哪些加载器"
+        loaders: dict[str, list] = {}
+        for item in self._installed_versions:
+            if not item.loaders:
+                continue
+            keys = {item.id}
+            if item.base_version:
+                keys.add(item.base_version)
+            for key in keys:
+                bucket = loaders.setdefault(key, [])
+                for loader in item.loaders:
+                    pair = (loader.kind, loader.version)
+                    if pair not in bucket:
+                        bucket.append(pair)
+        self._model.set_loaders(loaders)
+
+        # 不能启动的原因（缺前置版本等）也挂到原版那一行
+        problems: dict = {}
+        for item in self._installed_versions:
+            reason = item.problem()
+            if not reason:
+                continue
+            for key in {item.id, item.base_version or item.id}:
+                problems.setdefault(key, reason)
+        self._model.set_problems(problems)
+
+    def _loader_summary_text(self) -> str:
+        """状态栏那行：已安装几个 + 各加载器各几个。"""
+        counts: dict = {}
+        for item in getattr(self, "_installed_versions", []):
+            for loader in item.loaders:
+                counts[loader.name] = counts.get(loader.name, 0) + 1
+        if not counts:
+            return ""
+        parts = "、".join(f"{name} {count}" for name, count in sorted(counts.items()))
+        multiple = sum(1 for count in counts.values() if count > 1)
+        tail = "（同一原版装了多个加载器）" if multiple else ""
+        return "｜加载器：" + parts + tail
+
     def _on_versions_loaded(self, versions: list[GameVersion]) -> None:
+
         self._versions = versions
-        self._installed = get_installed_versions()
+        self._refresh_installed()
         self._last_fs_snapshot = set(self._installed)
         self.refresh_btn.setEnabled(True)
         self._apply_filters()
         self.loading_widget.setVisible(False)
         self.status_label.setVisible(True)
-        self.status_label.setText(f"共 {len(self._versions)} 个版本，已安装 {len(self._installed)} 个")
+        self.status_label.setText(
+            f"共 {len(self._versions)} 个版本，已安装 {len(self._installed)} 个"
+            f"{self._loader_summary_text()}")
         self._show_versions(self._filtered)
 
     def _on_load_error(self, error: str) -> None:
@@ -185,133 +491,27 @@ class VersionsPage(BasePage):
             parent=self,
         )
 
-    def _clear_version_cards(self) -> None:
-        """安全清理所有版本卡片"""
-        for child in self.version_container.children():
-            if isinstance(child, CardWidget):
-                child.deleteLater()
-        
-        while self.version_layout.count() > 0:
-            item = self.version_layout.takeAt(0)
-            if item and hasattr(item, 'widget'):
-                widget = item.widget()
-                if widget:
-                    widget.deleteLater()
+    def _show_versions(self, versions: list) -> None:
+        """把过滤后的结果塞进模型（不再创建任何控件）。"""
+        self._refresh_installed()
+        self._model.set_versions(versions, self._installed)
+        if versions:
+            self.status_label.setText(
+                f"共 {len(self._versions)} 个版本，已安装 {len(self._installed)} 个 | "
+                f"当前显示 {len(versions)} 个{self._loader_summary_text()}")
+        else:
+            self.status_label.setText("没有匹配的版本")
 
-    def _apply_filters(self) -> None:
-        category_map = {
-            0: VersionType.ALL,
-            1: VersionType.RELEASE,
-            2: VersionType.SNAPSHOT,
-            3: VersionType.OLD,
-        }
-        category = category_map.get(self.category_combo.currentIndex(), VersionType.ALL)
-        query = self.search_box.text()
+    def _on_row_clicked(self, index) -> None:
+        version = index.data(Qt.UserRole)
+        if version is not None:
+            self._on_version_card_clicked(version)
 
-        self._filtered = filter_versions(
-            self._versions,
-            query=query,
-            category=category,
-        )
-
-    def _show_versions(self, versions: list[GameVersion]) -> None:
-        """显示版本列表 - 一行一个"""
-        self._clear_version_cards()
-
-        if not versions:
-            empty_label = BodyLabel("没有匹配的版本", self.version_container)
-            self.version_layout.addWidget(empty_label)
-            return
-
-        # 更新已安装列表
-        self._installed = get_installed_versions()
-
-        for version in versions:
-            card = self._create_version_card(version)
-            self.version_layout.addWidget(card)
-
-    def _create_version_card(self, version: GameVersion) -> CardWidget:
-        """创建单个版本卡片 - 整个卡片可点击进入配置页"""
-        card = CardWidget(self.version_container)
-        card.setFixedHeight(52)
-        card.setAttribute(Qt.WA_Hover, True)
-        card.setCursor(Qt.PointingHandCursor)
-        card.version_id = version.id
-
-        layout = QHBoxLayout(card)
-        layout.setContentsMargins(16, 6, 16, 6)
-        layout.setSpacing(12)
-
-        # ---- 点击事件由 eventFilter 处理 ----
-
-        # 版本号
-        name_label = StrongBodyLabel(version.id, card)
-        name_label.setFixedWidth(140)
-        layout.addWidget(name_label)
-
-        # 版本类型
-        type_map = {"release": "正式版", "snapshot": "快照", "old": "旧版"}
-        type_label = BodyLabel(type_map.get(version.version_type, version.version_type), card)
-        type_label.setTextColor("#666666", "#999999")
-        type_label.setFixedWidth(60)
-        layout.addWidget(type_label)
-
-        # 发布日期
-        date_label = BodyLabel(version.release_label, card)
-        date_label.setTextColor("#888888", "#888888")
-        date_label.setFixedWidth(150)
-        layout.addWidget(date_label)
-
-        # 弹簧撑开
-        layout.addStretch(1)
-
-        # --- 操作按钮（"版本日志"和"获取服务端"） ---
-        # 单击卡片任意位置进入配置页（card_click_btn 处理）
-        button_widget = QWidget(card)
-        button_widget.setVisible(False)
-        button_layout = QHBoxLayout(button_widget)
-        button_layout.setContentsMargins(0, 0, 0, 0)
-        button_layout.setSpacing(8)
-
-        # "版本日志"按钮
-        log_btn = QPushButton("📜 版本日志")
-        log_btn.setFixedSize(80, 28)
-        log_btn.clicked.connect(lambda checked, v=version: self._open_version_wiki(v))
-        button_layout.addWidget(log_btn)
-
-        # "获取服务端"按钮
-        server_btn = QPushButton("🖥 获取服务端")
-        server_btn.setFixedSize(90, 28)
-        server_btn.clicked.connect(lambda checked, v=version: self._show_server_placeholder(v))
-        button_layout.addWidget(server_btn)
-
-        # 把按钮容器放在透明按钮上面
-        button_widget.raise_()
-
-        layout.addWidget(button_widget)
-
-        card.button_widget = button_widget
-
-        card.installEventFilter(self)
-
-        return card
-
-    def eventFilter(self, obj, event):
-        """事件过滤器：处理卡片点击和悬停显示按钮"""
-        if isinstance(obj, CardWidget):
-            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-                # 点击卡片进入配置页（排除按钮点击）
-                if hasattr(obj, 'version_id'):
-                    v = next((v for v in self._versions if v.id == obj.version_id), None)
-                    if v and not self._on_version_card_clicked(v):
-                        pass
-                return True
-            if hasattr(obj, 'button_widget'):
-                if event.type() == QEvent.Enter:
-                    obj.button_widget.setVisible(True)
-                elif event.type() == QEvent.Leave:
-                    obj.button_widget.setVisible(False)
-        return super().eventFilter(obj, event)
+    def _on_row_action(self, version, action: str) -> None:
+        if action == "wiki":
+            self._open_version_wiki(version)
+        elif action == "server":
+            self._show_server_placeholder(version)
 
     def _on_version_card_clicked(self, version: GameVersion):
         """单击版本卡片进入下载配置页"""
@@ -350,179 +550,6 @@ class VersionsPage(BasePage):
             duration=3000,
             parent=self,
         )
-
-    # ==================== Java 版本检测服务 ====================
-    
-    def _detect_java_version(self, java_path: str) -> tuple[int, str]:
-        """检测 Java 版本，返回 (主版本号, 完整版本字符串)"""
-        try:
-            result = subprocess.run(
-                [java_path, '-version'],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            output = result.stderr + result.stdout
-            
-            # 匹配版本号
-            match = re.search(r'version "(\d+)', output)
-            if match:
-                major = int(match.group(1))
-                return major, output
-            return 0, output
-        except Exception as e:
-            print(f"[JavaVersion] 检测失败: {e}")
-            return 0, ""
-    
-    def _get_supported_jvm_args(self, java_major: int) -> list:
-        """根据 Java 版本返回支持的 JVM 参数"""
-        args = [
-            "--enable-native-access=ALL-UNNAMED",
-            "-XX:+UnlockExperimentalVMOptions",
-            "-XX:+UseG1GC",
-            "-XX:G1NewSizePercent=20",
-            "-XX:G1ReservePercent=20",
-            "-XX:G1HeapRegionSize=32M",
-            "-XX:MaxGCPauseMillis=50",
-            "-XX:+PerfDisableSharedMem",
-            "-XX:MinHeapFreeRatio=25",
-            "-XX:MaxHeapFreeRatio=40",
-            "-XX:-OmitStackTraceInFastThrow",
-            "-Djdk.lang.Process.allowAmbiguousCommands=True",
-            "-Dfml.ignoreInvalidMinecraftCertificates=True",
-            "-Dfml.ignorePatchDiscrepancies=True",
-        ]
-        
-        # Java 9+ 支持
-        if java_major >= 9:
-            args.append("--sun-misc-unsafe-memory-access=allow")
-        
-        # Java 23+ 支持 CompactObjectHeaders
-        if java_major >= 23:
-            args.append("-XX:+UseCompactObjectHeaders")
-        
-        return args
-    
-    def _is_java_compatible(self, java_major: int, mc_version: str) -> tuple[bool, str]:
-        """检查 Java 版本是否与 Minecraft 版本兼容"""
-        required = 17  # 默认
-        try:
-            parts = mc_version.split('.')
-            if len(parts) >= 2:
-                if int(parts[0]) >= 26:
-                    required = 25
-                elif int(parts[0]) >= 21:
-                    required = 21
-                elif int(parts[0]) == 1 and int(parts[1]) >= 21:
-                    required = 21
-                elif int(parts[0]) == 1 and int(parts[1]) >= 17:
-                    required = 17
-        except:
-            pass
-        
-        if java_major >= required:
-            return True, f"Java {java_major} 兼容 (需要 Java {required}+)"
-        else:
-            return False, f"Java {java_major} 版本过低 (需要 Java {required}+)"
-
-    # ==================== 平台检测和库兼容性 ====================
-    
-    def _detect_platform(self):
-        """检测当前平台信息"""
-        system = sys.platform
-        is_windows = system.startswith('win')
-        is_macos = system.startswith('darwin')
-        is_linux = system.startswith('linux')
-        arch = platform.machine().lower()
-        is_arm64 = arch in ['arm64', 'aarch64']
-        return is_windows, is_macos, is_linux, is_arm64
-
-    def _is_lib_compatible(self, lib: dict, is_windows: bool, is_macos: bool, is_linux: bool, is_arm64: bool) -> bool:
-        """完整库兼容性检测 - 支持 os 和 arch 规则"""
-        rules = lib.get('rules', [])
-        if not rules:
-            return True
-        
-        current_os = None
-        if is_windows:
-            current_os = 'windows'
-        elif is_macos:
-            current_os = 'osx'
-        elif is_linux:
-            current_os = 'linux'
-        
-        allow = False
-        for rule in rules:
-            action = rule.get('action', 'allow')
-            os_info = rule.get('os', {})
-            
-            # 检查操作系统
-            rule_os = os_info.get('name')
-            if rule_os and rule_os != current_os:
-                continue
-            
-            # 检查架构
-            rule_arch = os_info.get('arch')
-            if rule_arch:
-                if rule_arch == 'arm64' and not is_arm64:
-                    continue
-                if rule_arch == 'x86' and is_arm64:
-                    continue
-            
-            allow = action == 'allow'
-        
-        return allow
-
-    def _get_native_key(self, natives: dict, is_windows: bool, is_macos: bool, is_linux: bool, is_arm64: bool) -> str | None:
-        """根据平台获取 natives 键名"""
-        if is_windows:
-            if is_arm64 and 'natives-windows-arm64' in natives:
-                return 'natives-windows-arm64'
-            if 'natives-windows' in natives:
-                return 'natives-windows'
-        elif is_macos:
-            if is_arm64 and 'natives-osx-arm64' in natives:
-                return 'natives-osx-arm64'
-            if 'natives-osx' in natives:
-                return 'natives-osx'
-        elif is_linux:
-            if is_arm64 and 'natives-linux-arm64' in natives:
-                return 'natives-linux-arm64'
-            if 'natives-linux' in natives:
-                return 'natives-linux'
-        return None
-
-    def _build_classpath(self, version_info: dict, game_dir: Path, is_windows: bool, is_macos: bool, is_linux: bool, is_arm64: bool) -> tuple[list[str], int]:
-        """构建 classpath 列表和分隔符"""
-        libraries_dir = game_dir / "libraries"
-        classpath_entries = []
-        lib_count = 0
-
-        for lib in version_info.get('libraries', []):
-            if not self._is_lib_compatible(lib, is_windows, is_macos, is_linux, is_arm64):
-                continue
-            downloads = lib.get('downloads', {})
-            artifact = downloads.get('artifact')
-            natives = downloads.get('classifiers') or {}
-            native_key = self._get_native_key(natives, is_windows, is_macos, is_linux, is_arm64)
-
-            if native_key and native_key in natives:
-                path = natives[native_key].get('path')
-                if path:
-                    lib_file = libraries_dir / path
-                    if lib_file.exists():
-                        classpath_entries.append(str(lib_file))
-                        lib_count += 1
-            elif artifact:
-                path = artifact.get('path')
-                if path:
-                    lib_file = libraries_dir / path
-                    if lib_file.exists():
-                        classpath_entries.append(str(lib_file))
-                        lib_count += 1
-
-        # 游戏 jar 放在最后
-        return classpath_entries, lib_count
 
     # ==================== 启动逻辑 ====================
 
@@ -593,9 +620,26 @@ class VersionsPage(BasePage):
         self._load_versions()
 
     def _on_search(self, text: str) -> None:
+        self._reload_timer.start()
+
+    def _apply_filters(self) -> None:
+        """按分类 + 关键字过滤（结果交给 _show_versions 塞进模型）。"""
+        category_map = {
+            0: VersionType.ALL,
+            1: VersionType.RELEASE,
+            2: VersionType.SNAPSHOT,
+            3: VersionType.OLD,
+        }
+        category = category_map.get(self.category_combo.currentIndex(), VersionType.ALL)
+        self._filtered = filter_versions(
+            self._versions,
+            query=self.search_box.text(),
+            category=category,
+        )
+
+    def _reload_list(self) -> None:
         self._apply_filters()
         self._show_versions(self._filtered)
 
     def _on_category_changed(self, index: int) -> None:
-        self._apply_filters()
-        self._show_versions(self._filtered)
+        self._reload_list()

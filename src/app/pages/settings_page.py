@@ -30,6 +30,7 @@ import psutil
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QSlider, QSpinBox
 from qfluentwidgets import (
+    ColorSettingCard,
     ComboBoxSettingCard,
     FluentIcon as FIF,
     HyperlinkCard,
@@ -45,16 +46,17 @@ from qfluentwidgets import (
     Theme,
 )
 
-from src.app.common.config import APP_NAME, APP_VERSION, DownloadSource
+from src.core.constants import APP_NAME, APP_VERSION, DownloadSource
 from src.app.common.launcher_config import (
     LauncherLanguage,
     WindowSizePreset,
     cfg,
-    theme_labels,
     save_config,
 )
+from src.app.theme import THEME_LABELS
 from src.app.common.base_page import BasePage
-from src.app.common.platform import default_game_directory
+from src.core.platform import default_game_directory
+from src.core.logger import log
 from src.app.widgets.java_setting_card import JavaSettingCard
 
 
@@ -150,6 +152,53 @@ class MemorySettingCard(SettingCard):
         self.spin_box.blockSignals(False)
 
 
+class SpinSettingCard(SettingCard):
+    """单数值设置卡片（右侧 QSpinBox），用于并发数 / 限速这类数值项。"""
+
+    def __init__(
+        self,
+        configItem,
+        icon,
+        title,
+        content=None,
+        parent=None,
+        minimum=0,
+        maximum=100,
+        step=1,
+        suffix="",
+        on_changed=None,
+    ):
+        super().__init__(icon, title, content, parent)
+        self.configItem = configItem
+        self._on_changed = on_changed
+
+        self.spin = QSpinBox(self)
+        self.spin.setRange(int(minimum), int(maximum))
+        self.spin.setSingleStep(int(step))
+        self.spin.setSuffix(suffix)
+        self.spin.setFixedWidth(130)
+        try:
+            self.spin.setValue(int(configItem.value))
+        except Exception:
+            self.spin.setValue(int(minimum))
+
+        self.hBoxLayout.addStretch(1)
+        self.hBoxLayout.addWidget(self.spin)
+        self.hBoxLayout.addSpacing(20)
+        self.spin.valueChanged.connect(self._apply)
+
+    def _apply(self, value: int) -> None:
+        qconfig.set(self.configItem, int(value))
+        save_config()
+        if self._on_changed:
+            self._on_changed(int(value))
+
+    def set_value(self, value: int) -> None:
+        self.spin.blockSignals(True)
+        self.spin.setValue(int(value))
+        self.spin.blockSignals(False)
+
+
 class SettingsPage(BasePage):
     def __init__(self, parent=None) -> None:
         super().__init__(
@@ -172,10 +221,18 @@ class SettingsPage(BasePage):
             parent=general_group,
         )
         self.theme_card = ComboBoxSettingCard(
-            cfg.themeMode,
+            qconfig.themeMode,
             FIF.BRUSH,
             "主题模式",
-            texts=theme_labels(),
+            "浅色 / 深色 / 跟随系统",
+            texts=THEME_LABELS,
+            parent=general_group,
+        )
+        self.theme_color_card = ColorSettingCard(
+            qconfig.themeColor,
+            FIF.PALETTE,
+            "主题色",
+            "强调色：按钮、选中态、进度条都会跟着变",
             parent=general_group,
         )
         self.language_card = ComboBoxSettingCard(
@@ -208,6 +265,7 @@ class SettingsPage(BasePage):
 
         general_group.addSettingCard(self.update_card)
         general_group.addSettingCard(self.theme_card)
+        general_group.addSettingCard(self.theme_color_card)
         general_group.addSettingCard(self.language_card)
         general_group.addSettingCard(self.source_card)
 
@@ -303,6 +361,39 @@ class SettingsPage(BasePage):
         advanced_group.addSettingCard(self.download_engine_card)
         advanced_group.addSettingCard(self.reset_card)
 
+        # ---- 下载设置（自研异步下载引擎）----
+        download_group = SettingCardGroup("下载设置", self.view)
+
+        self.conn_card = SpinSettingCard(
+            cfg.maxConnections,
+            FIF.SPEED_HIGH,
+            "并发连接数",
+            "同时进行的下载连接数；带宽跑不满时可以调高（4 - 128）",
+            parent=download_group,
+            minimum=4, maximum=128, step=4,
+        )
+        self.limit_card = SpinSettingCard(
+            cfg.speedLimitKbps,
+            FIF.SPEED_OFF,
+            "下载限速",
+            "0 = 不限速；单位 KB/s（1024KB/s = 1MB/s），对所有下载连接全局生效",
+            parent=download_group,
+            minimum=0, maximum=1048576, step=256, suffix=" KB/s",
+            on_changed=self._apply_speed_limit,
+        )
+        _verify_icon = getattr(FIF, "CERTIFICATE", None) or getattr(FIF, "ACCEPT", FIF.INFO)
+        self.verify_card = SwitchSettingCard(
+            _verify_icon,
+            "校验文件完整性（SHA1）",
+            "强制校验 Mojang 提供哈希的全部资源；校验失败会自动换源重下",
+            configItem=cfg.verifySha1,
+            parent=download_group,
+        )
+
+        download_group.addSettingCard(self.conn_card)
+        download_group.addSettingCard(self.limit_card)
+        download_group.addSettingCard(self.verify_card)
+
         # ---- 关于 ----
         about_group = SettingCardGroup("关于", self.view)
         self.about_card = SettingCard(
@@ -323,6 +414,7 @@ class SettingsPage(BasePage):
 
         self.add_content(general_group)
         self.add_content(game_group)
+        self.add_content(download_group)
         self.add_content(advanced_group)
         self.add_content(about_group)
         self.add_stretch()
@@ -337,7 +429,8 @@ class SettingsPage(BasePage):
         self.java_card.selectionChanged.connect(self._on_java_changed)
         self.game_dir_card.clicked.connect(self._pick_game_directory)
         self.reset_card.clicked.connect(self._reset_settings)
-        cfg.themeMode.valueChanged.connect(self._on_theme_changed)
+        qconfig.themeMode.valueChanged.connect(lambda *_: self._on_theme_changed())
+        qconfig.themeColor.valueChanged.connect(lambda *_: self._on_theme_changed())
         cfg.downloadSource.valueChanged.connect(self._on_download_source_changed)
         cfg.versionIsolation.valueChanged.connect(self._on_isolation_changed)
 
@@ -358,7 +451,8 @@ class SettingsPage(BasePage):
 
     def _reset_settings(self) -> None:
         qconfig.set(cfg.autoCheckUpdate, True)
-        qconfig.set(cfg.themeMode, Theme.AUTO)
+        from qfluentwidgets import Theme as _Theme
+        qconfig.set(qconfig.themeMode, _Theme.AUTO)
         qconfig.set(cfg.language, LauncherLanguage.ZH_CN)
         qconfig.set(cfg.downloadSource, DownloadSource.BMCLAPI)
         qconfig.set(cfg.javaPath, "")
@@ -379,12 +473,19 @@ class SettingsPage(BasePage):
         qconfig.set(cfg.windowSize, WindowSizePreset.SIZE_1280x720)
         qconfig.set(cfg.gameDirectory, str(default_game_directory()))
         qconfig.set(cfg.debugMode, False)
+        qconfig.set(cfg.maxConnections, 32)
+        qconfig.set(cfg.speedLimitKbps, 0)
+        qconfig.set(cfg.verifySha1, True)
 
         save_config()
 
+        self.conn_card.set_value(32)
+        self.limit_card.set_value(0)
+        self._apply_speed_limit(0)
+
         self.game_dir_card.setContent(cfg.gameDirectory.value)
         self.java_card.refresh()
-        self.theme_card.setValue(cfg.themeMode.value)
+        self.theme_card.setValue(qconfig.themeMode.value)
         self.language_card.setValue(cfg.language.value)
         self.source_card.setValue(cfg.downloadSource.value)
         self.window_card.setValue(cfg.windowSize.value)
@@ -407,8 +508,19 @@ class SettingsPage(BasePage):
             parent=self,
         )
 
-    def _on_theme_changed(self, theme) -> None:
-        setTheme(theme)
+    def _on_theme_changed(self, theme=None) -> None:
+        """主题/主题色变化：就地重刷全部样式（不重建窗口，避免打断下载任务）。"""
+        from src.app.theme import apply_theme
+        apply_theme(qconfig.themeMode.value)
+
+    def _apply_speed_limit(self, kbps: int) -> None:
+        """限速即时生效（不用重启下载）。"""
+        try:
+            from src.core.download import limiter
+            limiter().set_rate(float(kbps or 0) * 1024.0)
+            log.info("下载限速已更新: %s KB/s", kbps)
+        except Exception as exc:
+            log.warning("设置限速失败: %s", exc)
 
     def _on_download_source_changed(self, source: DownloadSource) -> None:
         window = self.window()

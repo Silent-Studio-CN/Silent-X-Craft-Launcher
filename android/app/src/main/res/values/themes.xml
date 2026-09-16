@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 不用 AndroidX/Material 依赖：直接继承系统主题，少一层依赖少一堆版本问题 -->
+    <style name="Theme.SXCL" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#101418</item>
+        <item name="android:statusBarColor">#101418</item>
+    </style>
+</resources>

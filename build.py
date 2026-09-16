@@ -67,6 +67,7 @@ def build_windows(target_arch: str):
         "--enable-plugin=pyside6",
         "--windows-console-mode=disable",
         "--include-data-dir=config=config",
+        "--include-data-dir=assets=assets",
         f"--output-dir={DIST}",
         str(ROOT / "main.py"),
     ]
@@ -99,16 +100,26 @@ def build_windows(target_arch: str):
 
 
 def build_macos():
-    """Build macOS single-file executable via Nuitka."""
+    """Build macOS app bundle via Nuitka.
+
+    macOS 上只给一个裸二进制体验很差（没有 Dock 图标/菜单栏，Gatekeeper 还会拦），
+    所以这里用 --macos-create-app-bundle 直接产出 SXCL.app。
+    未签名的包首次打开需要：右键 -> 打开，或 xattr -dr com.apple.quarantine SXCL.app
+    正式分发请自行 codesign + notarytool（见 README「跨平台」一节）。
+    """
     info("Building for macOS…")
     target_arch = get_target_arch()
     arch_flag = f"--macos-target-arch={target_arch}" if target_arch else ""
 
     args = [
         sys.executable, "-m", "nuitka",
-        "--onefile",
+        "--standalone",
+        "--macos-create-app-bundle",
+        "--macos-app-name=Silent X Craft Launcher",
+        "--macos-app-version=0.1.0",
         "--enable-plugin=pyside6",
         "--include-data-dir=config=config",
+        "--include-data-dir=assets=assets",
         f"--output-dir={DIST}",
         str(ROOT / "main.py"),
     ]
@@ -116,17 +127,25 @@ def build_macos():
         args.insert(2, arch_flag)
 
     info("Running Nuitka…")
-    subprocess.run(args, cwd=ROOT, check=True)
+    result = subprocess.run(args, cwd=ROOT)
+    if result.returncode != 0:
+        error("Nuitka build failed")
+        sys.exit(result.returncode)
 
-    binary = DIST / "main.bin"  # macOS onefile
-    if binary.exists():
-        size_mb = binary.stat().st_size / 1024 / 1024
-        ok(f"Build successful! {binary} ({size_mb:.1f} MB)")
+    app = DIST / "main.app"
+    if app.exists():
+        final = DIST / ("SXCL-" + target_arch + ".app")
+        if final.exists():
+            shutil.rmtree(final, ignore_errors=True)
+        app.rename(final)
+        ok(f"Build successful! {final}")
+        info("提示：未签名时首次运行需 右键→打开；分发前请 codesign --deep 并 notarize")
     else:
-        # Nuitka might name it differently on macOS
         for f in DIST.iterdir():
-            if f.is_file() and "main" in f.name:
+            if f.name.endswith(".app"):
                 ok(f"Build successful! {f}")
+                return
+        error("Expected .app bundle not found")
 
 
 def build_linux():
@@ -137,6 +156,7 @@ def build_linux():
         "--onefile",
         "--enable-plugin=pyside6",
         "--include-data-dir=config=config",
+        "--include-data-dir=assets=assets",
         f"--output-dir={DIST}",
         str(ROOT / "main.py"),
     ]

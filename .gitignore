@@ -12,3 +12,21 @@ venv/
 *.log
 .minecraft/
 launcher-data/
+
+# 自研下载引擎的断点续传临时文件
+*.part
+*.part.json
+
+# 引擎/工具产物
+target/
+.tmp_*
+scripts/__pycache__/
+
+# 端到端自测用的临时游戏目录
+.e2e-mc/
+
+# 本地临时脚本(仅本机使用,不随仓库走)
+/_*.ps1
+/_*.py
+/_*.bat
+/_scratch/
