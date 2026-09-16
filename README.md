@@ -1,7 +1,18 @@
 # Silent-X-Craft-Launcher C 版（SXCL-C）
 
-SXCL 的 C/C++ 重写工程。Python/PySide6 版在 `../Silent-X-Craft-Launcher`，两版功能对等、数据格式互通
-（共用 `PCL\Setup.ini`、`launcher_profiles.json`、`sxcl.keymap.v1` 等既有契约）。
+SXCL 的 C/C++ 重写工程。本仓库 `main` 是 C 版；Python/PySide6 版保留在 `legacy-python` 分支，
+两版功能对等、数据格式互通（共用 `PCL\Setup.ini`、`launcher_profiles.json`、`sxcl.keymap.v1` 等既有契约）。
+
+## 分支与版本
+
+| 分支 / 标签 | 内容 |
+| --- | --- |
+| `main` | C/C++ 重写版（本文件所述） |
+| `legacy-python` | Python/PySide6 实现（重写前的最后一版，随时可取回） |
+| `legacy-python-before-c` | 与 `legacy-python` 同一点的标签，防分支误删 |
+| `v0.1.0` | Python 版的历史发布标签 |
+
+取回 Python 版：`git switch legacy-python`（或在 GitHub 上切分支查看）。
 
 ## 为什么重写
 
@@ -55,7 +66,19 @@ UI 需要 Qt 6.11.2（WS2025 已装，含 4 套安卓套件）与 `libqf`；纯�
 
 ## 现状
 
-阶段 0（骨架与编译机验证）进行中。见 `docs/02-迁移路线.md`。
+| 阶段 | 状态 |
+| --- | --- |
+| 0 骨架与工具链 | **已完成**：MSVC 14.51 编过，`ctest` 全绿（限速器 27 项 / 哈希 79 项 / 校验层 / 传输层 14 项） |
+| 1 下载引擎 | 进行中：限速器、校验层、文件系统层、Qt 传输后端已就位；引擎与 `sxcl-dl` CLI 待写 |
+| 2 双路线路与熔断 | 未开始 |
+| 3 元数据层 | 未开始 |
+| 4 安装层（Forge/NeoForge/OptiFine 静默安装） | 未开始 |
+| 5 启动层 | 未开始 |
+| 6 UI（Qt6 + libqf） | 未开始 |
+| 7 基岩与联机（Rust） | 未开始 |
+| 8 打包（Inno / DMG / AppImage / APK） | 未开始 |
+
+四平台编译验证见 `docs/02-迁移路线.md` 与 CI 配置。
 
 ## 许可
 
