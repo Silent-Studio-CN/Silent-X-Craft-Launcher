@@ -93,12 +93,15 @@ static int make_engine(const cli_opts *o, cli_state *st, sxcl_engine **out)
 #if defined(SXCL_HAVE_QT_TRANSPORT)
     sxcl_transport_qt_bootstrap();
     opts.transport_factory = make_qt_transport;
-#else
-    fprintf(stderr, "本产物没有编译进任何传输后端(需要 Qt6::Network)\n");
-    return -1;
-#endif
     *out = sxcl_engine_create(&opts);
     return *out ? 0 : -1;
+#else
+    /* 没有 Qt 就没有传输后端。注意:这里 return 之后不能再有代码,
+     * 否则 MSVC 的 C4702(unreachable code)会在 /WX 下把构建打挂 —— CI 上抓到过。 */
+    fprintf(stderr, "本产物没有编译进任何传输后端(需要 Qt6::Network),无法下载\n");
+    *out = NULL;
+    return -1;
+#endif
 }
 
 /** 提交一个任务并跑到结束;返回任务状态。 */
