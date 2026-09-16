@@ -170,9 +170,24 @@ int main(void) {
         }
         check(all_ok, "计划里每个任务都有 目标/URL/SHA-1/大小");
 
+        /* 期望值必须按平台分别算:不同平台的 natives 分类器大小不同(osx=70,linux=60,windows=50),
+         * 而且 winonly/notwin 两个库按规则只进一个。写死一个数只会在别的平台挂 —— CI 上就是这么挂的。 */
+        int64_t expected_total;
+        if (strcmp(os_name, "windows") == 0) {
+            expected_total = 100 + 200 + 10 + 20 + 40 + 50; /* 客户端+索引+always+winonly+native+natives-windows */
+        } else if (strcmp(os_name, "osx") == 0) {
+            expected_total = 100 + 200 + 10 + 30 + 40 + 70; /* ...+notwin+native+natives-osx */
+        } else {
+            expected_total = 100 + 200 + 10 + 30 + 40 + 60; /* ...+notwin+native+natives-linux */
+        }
         const int64_t total = sxcl_version_plan_total_bytes(plan);
-        check(total == 100 + 200 + 10 + (strcmp(os_name, "windows") == 0 ? 20 + 40 + 50 : 30 + 40 + 60),
-              "总字节数合计正确");
+        if (total != expected_total) {
+            printf("  [!!] 总字节数合计: 平台=%s 实际=%lld 期望=%lld\n", os_name, (long long)total,
+                   (long long)expected_total);
+            ++g_fail;
+        } else {
+            ++g_pass;
+        }
         sxcl_version_plan_free(plan);
     }
 
