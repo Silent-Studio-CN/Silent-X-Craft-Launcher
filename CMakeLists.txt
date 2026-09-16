@@ -32,10 +32,12 @@ endfunction()
 # ---- libsxcl(核心静态库) ----
 add_library(sxcl STATIC
   src/core/version.c
+  src/core/json.c
   src/core/dl/hash.c
   src/core/dl/limiter.c
   src/core/dl/verify.c
   src/core/dl/engine.c
+  src/services/metadata/manifest.c
 )
 target_include_directories(sxcl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 sxcl_warnings(sxcl)
@@ -84,6 +86,8 @@ if(SXCL_BUILD_TESTS)
     hash_test    tests/hash_test.c
     limiter_test tests/limiter_test.c
     verify_test  tests/verify_test.c
+    json_test    tests/json_test.c
+    manifest_test tests/manifest_test.c
   )
   list(LENGTH SXCL_TESTS _n)
   math(EXPR _last "${_n} - 1")
