@@ -1,0 +1,78 @@
+name: CI
+
+# 四平台编译验证:Windows / Linux / macOS / Android。
+# macOS 走 CI(本机没有可用的 Mac),但覆盖是全的,不给"最后才发现编不过"留机会。
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  desktop:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-msvc, os: windows-latest, gen: "Visual Studio 17 2022", config: Release }
+          - { name: linux-gcc,   os: ubuntu-latest,  gen: Ninja }
+          - { name: macos-universal, os: macos-latest, gen: Ninja }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 (Windows / MSVC)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -G "${{ matrix.gen }}" -A x64 -DSXCL_BUILD_TESTS=ON -DSXCL_WERROR=ON
+
+      - name: 配置 (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          EXTRA=""
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            # 通用二进制:Intel 与 Apple Silicon 都要能跑
+            EXTRA="-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0"
+          fi
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSXCL_BUILD_TESTS=ON -DSXCL_WERROR=ON ${EXTRA}
+
+      - name: 构建
+        run: cmake --build build --config Release -j 4
+
+      - name: 测试
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  # Android:只交叉编译核心库(测试在目标机上跑没有意义)
+  android:
+    name: android-arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 交叉编译 (arm64-v8a)
+        run: |
+          cmake -S . -B build-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DSXCL_BUILD_TESTS=OFF \
+            -DSXCL_BUILD_QT_TRANSPORT=OFF \
+            -DSXCL_WERROR=ON
+          cmake --build build-android -j 4
+
+  # Qt 传输后端单独一个 job:它需要 Qt,而其它 job 不该为此变慢
+  qt-transport:
+    name: qt-transport-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          cache: true
+      - name: 配置
+        run: cmake -S . -B build-qt -G Ninja -DCMAKE_BUILD_TYPE=Release -DSXCL_BUILD_TESTS=ON -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
+      - name: 构建
+        run: cmake --build build-qt -j 4
+      - name: 测试(离线用例;联网用例需要显式开开关)
+        run: ctest --test-dir build-qt --output-on-failure
