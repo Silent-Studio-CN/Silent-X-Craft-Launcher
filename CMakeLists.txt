@@ -35,6 +35,7 @@ add_library(sxcl STATIC
   src/core/dl/hash.c
   src/core/dl/limiter.c
   src/core/dl/verify.c
+  src/core/dl/engine.c
 )
 target_include_directories(sxcl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 sxcl_warnings(sxcl)
@@ -60,6 +61,18 @@ if(SXCL_BUILD_QT_TRANSPORT)
     message(STATUS "已启用 Qt Network 传输后端")
   else()
     message(STATUS "未找到 Qt6::Network,跳过 Qt 传输后端")
+  endif()
+endif()
+
+# ---- 命令行前端(纯 C,无 Python) ----
+option(SXCL_BUILD_CLI "构建 sxcl-dl 命令行下载器" ON)
+if(SXCL_BUILD_CLI)
+  add_executable(sxcl-dl tools/sxcl-dl/main.c)
+  target_link_libraries(sxcl-dl PRIVATE sxcl)
+  sxcl_warnings(sxcl-dl)
+  if(TARGET sxcl_net_qt)
+    target_link_libraries(sxcl-dl PRIVATE sxcl_net_qt)
+    target_compile_definitions(sxcl-dl PRIVATE SXCL_HAVE_QT_TRANSPORT=1)
   endif()
 endif()
 

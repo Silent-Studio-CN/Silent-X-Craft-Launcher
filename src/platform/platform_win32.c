@@ -199,3 +199,77 @@ int sxcl_fs_remove(const char *path)
     free(wide);
     return rc;
 }
+
+/* ── 下载落盘:sxcl_file(Windows) ── */
+
+struct sxcl_file {
+    HANDLE handle;
+};
+
+sxcl_file *sxcl_file_open_write(const char *path, int64_t final_size)
+{
+    if (!path) {
+        return NULL;
+    }
+    wchar_t *wide = sxcl_win32_utf8_to_wide(path);
+    if (!wide) {
+        return NULL;
+    }
+    HANDLE h = CreateFileW(wide, GENERIC_WRITE | GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(wide);
+    if (h == INVALID_HANDLE_VALUE) {
+        return NULL;
+    }
+    if (final_size > 0) {
+        /* 预分配:避免下载过程中反复扩文件,也给磁盘留出连续空间的机会 */
+        LARGE_INTEGER li;
+        li.QuadPart = final_size;
+        if (SetFilePointerEx(h, li, NULL, FILE_BEGIN) && !SetEndOfFile(h)) {
+            CloseHandle(h);
+            return NULL;
+        }
+    }
+    sxcl_file *f = (sxcl_file *)malloc(sizeof(sxcl_file));
+    if (!f) {
+        CloseHandle(h);
+        return NULL;
+    }
+    f->handle = h;
+    return f;
+}
+
+int64_t sxcl_file_write_at(sxcl_file *file, const void *data, size_t len, int64_t offset)
+{
+    if (!file || !data) {
+        return -1;
+    }
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof(ov));
+    ov.Offset = (DWORD)(offset & 0xFFFFFFFFLL);
+    ov.OffsetHigh = (DWORD)((offset >> 32) & 0xFFFFFFFFLL);
+    DWORD written = 0;
+    const DWORD want = (DWORD)(len > 0x7FFFFFFFu ? 0x7FFFFFFFu : len);
+    if (!WriteFile(file->handle, data, want, &written, &ov)) {
+        return -1;
+    }
+    return (int64_t)written;
+}
+
+int sxcl_file_flush(sxcl_file *file)
+{
+    if (!file) {
+        return -1;
+    }
+    return FlushFileBuffers(file->handle) ? 0 : -1;
+}
+
+int sxcl_file_close(sxcl_file *file)
+{
+    if (!file) {
+        return -1;
+    }
+    const BOOL ok = CloseHandle(file->handle);
+    free(file);
+    return ok ? 0 : -1;
+}

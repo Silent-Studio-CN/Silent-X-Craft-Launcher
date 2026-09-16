@@ -32,6 +32,23 @@ int sxcl_fs_remove(const char *path);
 /** 保证父目录存在(用于建文件前)。返回 0 成功。 */
 int sxcl_fs_mkdirs_for_file(const char *path);
 
+/* ── 下载落盘用的文件句柄(支持按绝对偏移写入,分片之间互不干扰) ── */
+
+typedef struct sxcl_file sxcl_file;
+
+/** 打开(创建/截断)并按 final_size 预分配。final_size < 0 表示不预分配。
+ *  失败返回 NULL。 */
+sxcl_file *sxcl_file_open_write(const char *path, int64_t final_size);
+
+/** 在 offset 处写入 len 字节(必须整块写完才算成功)。返回写入字节数,<0 表示出错。 */
+int64_t sxcl_file_write_at(sxcl_file *file, const void *data, size_t len, int64_t offset);
+
+/** 把已写入的内容刷到磁盘。返回 0 成功。 */
+int sxcl_file_flush(sxcl_file *file);
+
+/** 关闭句柄。返回 0 成功。 */
+int sxcl_file_close(sxcl_file *file);
+
 #ifdef __cplusplus
 }
 #endif

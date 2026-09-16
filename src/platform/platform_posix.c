@@ -122,3 +122,69 @@ int sxcl_fs_remove(const char *path)
     }
     return -2;
 }
+
+/* ── 下载落盘:sxcl_file(POSIX) ── */
+
+struct sxcl_file {
+    int fd;
+};
+
+sxcl_file *sxcl_file_open_write(const char *path, int64_t final_size)
+{
+    if (!path) {
+        return NULL;
+    }
+    const int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) {
+        return NULL;
+    }
+    if (final_size > 0 && ftruncate(fd, (off_t)final_size) != 0) {
+        close(fd);
+        return NULL;
+    }
+    sxcl_file *f = (sxcl_file *)malloc(sizeof(sxcl_file));
+    if (!f) {
+        close(fd);
+        return NULL;
+    }
+    f->fd = fd;
+    return f;
+}
+
+int64_t sxcl_file_write_at(sxcl_file *file, const void *data, size_t len, int64_t offset)
+{
+    if (!file || !data) {
+        return -1;
+    }
+    size_t done = 0;
+    while (done < len) {
+        const ssize_t n = pwrite(file->fd, (const char *)data + done, len - done,
+                                 (off_t)(offset + (int64_t)done));
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        done += (size_t)n;
+    }
+    return (int64_t)done;
+}
+
+int sxcl_file_flush(sxcl_file *file)
+{
+    if (!file) {
+        return -1;
+    }
+    return fsync(file->fd) == 0 ? 0 : -1;
+}
+
+int sxcl_file_close(sxcl_file *file)
+{
+    if (!file) {
+        return -1;
+    }
+    const int rc = close(file->fd);
+    free(file);
+    return rc == 0 ? 0 : -1;
+}

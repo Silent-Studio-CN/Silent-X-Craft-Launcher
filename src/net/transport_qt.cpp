@@ -16,6 +16,7 @@
 #include "sxcl/net.h"
 
 #include <QByteArray>
+#include <QCoreApplication>
 #include <QEventLoop>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -247,11 +248,28 @@ void qtDestroy(void *ctx) {
     const QSet<QtBody *> snapshot = t->bodies;
     for (QtBody *b : snapshot)
         qtCloseBody(t, reinterpret_cast<sxcl_http_body *>(b));
-    delete t->nam;
+    if (t->nam) {
+        // 先断掉所有 keep-alive 连接再销毁:否则 Qt 内部线程还在等,
+        // 退出时会打印 "QWaitCondition: Destroyed while threads are still waiting"
+        t->nam->clearAccessCache();
+        delete t->nam;
+        t->nam = nullptr;
+    }
     delete t;
 }
 
 } // namespace
+
+extern "C" void sxcl_transport_qt_bootstrap(void) {
+    if (QCoreApplication::instance() != nullptr) {
+        return;
+    }
+    // 故意不释放:进程级单例,与 Qt 的常规用法一致
+    static int argc = 1;
+    static char name[] = "sxcl-dl";
+    static char *argv[] = {name, nullptr};
+    new QCoreApplication(argc, argv);
+}
 
 extern "C" sxcl_transport *sxcl_transport_qt_create(void) {
     QtTransport *t = new QtTransport();

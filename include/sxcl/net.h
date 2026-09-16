@@ -78,6 +78,10 @@ typedef struct sxcl_transport {
  *  (QNetworkAccessManager 有线程亲和性);工作线程池的每个线程各持一个实例。 */
 sxcl_transport *sxcl_transport_qt_create(void);
 
+/** 创建进程级 QCoreApplication(必须在主线程、创建任何 Qt 传输实例之前调用一次)。
+ *  引擎的工作线程里跑嵌套事件循环依赖它;纯 C 调用方(如 sxcl-dl)靠这个函数引导。 */
+void sxcl_transport_qt_bootstrap(void);
+
 /** libcurl 后端(Win/Linux/Android;性能后端,HTTP/2 多路复用)。 */
 sxcl_transport *sxcl_transport_libcurl_create(void);
 
