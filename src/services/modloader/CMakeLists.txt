@@ -1,2 +1,44 @@
 # 本目录的源文件由这里追加到 sxcl 目标(见根 CMakeLists 的说明)。
 # 子代理请只改这个文件,不要动根 CMakeLists。
+#
+# 归属说明(给父代理):
+#   catalog.c         加载器版本目录(元数据层)—— 补 docs/04-页面规格.md §7 缺口 #2
+#   keymap*.c         键位映射核心 —— 补 §7 缺口 #6。**逻辑上属于 src/core/keymap/**,
+#                     为了不依赖"往根 CMakeLists 加 add_subdirectory"而先放在本目录;
+#                     等 src/core/keymap/CMakeLists.txt 建好,把下面这几行搬过去即可(文件可直接移)。
+target_sources(sxcl PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/catalog.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/keymap.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/keymap_presets.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/keymap_fcl.c
+)
+
+if(SXCL_BUILD_TESTS)
+  # 根 CMakeLists 是在 add_subdirectory 之后才 enable_testing() 的,所以本目录(在它之前
+  # 被加进来)必须自己再开一次,否则 add_test 进不了 CTestTestfile.cmake(ctest 看不到)。
+  enable_testing()
+
+  # 加载器版本目录:不联网。真实响应片段在 tests/catalog_fragments.inc(纯文本,注释里有来源与抓取日期)
+  add_executable(sxcl_loader_catalog_test tests/loader_catalog_test.c)
+  target_include_directories(sxcl_loader_catalog_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  target_link_libraries(sxcl_loader_catalog_test PRIVATE sxcl)
+  sxcl_warnings(sxcl_loader_catalog_test)
+  add_test(NAME sxcl_loader_catalog_test COMMAND sxcl_loader_catalog_test)
+  set_tests_properties(sxcl_loader_catalog_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+  # 键位映射核心:9 套安卓端资产逐字节嵌在 tests/keymap_assets.inc 里,所以同样不联网;
+  # 测试自己往当前构建目录写临时布局(仓库里不留夹具)。
+  add_executable(sxcl_keymap_test tests/keymap_test.c)
+  target_include_directories(sxcl_keymap_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  target_link_libraries(sxcl_keymap_test PRIVATE sxcl)
+  sxcl_warnings(sxcl_keymap_test)
+  add_test(NAME sxcl_keymap_test COMMAND sxcl_keymap_test)
+  set_tests_properties(sxcl_keymap_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  # 安卓端资产目录就在隔壁仓库里(存在才定义):测试会把内嵌片段与磁盘上的真实文件逐字节比对,
+  # 防止两边跑偏;换台机器没有这个目录也不影响编译与运行。
+  set(_sxcl_android_keymaps "${CMAKE_SOURCE_DIR}/../Silent-X-Craft-Launcher/android/app/src/main/assets/keymaps")
+  if(EXISTS "${_sxcl_android_keymaps}")
+    target_compile_definitions(sxcl_keymap_test PRIVATE
+      SXCL_ANDROID_KEYMAPS_DIR="${_sxcl_android_keymaps}")
+  endif()
+endif()
