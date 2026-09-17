@@ -4,6 +4,7 @@
 // 页面内容由后续批次补;命令行前端(sxcl-dl)与核心库保持独立,不受这里影响。
 #include <QApplication>
 #include <QColor>
+#include <QCursor>
 #include <QPainter>
 #include <QPixmap>
 #include <QTimer>
@@ -14,6 +15,9 @@
 #include "main_window.h"
 #include "fluent_theme.h"
 #include "theme_bridge.h"
+
+// ComboBox:弹出层取证要用它的 showPopup()
+#include "fluent/fluent_setting_cards.h"
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -66,7 +70,63 @@ int main(int argc, char *argv[]) {
     // 验收通路:自渲染截图(对应 Python 的 widget.grab(),不受其它窗口遮挡)
     //   SXCL_UI_SHOT=<png 路径> 时,窗口显示后抓图并退出
     const QString shot = qEnvironmentVariable("SXCL_UI_SHOT");
-    if (!shot.isEmpty()) {
+
+    // 取证通路:下拉弹出层截图(对应 Python tools/popup_capture_py.py)
+    //   SXCL_UI_POPUP=<序号> + SXCL_UI_SHOT=<png 路径>:
+    //   打开当前路由页里第 N 个 ComboBox 的弹出层(序号 = 可见 ComboBox 的 findChildren
+    //   顺序,与 Python 端 page.findChildren(ComboBox) 同序),等 qf 动画跑完
+    //   (250ms OutQuad)再 grab QApplication::activePopupWidget() 存图退出。
+    //   这是成品的取证功能(见 docs/05-UI-1to1规格.md §11),不是临时诊断。
+    const QString popup = qEnvironmentVariable("SXCL_UI_POPUP");
+    if (!popup.isEmpty() && !shot.isEmpty()) {
+        bool numeric = false;
+        const int index = popup.toInt(&numeric);
+        // (&app 要捕获:内层 singleShot 用它当 context 对象)
+        QTimer::singleShot(1500, &app, [&app, &window, index, numeric, shot]() {
+            if (!numeric || index < 0) {
+                std::fprintf(stderr, "[sxcl-ui] SXCL_UI_POPUP 需要非负序号,收到 %d\n", index);
+                QCoreApplication::quit();
+                return;
+            }
+            // 光标停到固定点:qf 的 getCurrentScreenGeometry() 取【光标所在屏】的可用区域,
+            // 弹层的 hover 高亮也取决于光标位置 —— 参考图脚本(popup_capture_py.py)同口径,
+            // 否则同一份代码两次抓图的悬停行会不一样。
+            QCursor::setPos(5, 5);
+
+            QList<ComboBox *> combos;
+            const QList<ComboBox *> all = window.findChildren<ComboBox *>();
+            for (ComboBox *c : all) {
+                if (c->isVisible())
+                    combos.append(c);
+            }
+            if (index >= combos.size()) {
+                std::fprintf(stderr, "[sxcl-ui] 弹出层 #%d 不存在(当前页可见下拉 %d 个)\n",
+                             index, static_cast<int>(combos.size()));
+                QCoreApplication::quit();
+                return;
+            }
+            ComboBox *combo = combos.at(index);
+            std::fprintf(stderr, "[sxcl-ui] 弹出层 #%d:下拉框 %dx%d 当前项 %d\n", index,
+                         combo->width(), combo->height(), combo->currentIndex());
+            combo->showPopup();
+            QTimer::singleShot(700, &app, [shot]() {
+                QWidget *pop = QApplication::activePopupWidget();
+                if (!pop) {
+                    std::fprintf(stderr, "[sxcl-ui] 弹出层截图失败:没有活动弹层\n");
+                    QCoreApplication::quit();
+                    return;
+                }
+                const QPixmap pm = pop->grab();
+                const bool ok = pm.save(shot);
+                std::fprintf(stderr, "[sxcl-ui] 弹层截图 %s %dx%d dpr=%.2f %s\n",
+                             shot.toUtf8().constData(), pm.width(), pm.height(),
+                             pm.devicePixelRatio(), ok ? "OK" : "FAILED");
+                QCoreApplication::quit();
+            });
+        });
+    }
+
+    if (!shot.isEmpty() && popup.isEmpty()) {
         QTimer::singleShot(1500, &app, [&window, shot]() {
             // libqf 的窗口开着 WA_TranslucentBackground(亚克力/Mica 区域在屏幕上是系统画的),
             // 直接 grab() 会得到 alpha=0 的洞。验收图必须与参考图同样不透明,
