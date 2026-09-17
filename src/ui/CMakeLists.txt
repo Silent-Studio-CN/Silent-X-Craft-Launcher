@@ -24,6 +24,12 @@ add_subdirectory("${SXCL_PYQFTO_DIR}" "${CMAKE_BINARY_DIR}/_libqf" EXCLUDE_FROM_
 
 # ---- 界面核心层(主程序与 UI 冒烟测试共用同一份实现)----
 set(SXCL_UI_SOURCES
+  pages/page_factory.cpp  pages/page_factory.h
+  pages/home_page.cpp     pages/versions_page.cpp
+  pages/tasks_page.cpp    pages/keymap_page.cpp
+  pages/multiplayer_page.cpp pages/settings_page.cpp
+  fluent_theme.cpp   fluent_theme.h
+  sxcl_icons.cpp     sxcl_icons.h
   theme_bridge.cpp   theme_bridge.h
   icon_registry.cpp  icon_registry.h
   nav.cpp            nav.h
@@ -31,6 +37,10 @@ set(SXCL_UI_SOURCES
 )
 qt_add_library(sxcl_ui_core STATIC ${SXCL_UI_SOURCES})
 target_include_directories(sxcl_ui_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# 主题资产（qf 原版 QSS）在源码树里，编译期把目录写死，运行时按需回退到 exe 旁
+target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_THEME_DIR="${CMAKE_SOURCE_DIR}/assets/theme")
+# 方块图标资产(assets/icons/blocks/*.png)
+target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_BLOCK_DIR="${CMAKE_SOURCE_DIR}/assets/icons/blocks")
 # fluent 的 Qt6::Svg 是 PRIVATE(静态库只把它带进链接行),我们直接用 QSvgRenderer,
 # 所以这里显式要一份 Svg 的头文件路径
 target_link_libraries(sxcl_ui_core PUBLIC fluent Qt6::Svg)

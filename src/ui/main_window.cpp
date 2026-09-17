@@ -1,14 +1,25 @@
 #include "main_window.h"
 
+#include "pages/page_factory.h"
+
+#include <QAbstractButton>
+#include <QBoxLayout>
 #include <QEvent>
-#include <QFont>
+#include <QFile>
 #include <QLabel>
 #include <QPainter>
-#include <QShowEvent>
-#include <QStackedWidget>
+#include <QPainterPath>
+#include <QResizeEvent>
 #include <QVBoxLayout>
 
+#include "fluent/fluent_controls.h" // Min/Max/CloseButton(qf 三键的 libqf 基类)
+
 #include "theme_bridge.h"
+
+// 版本号:标题栏显示的文字 = f"{APP_NAME} {APP_VERSION}"(Python src/app/main_window.py:54)。
+// 走相对路径包含 —— include/sxcl/version.h 是版本契约,但 sxcl_ui_core 不链接 sxcl
+// (只用编译期宏,不给 UI 冒烟测试增加链接依赖)。
+#include "../../include/sxcl/version.h"
 
 namespace sxcl::ui {
 
@@ -16,22 +27,104 @@ const char *MainWindow::kTitle = "Silent X Craft Launcher";
 
 namespace {
 
-// 导航项(顺序即界面顺序):主页 / 下载 / 任务 / 联机 / 更多,设置单独在底部
+// 导航项(顺序即界面顺序,逐条对应 Python src/app/main_window.py:105-119):
+//   addSubInterface(home, FIF.HOME, "主页")
+//   addSubInterface(versions, grass_block_icon(24), "版本")
+//   addSubInterface(tasks, FIF.UPDATE, "任务")
+//   addSubInterface(keymap, FIF.LAYOUT, "按键映射")
+//   addSubInterface(multiplayer, FIF.GLOBE, "联机")
+//   addSubInterface(settings, FIF.SETTING, "设置", BOTTOM)
 const NavItem kNavSpec[] = {
-    {QStringLiteral("home"), IconRegistry::Home, QStringLiteral("主页"), false},
-    {QStringLiteral("download"), IconRegistry::Download, QStringLiteral("下载"), false},
-    {QStringLiteral("tasks"), IconRegistry::Tasks, QStringLiteral("任务"), false},
-    {QStringLiteral("multiplayer"), IconRegistry::Multiplayer, QStringLiteral("联机"), false},
-    {QStringLiteral("more"), IconRegistry::More, QStringLiteral("更多"), false},
-    {QStringLiteral("settings"), IconRegistry::Settings, QStringLiteral("设置"), true},
+    {QStringLiteral("home"), QStringLiteral("Home"), QString(), QStringLiteral("主页"), false},
+    {QStringLiteral("versions"), QString(), QStringLiteral("vanilla"), QStringLiteral("版本"), false},
+    {QStringLiteral("tasks"), QStringLiteral("Update"), QString(), QStringLiteral("任务"), false},
+    {QStringLiteral("keymap"), QStringLiteral("Layout"), QString(), QStringLiteral("按键映射"), false},
+    {QStringLiteral("multiplayer"), QStringLiteral("Globe"), QString(), QStringLiteral("联机"), false},
+    {QStringLiteral("settings"), QStringLiteral("Setting"), QString(), QStringLiteral("设置"), true},
+};
+
+// ---------------------------------------------------------------------------
+// 窗口三键:qf 的实现是 qframelesswindow/titlebar/title_bar_buttons.py:230-305
+//   * 按钮 46x32(不是 libqf 的 46x37)
+//   * 最小化:(18,16)->(28,16) 的 1px 线(cosmetic,画在设备坐标)
+//   * 最大化:(18,11) 起的 10x10 方框(按 DPR 缩放到设备坐标画);最大化态画"还原"双层框
+//   * 关闭  :把 :/qframelesswindow/close.svg 的 stroke 换成当前颜色后渲染进整块按钮
+//     (svg viewBox 15.875x10.583,默认 xMidYMid meet -> 居中 10x10 的 X)
+// libqf 同名类的图标盒固定为 rect().adjusted(10,10,-10,-10)(26x12),比参考图大一倍多,
+// 这里继承 libqf 的类、只把尺寸与图标改回 qf 的几何:不写 Q_OBJECT,
+// metaObject 类名仍是 MinimizeButton/MaximizeButton/CloseButton,
+// fluent_window.qss 里的 qproperty-normalColor/hoverBackgroundColor 照旧生效。
+class ShellMinimizeButton : public MinimizeButton {
+public:
+    explicit ShellMinimizeButton(QWidget *parent) : MinimizeButton(parent) { setFixedSize(46, 32); }
+
+protected:
+    void drawGlyph(QPainter &p, const QRect &r) override {
+        Q_UNUSED(r)
+        // qf 的 MinimizeButton.paintEvent 没有开抗锯齿 -> 1px cosmetic 线落在整设备像素上
+        // (参考图那行线是纯 #ffffff 的单行;开着抗锯齿会摊成两行 50% 灰)
+        p.setRenderHint(QPainter::Antialiasing, false);
+        p.drawLine(18, 16, 28, 16);
+    }
+};
+
+class ShellMaximizeButton : public MaximizeButton {
+public:
+    explicit ShellMaximizeButton(QWidget *parent) : MaximizeButton(parent) { setFixedSize(46, 32); }
+
+protected:
+    void drawGlyph(QPainter &p, const QRect &r) override {
+        Q_UNUSED(r)
+        // 同上:qf 的 MaximizeButton.paintEvent 也没有开抗锯齿
+        p.setRenderHint(QPainter::Antialiasing, false);
+        const qreal dpr = devicePixelRatioF();
+        p.save();
+        p.scale(1.0 / dpr, 1.0 / dpr);
+        if (!(window() && window()->isMaximized())) {
+            p.drawRect(int(18 * dpr), int(11 * dpr), int(10 * dpr), int(10 * dpr));
+        } else {
+            p.drawRect(int(18 * dpr), int(13 * dpr), int(8 * dpr), int(8 * dpr));
+            const qreal x0 = int(18 * dpr) + int(2 * dpr);
+            const qreal y0 = 13 * dpr;
+            const qreal dw = int(2 * dpr);
+            QPainterPath path(QPointF(x0, y0));
+            path.lineTo(x0, y0 - dw);
+            path.lineTo(x0 + 8 * dpr, y0 - dw);
+            path.lineTo(x0 + 8 * dpr, y0 - dw + 8 * dpr);
+            path.lineTo(x0 + 8 * dpr - dw, y0 - dw + 8 * dpr);
+            p.drawPath(path);
+        }
+        p.restore();
+    }
+};
+
+class ShellCloseButton : public CloseButton {
+public:
+    explicit ShellCloseButton(QWidget *parent) : CloseButton(parent) { setFixedSize(46, 32); }
+
+protected:
+    void drawGlyph(QPainter &p, const QRect &r) override {
+        Q_UNUSED(r)
+        QColor color = normalColor();
+        if (isDown())
+            color = pressedColor();
+        else if (underMouse())
+            color = hoverColor();
+        static const QByteArray kRaw = [] {
+            QFile f(QStringLiteral(":/qframelesswindow/close.svg"));
+            return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+        }();
+        if (kRaw.isEmpty())
+            return;
+        QByteArray svg = kRaw;
+        svg.replace("stroke=\"#000\"", "stroke=\"" + color.name().toLatin1() + "\"");
+        drawSvgIcon(svg, &p, QRectF(rect()));
+    }
 };
 
 } // namespace
 
-MainWindow::MainWindow(QWidget *parent)
-    // 传 true = "合成可用时按 libqf 的规格留阴影边距";offscreen 下 libqf 自己会
-    // 回落(acrylicEnabled() 变 false),留白随之变 0,截图因此是确定的。
-    : FluentWindowBase(true, parent) {
+MainWindow::MainWindow(QWidget *parent) : FluentWindowBase(true, parent) {
     buildUi();
     ThemeBridge::instance().attach(this);
 }
@@ -44,44 +137,106 @@ void MainWindow::buildUi() {
     resize(kInitialWidth, kInitialHeight);
     setMinimumSize(kMinimumWidth, kMinimumHeight);
 
-    m_outer = new QVBoxLayout(this);
-    m_outer->setContentsMargins(0, 0, 0, 0);
-    m_outer->setSpacing(0);
-
-    // ---- 标题栏(libqf) ----
-    m_titleBar = new FluentTitleBar(this);
-    m_titleBar->titleLabel()->setText(QString::fromUtf8(kTitle));
-    m_outer->addWidget(m_titleBar);
-    connect(m_titleBar, &FluentTitleBar::minimizeRequested, this, &QWidget::showMinimized);
-    connect(m_titleBar, &FluentTitleBar::maximizeRequested, this,
-            [this] { isMaximized() ? showNormal() : showMaximized(); });
-    connect(m_titleBar, &FluentTitleBar::closeRequested, this, &QWidget::close);
-    connect(m_titleBar, &FluentTitleBar::navMenuRequested, this,
-            [this] { m_nav->setCollapsed(!m_nav->collapsed()); });
-
-    // ---- 内容行:左侧导航 + 右侧页面栈 ----
-    auto *content = new QWidget(this);
-    content->setObjectName(QStringLiteral("sxclContent"));
-    auto *row = new QHBoxLayout(content);
+    // ---- 窗口根布局:左导航(整窗高)+ 右内容列(qf fluent_window.py:263-271)----
+    // 窗口内**没有阴影留白**:qf 在 Windows 上靠 DWM 画窗口阴影,窗口内容从 (0,0) 起算;
+    // libqf 的 FluentWindow::kWinMargin=30 是它自带 FluentWindow 形态的留白,这里不用,
+    // 否则内容区会整体内缩 30px(参考图实测内容框左上角 = 逻辑 (48,48))。
+    auto *row = new QHBoxLayout(this);
     row->setContentsMargins(0, 0, 0, 0);
     row->setSpacing(0);
 
-    m_nav = new NavPanel(content);
+    // 导航面板:占满整窗高(0..H),含标题栏那 48px 那一段(qf 的 navigationInterface 也是这样)
+    m_nav = new NavPanel(this);
     row->addWidget(m_nav);
 
-    auto *body = new QWidget(content);
+    auto *body = new QWidget(this);
     auto *bodyLay = new QVBoxLayout(body);
-    bodyLay->setContentsMargins(12, 12, 12, 12);
+    // qf fluent_window.py:271 self.widgetLayout.setContentsMargins(0, 48, 0, 0)
+    bodyLay->setContentsMargins(0, kTitleBarHeight, 0, 0);
     bodyLay->setSpacing(0);
-    m_stack = new QStackedWidget(body);
+
+    // 内容框必须是 libqf 的 StackedWidget:qf 的 fluent_window.qss:63-69 用 StackedWidget
+    // 这个类选择器画边框/圆角,Qt 自带的 QStackedWidget 类名对不上(选择器按 metaObject 类名匹配),
+    // 换成它边框才会出现。
+    m_stack = new StackedWidget(body);
     m_stack->setObjectName(QStringLiteral("sxclStack"));
+    // qf FluentWindowBase.__init__: FluentStyleSheet.FLUENT_WINDOW.apply(self.stackedWidget)
+    //   -> border: 1px solid rgba(0,0,0,0.18); border-right: none; border-bottom: none;
+    //      border-top-left-radius: 10px(贴住窗口右边与底边)
+    FluentStyleSheet::apply(m_stack, FluentStyleSheet::FLUENT_WINDOW);
+    // ...但底色要是**透明**:SXCL global_qss(theme.py:196
+    //   "QScrollArea, QStackedWidget, QWidget#qt_scrollarea_viewport { background: transparent; }")
+    // 把内容栈设成透出窗口底(#202020)。应用级那条规则会被这里的控件级 qss 压住,
+    // 所以在同一份控件级 qss 后面再写一次(qf 的 border/圆角保留)。
+    m_stack->setStyleSheet(m_stack->styleSheet() +
+                           QStringLiteral("\nStackedWidget { background-color: transparent; }\n"));
     bodyLay->addWidget(m_stack);
     row->addWidget(body, 1);
-    m_outer->addWidget(content, 1);
+
+    // ---- 标题栏:浮层,盖在导航面板右侧那 2px 与内容列之上(qf fluent_window.py:273,344-346)----
+    m_titleBar = new FluentTitleBar(this);
+    m_titleBar->setFixedHeight(kTitleBarHeight); // qf FluentTitleBar.__init__: setFixedHeight(48)
+
+    // qf FluentTitleBar 的布局 = [iconLabel(18x18), titleLabel, 弹性, 最小化/最大化/关闭]。
+    // libqf 在第一位放的是自绘汉堡按钮 —— 那是 libqf 自己 FluentWindow 形态的东西,qf 的
+    // 窗口标题栏里没有它(汉堡在导航面板顶部)。换成 qf 的 18x18 窗口图标标签:本窗口没设
+    // windowIcon,它就是一块空白占位,正好把标题文字顶到 qf 的位置(46 + 18 + padding 4)。
+    if (auto *lay = qobject_cast<QBoxLayout *>(m_titleBar->layout())) {
+        QWidget *first = lay->count() > 0 && lay->itemAt(0) ? lay->itemAt(0)->widget() : nullptr;
+        if (first && first != m_titleBar->titleLabel()) {
+            lay->removeWidget(first);
+            first->hide();
+        }
+        lay->setContentsMargins(0, 0, 0, 0); // qf TitleBar: hBoxLayout(0,0,0,0) + spacing 0
+        lay->setSpacing(0);
+        m_iconLabel = new QLabel(m_titleBar);
+        m_iconLabel->setObjectName(QStringLiteral("titleIcon"));
+        m_iconLabel->setFixedSize(18, 18); // qf: self.iconLabel.setFixedSize(18, 18)
+        lay->insertWidget(0, m_iconLabel, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    }
+
+    // 标题文字:Python 是 f"{APP_NAME} {APP_VERSION}"。窗口标题(Win32 属性)保持工程既有
+    // 契约 "Silent X Craft Launcher"(冒烟测试断言的就是它),标题栏显示的文字按参考图带版本号。
+    m_titleBar->titleLabel()->setText(
+        QStringLiteral("%1 %2.%3.%4")
+            .arg(QString::fromUtf8(kTitle))
+            .arg(SXCL_VERSION_MAJOR)
+            .arg(SXCL_VERSION_MINOR)
+            .arg(SXCL_VERSION_PATCH));
+
+    // qf: FluentTitleBar.__init__ 与 FluentWidgetTitleBar 都会把 fluent_window.qss 套到
+    // 标题栏和三键上 -> 标题栏透明、#titleLabel 13px + padding 0 4px + 白字、
+    // 三键 normalColor=white / hover rgba(255,255,255,26) / close hover rgb(232,17,35)。
+    FluentStyleSheet::apply(m_titleBar, FluentStyleSheet::FLUENT_WINDOW);
+
+    // 三键:把 libqf 原来的三个(46x37、26x12 图标)换成 qf 几何的同类,位置与顺序不变
+    const QList<QAbstractButton *> oldButtons = m_titleBar->findChildren<QAbstractButton *>();
+    for (QAbstractButton *b : oldButtons)
+        b->hide(); // 尺寸/图标都不对(46x37 / 26x12):藏起来,换成下面三个
+    auto *minBtn = new ShellMinimizeButton(m_titleBar);
+    auto *maxBtn = new ShellMaximizeButton(m_titleBar);
+    auto *closeBtn = new ShellCloseButton(m_titleBar);
+    if (auto *lay = qobject_cast<QBoxLayout *>(m_titleBar->layout())) {
+        // qf TitleBar 把三键 addWidget(..., Qt::AlignRight) 放在弹性项之后;
+        // 垂直方向必须是**顶端**(qf 的按钮在 y 0..32,标题栏 48 高,不是居中)。
+        lay->addWidget(minBtn, 0, Qt::AlignTop);
+        lay->addWidget(maxBtn, 0, Qt::AlignTop);
+        lay->addWidget(closeBtn, 0, Qt::AlignTop);
+    }
+    const QList<QAbstractButton *> chromeButtons{minBtn, maxBtn, closeBtn};
+    for (QAbstractButton *b : chromeButtons)
+        FluentStyleSheet::apply(b, FluentStyleSheet::FLUENT_WINDOW);
+
+    connect(minBtn, &QAbstractButton::clicked, this, &QWidget::showMinimized);
+    connect(maxBtn, &QAbstractButton::clicked, this,
+            [this] { isMaximized() ? showNormal() : showMaximized(); });
+    connect(closeBtn, &QAbstractButton::clicked, this, &QWidget::close);
 
     // ---- 六个页面(占位:只证明路由与栈是对的) ----
     for (const NavItem &item : kNavSpec) {
-        QWidget *page = makePlaceholderPage(item);
+        QWidget *page = createPageForRoute(item.routeKey, nullptr);
+        if (!page)
+            page = makePlaceholderPage(item);
         m_pages.insert(item.routeKey, page);
         m_stack->addWidget(page);
         m_nav->addItem(item);
@@ -89,15 +244,23 @@ void MainWindow::buildUi() {
     connect(m_nav, &NavPanel::routeChanged, this, &MainWindow::switchToRoute);
     switchToRoute(QStringLiteral("home"));
 
-    updateChromeMargins();
+    layoutTitleBar();
+}
+
+void MainWindow::layoutTitleBar() {
+    if (!m_titleBar)
+        return;
+    // qf fluent_window.py:344-346 resizeEvent:
+    //   self.titleBar.move(46, 0); self.titleBar.resize(self.width() - 46, self.titleBar.height())
+    m_titleBar->setGeometry(kTitleBarLeft, 0, qMax(0, width() - kTitleBarLeft), kTitleBarHeight);
+    m_titleBar->raise(); // qf: self.titleBar.raise_()(Qt6 里就是 QWidget::raise)
 }
 
 QWidget *MainWindow::makePlaceholderPage(const NavItem &item) {
     auto *page = new QWidget;
     page->setObjectName(QStringLiteral("sxclPage_") + item.routeKey);
-    // 页面底色交给 ThemeBridge 的令牌(QSS 底色需要这个属性才会真的画出来)
+    // 页面**透明**:底色由内容框/页面自己负责(QSS 的 StackedWidget 底 + 页面卡片)
     page->setAttribute(Qt::WA_StyledBackground, true);
-    page->setProperty("sxclCard", true);
 
     auto *lay = new QVBoxLayout(page);
     lay->setContentsMargins(28, 24, 28, 24);
@@ -106,12 +269,11 @@ QWidget *MainWindow::makePlaceholderPage(const NavItem &item) {
     auto *title = new QLabel(item.title, page);
     title->setObjectName(QStringLiteral("sxclPageTitle"));
     QFont tf = title->font();
-    tf.setPixelSize(26);
-    tf.setBold(true);
+    tf.setPixelSize(28); // qf TitleLabel = 28px / 600
+    tf.setWeight(QFont::DemiBold);
     title->setFont(tf);
 
-    auto *hint = new QLabel(
-        QStringLiteral("导航骨架已就位(阶段 6)。本页内容在后续批次实现。"), page);
+    auto *hint = new QLabel(QStringLiteral("本页内容尚未移植(见 docs/05-UI-1to1规格.md)"), page);
     hint->setObjectName(QStringLiteral("sxclPageHint"));
     hint->setWordWrap(true);
 
@@ -134,44 +296,30 @@ void MainWindow::switchToRoute(const QString &routeKey) {
 }
 
 void MainWindow::paintEvent(QPaintEvent *) {
+    // qf FluentWidget.paintEvent(fluent_window.py:66-71):整窗铺一层后台色
+    // (SXCL 侧:main_window.py:298 FluentWindow { background-color: token(bg) } = #202020)
     QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing);
-    const QColor bg = ThemeBridge::instance().token(QStringLiteral("bg"));
-    if (m_shadowMargin <= 0) {
-        p.fillRect(rect(), bg); // 离屏/无合成:整窗纯色,截图确定
-        return;
-    }
-    p.setPen(Qt::NoPen);
-    p.setBrush(bg);
-    p.drawRoundedRect(QRectF(rect()).adjusted(m_shadowMargin, m_shadowMargin,
-                                              -m_shadowMargin, -m_shadowMargin),
-                      10, 10);
-}
-
-void MainWindow::showEvent(QShowEvent *e) {
-    FluentWindowBase::showEvent(e);
-    updateChromeMargins();
+    p.fillRect(rect(), ThemeBridge::instance().token(QStringLiteral("bg")));
 }
 
 void MainWindow::changeEvent(QEvent *e) {
-    if (e->type() == QEvent::WindowStateChange)
-        updateChromeMargins();
     FluentWindowBase::changeEvent(e);
+    // 最大化/还原时三键的图标要跟着变(qf 的 TitleBar.eventFilter 也是在 WindowStateChange
+    // 时刷 maxBtn 的图标;我们的最大化键在绘制时读 window()->isMaximized(),所以要主动重绘)。
+    if (e->type() == QEvent::WindowStateChange && m_titleBar) {
+        const QList<QAbstractButton *> buttons = m_titleBar->findChildren<QAbstractButton *>();
+        for (QAbstractButton *b : buttons)
+            b->update();
+    }
 }
 
-void MainWindow::updateChromeMargins() {
-    // libqf 的无边框窗口把窗口边缘 30px 当作(透明)阴影/缩放的预留带;
-    // 合成不可用(offscreen)时它不留边,我们跟着留 0,保证尺寸断言与截图确定。
-    const bool compositing = acrylicEnabled();
-    const int margin = (compositing && !isMaximized() && !isFullScreen())
-                           ? FluentWindow::kWinMargin
-                           : 0;
-    if (margin == m_shadowMargin)
-        return;
-    m_shadowMargin = margin;
-    if (m_outer)
-        m_outer->setContentsMargins(margin, margin, margin, margin);
-    update();
+void MainWindow::resizeEvent(QResizeEvent *e) {
+    QWidget::resizeEvent(e);
+    layoutTitleBar();
+    // qf navigation_panel.py:722-725:窗口宽度掉到 minimumExpandWidth(1008)以下时,
+    // 展开态的导航自动收起(EXPAND 模式只在够宽时成立)。
+    if (m_nav && width() < NavPanel::kMinimumExpandWidth && !m_nav->collapsed())
+        m_nav->setCollapsed(true);
 }
 
 } // namespace sxcl::ui

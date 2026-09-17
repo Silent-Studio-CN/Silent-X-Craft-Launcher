@@ -1,5 +1,7 @@
 #include "theme_bridge.h"
 
+#include "fluent_theme.h" // 令牌的唯一来源(docs/05-UI-1to1规格.md §2)
+
 #include <QApplication>
 #include <QPalette>
 #include <QStyle>
@@ -60,40 +62,25 @@ ThemeBridge::ThemeBridge() {
     fluent::FluentStyle::instance()->subscribe([this] { refreshAll(); });
 }
 
-bool ThemeBridge::isDark() const {
-    return fluent::FluentStyle::instance()->theme() == fluent::Theme::Dark;
-}
+bool ThemeBridge::isDark() const { return FluentTheme::instance().isDark(); }
 
 fluent::Theme ThemeBridge::mode() const { return fluent::FluentStyle::instance()->theme(); }
 
 void ThemeBridge::setMode(fluent::Theme t) {
-    // 走 libqf:内部会 reapplyAll(已安装 QSS) + applyAppPalette(原生控件) + 广播
-    setTheme(t); // 全局自由函数(python setTheme 同名),不是 fluent:: 命名空间成员
+    // 唯一权威是 FluentTheme:它会对齐 libqf 引擎(主题/主题色/调色板/reapplyAll),
+    // 再广播给登记过的窗口。不再直接调用 libqf 的 setTheme —— 那会绕过令牌层。
+    FluentTheme::instance().setDark(t == fluent::Theme::Dark);
     refreshAll();
 }
 
 void ThemeBridge::toggleMode() { setMode(isDark() ? fluent::Theme::Light : fluent::Theme::Dark); }
 
-QColor ThemeBridge::accent() const { return fluent::FluentStyle::instance()->themeColor(); }
+QColor ThemeBridge::accent() const { return FluentTheme::instance().accent(); }
 
 QColor ThemeBridge::token(const QString &name) const {
-    const bool dark = isDark();
-    // 画布色:libqf 自己的窗口底色(#f3f3f3 / #202020)
-    if (name == QLatin1String("bg"))
-        return dark ? FluentBackgroundTheme::dark(FluentBackgroundTheme::Default)
-                    : FluentBackgroundTheme::light(FluentBackgroundTheme::Default);
-    if (name == QLatin1String("bgNav"))
-        return dark ? FluentBackgroundTheme::dark(FluentBackgroundTheme::DefaultBlue)
-                    : FluentBackgroundTheme::light(FluentBackgroundTheme::DefaultBlue);
-    if (name == QLatin1String("accent"))
-        return accent();
-    if (name == QLatin1String("onAccent"))
-        return dark ? QColor(0, 0, 0) : QColor(255, 255, 255);
-    for (const Row &r : kRows) {
-        if (name == QLatin1String(r.name))
-            return parseCss(QLatin1String(dark ? r.dark : r.light));
-    }
-    return QColor();
+    // 全部令牌(含 bg/bgNav/accent/onAccent)只从 FluentTheme 取 —— 那里的值与
+    // Python src/app/theme.py 逐字一致。本层不再自带色表(避免第二次"两套颜色打架")。
+    return FluentTheme::parseCssColor(FluentTheme::instance().tokenText(name));
 }
 
 QColor ThemeBridge::iconColor() const { return token(QStringLiteral("text")); }
