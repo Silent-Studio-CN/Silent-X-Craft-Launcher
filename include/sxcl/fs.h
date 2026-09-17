@@ -5,6 +5,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +33,10 @@ int sxcl_fs_remove(const char *path);
 
 /** 保证父目录存在(用于建文件前)。返回 0 成功。 */
 int sxcl_fs_mkdirs_for_file(const char *path);
+
+/** UTF-8 路径安全的 fopen(Windows 走 _wfopen,POSIX 走 fopen)。
+ *  必须用它:MSVC 的 fopen 按 ANSI 代码页解释路径,中文目录会直接失败(实测踩过)。 */
+FILE *sxcl_fs_fopen(const char *path, const char *mode);
 
 /* ── 下载落盘用的文件句柄(支持按绝对偏移写入,分片之间互不干扰) ── */
 

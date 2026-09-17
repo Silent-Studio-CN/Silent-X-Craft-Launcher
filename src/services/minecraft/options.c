@@ -97,7 +97,7 @@ sxcl_options *sxcl_options_load(const char *path)
     if (!o) {
         return NULL;
     }
-    FILE *fh = fopen(path, "rb");
+    FILE *fh = sxcl_fs_fopen(path, "rb");
     if (!fh) {
         return o; /* 不存在 / 打不开 = 空表 */
     }
@@ -148,7 +148,7 @@ int sxcl_options_save(const sxcl_options *options, const char *path)
 
     int rc = -1;
     if (sxcl_fs_mkdirs_for_file(path) == 0) {
-        FILE *fh = fopen(tmp, "wb");
+        FILE *fh = sxcl_fs_fopen(tmp, "wb");
         if (fh) {
             rc = 0;
             for (size_t i = 0; i < options->count; ++i) {
