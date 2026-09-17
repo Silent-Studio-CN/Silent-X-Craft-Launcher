@@ -298,20 +298,24 @@ int sxcl_loader_json_dump(const sxcl_json_value *root, const sxcl_loader_json_ov
  *  (Python: "已经有了就不动它" —— 用户可能在官方启动器/PCL 里改过它),
  *  但这次合并仍然算"没变化"(*changed = 0,不重写文件)。
  *  原有档案、不认识的字段全部保留。last_used 为空则用当前 UTC 时间。
+ *  last_version_id 是这个档案指向的版本 id:装完实例后用实例名调一次,档案就能直接启动它;
+ *  为空则用 Python 版那条固定值 "latest-release"。
  *  成功返回 SXCL_LOADER_OK 并让 *out_text 指向 malloc 出来的文本(调用方 free)。
  *  注意与 Python 版的一处**故意不同**:existing_json 解析失败时这里报 SXCL_LOADER_ERR_FORMAT
  *  并且不动原文件(Python 会把整份数据当成空字典然后覆盖写 —— 那会毁掉用户的档案与登录信息)。 */
 int sxcl_loader_merge_profiles_text(const char *existing_json, const char *key, const char *name,
-                                   const char *last_used, char **out_text, int *changed,
-                                   char *err, size_t err_len);
+                                   const char *last_version_id, const char *last_used, char **out_text,
+                                   int *changed, char *err, size_t err_len);
 
 /** 保证 <game_dir>/launcher_profiles.json 存在(不存在就按 Python 的默认内容建一份),
  *  存在就按上面的规则合并一次,需要时才原子写回(写 <路径>.tmp 再改名)。
- *  key/name 可为空(默认 "SXCL" / "Silent X Craft Launcher")。
+ *  key/name/last_version_id 可为空(默认 "SXCL" / "Silent X Craft Launcher" / "latest-release");
+ *  装完某个实例后登记它,就传 key=name=last_version_id=<实例名>。
  *  返回 SXCL_LOADER_OK = 文件已存在(安装器可以开工;err 里可能有非致命的合并告警);
  *  SXCL_LOADER_ERR_IO = 文件不在且写不出来(安装器必然失败,必须挡住)。 */
 int sxcl_loader_ensure_launcher_profiles(const char *game_dir, const char *key, const char *name,
-                                         const char *last_used, int *changed, char *err, size_t err_len);
+                                         const char *last_version_id, const char *last_used, int *changed,
+                                         char *err, size_t err_len);
 
 /* ── 安装驱动 ── */
 
@@ -365,6 +369,10 @@ typedef struct sxcl_loader_install_request {
      *  (dest = <game_dir>/libraries/<path>,urls[0] = <url><path>),再 sxcl_engine_run。
      *  返回非 0 = 失败(安装按方式 B 失败收场)。 */
     int (*on_libraries)(void *userdata, const sxcl_loader_library *libs, size_t count);
+    /** 可空:安装器每输出一行原始输出就回调一次(与 process.h 的 on_line 同签名同语义)。
+     *  用途:CLI 的 --verbose、启动器记日志/进度界面;返回非 0 = 请求终止安装。
+     *  注意用的是上面那个 userdata(不是 cancel_userdata)。 */
+    int (*on_line)(void *userdata, int is_stderr, const char *line);
 } sxcl_loader_install_request;
 
 /** 装一个模组加载器。返回 0 = 成功;1 = 失败(看 out->fail_stage / out->error);

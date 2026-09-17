@@ -6,10 +6,18 @@
  *   sxcl-dl version <版本号|latest> <游戏目录> [--rate 5MB] [--workers N] [--verbose]
  *       └ 拉取该版本的客户端 jar + 全部依赖库 + 资源索引,每个文件强校验 SHA-1
  *   sxcl-dl list [--limit N]      列出官方版本清单(取 latest 与前 N 个)
+ *   sxcl-dl loader <forge|neoforge|fabric|quilt|optifine> <加载器版本> <MC 版本> <游戏目录>
+ *                  [--java PATH] [--instance NAME] [--installer JAR] [--timeout MS]
+ *                  [--maven-mirror URL] [--no-fallback] [--verbose]
+ *       └ 静默安装模组加载器(方式 A 跑安装器自己的无头入口,失败回退方式 B 解包安装)
  *
  * 限速值支持 "5MB" / "512kb" / "0"(不限速),解析规则与 Python 版 parse_rate 一致。
  * 退出码:0 全部成功;1 有任务失败;2 参数错误。
  */
+#if defined(_MSC_VER)
+#  define _CRT_SECURE_NO_WARNINGS 1 /* fopen/fgets 在 MSVC 下默认被标记弃用 */
+#endif
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,7 +25,9 @@
 #include "sxcl/engine.h"
 #include "sxcl/fs.h"
 #include "sxcl/json.h"
+#include "sxcl/launch.h"
 #include "sxcl/limiter.h"
+#include "sxcl/loader.h"
 #include "sxcl/manifest.h"
 #include "sxcl/net.h"
 #include "sxcl/options.h"
@@ -162,7 +172,15 @@ static int usage(void)
            "  sxcl-dl manifest <dest> [--rate 5MB]\n"
            "  sxcl-dl version <版本号|latest> <游戏目录> [--rate 5MB] [--workers N] [--verbose]\n"
            "  sxcl-dl list [--limit N]\n"
-           "  sxcl-dl options <options.txt> [--get KEY] [--set KEY=VALUE] [--remove KEY] [--dump]\n");
+           "  sxcl-dl options <options.txt> [--get KEY] [--set KEY=VALUE] [--remove KEY] [--dump]\n"
+           "  sxcl-dl loader <forge|neoforge|fabric|quilt|optifine> <加载器版本> <MC 版本> <游戏目录>\n"
+           "      [--java PATH] [--instance NAME] [--installer JAR] [--timeout MS] [--maven-mirror URL]\n"
+           "      [--no-fallback] [--verbose]\n"
+           "  sxcl-dl launch <版本名> <游戏目录> [--java PATH] [--memory MB] [--instance NAME]\n"
+           "      [--offline 玩家名] [--backend default|vulkan|opengl] [--timeout 秒] [--settings PATH]\n"
+           "      [--verbose]\n"
+           "      └ 读版本 JSON -> 选 Java -> 按实例设置写 options.txt(渲染后端)-> 起进程\n"
+           "        -> 每行归类 -> 出一条人话结论(发现 Vulkan 回退会写回 lastGraphicsApi)\n");
     return 2;
 }
 
@@ -576,6 +594,384 @@ static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
     return failed == 0 ? 0 : 1;
 }
 
+/* ── loader:模组加载器静默安装(sxcl/loader.h 的端到端验收入口) ── */
+
+static volatile sig_atomic_t g_loader_cancel = 0;
+
+static void on_sigint(int sig)
+{
+    (void)sig;
+    g_loader_cancel = 1;   /* Ctrl+C:交给安装驱动的 is_cancelled 回调去终止安装器进程 */
+}
+
+static int loader_cancelled(void *userdata)
+{
+    (void)userdata;
+    return g_loader_cancel != 0;
+}
+
+static void loader_progress(void *userdata, int percent, const char *status)
+{
+    (void)userdata;
+    printf("  [%3d%%] %s\n", percent, status);
+    fflush(stdout);
+}
+
+/* 读一行文本(去掉首尾空白)。返回 0 成功。 */
+static int read_trimmed_line(const char *path, char *out, size_t cap)
+{
+    FILE *fh = fopen(path, "rb");
+    if (!fh) {
+        return -1;
+    }
+    if (!fgets(out, (int)cap, fh)) {
+        fclose(fh);
+        return -1;
+    }
+    fclose(fh);
+    size_t len = strlen(out);
+    while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r' || out[len - 1] == ' ')) {
+        out[--len] = '\0';
+    }
+    return 0;
+}
+
+/* 本地没有安装器时,用我们自己的下载引擎去官方 maven 取一份(先取 .sha1,再带哈希下 jar)。
+ * 只有 Forge / NeoForge 的地址能从"MC 版本 + 加载器版本"拼出来;其它加载器请用 --installer。 */
+static int loader_fetch_installer(const cli_opts *o, sxcl_loader_kind kind, const char *mc_version,
+                                  const char *loader_version, const char *dest)
+{
+    char url[1024];
+    if (kind == SXCL_LOADER_FORGE) {
+        snprintf(url, sizeof(url),
+                 "https://maven.minecraftforge.net/net/minecraftforge/forge/%s-%s/forge-%s-%s-installer.jar",
+                 mc_version, loader_version, mc_version, loader_version);
+    } else if (kind == SXCL_LOADER_NEOFORGE) {
+        snprintf(url, sizeof(url),
+                 "https://maven.neoforged.net/releases/net/neoforged/neoforge/%s/neoforge-%s-installer.jar",
+                 loader_version, loader_version);
+    } else {
+        fprintf(stderr, "%s 的安装器地址拼不出来，请用 --installer 指定本地 jar\n",
+                sxcl_loader_kind_name(kind));
+        return -1;
+    }
+
+    char sha_url[1100];
+    char sha_path[1100];
+    snprintf(sha_url, sizeof(sha_url), "%s.sha1", url);
+    snprintf(sha_path, sizeof(sha_path), "%s.sha1", dest);
+
+    cli_state st;
+    memset(&st, 0, sizeof(st));
+    st.verbose = o->verbose;
+    sxcl_engine *engine = NULL;
+    if (make_engine(o, &st, &engine) != 0) {
+        return -1;
+    }
+
+    sxcl_task sha_task;
+    memset(&sha_task, 0, sizeof(sha_task));
+    sha_task.dest = sha_path;
+    sha_task.urls[0] = sha_url;
+    sha_task.urls[1] = o->mirror;
+    sha_task.algo = SXCL_HASH_SHA1;
+    sha_task.priority = 0;
+    sha_task.label = "installer.sha1";
+    if (run_one(engine, &sha_task) != SXCL_TASK_DONE) {
+        fprintf(stderr, "取安装器 .sha1 失败: %s\n", sha_task.error);
+        sxcl_engine_destroy(engine);
+        return -1;
+    }
+
+    char want[96];
+    want[0] = '\0';
+    if (read_trimmed_line(sha_path, want, sizeof(want)) != 0 || strlen(want) < 32) {
+        fprintf(stderr, "读 %s 失败,拿不到官方哈希\n", sha_path);
+        sxcl_engine_destroy(engine);
+        return -1;
+    }
+    printf("官方 SHA-1: %s\n", want);
+
+    sxcl_task jar_task;
+    memset(&jar_task, 0, sizeof(jar_task));
+    jar_task.dest = dest;
+    jar_task.urls[0] = url;
+    jar_task.urls[1] = o->mirror;
+    jar_task.sha1 = want;
+    jar_task.algo = SXCL_HASH_SHA1;
+    jar_task.priority = 0;
+    jar_task.label = "installer";
+    const int state = run_one(engine, &jar_task);
+    const int ok = (state == SXCL_TASK_DONE);
+    if (!ok) {
+        fprintf(stderr, "下载安装器失败: %s\n", jar_task.error);
+    }
+    sxcl_engine_destroy(engine);
+    return ok ? 0 : -1;
+}
+
+/* ── launch:把游戏真的跑起来(启动驱动的最薄一层外壳) ── */
+
+typedef struct launch_cli_opts {
+    const char *java_path;
+    const char *instance;
+    const char *offline;
+    const char *backend;
+    const char *settings;
+    int memory_mb;
+    int timeout_ms;
+    int verbose;
+} launch_cli_opts;
+
+static int launch_echo_line(void *userdata, int is_stderr, const char *line)
+{
+    (void)userdata;
+    printf("  %s %s\n", is_stderr ? "|!" : "|", line);
+    return 0; /* 返回非 0 就是请求终止进程;命令行前端不主动终止 */
+}
+
+static int cmd_launch(int argc, char **argv, const cli_opts *o)
+{
+    if (argc < 4) {
+        return usage(); /* launch <版本名> <游戏目录> */
+    }
+    launch_cli_opts lo;
+    memset(&lo, 0, sizeof(lo));
+    lo.verbose = o->verbose;
+    for (int i = 4; i < argc; ++i) {
+        const char *a = argv[i];
+        const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
+        if (strcmp(a, "--java") == 0 && v) {
+            lo.java_path = v;
+            ++i;
+        } else if (strcmp(a, "--memory") == 0 && v) {
+            lo.memory_mb = atoi(v);
+            ++i;
+        } else if (strcmp(a, "--instance") == 0 && v) {
+            lo.instance = v;
+            ++i;
+        } else if (strcmp(a, "--offline") == 0 && v) {
+            lo.offline = v;
+            ++i;
+        } else if (strcmp(a, "--backend") == 0 && v) {
+            lo.backend = v;
+            ++i;
+        } else if (strcmp(a, "--timeout") == 0 && v) {
+            lo.timeout_ms = atoi(v) * 1000; /* 命令行给秒,内部用毫秒 */
+            ++i;
+        } else if (strcmp(a, "--settings") == 0 && v) {
+            lo.settings = v;
+            ++i;
+        } else if (strcmp(a, "--verbose") == 0) {
+            lo.verbose = 1;
+        } else {
+            fprintf(stderr, "未知参数: %s\n", a);
+            return usage();
+        }
+    }
+
+    char settings_path[1024];
+    if (!lo.settings) {
+        /* 每实例设置默认跟着游戏目录走:命令行前端没有"启动器配置目录"这个概念,
+         * 把设置文件和游戏放一起最不容易找错地方。 */
+        snprintf(settings_path, sizeof(settings_path), "%s/sxcl-launcher.conf", argv[3]);
+        lo.settings = settings_path;
+    }
+
+    sxcl_launch_request req;
+    memset(&req, 0, sizeof(req));
+    req.game_dir = argv[3];
+    req.version_name = argv[2];
+    req.java_path = lo.java_path;
+    req.memory_mb = lo.memory_mb;
+    req.instance = lo.instance;
+    req.offline_name = lo.offline;
+    req.backend = lo.backend;
+    req.settings_path = lo.settings;
+    req.timeout_ms = lo.timeout_ms;
+    req.on_line = lo.verbose ? launch_echo_line : NULL;
+
+    sxcl_launch_result res;
+    char err[256];
+    const int rc = sxcl_launch_run(&req, &res, err, sizeof(err));
+
+    printf("版本: %s   实例: %s\n", req.version_name, lo.instance ? lo.instance : req.version_name);
+    if (res.java_path[0]) {
+        if (res.java_version[0]) {
+            printf("Java: %s (Java %s)\n", res.java_path, res.java_version);
+        } else if (res.java_major > 0) {
+            printf("Java: %s (Java %d)\n", res.java_path, res.java_major);
+        } else {
+            printf("Java: %s (版本未知)\n", res.java_path);
+        }
+    }
+    printf("后端: 要求 %s -> 实际 %s%s\n", res.requested_backend, res.actual_backend,
+           res.vulkan_fell_back ? "(Vulkan 被回退)" : "");
+    if (res.options_path[0]) {
+        printf("options.txt: %s\n", res.options_path);
+    }
+    if (res.missing[0]) {
+        printf("缺东西: %s\n", res.missing);
+    }
+    printf("退出码: %d   用时 %.2f s%s\n", res.exit_code, (double)res.elapsed_ms / 1000.0,
+           res.timed_out ? "  (超时被终止)" : (res.killed_by_client ? "  (按请求终止)" : ""));
+    printf("结论: %s\n", res.conclusion_text);
+    if (rc != 0) {
+        fprintf(stderr, "启动失败: %s\n", err);
+        return 1;
+    }
+    return res.exit_code == 0 ? 0 : 1;
+}
+
+static int cmd_loader(int argc, char **argv, const cli_opts *opts_in)
+{
+    if (argc < 6) {
+        return usage();   /* loader <kind> <加载器版本> <MC 版本> <游戏目录> */
+    }
+    const cli_opts *o = opts_in;
+    const char *kind_text = argv[2];
+    const char *loader_version = argv[3];
+    const char *mc_version = argv[4];
+    const char *game_dir = argv[5];
+
+    const sxcl_loader_kind kind = sxcl_loader_kind_from_id(kind_text);
+    if (kind == SXCL_LOADER_VANILLA) {
+        fprintf(stderr, "认不出的加载器: %s(可用: forge / neoforge / fabric / quilt / optifine)\n",
+                kind_text);
+        return 2;
+    }
+    if (!sxcl_loader_kind_implemented(kind)) {
+        fprintf(stderr, "%s 还没有静默安装实现(只有 Forge / NeoForge / Fabric / OptiFine 有)\n",
+                sxcl_loader_kind_name(kind));
+        return 2;
+    }
+
+    const char *java_opt = NULL;
+    const char *instance_opt = NULL;
+    const char *installer_opt = NULL;
+    const char *maven_mirror = NULL;
+    int timeout_ms = 0;
+    int no_fallback = 0;
+    for (int i = 6; i < argc; ++i) {
+        const char *a = argv[i];
+        const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
+        if (strcmp(a, "--java") == 0 && v) {
+            java_opt = v;
+            ++i;
+        } else if (strcmp(a, "--instance") == 0 && v) {
+            instance_opt = v;
+            ++i;
+        } else if (strcmp(a, "--installer") == 0 && v) {
+            installer_opt = v;
+            ++i;
+        } else if (strcmp(a, "--timeout") == 0 && v) {
+            timeout_ms = atoi(v);
+            ++i;
+        } else if (strcmp(a, "--maven-mirror") == 0 && v) {
+            maven_mirror = v;
+            ++i;
+        } else if (strcmp(a, "--no-fallback") == 0) {
+            no_fallback = 1;
+        } else if (strcmp(a, "--rate") == 0 || strcmp(a, "--workers") == 0 ||
+                   strcmp(a, "--conn") == 0 || strcmp(a, "--cache") == 0 ||
+                   strcmp(a, "--mirror") == 0) {
+            ++i; /* 通用参数已在 main 里解析,这里只需跳过它的值 */
+        } else if (strcmp(a, "--no-cache") == 0 || strcmp(a, "--verbose") == 0) {
+            /* 无值参数 */
+        } else {
+            fprintf(stderr, "未知参数: %s\n", a);
+            return usage();
+        }
+    }
+
+    /* Java:--java > $JAVA_HOME/bin/java > PATH 里的 java。装 1.17+ 的 Forge 要用 17+,别默认挑到太旧的。 */
+    char java_buf[1024];
+    const char *java_path = java_opt;
+    if (!java_path) {
+        const char *home = getenv("JAVA_HOME");
+        if (home && home[0]) {
+#if defined(_WIN32)
+            snprintf(java_buf, sizeof(java_buf), "%s/bin/java.exe", home);
+#else
+            snprintf(java_buf, sizeof(java_buf), "%s/bin/java", home);
+#endif
+            java_path = java_buf;
+        } else {
+            java_path = "java";
+        }
+    }
+
+    /* 实例名:不指定就按加载器拼一个稳定的名字(Forge 用 maven 的 <MC>-<版本> 形式)。 */
+    char instance_buf[256];
+    const char *instance = instance_opt;
+    if (!instance || !instance[0]) {
+        if (kind == SXCL_LOADER_OPTIFINE) {
+            snprintf(instance_buf, sizeof(instance_buf), "%s-OptiFine_%s", mc_version, loader_version);
+        } else {
+            snprintf(instance_buf, sizeof(instance_buf), "%s-%s", mc_version, loader_version);
+        }
+        instance = instance_buf;
+    }
+
+    /* 安装器 jar:--installer > <游戏目录>/loaders/<加载器>-<MC>-<版本>-installer.jar > 自己下。 */
+    char installer_buf[1200];
+    const char *installer = installer_opt;
+    if (!installer || !installer[0]) {
+        snprintf(installer_buf, sizeof(installer_buf), "%s/loaders/%s-%s-%s-installer.jar", game_dir,
+                 sxcl_loader_kind_id(kind), mc_version, loader_version);
+        installer = installer_buf;
+        if (!sxcl_fs_exists(installer)) {
+            printf("本地没有安装器,用内置下载引擎取官方安装器(带 .sha1 强校验):\n  %s\n", installer);
+            if (loader_fetch_installer(o, kind, mc_version, loader_version, installer) != 0) {
+                fprintf(stderr, "取安装器失败(也可以自己下好再用 --installer 指过来)\n");
+                return 1;
+            }
+        }
+    }
+
+    printf("加载器   : %s %s\n", sxcl_loader_kind_name(kind), loader_version);
+    printf("原版版本 : %s\n", mc_version);
+    printf("游戏目录 : %s\n", game_dir);
+    printf("实例名   : %s\n", instance);
+    printf("Java     : %s\n", java_path);
+    printf("安装器   : %s\n", installer);
+    fflush(stdout);
+
+    signal(SIGINT, on_sigint);
+    g_loader_cancel = 0;
+
+    sxcl_loader_install_request req;
+    memset(&req, 0, sizeof(req));
+    req.game_dir = game_dir;
+    req.instance_name = instance;
+    req.base_version = mc_version;
+    req.kind = kind;
+    req.loader_version = loader_version;
+    req.installer_jar = installer;
+    req.java_path = java_path;
+    req.mirror_maven = maven_mirror;
+    req.timeout_ms = timeout_ms;
+    req.no_fallback = no_fallback;
+    req.on_progress = loader_progress;
+    req.is_cancelled = loader_cancelled;
+
+    sxcl_loader_install_result res;
+    const int rc = sxcl_loader_install(&req, &res);
+    if (rc < 0) {
+        fprintf(stderr, "参数错误: %s\n", res.error[0] ? res.error : "(没有说明)");
+        return 2;
+    }
+    printf("\n阶段=%s 回退方式B=%s 沙箱=%s 进度=%d%% 安装器退出码=%d\n",
+           sxcl_loader_fail_stage_name(res.fail_stage), res.used_fallback ? "是" : "否",
+           res.used_sandbox ? "是" : "否", res.percent, res.exit_code);
+    if (!res.ok) {
+        fprintf(stderr, "%s 安装失败: %s\n", sxcl_loader_kind_name(kind), res.error);
+        return 1;
+    }
+    printf("%s 安装完成: %s\n", sxcl_loader_kind_name(kind), res.version_dir);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     /* 无缓冲输出:崩溃时不会把最后一段输出留在缓冲区里丢掉(排查跨平台崩溃吃过这个亏) */
@@ -636,6 +1032,12 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "options") == 0) {
         return cmd_options(argc, argv);
+    }
+    if (strcmp(argv[1], "loader") == 0) {
+        return cmd_loader(argc, argv, &o);
+    }
+    if (strcmp(argv[1], "launch") == 0) {
+        return cmd_launch(argc, argv, &o);
     }
     return usage();
 }

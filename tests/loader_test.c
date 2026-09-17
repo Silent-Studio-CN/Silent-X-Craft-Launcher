@@ -30,6 +30,16 @@ static int issues_contain(const sxcl_loader_issues *its, const char *needle) {
     return 0;
 }
 
+/* 在 [begin, end) 里数 needle 出现几次(写出来的 JSON 文本做区间断言用)。 */
+static int count_in_range(const char *begin, const char *end, const char *needle) {
+    int count = 0;
+    const size_t n = strlen(needle);
+    for (const char *p = begin; p && *p && (!end || p < end); ++p) {
+        if (strncmp(p, needle, n) == 0) { ++count; p += n - 1; }
+    }
+    return count;
+}
+
 static int write_file(const char *path, const char *text) {
     sxcl_fs_mkdirs_for_file(path);
     FILE *fh = fopen(path, "wb");
@@ -369,7 +379,9 @@ static const char *k_existing =
     "  \"clientToken\": \"abcdef\",\n"
     "  \"authenticationDatabase\": {\"uuid-1\": {\"accessToken\": \"tok\", \"username\": \"Steve\"}},\n"
     "  \"launcherVersion\": {\"name\": \"2.1.0\", \"format\": 21},\n"
-    "  \"unknownTop\": [1, 2, 3]\n"
+    "  \"unknownTop\": [1, 2, 3],\n"
+    "  \"flagsInArray\": [true, false, true],\n"
+    "  \"nestedBool\": {\"on\": true, \"off\": false}\n"
     "}\n";
 
 static void test_profiles_merge_text(void) {
@@ -378,8 +390,8 @@ static void test_profiles_merge_text(void) {
     int changed = 0;
 
     /* 3a) 全新文件 */
-    check(sxcl_loader_merge_profiles_text(NULL, NULL, NULL, "2026-01-01T00:00:00.0000Z", &text, &changed,
-                                          err, sizeof(err)) == SXCL_LOADER_OK, "空内容也能合并");
+    check(sxcl_loader_merge_profiles_text(NULL, NULL, NULL, NULL, "2026-01-01T00:00:00.0000Z", &text,
+                                          &changed, err, sizeof(err)) == SXCL_LOADER_OK, "空内容也能合并");
     check(changed == 1, "全新文件算有变化");
     check(text != NULL, "有输出文本");
     check(strstr(text, "\"selectedProfile\": \"SXCL\"") != NULL, "补了 selectedProfile");
@@ -407,7 +419,7 @@ static void test_profiles_merge_text(void) {
     text = NULL;
 
     /* 3b) 已有档案 + 未知字段:全部原样保留;同名档案不动(所以是"没有变化") */
-    check(sxcl_loader_merge_profiles_text(k_existing, NULL, NULL, "2026-01-01T00:00:00.0000Z", &text,
+    check(sxcl_loader_merge_profiles_text(k_existing, NULL, NULL, NULL, "2026-01-01T00:00:00.0000Z", &text,
                                           &changed, err, sizeof(err)) == SXCL_LOADER_OK, "合并已有内容");
     check(changed == 0, "同名档案已存在且键齐全 = 不需要重写文件");
     check(text != NULL, "仍然给出合并后的文本");
@@ -440,6 +452,26 @@ static void test_profiles_merge_text(void) {
             check(sxcl_json_size(sxcl_json_get(root, "unknownTop")) == 3, "未知数组原样保留");
             check(sxcl_json_number(sxcl_json_at(sxcl_json_get(root, "unknownTop"), 2)) == 3.0,
                   "数组里的数字原样写回");
+            /* 数组里的布尔值:sxcl_json_bool(节点级接口)读得到、也写得回原值 */
+            {
+                const sxcl_json_value *flags = sxcl_json_get(root, "flagsInArray");
+                check(sxcl_json_size(flags) == 3, "数组里的布尔原样保留(条数)");
+                check(sxcl_json_bool(sxcl_json_at(flags, 0)) == 1, "  true 还是 true");
+                check(sxcl_json_bool(sxcl_json_at(flags, 1)) == 0, "  false 还是 false");
+                check(sxcl_json_bool(sxcl_json_at(flags, 2)) == 1, "  第三个也是 true");
+                const char *seg = strstr(text, "\"flagsInArray\": [");
+                const char *seg_end = seg ? strchr(seg, ']') : NULL;
+                check(seg != NULL && seg_end != NULL, "  写出来有 flagsInArray 数组");
+                if (seg && seg_end) {
+                    check(count_in_range(seg, seg_end, "true") == 2 &&
+                          count_in_range(seg, seg_end, "false") == 1,
+                          "  写出来就是 true/false(没有被写坏成别的值)");
+                }
+            }
+            check(sxcl_json_bool(sxcl_json_get(sxcl_json_get(root, "nestedBool"), "on")) == 1,
+                  "嵌套对象里的布尔也原样保留");
+            check(sxcl_json_bool(sxcl_json_get(sxcl_json_get(root, "nestedBool"), "off")) == 0,
+                  "  false 没被写成 true");
             sxcl_json_free(doc);
         }
     }
@@ -447,7 +479,7 @@ static void test_profiles_merge_text(void) {
     text = NULL;
 
     /* 3c) 不存在则新增(换一个 key) */
-    check(sxcl_loader_merge_profiles_text(k_existing, "SXCL2", "第二个档案",
+    check(sxcl_loader_merge_profiles_text(k_existing, "SXCL2", "第二个档案", NULL,
                                           "2026-03-03T00:00:00.0000Z", &text, &changed, err,
                                           sizeof(err)) == SXCL_LOADER_OK, "新增一个档案");
     check(changed == 1, "新增档案算有变化");
@@ -474,8 +506,8 @@ static void test_profiles_merge_text(void) {
     {
         char *bad_out = (char *)"哨兵";
         int bad_changed = 7;
-        const int rc = sxcl_loader_merge_profiles_text("{ 这不是 JSON", NULL, NULL, NULL, &bad_out,
-                                                       &bad_changed, err, sizeof(err));
+        const int rc = sxcl_loader_merge_profiles_text("{ 这不是 JSON", NULL, NULL, NULL, NULL,
+                                                       &bad_out, &bad_changed, err, sizeof(err));
         check(rc == SXCL_LOADER_ERR_FORMAT, "坏 JSON 报格式错误");
         check(bad_out == NULL, "坏 JSON 不产出文本(调用方不会拿它去覆盖)");
         check(bad_changed == 0, "坏 JSON 不算有变化");
@@ -495,8 +527,9 @@ static void test_profiles_file(void) {
 
     /* 4a) 文件不存在:直接建一份(安装器靠它开工) */
     (void)sxcl_fs_remove(path);
-    check(sxcl_loader_ensure_launcher_profiles(game, NULL, NULL, "2026-05-05T00:00:00.0000Z", &changed,
-                                               err, sizeof(err)) == SXCL_LOADER_OK, "文件不在就建一份");
+    check(sxcl_loader_ensure_launcher_profiles(game, NULL, NULL, NULL, "2026-05-05T00:00:00.0000Z",
+                                               &changed, err, sizeof(err)) == SXCL_LOADER_OK,
+          "文件不在就建一份");
     check(changed == 1, "建文件算有变化");
     check(sxcl_fs_exists(path), "文件真的落盘了");
     check(!sxcl_fs_exists("build/_loader_tmp/game/launcher_profiles.json.tmp"), "没有留 .tmp 残渣");
@@ -515,8 +548,8 @@ static void test_profiles_file(void) {
     /* 4b) 原子写后重新读回一致 + 幂等(第二次合并不动文件) */
     check(read_file(path, buf1, sizeof(buf1)) != NULL, "读回文件");
     changed = -1;
-    check(sxcl_loader_ensure_launcher_profiles(game, NULL, NULL, "2026-06-06T00:00:00.0000Z", &changed,
-                                               err, sizeof(err)) == SXCL_LOADER_OK, "第二次合并");
+    check(sxcl_loader_ensure_launcher_profiles(game, NULL, NULL, NULL, "2026-06-06T00:00:00.0000Z",
+                                               &changed, err, sizeof(err)) == SXCL_LOADER_OK, "第二次合并");
     check(changed == 0, "同名档案已存在:不重写文件");
     check(read_file(path, buf2, sizeof(buf2)) != NULL, "再读回文件");
     check(strcmp(buf1, buf2) == 0, "再次合并后文件内容一字不差");
@@ -529,9 +562,9 @@ static void test_profiles_file(void) {
         check(write_file(path, without_sxcl) == 0, "写一份没有 SXCL 档案但字段很怪的文件");
     }
     changed = -1;
-    check(sxcl_loader_ensure_launcher_profiles(game, NULL, "SXCL 测试", "2026-07-07T00:00:00.0000Z",
-                                               &changed, err, sizeof(err)) == SXCL_LOADER_OK,
-          "合并进别人家的文件");
+    check(sxcl_loader_ensure_launcher_profiles(game, NULL, "SXCL 测试", NULL,
+                                               "2026-07-07T00:00:00.0000Z", &changed, err,
+                                               sizeof(err)) == SXCL_LOADER_OK, "合并进别人家的文件");
     check(changed == 1, "这次真的插入了");
     {
         char perr[192];
@@ -556,15 +589,53 @@ static void test_profiles_file(void) {
     /* 4d) 文件在但读不出来:保留原文件,不覆盖 */
     check(write_file(path, "{ 坏掉的 launcher_profiles") == 0, "写一份坏文件");
     changed = -1;
-    check(sxcl_loader_ensure_launcher_profiles(game, NULL, NULL, NULL, &changed, err, sizeof(err)) ==
-              SXCL_LOADER_OK, "坏文件不影响'文件存在'这个结论");
+    check(sxcl_loader_ensure_launcher_profiles(game, NULL, NULL, NULL, NULL, &changed, err,
+                                               sizeof(err)) == SXCL_LOADER_OK,
+          "坏文件不影响'文件存在'这个结论");
     check(changed == 0, "坏文件不会被改写");
     check(read_file(path, buf1, sizeof(buf1)) != NULL && strcmp(buf1, "{ 坏掉的 launcher_profiles") == 0,
           "坏文件原封不动");
     check(strstr(err, "保留原文件") != NULL, "告警写进了 err");
 
-    check(sxcl_loader_ensure_launcher_profiles(NULL, NULL, NULL, NULL, &changed, err, sizeof(err)) ==
-              SXCL_LOADER_ERR_ARG, "没有游戏目录 = 参数错");
+    check(sxcl_loader_ensure_launcher_profiles(NULL, NULL, NULL, NULL, NULL, &changed, err,
+                                               sizeof(err)) == SXCL_LOADER_ERR_ARG, "没有游戏目录 = 参数错");
+
+    /* 4e) 装完登记实例:key = 实例名,lastVersionId 指向这个实例,原有档案一个不动 */
+    {
+        const char *with_other =
+            "{\"profiles\":{\"PCL\":{\"name\":\"PCL\",\"icon\":\"Furnace\"}},"
+            "\"selectedProfile\":\"PCL\",\"clientToken\":\"tok\"}";
+        check(write_file(path, with_other) == 0, "写一份只有别人家档案的文件");
+        changed = -1;
+        check(sxcl_loader_ensure_launcher_profiles(game, "1.20.1-47.2.0", "1.20.1-47.2.0",
+                                                   "1.20.1-47.2.0", "2026-08-08T00:00:00.0000Z", &changed,
+                                                   err, sizeof(err)) == SXCL_LOADER_OK, "登记实例档案");
+        check(changed == 1, "登记实例算有变化");
+        char perr[192];
+        perr[0] = '\0';
+        sxcl_json *doc = sxcl_json_parse_file(path, perr, sizeof(perr));
+        check(doc != NULL, "登记后的文件是合法 JSON");
+        if (doc) {
+            const sxcl_json_value *root = sxcl_json_root(doc);
+            const sxcl_json_value *profiles = sxcl_json_get(root, "profiles");
+            const sxcl_json_value *mine = sxcl_json_get(profiles, "1.20.1-47.2.0");
+            check(sxcl_json_member_count(profiles) == 2, "两个档案(PCL + 实例)");
+            check(mine != NULL, "实例档案在里面(启动器的版本列表靠它)");
+            check_str(sxcl_json_get_string(mine, "lastVersionId", ""), "1.20.1-47.2.0",
+                      "档案指向刚装好的那个实例");
+            check_str(sxcl_json_get_string(mine, "name", ""), "1.20.1-47.2.0", "档案名");
+            check_str(sxcl_json_get_string(sxcl_json_get(profiles, "PCL"), "icon", ""), "Furnace",
+                      "原有档案没被动");
+            check_str(sxcl_json_get_string(root, "selectedProfile", ""), "PCL", "不改别人的选中项");
+            sxcl_json_free(doc);
+        }
+        /* 再来一次:同名档案已存在 -> 不动、不重写 */
+        changed = -1;
+        check(sxcl_loader_ensure_launcher_profiles(game, "1.20.1-47.2.0", "1.20.1-47.2.0",
+                                                   "1.20.1-47.2.0", NULL, &changed, err,
+                                                   sizeof(err)) == SXCL_LOADER_OK, "重复登记");
+        check(changed == 0, "同名实例档案不重复写");
+    }
 }
 
 /* ── 5) 命令行构造 ── */
@@ -797,6 +868,22 @@ static void test_json_dump(void) {
             check(text && strstr(text, "[") != NULL, "  输出里有数组");
             free(text);
             sxcl_json_free(doc2);
+        }
+    }
+    /* 根就是布尔/数组的情况:现在也能原样写回(以前缺节点级布尔接口时是拒绝改写的) */
+    {
+        const char *bool_doc = "true";
+        err[0] = '\0';
+        sxcl_json *doc3 = sxcl_json_parse(bool_doc, strlen(bool_doc), perr, sizeof(perr));
+        check(doc3 != NULL, "根是布尔也能解析");
+        if (doc3) {
+            check(sxcl_json_bool(sxcl_json_root(doc3)) == 1, "根布尔读得出来");
+            char *text = NULL;
+            check(sxcl_loader_json_dump(sxcl_json_root(doc3), NULL, 0, &text, err, sizeof(err)) ==
+                      SXCL_LOADER_OK, "根布尔能序列化");
+            check_str(text, "true", "  写回来还是 true");
+            free(text);
+            sxcl_json_free(doc3);
         }
     }
     check(sxcl_loader_json_dump(NULL, NULL, 0, NULL, err, sizeof(err)) == SXCL_LOADER_ERR_ARG,

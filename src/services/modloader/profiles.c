@@ -36,6 +36,7 @@
 
 #define PROFILE_DEFAULT_KEY  "SXCL"
 #define PROFILE_DEFAULT_NAME "Silent X Craft Launcher"
+#define PROFILE_DEFAULT_LAST_VERSION "latest-release"   /* Python 版那条固定值 */
 #define PROFILE_DEFAULT_TOKEN "23323323323323323323323323323333"   /* Python 版原样搬过来的 */
 
 /* ── UTF-8 路径的文件 IO(与 src/core/settings.c 同一套做法) ── */
@@ -176,22 +177,14 @@ static void dump_number(dbuf *b, double value)
     db_put(b, tmp);
 }
 
-/* 序列化状态。
- *
- * 关于布尔值(json.h 只有 sxcl_json_get_bool(对象, 键, 默认值),没有"取布尔节点本身"的接口):
- *   - 对象成员的布尔值:用"父对象 + 键名"查得出来,正常写 true/false;
- *   - 数组元素、根节点位置的布尔值:读不出值。这种情况**拒绝改写**(置 unsupported_bool),
- *     而不是瞎写一个 true 把用户的数据改坏 —— 调用方会拿到 SXCL_LOADER_ERR_FORMAT 并且
- *     原文件一动不动。launcher_profiles.json 里布尔只出现在对象成员位置,正常文件不受影响。 */
+/* 序列化状态。布尔值走 json.h 的节点级接口 sxcl_json_bool —— 对象成员、数组元素、
+ * 根位置的布尔都能正确读写,不用再"拒绝改写"或者靠父对象+键名兜圈子。 */
 typedef struct dump_state {
     dbuf *out;
-    int unsupported_bool;
 } dump_state;
 
-/* 把 DOM 里的一个值原样写出来(不认识的东西照样按原结构写回)。
- * owner/owner_key:该值作为对象成员时的父对象与键名(数组元素传 NULL)。 */
-static void dump_value(dump_state *st, const sxcl_json_value *value, int depth,
-                       const sxcl_json_value *owner, const char *owner_key);
+/* 把 DOM 里的一个值原样写出来(不认识的东西照样按原结构写回)。 */
+static void dump_value(dump_state *st, const sxcl_json_value *value, int depth);
 
 static void dump_object(dump_state *st, const sxcl_json_value *value, int depth)
 {
@@ -211,7 +204,7 @@ static void dump_object(dump_state *st, const sxcl_json_value *value, int depth)
         dump_indent(b, depth + 1);
         dump_string(b, key);
         db_put(b, ": ");
-        dump_value(st, sxcl_json_member_value(value, i), depth + 1, value, key);
+        dump_value(st, sxcl_json_member_value(value, i), depth + 1);
     }
     db_putn(b, "\n", 1);
     dump_indent(b, depth);
@@ -233,15 +226,14 @@ static void dump_array(dump_state *st, const sxcl_json_value *value, int depth)
         }
         db_putn(b, "\n", 1);
         dump_indent(b, depth + 1);
-        dump_value(st, sxcl_json_at(value, i), depth + 1, NULL, NULL);
+        dump_value(st, sxcl_json_at(value, i), depth + 1);
     }
     db_putn(b, "\n", 1);
     dump_indent(b, depth);
     db_putn(b, "]", 1);
 }
 
-static void dump_value(dump_state *st, const sxcl_json_value *value, int depth,
-                       const sxcl_json_value *owner, const char *owner_key)
+static void dump_value(dump_state *st, const sxcl_json_value *value, int depth)
 {
     dbuf *b = st->out;
     if (!value) {
@@ -250,14 +242,7 @@ static void dump_value(dump_state *st, const sxcl_json_value *value, int depth,
     }
     switch (sxcl_json_type_of(value)) {
     case SXCL_JSON_NULL:   db_put(b, "null"); break;
-    case SXCL_JSON_BOOL:
-        if (owner && owner_key) {
-            db_put(b, sxcl_json_get_bool(owner, owner_key, 0) ? "true" : "false");
-        } else {
-            st->unsupported_bool = 1;
-            db_put(b, "false");
-        }
-        break;
+    case SXCL_JSON_BOOL:   db_put(b, sxcl_json_bool(value) ? "true" : "false"); break;
     case SXCL_JSON_NUMBER: dump_number(b, sxcl_json_number(value)); break;
     case SXCL_JSON_STRING: dump_string(b, sxcl_json_string(value)); break;
     case SXCL_JSON_ARRAY:  dump_array(st, value, depth); break;
@@ -275,6 +260,7 @@ typedef struct merge_ctx {
     /* profiles 合并(profile_key 非空时启用) */
     const char *profile_key;
     const char *profile_name;
+    const char *profile_last_version;   /* 档案指向的版本 id(默认 "latest-release") */
     const char *profile_last_used;
     int had_profiles;
     int had_selected;
@@ -313,7 +299,9 @@ static void dump_own_profile(dbuf *b, const merge_ctx *ctx, int depth)
     db_put(b, ",");
     db_putn(b, "\n", 1);
     dump_indent(b, depth + 1);
-    db_put(b, "\"lastVersionId\": \"latest-release\",");
+    db_put(b, "\"lastVersionId\": ");
+    dump_string(b, ctx->profile_last_version);
+    db_put(b, ",");
     db_putn(b, "\n", 1);
     dump_indent(b, depth + 1);
     db_put(b, "\"type\": \"latest-release\",");
@@ -346,7 +334,7 @@ static void dump_profiles(dump_state *st, const sxcl_json_value *value, int dept
         if (key && strcmp(key, ctx->profile_key) == 0) {
             ctx->profile_exists = 1;   /* Python: 已经有了就不动它 */
         }
-        dump_value(st, sxcl_json_member_value(value, i), depth + 1, value, key);
+        dump_value(st, sxcl_json_member_value(value, i), depth + 1);
         ++written;
     }
     if (!ctx->profile_exists) {
@@ -375,7 +363,7 @@ static void dump_root(dump_state *st, const sxcl_json_value *root, merge_ctx *ct
     const int is_object = root && sxcl_json_type_of(root) == SXCL_JSON_OBJECT;
     if (root && !is_object && !ctx->profile_key) {
         /* 纯序列化:根是什么就写什么(数组/标量原样输出)。 */
-        dump_value(st, root, 0, NULL, NULL);
+        dump_value(st, root, 0);
         return;
     }
     /* 根不是对象又要合并 profiles:原文件根本不是合法档案,只能按全新文件写一份
@@ -403,7 +391,7 @@ static void dump_root(dump_state *st, const sxcl_json_value *root, merge_ctx *ct
             ctx->had_profiles = 1;
             dump_profiles(st, sxcl_json_member_value(root, i), 1, ctx);
         } else {
-            dump_value(st, sxcl_json_member_value(root, i), 1, root, key);
+            dump_value(st, sxcl_json_member_value(root, i), 1);
         }
         if (ctx->profile_key && key) {
             if (strcmp(key, "selectedProfile") == 0) {
@@ -486,7 +474,6 @@ int sxcl_loader_json_dump(const sxcl_json_value *root, const sxcl_loader_json_ov
     db_init(&b);
     dump_state st;
     st.out = &b;
-    st.unsupported_bool = 0;
     dump_root(&st, root, &ctx);
     if (b.bad) {
         db_free(&b);
@@ -494,13 +481,6 @@ int sxcl_loader_json_dump(const sxcl_json_value *root, const sxcl_loader_json_ov
             (void)snprintf(err, err_len, "内存不足，写不出 JSON 文本");
         }
         return SXCL_LOADER_ERR_NOMEM;
-    }
-    if (st.unsupported_bool) {
-        db_free(&b);
-        if (err && err_len) {
-            (void)snprintf(err, err_len, "这份 JSON 里有数组形式的布尔值，现有 json.h 读不出它的值，拒绝改写");
-        }
-        return SXCL_LOADER_ERR_FORMAT;
     }
     *out_text = b.data ? b.data : (char *)calloc(1, 1);
     if (!*out_text) {
@@ -530,8 +510,8 @@ static void default_last_used(char *out, size_t cap)
 }
 
 int sxcl_loader_merge_profiles_text(const char *existing_json, const char *key, const char *name,
-                                    const char *last_used, char **out_text, int *changed,
-                                    char *err, size_t err_len)
+                                    const char *last_version_id, const char *last_used, char **out_text,
+                                    int *changed, char *err, size_t err_len)
 {
     if (!out_text) {
         return SXCL_LOADER_ERR_ARG;
@@ -569,22 +549,15 @@ int sxcl_loader_merge_profiles_text(const char *existing_json, const char *key, 
     ctx.profile_key = use_key;
     ctx.profile_name = use_name;
     ctx.profile_last_used = stamp;
+    ctx.profile_last_version = (last_version_id && last_version_id[0]) ? last_version_id
+                                                                      : PROFILE_DEFAULT_LAST_VERSION;
 
     dbuf b;
     db_init(&b);
     dump_state st;
     st.out = &b;
-    st.unsupported_bool = 0;
     dump_root(&st, doc ? sxcl_json_root(doc) : NULL, &ctx);
     sxcl_json_free(doc);
-    if (st.unsupported_bool) {
-        db_free(&b);
-        if (err && err_len) {
-            (void)snprintf(err, err_len, "这份 launcher_profiles.json 里有数组形式的布尔值，读不出它的值，已保留原文件不覆盖");
-        }
-        return SXCL_LOADER_ERR_FORMAT;
-    }
-
     if (b.bad) {
         db_free(&b);
         if (err && err_len) {
@@ -651,7 +624,8 @@ static int write_atomic(const char *path, const char *text, char *err, size_t er
 }
 
 int sxcl_loader_ensure_launcher_profiles(const char *game_dir, const char *key, const char *name,
-                                         const char *last_used, int *changed, char *err, size_t err_len)
+                                         const char *last_version_id, const char *last_used, int *changed,
+                                         char *err, size_t err_len)
 {
     if (changed) {
         *changed = 0;
@@ -693,8 +667,8 @@ int sxcl_loader_ensure_launcher_profiles(const char *game_dir, const char *key, 
 
     char *merged = NULL;
     int need_write = 0;
-    const int rc = sxcl_loader_merge_profiles_text(old_text, key, name, last_used, &merged, &need_write,
-                                                  err, err_len);
+    const int rc = sxcl_loader_merge_profiles_text(old_text, key, name, last_version_id, last_used,
+                                                  &merged, &need_write, err, err_len);
     free(old_text);
 
     if (rc != SXCL_LOADER_OK) {

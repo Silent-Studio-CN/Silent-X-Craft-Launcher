@@ -46,6 +46,7 @@ add_library(sxcl STATIC
   src/services/launch/java.c
   src/services/launch/args.c
   src/services/launch/logscan.c
+  src/services/launch/driver.c
   src/services/modloader/compat.c
   src/services/modloader/profiles.c
   src/services/modloader/installer.c
@@ -121,6 +122,7 @@ if(SXCL_BUILD_TESTS)
     inflate_test tests/inflate_test.c
     zip_test     tests/zip_test.c
     launch_test  tests/launch_test.c
+    launch_driver_test tests/launch_driver_test.c
     loader_test  tests/loader_test.c
   )
   list(LENGTH SXCL_TESTS _n)

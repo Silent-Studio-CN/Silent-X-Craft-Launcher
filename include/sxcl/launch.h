@@ -289,6 +289,73 @@ const char *sxcl_log_kind_name(sxcl_log_kind kind);
 /** 结论文本键("graphics" / "ok" / ...),给 UI 做分支用。 */
 const char *sxcl_log_conclusion_name(sxcl_log_conclusion conclusion);
 
+/* ══════════════════════════ 4. 启动驱动(真正起进程) ══════════════════════════ */
+
+/** options.txt 里"渲染后端"的键名。
+ *  **只在这一处定义**:哪天某个版本改用别的键名,改这里,驱动与 CLI/测试都跟着走。 */
+#define SXCL_LAUNCH_GRAPHICS_KEY "graphicsApi"
+
+/** 实例设置里记录"上次实际生效的后端"的键名,完整键是 instance.<实例名>.<这个>。 */
+#define SXCL_LAUNCH_LAST_BACKEND_KEY "lastGraphicsApi"
+
+/** 后端取值(写进 options.txt 与设置里的就是这三个字符串)。 */
+#define SXCL_LAUNCH_BACKEND_DEFAULT "default"
+#define SXCL_LAUNCH_BACKEND_VULKAN  "vulkan"
+#define SXCL_LAUNCH_BACKEND_OPENGL  "opengl"
+
+/** 一次启动请求。字符串一律 UTF-8,生命周期由调用方保证。 */
+typedef struct sxcl_launch_request {
+    const char *game_dir;       /**< 必填:游戏根目录(内含 versions/ libraries/ assets/) */
+    const char *version_name;   /**< 必填:版本名,对应 versions/<名字>/<名字>.json */
+    const char *java_path;      /**< 可空:指定 java 可执行文件;空 = 自动探测。
+                                 *   指定了就用指定的(哪怕读不出 release —— 用户说了算) */
+    int memory_mb;              /**< <=0 = 按位数取默认(见 sxcl_launch_default_memory_mb) */
+    const char *instance;       /**< 可空:实例名(读写每实例设置);空 = 用 version_name */
+    const char *offline_name;   /**< 可空:离线用户名;空 = "Player" */
+    const char *backend;        /**< 可空:后端覆盖;空 = 读实例设置(默认 "default") */
+    const char *settings_path;  /**< 可空:设置文件;空 = 不读也不写设置 */
+    const char *launcher_name;  /**< 可空:覆盖 launcher_name 占位符 */
+    const char *launcher_version; /**< 可空:覆盖 launcher_version 占位符 */
+    int timeout_ms;             /**< <=0 = 不限时;超时会被终止并置 timed_out */
+    int dry_run;                /**< 非 0 = 只准备(选 Java / 写 options.txt / 拼 argv),不起进程 */
+    /** 每读到一行输出调用一次(stdout 与 stderr 都走这里,**原始行**未加工)。
+     *  返回非 0 = 请求终止进程 —— 取消与"看到完成标记就收工"都走这条路(与 process.h 一致)。 */
+    int (*on_line)(void *userdata, int is_stderr, const char *line);
+    void *userdata;
+} sxcl_launch_request;
+
+/** 一次启动的结果。 */
+typedef struct sxcl_launch_result {
+    int exit_code;              /**< 进程退出码;-1 = 没起来 */
+    int started;                /**< 1 = 真的起过进程(dry_run 时为 0) */
+    int timed_out;              /**< 1 = 超时被终止 */
+    int killed_by_client;       /**< 1 = on_line 回调请求终止 */
+    int64_t elapsed_ms;         /**< 从起进程到结束的墙钟毫秒 */
+    int java_major;             /**< 选中的 Java 主版本;0 = 未知 */
+    int java_is_64bit;          /**< 1/0/-1 */
+    int vulkan_fell_back;       /**< 1 = 设置的是 vulkan,但日志显示回退到了 OpenGL */
+    char java_path[SXCL_JAVA_PATH_MAX]; /**< 选中的 java 路径 */
+    char java_version[64];      /**< 选中的 Java 版本串(可能为空) */
+    char requested_backend[16]; /**< 本次要求写进 options.txt 的后端 */
+    char actual_backend[16];    /**< 日志显示实际生效的后端 */
+    char options_path[SXCL_JAVA_PATH_MAX]; /**< 写过的 options.txt 路径 */
+    char game_dir[SXCL_JAVA_PATH_MAX];
+    char error[256];            /**< 人话失败原因;空 = 没失败 */
+    char missing[160];          /**< 从日志里原样带出来的"缺什么"(不做补全,只报告) */
+    sxcl_log_conclusion conclusion; /**< 汇总结论 */
+    char conclusion_text[256];  /**< 一条人话结论(UI 直接显示这一条) */
+    sxcl_log_summary log;       /**< 完整日志汇总:想深入到"缺哪个类/多少行"就用它 */
+} sxcl_launch_result;
+
+/** 跑一次启动:读版本 JSON -> 选 Java -> 写 options.txt(渲染后端) -> 建 natives -> 拼 argv
+ *  -> 起进程 -> 逐行归类 -> 出一条人话结论;发现 Vulkan 回退就把它写回 lastGraphicsApi。
+ *
+ *  返回 0 = 进程真的跑起来了(dry_run 时表示"准备好了");<0 = 没启动,原因在 out->error 与 err。
+ *
+ *  **不做**资源补全:库/assets 缺了就是缺了,由日志结论把"缺什么"原样带出来,交给上层决定补不补。 */
+int sxcl_launch_run(const sxcl_launch_request *request, sxcl_launch_result *out,
+                    char *err, size_t err_len);
+
 #ifdef __cplusplus
 }
 #endif

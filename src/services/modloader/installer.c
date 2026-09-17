@@ -16,12 +16,15 @@
  *   6) OptiFine 的安装器忽略我们传的目录,只认 %APPDATA%\.minecraft,所以给它一个临时
  *      APPDATA 沙箱、摆好原版版本文件,装完再把产物与库搬回实例目录(_install_optifine)。
  *
- * 关于 APPDATA 沙箱的一处地基现状(必须说清楚):process.h 承诺了 opts->env("追加/覆盖的环境变量"),
- * POSIX 侧(process_posix.c)用 putenv 兑现了,**Windows 侧(process_win32.c)还是空的**
- * (源码里那句"需要自定义环境时由调用方传完整列表"的注释下面没有实现)。所以本模块两条腿走路:
- *   * 命令行构造出来的 appdata 会照常塞进 opts->env(地基补上之后立刻生效);
- *   * 另外在沙箱期间临时把**本进程**的 APPDATA 指过去,跑完恢复 —— 这跟 Python 版
- *     subprocess.run(env=...) 的效果一致。这也是本模块"同一时刻只许一个安装在跑"的原因。
+ * 关于 APPDATA 沙箱:首选通道就是 process.h 的 opts->env(地基两条腿都实现了:POSIX 用 putenv,
+ * Windows 用"父环境 + 覆盖项 → 环境块 + CREATE_UNICODE_ENVIRONMENT")。只有当子进程明显没认环境块
+ * (沙箱里什么都没生成)时,才退回"临时把本进程 APPDATA 指过去"的兜底方式重试一次 —— 这也是本模块
+ * "同一时刻只许一个安装在跑"的原因。
+ *
+ * 另一条实测踩出来的坑(真跑 Forge 1.20.1 时抓到):子进程的工作目录是游戏目录,而命令行里的
+ * -jar / --installClient 是相对路径时,会被**子进程**按它自己的工作目录去解析 ——
+ * "java -jar build/x.jar" 会被它找成 <游戏目录>/build/x.jar,直接 "Unable to access jarfile" 退出 1。
+ * 所以驱动在开跑前把游戏目录/安装器 jar/带分隔符的 java 路径一律转成绝对路径(见 make_absolute)。
  */
 #define _CRT_SECURE_NO_WARNINGS 1
 
@@ -41,6 +44,7 @@
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
 #  endif
+#  include <direct.h>   /* _getcwd */
 #  include <windows.h>
 #else
 #  include <dirent.h>
@@ -855,8 +859,16 @@ typedef struct install_ctx {
     int finished;      /* 这一轮看到安装器的完成标记 */
     int cancelled;     /* 用户取消 */
     int timed_out;     /* 安装器进程超时 */
+    /** 沙箱 APPDATA 的兜底通道:1 = 除了 opts->env,还临时改本进程的 APPDATA。
+     *  默认 0(只走 process.h 的 env,这是首选通道);只有在"子进程明显没认环境块"时
+     *  才由 install_optifine 打开重试一次。 */
+    int process_env_fallback;
     sxcl_loader_fail_stage fail_stage;
     char last_error[SXCL_LOADER_ERROR_MAX];
+    /* 安装器输出的最后几行(Python: _last_output 的 deque(maxlen=80),失败时拿它们当人话原因)。
+     * 这就是"退出码 1"背后真正的解释,不给用户看等于让人瞎猜。 */
+    char last_lines[3][SXCL_LOADER_TEXT_MAX];
+    int last_line_count;
 } install_ctx;
 
 static void ctx_report(install_ctx *ctx, int percent, const char *fmt, ...)
@@ -892,7 +904,26 @@ static int ctx_cancelled(const install_ctx *ctx)
 static int install_on_line(void *ud, int is_stderr, const char *line)
 {
     install_ctx *ctx = (install_ctx *)ud;
-    (void)is_stderr;
+    if (line && line[0]) {
+        /* 原始行:先给调用方(CLI 的 --verbose / 启动器的日志),再自己留一份尾巴。 */
+        if (ctx->req->on_line) {
+            ctx->req->on_line(ctx->req->userdata, is_stderr, line);
+        }
+        const size_t copy = strlen(line) < sizeof(ctx->last_lines[0]) - 1
+                                ? strlen(line)
+                                : sizeof(ctx->last_lines[0]) - 1;
+        if (ctx->last_line_count < 3) {
+            memcpy(ctx->last_lines[ctx->last_line_count], line, copy);
+            ctx->last_lines[ctx->last_line_count][copy] = '\0';
+            ++ctx->last_line_count;
+        } else {
+            /* 只有三行,直接整体前移一格,不值得上环形索引 */
+            memcpy(ctx->last_lines[0], ctx->last_lines[1], sizeof(ctx->last_lines[0]));
+            memcpy(ctx->last_lines[1], ctx->last_lines[2], sizeof(ctx->last_lines[0]));
+            memcpy(ctx->last_lines[2], line, copy);
+            ctx->last_lines[2][copy] = '\0';
+        }
+    }
     if (line && line[0]) {
         sxcl_loader_progress progress;
         if (sxcl_loader_parse_progress(line, &progress) == SXCL_LOADER_OK && progress.matched) {
@@ -909,6 +940,12 @@ static int install_on_line(void *ud, int is_stderr, const char *line)
         return 1;
     }
     return 0;
+}
+
+/* 安装器最后说的那句话 —— 失败时它就是"人话原因"的主体。 */
+static const char *ctx_last_line(const install_ctx *ctx)
+{
+    return ctx->last_line_count > 0 ? ctx->last_lines[ctx->last_line_count - 1] : "";
 }
 
 static int effective_timeout_ms(const sxcl_loader_install_request *req)
@@ -954,7 +991,12 @@ static int run_variant(install_ctx *ctx, const sxcl_loader_cmd *cmd, sxcl_proces
 
     ctx->finished = 0;
     ctx->cancelled = 0;
-    const int pushed = sandbox_env_push(cmd->appdata);
+    ctx->last_line_count = 0;
+    /* 沙箱 APPDATA 的首选通道就是 opts->env(process.h 两条腿都实现了:
+     * POSIX 用 putenv,Windows 用"父环境 + 覆盖项 → 环境块 + CREATE_UNICODE_ENVIRONMENT")。
+     * 只有兜底模式才额外临时改本进程的环境变量 —— 那是给"进程后端不认 env"的情况准备的,
+     * 正常情况下不动全局状态。 */
+    const int pushed = ctx->process_env_fallback ? sandbox_env_push(cmd->appdata) : 0;
     const int rc = sxcl_process_run(&opts, pres);
     sandbox_env_pop(pushed);
     return rc;
@@ -1395,9 +1437,13 @@ static int run_installer_phase(install_ctx *ctx, const char *versions_dir, const
         if (variant_succeeded(ctx, &pres, versions_dir, instance_dir)) {
             return 1;
         }
+        const char *tail = ctx_last_line(ctx);
         if (ctx->finished) {
             ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "安装器说装完了，但 %s 里没有版本 JSON",
                      instance_dir);
+        } else if (tail[0]) {
+            ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "安装器没有成功（退出码 %d）：%.140s",
+                     pres.exit_code, tail);
         } else {
             ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "安装器没有成功（退出码 %d）", pres.exit_code);
         }
@@ -1496,7 +1542,7 @@ static int install_optifine(install_ctx *ctx)
         char perr[192];
         perr[0] = '\0';
         int changed = 0;
-        if (sxcl_loader_ensure_launcher_profiles(fake_game, NULL, NULL, NULL, &changed, perr,
+        if (sxcl_loader_ensure_launcher_profiles(fake_game, NULL, NULL, NULL, NULL, &changed, perr,
                                                  sizeof(perr)) != SXCL_LOADER_OK) {
             ctx_fail(ctx, SXCL_LOADER_FAIL_PREPARE, "沙箱里补不了 launcher_profiles.json：%s", perr);
             goto done;
@@ -1517,35 +1563,54 @@ static int install_optifine(install_ctx *ctx)
             ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "拼不出 OptiFine 安装器命令行");
             goto done;
         }
-        sxcl_process_result pres;
-        memset(&pres, 0, sizeof(pres));
-        if (run_variant(ctx, &cmds[0], &pres) != 0) {
-            ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "启动 OptiFine 安装器失败：%s",
-                     pres.error[0] ? pres.error : req->java_path);
-            goto done;
-        }
-        res->exit_code = pres.exit_code;
-        if (ctx->cancelled) {
-            ctx_fail(ctx, SXCL_LOADER_FAIL_CANCELLED, "用户取消了安装");
-            goto done;
-        }
-        if (pres.timed_out) {
-            ctx->timed_out = 1;
-            ctx_fail(ctx, SXCL_LOADER_FAIL_TIMEOUT, "OptiFine 安装器超时");
-            goto done;
-        }
-        if (pres.exit_code != 0 && !ctx->finished) {
-            ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "OptiFine 安装器退出码 %d", pres.exit_code);
-            goto done;
-        }
-    }
-
-    /* 找它装出来的版本目录(沙箱里只可能有原版和我们刚给的那份,所以名字里带 optifine 的就是它)。 */
-    {
+        /* 给它两次机会:
+         *   第 1 次:APPDATA 只走 process.h 的 env(首选通道,不动全局状态);
+         *   第 2 次:沙箱里什么都没生成 -> 这个进程后端八成不认 env,才退回"临时改本进程
+         *           APPDATA"的兜底方式重试一次。
+         * 两次都不行就如实失败,不做无谓的第三次。 */
         find_dir_state found;
         memset(&found, 0, sizeof(found));
-        if (list_dir(fake_versions, find_optifine_cb, &found) != 0 || !found.found) {
-            ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "OptiFine 没有生成版本目录（输出里没有可用信息）");
+        for (int attempt = 0; attempt < 2 && !found.found; ++attempt) {
+            if (attempt > 0) {
+                ctx->process_env_fallback = 1;
+                ctx_report(ctx, ctx->percent, "OptiFine 没在沙箱里生成版本，改用进程环境变量兜底重试");
+            }
+            sxcl_process_result pres;
+            memset(&pres, 0, sizeof(pres));
+            if (run_variant(ctx, &cmds[0], &pres) != 0) {
+                ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "启动 OptiFine 安装器失败：%s",
+                         pres.error[0] ? pres.error : req->java_path);
+                goto done;
+            }
+            res->exit_code = pres.exit_code;
+            if (ctx->cancelled) {
+                ctx_fail(ctx, SXCL_LOADER_FAIL_CANCELLED, "用户取消了安装");
+                goto done;
+            }
+            if (pres.timed_out) {
+                ctx->timed_out = 1;
+                ctx_fail(ctx, SXCL_LOADER_FAIL_TIMEOUT, "OptiFine 安装器超时");
+                goto done;
+            }
+            if (pres.exit_code != 0 && !ctx->finished) {
+                const char *tail = ctx_last_line(ctx);
+                if (tail[0]) {
+                    ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "OptiFine 安装器退出码 %d：%.140s",
+                             pres.exit_code, tail);
+                } else {
+                    ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "OptiFine 安装器退出码 %d",
+                             pres.exit_code);
+                }
+            }
+            /* 找它装出来的版本目录(沙箱里只可能有原版和我们刚给的那份,所以名字里带 optifine 的就是它)。
+             * 找不到就说明它把东西装到别处去了(典型:没认我们给的 APPDATA)。 */
+            (void)list_dir(fake_versions, find_optifine_cb, &found);
+        }
+        if (!found.found) {
+            if (ctx->fail_stage == SXCL_LOADER_FAIL_NONE) {
+                ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER,
+                         "OptiFine 没有生成版本目录（它可能没认我们给的 APPDATA）");
+            }
             goto done;
         }
         char source_dir[SXCL_LOADER_CMD_ARG_MAX];
@@ -1587,6 +1652,54 @@ const char *sxcl_loader_fail_stage_name(sxcl_loader_fail_stage stage)
     case SXCL_LOADER_FAIL_CANCELLED:  return "cancelled";
     case SXCL_LOADER_FAIL_TIMEOUT:    return "timeout";
     default:                          return "unknown";
+    }
+}
+
+static int path_is_absolute(const char *path)
+{
+    if (!path || !path[0]) {
+        return 0;
+    }
+    if (path[0] == '/' || path[0] == '\\') {
+        return 1;
+    }
+#if defined(_WIN32)
+    if (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':') {
+        return 1;
+    }
+#endif
+    return 0;
+}
+
+/* 相对路径 -> 绝对路径(按本进程当前工作目录)。已经是绝对路径、或者取不到 cwd 时原样拷贝。
+ *
+ * 为什么非做不可:子进程的工作目录被我们设成了游戏目录,而 Java 解析 "-jar <路径>" 是相对
+ * **它自己的**工作目录 —— 真跑 Forge 1.20.1 时就是这条把方式 A 的四组命令行全打挂了:
+ * 它去找 <游戏目录>/build/e2e/mc/loaders/forge-....jar,直接 "Unable to access jarfile" 退出 1。 */
+static void make_absolute(char *out, size_t cap, const char *path)
+{
+    if (!out || cap == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!path || !path[0] || path_is_absolute(path)) {
+        (void)snprintf(out, cap, "%s", path ? path : "");
+        return;
+    }
+    char cwd[SXCL_LOADER_CMD_ARG_MAX];
+#if defined(_WIN32)
+    if (!_getcwd(cwd, (int)sizeof(cwd))) {
+        (void)snprintf(out, cap, "%s", path);
+        return;
+    }
+#else
+    if (!getcwd(cwd, sizeof(cwd))) {
+        (void)snprintf(out, cap, "%s", path);
+        return;
+    }
+#endif
+    if (join_path(out, cap, cwd, path) != 0) {
+        (void)snprintf(out, cap, "%s", path);
     }
 }
 
@@ -1632,6 +1745,25 @@ int sxcl_loader_install(const sxcl_loader_install_request *req, sxcl_loader_inst
         return install_arg_error(out, "还不支持安装该加载器（只有 Forge / NeoForge / Fabric / OptiFine 有静默实现）");
     }
 
+    /* 游戏目录 / 安装器 jar / 带分隔符的 java 路径一律转绝对路径 —— 子进程的工作目录是游戏目录,
+     * 相对路径会被它按自己的工作目录重新解析(见 make_absolute 的注释)。 */
+    sxcl_loader_install_request local;
+    char game_abs[SXCL_LOADER_CMD_ARG_MAX];
+    char installer_abs[SXCL_LOADER_CMD_ARG_MAX];
+    char java_abs[SXCL_LOADER_CMD_ARG_MAX];
+    memcpy(&local, req, sizeof(local));
+    make_absolute(game_abs, sizeof(game_abs), req->game_dir);
+    make_absolute(installer_abs, sizeof(installer_abs), req->installer_jar);
+    if (strchr(req->java_path, '/') || strchr(req->java_path, '\\')) {
+        make_absolute(java_abs, sizeof(java_abs), req->java_path);
+    } else {
+        (void)snprintf(java_abs, sizeof(java_abs), "%s", req->java_path);   /* 裸名字走 PATH,别动它 */
+    }
+    local.game_dir = game_abs;
+    local.installer_jar = installer_abs;
+    local.java_path = java_abs;
+    req = &local;
+
     install_ctx ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.req = req;
@@ -1662,8 +1794,8 @@ int sxcl_loader_install(const sxcl_loader_install_request *req, sxcl_loader_inst
         char perr[192];
         perr[0] = '\0';
         int changed = 0;
-        if (sxcl_loader_ensure_launcher_profiles(req->game_dir, NULL, NULL, NULL, &changed, perr,
-                                                 sizeof(perr)) != SXCL_LOADER_OK) {
+        if (sxcl_loader_ensure_launcher_profiles(req->game_dir, NULL, NULL, NULL, NULL, &changed,
+                                                 perr, sizeof(perr)) != SXCL_LOADER_OK) {
             ctx_fail(&ctx, SXCL_LOADER_FAIL_PREPARE, "补不了 launcher_profiles.json：%s",
                      perr[0] ? perr : "写不进去");
             goto finish;
@@ -1694,6 +1826,24 @@ int sxcl_loader_install(const sxcl_loader_install_request *req, sxcl_loader_inst
         if (!dir_has_json(instance_dir)) {
             ok = 0;
             ctx_fail(&ctx, SXCL_LOADER_FAIL_VERIFY, "版本目录里没有版本 JSON：%s", instance_dir);
+        }
+    }
+
+    /* 装完把实例登记进 launcher_profiles.json:启动器的版本列表才看得到它。
+     * 用同一个只合并不覆盖的入口(key = 实例名),原有档案与未知字段一个都不动。
+     * 这一步失败不算安装失败(版本本身已经就位),只在进度里说一声。 */
+    if (ok) {
+        char perr[192];
+        perr[0] = '\0';
+        int changed = 0;
+        const int prc = sxcl_loader_ensure_launcher_profiles(req->game_dir, req->instance_name,
+                                                            req->instance_name, req->instance_name,
+                                                            NULL, &changed, perr, sizeof(perr));
+        if (prc != SXCL_LOADER_OK) {
+            ctx_report(&ctx, ctx.percent, "实例没能写进 launcher_profiles.json：%s",
+                       perr[0] ? perr : "写不进去");
+        } else if (perr[0]) {
+            ctx_report(&ctx, ctx.percent, perr);
         }
     }
 
