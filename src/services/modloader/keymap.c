@@ -254,9 +254,48 @@ int sxcl_kp_buf_json_string(sxcl_kp_buf *buf, const char *text)
 
 int sxcl_kp_buf_json_number(sxcl_kp_buf *buf, double value)
 {
+    if (!(value == value) || value > 1.0e308 || value < -1.0e308) {
+        return sxcl_kp_buf_puts(buf, "0");   /* NaN / inf:JSON 里没有这种东西 */
+    }
+    /* Python 的 repr(float) 是最短的、能原样读回来的十进制表示。
+     * 原来这里写 %.4g(4 位有效数字)—— 坐标 0.2655 对得上,但 meta 里一个
+     * 12345678 会被写成 1.235e+07 丢掉精度;改成"从 15 位试到 17 位,能读回原值就停",
+     * 就与 Python 的写法对齐了(整数值也不带小数点,与 Python 里 int 的写法一致)。 */
     char text[64];
-    /* 坐标/透明度都只有几位小数(资产里最多 4 位),%g 既不丢精度也不会写出 0.550000 */
-    (void)snprintf(text, sizeof text, "%.4g", (value == value) ? value : 0.0);
+    for (int precision = 15; precision <= 17; ++precision) {
+        (void)snprintf(text, sizeof text, "%.*g", precision, value);
+        if (strtod(text, NULL) == value) {
+            break;
+        }
+    }
+    return sxcl_kp_buf_puts(buf, text);
+}
+
+int sxcl_kp_buf_py_number(sxcl_kp_buf *buf, double value, int decimals)
+{
+    if (!(value == value)) {
+        value = 0.0;
+    }
+    if (decimals < 0) {
+        decimals = 0;
+    }
+    if (decimals > 12 || value >= 1.0e15 || value <= -1.0e15) {
+        return sxcl_kp_buf_json_number(buf, value);   /* 病态输入:退回通用写法,别拼出几百个字符 */
+    }
+    char text[64];
+    (void)snprintf(text, sizeof text, "%.*f", decimals, value);
+    /* Python 的 repr 不写多余的 0(round(0.55, 2) -> 0.55),但整数要留一位小数(1.0) */
+    char *dot = strchr(text, '.');
+    if (dot) {
+        char *end = text + strlen(text) - 1;
+        while (end > dot && *end == '0') {
+            *end-- = '\0';
+        }
+        if (end == dot) {
+            *++end = '0';
+            *++end = '\0';
+        }
+    }
     return sxcl_kp_buf_puts(buf, text);
 }
 
@@ -928,14 +967,25 @@ static int dump_binding(sxcl_kp_buf *buf, const sxcl_keymap_binding *binding, in
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_json_string(buf, binding->action) : rc;
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ",") : rc;
     sxcl_kp_buf_indent(buf, indent + 1);
+    /* keys 数组逐行写:json.dumps(indent=2) 就是这么排的(空数组写成 []),这样
+     * C 版存出来的文件与 store.py 存出来的**逐字节一致**,跨端 diff 才有意义。 */
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, "\"keys\": [") : rc;
-    for (size_t i = 0; i < binding->key_count; ++i) {
-        if (i) {
-            rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ", ") : rc;
+    if (binding->key_count == 0) {
+        rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, "]") : rc;
+    } else {
+        for (size_t i = 0; i < binding->key_count && rc == SXCL_KEYMAP_OK; ++i) {
+            if (i) {
+                rc = sxcl_kp_buf_puts(buf, ",");
+            }
+            sxcl_kp_buf_indent(buf, indent + 2);
+            rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_json_string(buf, binding->keys[i]) : rc;
         }
-        rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_json_string(buf, binding->keys[i]) : rc;
+        if (rc == SXCL_KEYMAP_OK) {
+            sxcl_kp_buf_indent(buf, indent + 1);
+        }
+        rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, "]") : rc;
     }
-    rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, "],") : rc;
+    rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ",") : rc;
     sxcl_kp_buf_indent(buf, indent + 1);
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, "\"behavior\": ") : rc;
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_json_string(buf, binding->behavior) : rc;
@@ -967,7 +1017,8 @@ static int dump_button(sxcl_kp_buf *buf, const sxcl_keymap_button *button, int i
         sxcl_kp_buf_indent(buf, indent + 1);
         rc = sxcl_kp_buf_json_string(buf, numbers[i].key);
         rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ": ") : rc;
-        rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_json_number(buf, numbers[i].value) : rc;
+        /* model.py ControlButton.to_dict():坐标 round(x, 4) */
+        rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_py_number(buf, numbers[i].value, 4) : rc;
         rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ",") : rc;
     }
     sxcl_kp_buf_indent(buf, indent + 1);
@@ -976,7 +1027,8 @@ static int dump_button(sxcl_kp_buf *buf, const sxcl_keymap_button *button, int i
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ",") : rc;
     sxcl_kp_buf_indent(buf, indent + 1);
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, "\"opacity\": ") : rc;
-    rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_json_number(buf, button->opacity) : rc;
+    /* model.py ControlButton.to_dict():opacity round(x, 2) */
+    rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_py_number(buf, button->opacity, 2) : rc;
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ",") : rc;
     sxcl_kp_buf_indent(buf, indent + 1);
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, "\"group\": ") : rc;
@@ -1036,7 +1088,8 @@ static int dump_direction(sxcl_kp_buf *buf, const sxcl_keymap_direction *directi
         sxcl_kp_buf_indent(buf, indent + 1);
         rc = sxcl_kp_buf_json_string(buf, numbers[i].key);
         rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ": ") : rc;
-        rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_json_number(buf, numbers[i].value) : rc;
+        /* model.py DirectionControl.to_dict():坐标 round(x, 4) */
+        rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_py_number(buf, numbers[i].value, 4) : rc;
         rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ",") : rc;
     }
     sxcl_kp_buf_indent(buf, indent + 1);
@@ -1045,11 +1098,13 @@ static int dump_direction(sxcl_kp_buf *buf, const sxcl_keymap_direction *directi
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ",") : rc;
     sxcl_kp_buf_indent(buf, indent + 1);
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, "\"opacity\": ") : rc;
-    rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_json_number(buf, direction->opacity) : rc;
+    /* model.py DirectionControl.to_dict():opacity round(x, 2) */
+    rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_py_number(buf, direction->opacity, 2) : rc;
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ",") : rc;
     sxcl_kp_buf_indent(buf, indent + 1);
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, "\"dead_zone\": ") : rc;
-    rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_json_number(buf, direction->dead_zone) : rc;
+    /* model.py DirectionControl.to_dict():dead_zone round(x, 3) */
+    rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_py_number(buf, direction->dead_zone, 3) : rc;
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ",") : rc;
     sxcl_kp_buf_indent(buf, indent + 1);
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, "\"group\": ") : rc;

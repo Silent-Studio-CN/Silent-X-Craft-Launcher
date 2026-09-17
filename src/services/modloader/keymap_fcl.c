@@ -225,6 +225,15 @@ static const char *pick_string(const sxcl_json_value *object, const char *const 
     return def;
 }
 
+/* fcl.py 里到处是 str(_pick(...) or 后面那个默认值) —— 字段**存在但是空串**时也要回落。
+ * (pick_string 只管"有没有这个字段",不管空不空。) */
+static const char *pick_string_or(const sxcl_json_value *object, const char *const *names, size_t count,
+                                 const char *fallback)
+{
+    const char *text = pick_string(object, names, count, fallback);
+    return (text && *text) ? text : fallback;
+}
+
 /* _keys_of:把某个字段里的按键统一成 "KEY_*"/"MOUSE_*"。 */
 static size_t keys_of(const sxcl_json_value *item, const char *const *names, size_t count,
                       char keys[][SXCL_KEYMAP_KEY_MAX], size_t cap)
@@ -295,14 +304,22 @@ static void rect_of(const sxcl_json_value *item, double screen_w, double screen_
     *h = rh;
 }
 
-/* FCL 原始数据塞进 meta.fcl_raw(fcl.py 的做法:方便对照排查)。 */
+/* FCL 原始数据塞进 meta.fcl_raw(fcl.py 的做法:方便对照排查)。
+ * 顶层是数组时 fcl.py 会包一层 {"views": [...]},这里跟着包,免得两边 meta 结构不一样。 */
 static int set_fcl_meta(sxcl_keymap_layout *layout, const sxcl_json_value *root)
 {
+    const int wrapped = (root && sxcl_json_type_of(root) == SXCL_JSON_ARRAY);
     sxcl_kp_buf buf;
     sxcl_kp_buf_init(&buf);
     int rc = sxcl_kp_buf_puts(&buf, "{\n    \"fcl_raw\": ");
+    if (rc == SXCL_KEYMAP_OK && wrapped) {
+        rc = sxcl_kp_buf_puts(&buf, "{\n      \"views\": ");
+    }
     if (rc == SXCL_KEYMAP_OK) {
-        rc = sxcl_kp_json_dump(&buf, root, 2);
+        rc = sxcl_kp_json_dump(&buf, root, wrapped ? 3 : 2);
+    }
+    if (rc == SXCL_KEYMAP_OK && wrapped) {
+        rc = sxcl_kp_buf_puts(&buf, "\n    }");
     }
     if (rc == SXCL_KEYMAP_OK) {
         rc = sxcl_kp_buf_puts(&buf, "\n  }");
@@ -393,29 +410,25 @@ int sxcl_keymap_import_fcl(const char *json_text, size_t len, const char *name,
                                   strstr(kind, "dpad") != NULL || strstr(kind, "rocker") != NULL);
         static const char *const id_names[] = { "id" };
         static const char *const text_names[] = { "text", "label", "name" };
+        /* 方向控件的字段表与按钮不同:fcl.py 的方向只认 text/label(不认 name) */
+        static const char *const direction_text_names[] = { "text", "label" };
         if (is_direction) {
             char id[64];
             (void)snprintf(id, sizeof id, "move%d", (int)i);
             sxcl_keymap_direction direction;
             memset(&direction, 0, sizeof direction);
-            sxcl_kp_copy(direction.id, sizeof direction.id, pick_string(item, id_names, 1, id));
+            /* fcl.py: str(_pick(item, "id", default=f"move{index}") or ...) —— 空 id 也回落 */
+            sxcl_kp_copy(direction.id, sizeof direction.id, pick_string_or(item, id_names, 1, id));
             sxcl_kp_copy(direction.label, sizeof direction.label,
-                         pick_string(item, text_names, 3, "移动"));
+                         pick_string_or(item, direction_text_names, 2, "移动"));
             direction.x = x;
             direction.y = y;
             direction.w = w;
             direction.h = h;
-            /* fcl.py 只看视图类型字符串;这里多认一个显式的 "style" 字段(更贴近用户预期),
-             * 认不出来才按类型推断。 */
-            const char *explicit_style = sxcl_kp_string(item, "style", "");
-            if (explicit_style[0]) {
-                sxcl_kp_copy(direction.style, sizeof direction.style,
-                             sxcl_keymap_normalize_style(explicit_style, NULL));
-            } else {
-                sxcl_kp_copy(direction.style, sizeof direction.style,
-                             (strstr(kind, "rocker") || strstr(kind, "joystick")) ? "rocker"
-                                                                                 : "dpad_compact");
-            }
+            /* style 只由**视图类型**决定(fcl.py 不看视图里那个显式 style 字段):
+             * 类型串里有 rocker/joystick 就是 rocker,否则 dpad_compact。 */
+            sxcl_kp_copy(direction.style, sizeof direction.style,
+                         (strstr(kind, "rocker") || strstr(kind, "joystick")) ? "rocker" : "dpad_compact");
             direction.opacity = 0.5;
             direction.dead_zone = 0.18;
             sxcl_kp_copy(direction.group, sizeof direction.group, "left");
@@ -437,7 +450,8 @@ int sxcl_keymap_import_fcl(const char *json_text, size_t len, const char *name,
         memset(&button, 0, sizeof button);
         char fallback_id[32];
         (void)snprintf(fallback_id, sizeof fallback_id, "fcl%d", (int)i);
-        sxcl_kp_copy(button.id, sizeof button.id, pick_string(item, id_names, 1, fallback_id));
+        /* fcl.py: id 空 -> fcl<序号>;label 空 -> 空串(但**没有** label 字段时用 键<序号>) */
+        sxcl_kp_copy(button.id, sizeof button.id, pick_string_or(item, id_names, 1, fallback_id));
         char fallback_label[32];
         (void)snprintf(fallback_label, sizeof fallback_label, "键%d", (int)i + 1);
         sxcl_kp_copy(button.label, sizeof button.label,
@@ -450,7 +464,11 @@ int sxcl_keymap_import_fcl(const char *json_text, size_t len, const char *name,
         static const char *const alpha_names[] = { "alpha", "opacity" };
         const sxcl_json_value *alpha = pick_value(item, alpha_names, 2);
         button.opacity = (alpha ? json_to_number(alpha, 0.55) : 0.55);
-        sxcl_kp_copy(button.group, sizeof button.group, "right");
+        if (button.opacity == 0.0) {
+            button.opacity = 0.55;   /* fcl.py 的 float(_pick(...) or 0.55):写了 0 也当没写 */
+        }
+        /* fcl.py 导入时 group 用 ControlButton 的默认值(空串),不是预设里那个 "right" */
+        sxcl_kp_copy(button.group, sizeof button.group, "");
 
         static const char *const press_names[] = { "keycodes", "keys", "codes", "key" };
         static const char *const click_names[] = { "clickKeycodes", "clickKeys" };

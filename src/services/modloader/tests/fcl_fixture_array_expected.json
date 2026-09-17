@@ -1,0 +1,120 @@
+{
+  "schema": "sxcl.keymap.v1",
+  "name": "从 FCL 导入",
+  "screen": "landscape",
+  "mc_version": "",
+  "description": "由 FCL 布局导入（坐标已按屏幕尺寸归一化）",
+  "meta": {
+    "fcl_raw": {
+      "views": [
+        {
+          "type": "button",
+          "text": "跳",
+          "x": 1200,
+          "y": 540,
+          "width": 120,
+          "height": 120,
+          "keycodes": [
+            32
+          ]
+        },
+        {
+          "type": "direction",
+          "text": "移动",
+          "x": 72,
+          "y": 626,
+          "width": 480,
+          "height": 389,
+          "keycodes": [
+            87,
+            83,
+            65,
+            68
+          ]
+        },
+        {
+          "type": "button",
+          "id": "bag",
+          "x": 0.62,
+          "y": 0.6,
+          "width": 0.09,
+          "height": 0.14,
+          "keycodes": [
+            69
+          ]
+        },
+        null
+      ]
+    }
+  },
+  "buttons": [
+    {
+      "id": "fcl0",
+      "label": "跳",
+      "hint": "",
+      "icon": "",
+      "x": 0.5,
+      "y": 0.5,
+      "w": 0.05,
+      "h": 0.1111,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "jump",
+          "keys": [
+            "KEY_SPACE"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "bag",
+      "label": "键3",
+      "hint": "",
+      "icon": "",
+      "x": 0.62,
+      "y": 0.6,
+      "w": 0.09,
+      "h": 0.14,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "inventory",
+          "keys": [
+            "KEY_E"
+          ],
+          "behavior": "hold"
+        }
+      }
+    }
+  ],
+  "directions": [
+    {
+      "id": "move1",
+      "label": "移动",
+      "hint": "",
+      "x": 0.03,
+      "y": 0.5796,
+      "w": 0.2,
+      "h": 0.3602,
+      "style": "dpad_compact",
+      "opacity": 0.5,
+      "dead_zone": 0.18,
+      "group": "left",
+      "keys": {
+        "up": "KEY_W",
+        "down": "KEY_S",
+        "left": "KEY_A",
+        "right": "KEY_D"
+      },
+      "sprint_key": "KEY_LEFT_SHIFT"
+    }
+  ]
+}

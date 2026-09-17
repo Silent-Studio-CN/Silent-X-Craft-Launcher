@@ -1,0 +1,411 @@
+{
+  "schema": "sxcl.keymap.v1",
+  "name": "FCL 生存布局",
+  "screen": "landscape",
+  "mc_version": "",
+  "description": "由 FCL 布局导入（坐标已按屏幕尺寸归一化）",
+  "meta": {
+    "fcl_raw": {
+      "name": "FCL 生存布局",
+      "screenWidth": 2400,
+      "screenHeight": 1080,
+      "views": [
+        {
+          "type": "direction",
+          "style": "rocker",
+          "text": "移动",
+          "id": "move",
+          "x": 72,
+          "y": 626,
+          "width": 480,
+          "height": 389,
+          "keycodes": [
+            87,
+            83,
+            65,
+            68
+          ]
+        },
+        {
+          "type": "joystick",
+          "text": "视角",
+          "x": 0.5,
+          "y": 0.5,
+          "width": 0.1,
+          "height": 0.1,
+          "keycodes": [
+            265,
+            264,
+            263,
+            262
+          ]
+        },
+        {
+          "type": "button",
+          "text": "跳",
+          "x": 2064,
+          "y": 670,
+          "width": 216,
+          "height": 173,
+          "alpha": 0.6,
+          "keycodes": [
+            32
+          ]
+        },
+        {
+          "type": "button",
+          "id": "mine",
+          "text": "挖",
+          "x": 1776,
+          "y": 799,
+          "width": 240,
+          "height": 194,
+          "keycodes": [
+            -1
+          ],
+          "longPressKeycodes": [
+            84
+          ],
+          "doubleClickKeycodes": [],
+          "clickKeycodes": [
+            82
+          ]
+        },
+        {
+          "type": "squareButton",
+          "id": "shield",
+          "text": "盾",
+          "x": 1488,
+          "y": 799,
+          "width": 216,
+          "height": 173,
+          "alpha": 0,
+          "keys": "右键"
+        },
+        {
+          "type": "button",
+          "id": "hotbar",
+          "text": "1",
+          "x": 1200,
+          "y": 1015,
+          "width": 108,
+          "height": 54,
+          "keycodes": [
+            "65"
+          ]
+        },
+        {
+          "type": "button",
+          "id": "weird",
+          "text": "怪键",
+          "x": 1100,
+          "y": 500,
+          "width": 100,
+          "height": 100,
+          "keycodes": [
+            999
+          ]
+        },
+        {
+          "type": "button",
+          "id": "",
+          "text": "背包",
+          "x": 0.62,
+          "y": 0.6,
+          "width": 0.09,
+          "height": 0.14,
+          "keycodes": [
+            "e",
+            "空格"
+          ]
+        },
+        {
+          "type": "button",
+          "text": "丢弃",
+          "x": 0.5,
+          "y": 0.68,
+          "width": 0.09,
+          "height": 0.14,
+          "keycodes": [
+            81
+          ]
+        },
+        {
+          "type": "button",
+          "text": "混合坐标",
+          "x": 100,
+          "y": 0.5,
+          "width": 120,
+          "height": 0.2,
+          "keycodes": [
+            70
+          ]
+        },
+        {
+          "type": "button",
+          "id": "no_rect"
+        },
+        42,
+        "not-a-view"
+      ]
+    }
+  },
+  "buttons": [
+    {
+      "id": "fcl2",
+      "label": "跳",
+      "hint": "",
+      "icon": "",
+      "x": 0.86,
+      "y": 0.6204,
+      "w": 0.09,
+      "h": 0.1602,
+      "shape": "round",
+      "opacity": 0.6,
+      "group": "",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "jump",
+          "keys": [
+            "KEY_SPACE"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "mine",
+      "label": "挖",
+      "hint": "",
+      "icon": "",
+      "x": 0.74,
+      "y": 0.7398,
+      "w": 0.1,
+      "h": 0.1796,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "attack",
+          "keys": [
+            "MOUSE_LEFT"
+          ],
+          "behavior": "hold"
+        },
+        "click": {
+          "action": "",
+          "keys": [
+            "KEY_R"
+          ],
+          "behavior": "hold"
+        },
+        "long_press": {
+          "action": "chat",
+          "keys": [
+            "KEY_T"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "shield",
+      "label": "盾",
+      "hint": "",
+      "icon": "",
+      "x": 0.62,
+      "y": 0.7398,
+      "w": 0.09,
+      "h": 0.1602,
+      "shape": "square",
+      "opacity": 0.55,
+      "group": "",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "use",
+          "keys": [
+            "MOUSE_RIGHT"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "hotbar",
+      "label": "1",
+      "hint": "",
+      "icon": "",
+      "x": 0.5,
+      "y": 0.9398,
+      "w": 0.045,
+      "h": 0.05,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "",
+          "keys": [
+            "KEY_A"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "weird",
+      "label": "怪键",
+      "hint": "",
+      "icon": "",
+      "x": 0.4583,
+      "y": 0.463,
+      "w": 0.0417,
+      "h": 0.0926,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "",
+          "keys": [
+            "KEY_999"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "fcl7",
+      "label": "背包",
+      "hint": "",
+      "icon": "",
+      "x": 0.62,
+      "y": 0.6,
+      "w": 0.09,
+      "h": 0.14,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "inventory",
+          "keys": [
+            "KEY_E",
+            "KEY_SPACE"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "fcl8",
+      "label": "丢弃",
+      "hint": "",
+      "icon": "",
+      "x": 0.5,
+      "y": 0.68,
+      "w": 0.09,
+      "h": 0.14,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "drop",
+          "keys": [
+            "KEY_Q"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "fcl9",
+      "label": "混合坐标",
+      "hint": "",
+      "icon": "",
+      "x": 0.0417,
+      "y": 0.0005,
+      "w": 0.05,
+      "h": 0.0002,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "",
+      "alias_of": "",
+      "events": {
+        "press": {
+          "action": "swap_offhand",
+          "keys": [
+            "KEY_F"
+          ],
+          "behavior": "hold"
+        }
+      }
+    },
+    {
+      "id": "no_rect",
+      "label": "键11",
+      "hint": "",
+      "icon": "",
+      "x": 0.0,
+      "y": 0.0,
+      "w": 0.09,
+      "h": 0.14,
+      "shape": "round",
+      "opacity": 0.55,
+      "group": "",
+      "alias_of": "",
+      "events": {}
+    }
+  ],
+  "directions": [
+    {
+      "id": "move",
+      "label": "移动",
+      "hint": "",
+      "x": 0.03,
+      "y": 0.5796,
+      "w": 0.2,
+      "h": 0.3602,
+      "style": "dpad_compact",
+      "opacity": 0.5,
+      "dead_zone": 0.18,
+      "group": "left",
+      "keys": {
+        "up": "KEY_W",
+        "down": "KEY_S",
+        "left": "KEY_A",
+        "right": "KEY_D"
+      },
+      "sprint_key": "KEY_LEFT_SHIFT"
+    },
+    {
+      "id": "move1",
+      "label": "视角",
+      "hint": "",
+      "x": 0.5,
+      "y": 0.5,
+      "w": 0.1,
+      "h": 0.1,
+      "style": "rocker",
+      "opacity": 0.5,
+      "dead_zone": 0.18,
+      "group": "left",
+      "keys": {
+        "up": "KEY_W",
+        "down": "KEY_S",
+        "left": "KEY_A",
+        "right": "KEY_D"
+      },
+      "sprint_key": "KEY_LEFT_SHIFT"
+    }
+  ]
+}

@@ -44,8 +44,12 @@ int sxcl_kp_buf_printf(sxcl_kp_buf *buf, const char *fmt, ...);
 int sxcl_kp_buf_indent(sxcl_kp_buf *buf, int indent);
 /** 带引号的 JSON 字符串(转义 " \ 与 <0x20)。 */
 int sxcl_kp_buf_json_string(sxcl_kp_buf *buf, const char *text);
-/** JSON 数字(%g;非法值按 0)。 */
+/** JSON 数字(Python json.dumps 那种写法:最短且能原样读回来的十进制;
+ *  整数值不带小数点 —— 与 Python 里 int 的写法一致)。非法值(NaN/inf)按 0。 */
 int sxcl_kp_buf_json_number(sxcl_kp_buf *buf, double value);
+/** Python 的 round(value, decimals) 之后 repr 的写法(坐标 4 位/透明度 2 位/死区 3 位)。
+ *  Python 版 model.py 的 to_dict() 就是这么写的,C 版存出来的文件要与它逐字段一致。 */
+int sxcl_kp_buf_py_number(sxcl_kp_buf *buf, double value, int decimals);
 /** 把已解析的 JSON 子树原样写回去(meta 原样保留靠它)。indent 是当前缩进层数。 */
 int sxcl_kp_json_dump(sxcl_kp_buf *buf, const sxcl_json_value *value, int indent);
 

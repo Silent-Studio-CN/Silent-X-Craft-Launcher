@@ -16,6 +16,7 @@
 // 标题栏从 x=46 起盖在上面(参考图 py_home.png 里左上是导航面板的返回键 + 汉堡键,
 // 不是标题栏的按钮)。窗口**没有任何阴影留白**:qf 在 Windows 上靠 DWM 画阴影,
 // 窗口内不留 30px 边距,内容才能落在 (48,48) 1052x702。
+#include <QByteArray>
 #include <QHash>
 #include <QString>
 #include <QVector>
@@ -44,6 +45,13 @@ public:
     static constexpr int kTitleBarHeight = 48;
     // qf FluentWindow.resizeEvent: self.titleBar.move(46, 0)
     static constexpr int kTitleBarLeft = 46;
+    // 窗口边缘的缩放命中带(**物理像素**):
+    //   qframelesswindow/windows/__init__.py:22  BORDER_WIDTH = 5
+    //   :111-145 WM_NCHITTEST 里用 ScreenToClient + GetClientRect 的物理像素比较,
+    //            x < 5 左边 / x > w-5 右边 / y < 5 上边 / y > h-5 下边,角优先,最大化时 0。
+    // libqf 的 FluentWindowBase 用的是它自己 30px 阴影带(fluent_window.cpp:152,599),
+    // 我们的窗口内没有阴影带,所以按参考实现覆写命中(见 .cpp nativeEvent)。
+    static constexpr int kResizeBandPx = 5;
 
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
@@ -56,6 +64,7 @@ public:
     void switchToRoute(const QString &routeKey);
 
 protected:
+    bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
     void paintEvent(QPaintEvent *) override;
     void resizeEvent(QResizeEvent *) override;
     void changeEvent(QEvent *) override;

@@ -47,6 +47,21 @@ namespace {
 // 令牌小工具
 QString tokenCss(const QString &name) { return FluentTheme::instance().tokenText(name); }
 
+// QSS 用的令牌字符串。实测(6.11):Qt 的 QSS 解析器**吃不下带空格的 rgba**
+// ("rgba(255, 255, 255, 0.05)" 会被整条声明丢掉 → 卡片底色不画),而令牌字符串
+// (theme.py) 里就是带空格的 —— 所以进 QSS 前先把 rgba(...) 里的空格去掉,
+// 颜色值不变,渲染结果与 Python 的设计意图(半透明白)一致。
+QString tokenQss(const QString &name) {
+    QString s = tokenCss(name);
+    if (s.startsWith(QLatin1String("rgba"), Qt::CaseInsensitive)) {
+        const int l = s.indexOf(QLatin1Char('('));
+        const int r = s.lastIndexOf(QLatin1Char(')'));
+        if (l > 0 && r > l)
+            s = s.left(l + 1) + s.mid(l + 1, r - l - 1).remove(QLatin1Char(' ')) + s.mid(r);
+    }
+    return s;
+}
+
 } // namespace
 
 // ──────────────────────────────────────────────────────────────── _StatusIcon
@@ -176,6 +191,10 @@ public:
         setFixedHeight(80);
         setAttribute(Qt::WA_StyledBackground, true);
         setCursor(Qt::PointingHandCursor);
+        // Python 用类名选择器 TaskCard { … };Qt 的 QSS 对**命名空间里的类**要求写成
+        // sxcl--ui--TaskCard(冒号换成 --),既啰嗦又容易踩坑 —— 这里改成等价的
+        // objectName 选择器 #taskCard,渲染结果与 Python 一致。
+        setObjectName(QStringLiteral("taskCard"));
 
         auto *layout = new QVBoxLayout(this);
         layout->setContentsMargins(16, 12, 16, 12);
@@ -264,10 +283,11 @@ protected:
 private:
     void refreshTheme() { // tasks_page.py:169-174
         setStyleSheet(QStringLiteral(
-                          "TaskCard { background: %1; border-radius: 8px; margin: 2px 0; }\n"
-                          "TaskCard:hover { background: %2; }")
-                          .arg(tokenCss(QStringLiteral("hover_bg")),
-                               tokenCss(QStringLiteral("hover_bg_strong"))));
+                          "#taskCard { background: %1; border-radius: 8px;"
+                          " margin: 2px 0; }\n"
+                          "#taskCard:hover { background: %2; }")
+                          .arg(tokenQss(QStringLiteral("hoverBg")),
+                               tokenQss(QStringLiteral("hoverBgStrong"))));
     }
 
     QString m_taskId;
@@ -308,7 +328,6 @@ public:
 
         buildContent();
     }
-
     // ---- 对外 API(tasks_page.py:235-283;主窗口登记任务时按 id 驱动)----
 
     Q_INVOKABLE TaskCard *addOrUpdateTask(const QString &taskId, const QString &title,

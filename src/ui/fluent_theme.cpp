@@ -211,33 +211,76 @@ const ThemeTokens &FluentTheme::tokens() const {
     return t;
 }
 
+namespace {
+
+// theme.py 的键名是 snake_case(text_tertiary),本层结构体字段是 CamelCase(textTertiary)。
+// 页面作者两边混着写时,旧实现会**静默返回空串**(颜色丢失、悬停/卡片底不画)——
+// 实测:versions 页因此有 4.5 个百分点的差异被吃掉。这里做归一化,两种写法都认。
+QString normalizeTokenName(const QString &name) {
+    static const struct { const char *snake; const char *camel; } kAliases[] = {
+        {"bg_nav", "bgNav"},         {"card_hover", "cardHover"},
+        {"border_strong", "borderStrong"}, {"hover_strong", "hoverStrong"},
+        {"hover_bg", "hoverBg"},     {"hover_bg_strong", "hoverBgStrong"},
+        {"text_secondary", "textSecondary"}, {"text_tertiary", "textTertiary"},
+        {"text_disabled", "textDisabled"},   {"input_bg", "inputBg"},
+        {"input_border", "inputBorder"},     {"on_accent", "onAccent"},
+    };
+    for (const auto &a : kAliases) {
+        if (name == QLatin1String(a.snake))
+            return QString::fromLatin1(a.camel);
+    }
+    return name;
+}
+
+// Qt 的 QSS 解析器**吃不下来带空格的 rgba**:`rgba(255, 255, 255, 0.05)` 会让整条声明被丢弃
+// (实测:卡片不画底、悬停无反应)。令牌字符串本身是带空格的写法(theme.py 原文如此),
+// 所以在**进 QSS 之前**去掉函数参数里的空格,颜色值一个比特都不变。
+QString qssSafe(const QString &raw) {
+    const int l = raw.indexOf(QLatin1Char('('));
+    const int r = raw.lastIndexOf(QLatin1Char(')'));
+    if (l < 0 || r <= l)
+        return raw;
+    const QString head = raw.left(l + 1);
+    if (!head.startsWith(QLatin1String("rgb"), Qt::CaseInsensitive))
+        return raw;
+    QString inner = raw.mid(l + 1, r - l - 1);
+    inner.remove(QLatin1Char(' '));
+    return head + inner + raw.mid(r);
+}
+
+} // namespace
+
 QString FluentTheme::tokenText(const QString &name) const {
     const ThemeTokens &t = tokens();
-    if (name == QLatin1String("hover")) return t.hover;
-    if (name == QLatin1String("hoverStrong")) return t.hoverStrong;
-    if (name == QLatin1String("hoverBg")) return t.hoverBg;
-    if (name == QLatin1String("hoverBgStrong")) return t.hoverBgStrong;
-    if (name == QLatin1String("track")) return t.track;
-    if (name == QLatin1String("bg")) return t.bg.name();
-    if (name == QLatin1String("bgNav")) return t.bgNav.name();
-    if (name == QLatin1String("card")) return t.card.name();
-    if (name == QLatin1String("cardHover")) return t.cardHover.name();
-    if (name == QLatin1String("border")) return t.border.name();
-    if (name == QLatin1String("borderStrong")) return t.borderStrong.name();
-    if (name == QLatin1String("separator")) return t.separator.name();
-    if (name == QLatin1String("text")) return t.text.name();
-    if (name == QLatin1String("textSecondary")) return t.textSecondary.name();
-    if (name == QLatin1String("textTertiary")) return t.textTertiary.name();
-    if (name == QLatin1String("textDisabled")) return t.textDisabled.name();
-    if (name == QLatin1String("inputBg")) return t.inputBg.name();
-    if (name == QLatin1String("inputBorder")) return t.inputBorder.name();
-    if (name == QLatin1String("success")) return t.success.name();
-    if (name == QLatin1String("warning")) return t.warning.name();
-    if (name == QLatin1String("danger")) return t.danger.name();
-    if (name == QLatin1String("info")) return t.info.name();
-    if (name == QLatin1String("onAccent")) return t.onAccent.name();
-    if (name == QLatin1String("accent")) return t.accent.name();
-    return QString();
+    const QString key = normalizeTokenName(name); // snake_case 也认(页面作者常照 theme.py 写)
+    QString raw;
+    if (key == QLatin1String("hover")) raw = t.hover;
+    else if (key == QLatin1String("hoverStrong")) raw = t.hoverStrong;
+    else if (key == QLatin1String("hoverBg")) raw = t.hoverBg;
+    else if (key == QLatin1String("hoverBgStrong")) raw = t.hoverBgStrong;
+    else if (key == QLatin1String("track")) raw = t.track;
+    else if (key == QLatin1String("bg")) raw = t.bg.name();
+    else if (key == QLatin1String("bgNav")) raw = t.bgNav.name();
+    else if (key == QLatin1String("card")) raw = t.card.name();
+    else if (key == QLatin1String("cardHover")) raw = t.cardHover.name();
+    else if (key == QLatin1String("border")) raw = t.border.name();
+    else if (key == QLatin1String("borderStrong")) raw = t.borderStrong.name();
+    else if (key == QLatin1String("separator")) raw = t.separator.name();
+    else if (key == QLatin1String("text")) raw = t.text.name();
+    else if (key == QLatin1String("textSecondary")) raw = t.textSecondary.name();
+    else if (key == QLatin1String("textTertiary")) raw = t.textTertiary.name();
+    else if (key == QLatin1String("textDisabled")) raw = t.textDisabled.name();
+    else if (key == QLatin1String("inputBg")) raw = t.inputBg.name();
+    else if (key == QLatin1String("inputBorder")) raw = t.inputBorder.name();
+    else if (key == QLatin1String("success")) raw = t.success.name();
+    else if (key == QLatin1String("warning")) raw = t.warning.name();
+    else if (key == QLatin1String("danger")) raw = t.danger.name();
+    else if (key == QLatin1String("info")) raw = t.info.name();
+    else if (key == QLatin1String("onAccent")) raw = t.onAccent.name();
+    else if (key == QLatin1String("accent")) raw = t.accent.name();
+    else return QString();
+    // 进 QSS 前统一成 Qt 认的写法(rgba 内不能有空格),颜色值不变
+    return qssSafe(raw);
 }
 
 QStringList FluentTheme::tokenNames() const {

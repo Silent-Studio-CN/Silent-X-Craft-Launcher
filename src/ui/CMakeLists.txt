@@ -43,10 +43,22 @@ target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_THEME_DIR="${CMAKE_SOURCE
 target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_BLOCK_DIR="${CMAKE_SOURCE_DIR}/assets/icons/blocks")
 # fluent 的 Qt6::Svg 是 PRIVATE(静态库只把它带进链接行),我们直接用 QSvgRenderer,
 # 所以这里显式要一份 Svg 的头文件路径
-target_link_libraries(sxcl_ui_core PUBLIC fluent Qt6::Svg)
+# sxcl = 纯 C 核心库。界面层必须能直接调它(设置读写/路径解析/实例列表…),
+# 否则页面只能用 Qt 去读 Python 版的旧配置文件(主页代理踩过这个坑)。
+# 核心库不依赖 Qt,不存在循环依赖。
+target_link_libraries(sxcl_ui_core PUBLIC fluent Qt6::Svg sxcl)
+# 核心库头文件目录:显式挂上,免得"链了库却看不到 include/sxcl/*.h"(页面代理踩过)
+target_include_directories(sxcl_ui_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 # ---- 可执行 ----
 qt_add_executable(sxcl-ui main.cpp)
+# 成品观感:控制台子系统会在启动器旁边弹一个黑窗口(实测 PE 子系统 = 3)。
+# 开发/验收阶段保留控制台 —— 工具链与各页自检都靠 stderr 看诊断;
+# **打包时**用 -DSXCL_UI_WINDOWS_GUI=ON 变成 GUI 子系统(PE 子系统 = 2)。
+option(SXCL_UI_WINDOWS_GUI "Windows: 把 sxcl-ui 编译为 GUI 子系统(不弹控制台窗口)" OFF)
+if(WIN32 AND SXCL_UI_WINDOWS_GUI)
+  set_target_properties(sxcl-ui PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
 target_link_libraries(sxcl-ui PRIVATE sxcl_ui_core sxcl)
 # 界面程序需要 platforms/tls 插件才能起窗:用 windeployqt 把 Qt 运行时铺到 exe 同目录
 # (用户反馈"总是提示找不到 Qt*.dll" —— 不能靠 PATH,产物必须自带)

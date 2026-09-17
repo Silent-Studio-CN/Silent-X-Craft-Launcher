@@ -158,6 +158,12 @@ if(SXCL_BUILD_CLI)
   if(TARGET sxcl_net_qt)
     target_link_libraries(sxcl-dl PRIVATE sxcl_net_qt)
     target_compile_definitions(sxcl-dl PRIVATE SXCL_HAVE_QT_TRANSPORT=1)
+    # CLI 的 HTTPS 走 Qt Network —— **必须**把 Qt 运行时和插件(尤其 tls/)铺到同目录。
+    # 踩过的坑:只靠"同目录恰好有别的测试目标拷来的 Qt6Core/Qt6Network.dll",
+    # 在干净机器(或清空 PATH)上会直接报
+    #   qt.network.ssl: No functional TLS backend was found
+    # 于是下载全废。sxcl_deploy_qt_full 用 windeployqt,会带 platforms/tls 插件。
+    sxcl_deploy_qt_full(sxcl-dl)
   endif()
   if(WIN32)
     # 崩溃处理器要解析符号:链 DbgHelp(WER 在这台机器上不记录我们的崩溃)

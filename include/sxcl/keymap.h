@@ -286,6 +286,93 @@ int sxcl_keymap_build_preset(const char *key, const char *screen, const char *mc
 /** 推荐一个预设(recommend_preset):竖屏 -> one_hand;没选版本 -> minimal;否则 survival。 */
 const char *sxcl_keymap_recommend_preset(const char *mc_version, const char *screen);
 
+/* ── 布局存取(对应 Python src/core/keymap/store.py) ──
+ *
+ * 目录结构(与 store.py 逐字一致,桌面端与安卓端共用同一份文件):
+ *     {keymaps}/preset-minimal.json    内置预设(ensure_presets 首次运行落盘,可覆盖)
+ *     {keymaps}/my-pvp.json            用户自己存的
+ *     {keymaps}/active.json            {"active": "my-pvp"} —— 安卓端启动时读它
+ *   {keymaps} = platform.py 的 default_config_directory("SilentXCraftLauncher")/keymaps:
+ *     Windows  %APPDATA%/SilentXCraftLauncher/keymaps
+ *     macOS    ~/Library/Application Support/SilentXCraftLauncher/keymaps
+ *     Linux    ${XDG_CONFIG_HOME:-~/.config}/silentxcraftlauncher/keymaps
+ *
+ * 所有函数的第一个参数 dir 都是"keymaps 目录"的可选覆盖:
+ *    NULL/空串 = 用上面的平台默认目录(界面就这么用,与 Python 完全同一条路径);
+ *    给了目录   = 只用它(单元测试靠它把文件写进构建目录,绝不碰用户的真实配置)。
+ * 目录不存在会自动建(store.py 的 keymap_dir() 也这么干)。
+ *
+ * 与 Python 的两处**有意**差异(都是安全加固,不是格式差异):
+ *    * key 里带路径分隔符(../、子目录)一律拒绝 —— store.py 会照原样拼路径,
+ *      C 版不让 UI 之外的输入有机会写到 keymaps/ 外面去;
+ *    * 文件名安全化在 C 里按**码点**近似 str.isalnum():ASCII 字母数字与 -_ 保留,
+ *      拉丁扩展/希腊/西里尔/假名/CJK/谚文/全角字母数字这些常用文字范围也保留,
+ *      标点(含全角括号)与符号一律丢掉 —— 中文布局名两边都能用、规则也对得上;
+ *      只有极冷门文字(如藏文)可能被丢掉,且只影响文件名、不影响文件内容。
+ */
+
+#define SXCL_KEYMAP_STORE_KEY_MAX   64    /* "my-pvp" / "preset-minimal" */
+#define SXCL_KEYMAP_STORE_FILE_MAX  128   /* "preset-one_hand.json" */
+#define SXCL_KEYMAP_STORE_PATH_MAX  640   /* 完整路径(UTF-8,中文一个 3 字节) */
+#define SXCL_KEYMAP_STORE_LIST_MAX  64    /* 一次最多列出几份布局(超了记 dropped) */
+
+/** 目录里的一份布局(list_layouts() 的一项)。字段全部由模块填好,调用方只读。 */
+typedef struct sxcl_keymap_store_entry {
+    char file[SXCL_KEYMAP_STORE_FILE_MAX];    /**< 文件名 "my-pvp.json" */
+    char key[SXCL_KEYMAP_STORE_KEY_MAX];      /**< 去掉 .json 与 preset- 前缀的 key */
+    char name[SXCL_KEYMAP_NAME_MAX];          /**< JSON 里的 name;读不出来用文件名 */
+    char label[SXCL_KEYMAP_NAME_MAX];         /**< 内置预设的中文名;否则与 name 相同 */
+    char screen[SXCL_KEYMAP_SCREEN_MAX];      /**< landscape / portrait */
+    size_t buttons;                           /**< JSON 里 buttons 的条数 */
+    size_t directions;                        /**< JSON 里 directions 的条数 */
+    int builtin;                              /**< 1 = 文件名以 preset- 开头(内置,删不掉) */
+} sxcl_keymap_store_entry;
+
+/** 一次列目录的清单。**零分配**:定长数组,可以放栈上。 */
+typedef struct sxcl_keymap_store_catalog {
+    sxcl_keymap_store_entry items[SXCL_KEYMAP_STORE_LIST_MAX];
+    size_t count;      /**< 有效条数(已按文件名排序) */
+    size_t dropped;    /**< 超过上限被丢掉的条数(不静默) */
+} sxcl_keymap_store_catalog;
+
+/** keymaps 目录(store.py 的 keymap_dir()):dir 为空用平台默认;会顺手建好目录。
+ *  写不进 out 返回 SXCL_KEYMAP_ERR_SPACE,连默认目录都拼不出来返回 ERR_IO(err 里给人话)。 */
+int sxcl_keymap_store_dir(const char *dir, char *out, size_t out_len, char *err, size_t err_len);
+
+/** 列出所有布局(store.py 的 list_layouts()):*.json、按文件名排序、跳过 active.json。
+ *  读不出来的文件跳过(不整份失败),原因记在 err 里(可空;多条时只留最后一条)。 */
+int sxcl_keymap_store_list(const char *dir, sxcl_keymap_store_catalog *out, char *err, size_t err_len);
+
+/** 加载一份布局(store.py 的 load()):key 可带可不带 .json;
+ *  key 是预设名而文件不在时先 ensure_presets() 再找(store.py 的行为)。
+ *  找不到返回 ERR_IO(err 里说清找的是哪个路径),JSON 坏了返回 ERR_FORMAT。 */
+int sxcl_keymap_store_load(const char *dir, const char *key, sxcl_keymap_layout *out,
+                           sxcl_keymap_issues *issues, char *err, size_t err_len);
+
+/** 保存一份布局(store.py 的 save()):key 空 -> 用 layout->name -> 兜底 "layout";
+ *  文件名安全化后再写,重名直接覆盖。成功时 out_path 收到**完整路径**(可空)。
+ *  out_path 缓冲不够返回 ERR_SPACE。 */
+int sxcl_keymap_store_save(const char *dir, const sxcl_keymap_layout *layout, const char *key,
+                           char *out_path, size_t out_len, char *err, size_t err_len);
+
+/** 删除一份布局(store.py 的 delete()):1 = 删掉了,0 = 没有这份 / 是内置预设(不许删)。 */
+int sxcl_keymap_store_delete(const char *dir, const char *key);
+
+/** 当前启用的布局 key(store.py 的 active_name()):
+ *  没有 active.json 返回 "preset-minimal";JSON 坏了返回 ""(与 store.py 一致)。 */
+int sxcl_keymap_store_active(const char *dir, char *out, size_t out_len);
+
+/** 设为当前布局(store.py 的 set_active()):写 active.json({ "active": "<key>" } 两空格缩进);
+ *  key 前面的 "preset-" 会去掉。成功时 out_path 收到 active.json 的完整路径(可空)。 */
+int sxcl_keymap_store_set_active(const char *dir, const char *key, char *out_path, size_t out_len,
+                                 char *err, size_t err_len);
+
+/** 首次运行把 5 套内置预设落盘(store.py 的 ensure_presets()):
+ *  overwrite=0 时已经存在的文件不动。返回**这次写了几份**;
+ *  written 可空(非空时填 file/key/name/label,方便界面说"写了哪几份")。 */
+size_t sxcl_keymap_store_ensure_presets(const char *dir, int overwrite, sxcl_keymap_store_catalog *written,
+                                        char *err, size_t err_len);
+
 /* ── FCL 格式互转(降低"从 FCL 换过来"的门槛) ── */
 
 /** FCL 的 GLFW 键码 -> 我们的键名(32 -> "KEY_SPACE"、-1 -> "MOUSE_LEFT");认不出来给 "KEY_<码>"。 */

@@ -1,0 +1,9 @@
+[
+  { "type": "button", "text": "跳", "x": 1200, "y": 540, "width": 120, "height": 120,
+    "keycodes": [32] },
+  { "type": "direction", "text": "移动", "x": 72, "y": 626, "width": 480, "height": 389,
+    "keycodes": [87, 83, 65, 68] },
+  { "type": "button", "id": "bag", "x": 0.62, "y": 0.6, "width": 0.09, "height": 0.14,
+    "keycodes": [69] },
+  null
+]

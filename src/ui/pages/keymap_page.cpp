@@ -24,6 +24,10 @@
 #include "libqf.h"
 #include "theme_bridge.h"
 
+// 键位数据的"唯一事实来源"是纯 C 核心库(keymap.c/keymap_store.c/keymap_fcl.c,
+// 对应 Python 的 model.py/store.py/fcl.py):本页只负责画与编排,落盘/读盘一律走它。
+#include "sxcl/keymap.h"
+
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
 #endif
@@ -45,6 +49,7 @@
 #include <QSet>
 #include <QFileDialog>
 #include <QFile>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -61,7 +66,9 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
+#include <memory>
 
 namespace sxcl::ui {
 namespace {
@@ -136,6 +143,9 @@ struct KLayout {                 // model.py:KeymapLayout
     QString name = QStringLiteral("默认");
     QString screen = QStringLiteral("landscape");
     QString description;
+    // model.py 的 meta:页面自己不用它,但必须原样带住 —— FCL 导入会把原始数据塞在
+    // meta.fcl_raw 里,编辑完再"保存为我的布局"时不能把它丢了(fcl.py/store.py 都不丢)。
+    QJsonObject meta;
     QVector<KControl> buttons;
     QVector<KControl> directions;
 
@@ -602,7 +612,7 @@ QString guideToMarkdown(const KLayout &layout) {             // guide.py:144-155
     return lines.join(QStringLiteral("\n"));
 }
 
-// ---- 布局存取(model.py:363-389 的 to_dict/from_dict;不含 store/FCL 模块) ----
+// ---- 布局存取(model.py:363-389 的 to_dict/from_dict;真正的落盘在下面的 C 桥接里) ----
 QJsonObject layoutToJson(const KLayout &layout) {
     QJsonObject root;
     root.insert(QStringLiteral("schema"), QStringLiteral("sxcl.keymap.v1"));
@@ -610,6 +620,7 @@ QJsonObject layoutToJson(const KLayout &layout) {
     root.insert(QStringLiteral("screen"), layout.screen);
     root.insert(QStringLiteral("mc_version"), QString());
     root.insert(QStringLiteral("description"), layout.description);
+    root.insert(QStringLiteral("meta"), layout.meta);      // model.py:to_dict() 里的 meta
     auto control = [](const KControl &c) {
         QJsonObject o;
         o.insert(QStringLiteral("id"), c.id);
@@ -665,6 +676,7 @@ bool layoutFromJson(const QJsonObject &root, KLayout *out) {
     layout.name = root.value(QStringLiteral("name")).toString(QStringLiteral("未命名"));
     layout.screen = root.value(QStringLiteral("screen")).toString(QStringLiteral("landscape"));
     layout.description = root.value(QStringLiteral("description")).toString();
+    layout.meta = root.value(QStringLiteral("meta")).toObject();   // model.py:from_dict() 的 meta
     for (const QJsonValue &value : root.value(QStringLiteral("buttons")).toArray()) {
         const QJsonObject o = value.toObject();
         KControl control;
@@ -726,6 +738,76 @@ bool layoutFromJson(const QJsonObject &root, KLayout *out) {
     }
     *out = layout;
     return true;
+}
+
+
+// ---- C 核心库桥接(include/sxcl/keymap.h) ----
+// 这一页的画布用的是 Qt 侧的 KLayout;真正"落地"的动作(写 keymaps/、写 active.json、
+// 读 FCL 布局)一律交给 C 核心库 —— 它与 Python 的 store.py / fcl.py 是同一套语义,
+// 页面不自己拼文件名、不自己写 active.json,中间只过一层 JSON:
+//   存:KLayout -> layoutToJson -> sxcl_keymap_parse ------------------> sxcl_keymap_store_save
+//   读:sxcl_keymap_store_load / sxcl_keymap_import_fcl -> to_json -> layoutFromJson -> KLayout
+QString coreError(const char *err)
+{
+    return (err && err[0]) ? QString::fromUtf8(err) : QString::fromUtf8("未知错误");
+}
+
+// KLayout -> JSON 文本 -> C 的 sxcl_keymap_layout(用完要 sxcl_keymap_layout_free)。
+bool toCoreLayout(const KLayout &layout, sxcl_keymap_layout *out, QString *error)
+{
+    const QByteArray text = QJsonDocument(layoutToJson(layout)).toJson(QJsonDocument::Compact);
+    char err[256];
+    err[0] = '\0';
+    sxcl_keymap_issues issues;
+    sxcl_keymap_issues_reset(&issues);
+    if (sxcl_keymap_parse(text.constData(), static_cast<size_t>(text.size()), out, &issues, err,
+                          sizeof err) != SXCL_KEYMAP_OK) {
+        *error = coreError(err);
+        return false;
+    }
+    return true;
+}
+
+// C 的 sxcl_keymap_layout -> JSON 文本 -> KLayout。
+bool fromCoreLayout(const sxcl_keymap_layout *core, KLayout *out, QString *error)
+{
+    char *text = nullptr;
+    char err[256];
+    err[0] = '\0';
+    if (sxcl_keymap_to_json(core, &text, err, sizeof err) != SXCL_KEYMAP_OK) {
+        *error = coreError(err);
+        return false;
+    }
+    QJsonParseError parseError{};
+    const QJsonDocument doc = QJsonDocument::fromJson(QByteArray(text), &parseError);
+    std::free(text);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()
+        || !layoutFromJson(doc.object(), out)) {
+        *error = QString::fromUtf8("核心库给出的 JSON 读不回来");
+        return false;
+    }
+    return true;
+}
+
+// keymaps/ 里**用户自己存的**布局(keymap_page.py:339-343 _reload_list 用的那份清单;
+// 内置预设已经在"预设"那一组里了,这里跳过)。
+QVector<QPair<QString, QString>> userStoreLayouts()
+{
+    QVector<QPair<QString, QString>> out;
+    sxcl_keymap_store_catalog catalog;
+    char err[256];
+    err[0] = '\0';
+    if (sxcl_keymap_store_list("", &catalog, err, sizeof err) != SXCL_KEYMAP_OK) {
+        return out;
+    }
+    for (size_t i = 0; i < catalog.count; ++i) {
+        if (catalog.items[i].builtin) {
+            continue;
+        }
+        out.append({QString::fromUtf8(catalog.items[i].key),
+                    QString::fromUtf8(catalog.items[i].label)});
+    }
+    return out;
 }
 
 
@@ -958,9 +1040,24 @@ QWidget *createKeymapPage(QWidget *parent) {
     row->setContentsMargins(0, 0, 0, 0);
     row->setSpacing(10);
 
+    // keymap_page.py:226 ensure_presets() —— 首次运行时把 5 套内置预设落到 keymaps/
+    // (手机端拿到这个目录就能直接选)。写不进去不拦着用页面:预设照样能现算、能导出,
+    // 真点"保存"的时候核心库会把具体原因报出来(不吞错、也不假装成功)。
+    {
+        char err[256];
+        err[0] = '\0';
+        (void)sxcl_keymap_store_ensure_presets("", 0, nullptr, err, sizeof err);
+    }
+
     auto *presetCombo = new ComboBox(toolbar);              // :241
     for (const QString &name : presetNames())               // :242-243
         presetCombo->addItem(presetLabel(name), name);
+    // keymap_page.py:339-343 _reload_list() —— 自己存过的布局也放进下拉框
+    for (const QPair<QString, QString> &entry : userStoreLayouts()) {
+        if (presetCombo->findData(entry.first) < 0) {
+            presetCombo->addItem(entry.second, entry.first);
+        }
+    }
 
     auto *screenCombo = new ComboBox(toolbar);              // :246
     screenCombo->addItems({QString::fromUtf8("横屏"), QString::fromUtf8("竖屏")}); // :247
@@ -1032,16 +1129,36 @@ QWidget *createKeymapPage(QWidget *parent) {
         }
     };
 
+    // 当前这份布局的 key(keymap_page.py 的 self._current_key):"设为当前布局"就是把它
+    // 写进 active.json(store.py 的 set_active 会去掉 preset- 前缀,安卓端读的也是这一份)。
+    auto currentKey = std::make_shared<QString>(QStringLiteral("preset-minimal"));
+
     // 应用预设(:318-337)
     std::function<void(const QString &)> applyPreset;
-    applyPreset = [page, canvas, screenCombo, refreshAnalysis](const QString &keyIn) {
+    applyPreset = [page, canvas, screenCombo, refreshAnalysis, currentKey](const QString &keyIn) {
         const QString key = keyIn.isEmpty() ? QStringLiteral("minimal") : keyIn;
         const QString screen = screenCombo->currentIndex() == 1 ? QStringLiteral("portrait")
                                                                 : QStringLiteral("landscape");
-        // Python: load_layout_by_key(key) or build_preset(key, screen) —— C 版没有 store 模块,
-        // 预设一律现算(内置预设落盘后内容相同)。
-        KLayout layout = buildPreset(key, screen);
+        // Python: load_layout_by_key(key) or build_preset(key, screen) —— 先读 keymaps/ 里
+        // 存的那份(预设名会先 ensure_presets 落盘),读不到才现算;屏幕方向对不上再重算。
+        KLayout layout;
+        bool loaded = false;
+        {
+            sxcl_keymap_layout core;
+            sxcl_keymap_issues issues;
+            sxcl_keymap_issues_reset(&issues);
+            char err[256];
+            err[0] = '\0';
+            if (sxcl_keymap_store_load("", key.toUtf8().constData(), &core, &issues, err, sizeof err)
+                == SXCL_KEYMAP_OK) {
+                QString error;
+                loaded = fromCoreLayout(&core, &layout, &error);
+                sxcl_keymap_layout_free(&core);
+            }
+        }
+        if (!loaded) layout = buildPreset(key, screen);
         if (layout.screen != screen) layout = buildPreset(key, screen);
+        *currentKey = QStringLiteral("preset-") + key;
         if (layout.screen != screen) {
             // 有些预设自带屏幕方向(单手模式固定竖屏),下拉框跟着它走
             screenCombo->blockSignals(true);
@@ -1120,17 +1237,73 @@ QWidget *createKeymapPage(QWidget *parent) {
     page->addStretch();                                     // :306
 
     // ---- 动作(:378-436) ----
-    auto notPorted = [page](const QString &title, const QString &content) {
-        InfoBar::push(InfoBar::Type::Warning, title, content, page, 4000);
-    };
-    QObject::connect(saveBtn, &QAbstractButton::clicked, page, [notPorted] {
-        notPorted(QString::fromUtf8("还没接上"),
-                  QString::fromUtf8("保存功能依赖 src/core/keymap/store.py（配置目录 keymaps/），"
-                                    "C 版核心库尚未移植该模块"));
+    // 保存为我的布局(:378-381 _on_save):存到 store.py 定的 keymaps/ 目录,key 用布局名。
+    QObject::connect(saveBtn, &QAbstractButton::clicked, page,
+                     [page, canvas, presetCombo, currentKey] {
+        sxcl_keymap_layout core;
+        QString error;
+        if (!toCoreLayout(canvas->layoutData(), &core, &error)) {
+            InfoBar::push(InfoBar::Type::Error, QString::fromUtf8("保存失败"), error, page, 5000);
+            return;
+        }
+        char path[640];
+        char err[256];
+        err[0] = '\0';
+        // key 传空 = 用布局名(store.py 的 save(layout, key="")),重名直接覆盖,
+        // 文件名安全化(中文可用、标点过掉)也由核心库负责,页面不自己拼路径。
+        const int rc = sxcl_keymap_store_save("", &core, nullptr, path, sizeof path, err, sizeof err);
+        sxcl_keymap_layout_free(&core);
+        if (rc != SXCL_KEYMAP_OK) {
+            InfoBar::push(InfoBar::Type::Error, QString::fromUtf8("保存失败"), coreError(err), page,
+                          5000);
+            return;
+        }
+        const QFileInfo info(QString::fromUtf8(path));
+        InfoBar::push(InfoBar::Type::Success, QString::fromUtf8("已保存"),
+                      QString::fromUtf8("布局已存到 %1").arg(info.fileName()), page, 3000);
+        // 存完把这份布局加进下拉框并选中它(Python 要重开页面才看得到,这里就地补上),
+        // 屏蔽信号 —— 画布上刚调好的东西不该再从文件里读回来覆盖一遍。
+        const QString key = info.completeBaseName();
+        presetCombo->blockSignals(true);
+        int index = presetCombo->findData(key);
+        if (index < 0) {
+            presetCombo->addItem(key, key);
+            index = presetCombo->count() - 1;
+        }
+        presetCombo->setCurrentIndex(index);
+        presetCombo->blockSignals(false);
+        *currentKey = QStringLiteral("preset-") + key;
     });
-    QObject::connect(activeBtn, &QAbstractButton::clicked, page, [notPorted] {
-        notPorted(QString::fromUtf8("还没接上"),
-                  QString::fromUtf8("设为当前依赖 src/core/keymap/store.py（active.json）"));
+    // 设为当前布局(:383-386 _on_set_active):写 active.json,安卓端启动时读它。
+    QObject::connect(activeBtn, &QAbstractButton::clicked, page, [page, canvas, currentKey] {
+        char path[640];
+        char err[256];
+        err[0] = '\0';
+        const QByteArray key = currentKey->toUtf8();
+        if (sxcl_keymap_store_set_active("", key.constData(), path, sizeof path, err, sizeof err)
+            != SXCL_KEYMAP_OK) {
+            InfoBar::push(InfoBar::Type::Error, QString::fromUtf8("设为当前失败"), coreError(err), page,
+                          5000);
+            return;
+        }
+        InfoBar::push(InfoBar::Type::Success, QString::fromUtf8("已设为当前"),
+                      QString::fromUtf8("手机端启动时会读取这个布局"), page, 3000);
+        // Python 不检查就写;这里多一句提醒(核心库的校验与手机端的冲突检查是同一套口径),
+        // 但不拦着 —— active.json 已经写成功了,如实说清楚就行。
+        sxcl_keymap_layout core;
+        QString error;
+        if (toCoreLayout(canvas->layoutData(), &core, &error)) {
+            sxcl_keymap_issues issues;
+            sxcl_keymap_issues_reset(&issues);
+            const size_t errors = sxcl_keymap_validate(&core, &issues);
+            sxcl_keymap_layout_free(&core);
+            if (errors > 0) {
+                InfoBar::push(InfoBar::Type::Warning, QString::fromUtf8("这份布局还有问题"),
+                              QString::fromUtf8("有 %1 处 ✗（见左边冲突检查），手机端也会照单全收")
+                                  .arg(errors),
+                              page, 4000);
+            }
+        }
     });
     QObject::connect(exportBtn, &QAbstractButton::clicked, page, [page, canvas] {
         const KLayout layout = canvas->layoutData();
@@ -1169,9 +1342,45 @@ QWidget *createKeymapPage(QWidget *parent) {
         refreshAnalysis();
         InfoBar::push(InfoBar::Type::Success, QString::fromUtf8("已导入"), layout.name, page, 3000);
     });
-    QObject::connect(fclBtn, &QAbstractButton::clicked, page, [notPorted] {
-        notPorted(QString::fromUtf8("还没接上"),
-                  QString::fromUtf8("FCL 布局导入依赖 src/core/keymap/fcl.py，C 版核心库尚未移植"));
+    // 导入 FCL 布局(:412-427 _on_import_fcl):核心库认 FCL 的像素坐标 + GLFW 键码,
+    // 归一化与"认不出的字段塞 meta.fcl_raw"都在 fcl.py 的对应实现里做。
+    QObject::connect(fclBtn, &QAbstractButton::clicked, page, [page, canvas, refreshAnalysis] {
+        const QString path = QFileDialog::getOpenFileName(
+            page, QString::fromUtf8("选择 FCL 布局文件"), QString(),
+            QString::fromUtf8("JSON (*.json)"));
+        if (path.isEmpty()) return;
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            InfoBar::push(InfoBar::Type::Error, QString::fromUtf8("导入失败"), file.errorString(),
+                          page, 5000);
+            return;
+        }
+        const QByteArray data = file.readAll();
+        sxcl_keymap_layout core;
+        sxcl_keymap_issues issues;
+        sxcl_keymap_issues_reset(&issues);
+        char err[256];
+        err[0] = '\0';
+        // 2400x1080 是 fcl.py import_layout() 的默认屏幕尺寸(照抄,不自己选)。
+        if (sxcl_keymap_import_fcl(data.constData(), static_cast<size_t>(data.size()), nullptr, 2400,
+                                   1080, &core, &issues, err, sizeof err) != SXCL_KEYMAP_OK) {
+            InfoBar::push(InfoBar::Type::Error, QString::fromUtf8("导入失败"), coreError(err), page,
+                          5000);
+            return;
+        }
+        const int buttons = static_cast<int>(core.button_count);
+        KLayout layout;
+        QString error;
+        const bool ok = fromCoreLayout(&core, &layout, &error);
+        sxcl_keymap_layout_free(&core);
+        if (!ok) {
+            InfoBar::push(InfoBar::Type::Error, QString::fromUtf8("导入失败"), error, page, 5000);
+            return;
+        }
+        canvas->setLayoutData(layout);
+        refreshAnalysis();
+        InfoBar::push(InfoBar::Type::Success, QString::fromUtf8("已从 FCL 导入"),
+                      QString::fromUtf8("%1 个按钮，坐标已按屏幕归一化").arg(buttons), page, 4000);
     });
     QObject::connect(guideBtn, &QAbstractButton::clicked, page, [page, canvas] {
         const KLayout layout = canvas->layoutData();
@@ -1187,7 +1396,9 @@ QWidget *createKeymapPage(QWidget *parent) {
         InfoBar::push(InfoBar::Type::Success, QString::fromUtf8("已导出教学"), path, page, 3000);
     });
 
-    applyPreset(presetCombo->currentText());                // :231
+    // :231。Python 这里传的是 currentText()(下拉框的显示名),认不出预设名就回落到极简;
+    // C 版改用 currentData()(真正的 key),开局同样是"极简",但意图更直白。
+    applyPreset(presetCombo->currentData().toString());
     return page;
 }
 

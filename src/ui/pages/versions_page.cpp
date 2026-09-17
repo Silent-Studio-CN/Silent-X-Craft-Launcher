@@ -275,8 +275,8 @@ public:
         const ThemeTokens &t = FluentTheme::instance().tokens();
 
         painter->setPen(Qt::NoPen);
-        painter->setBrush(tokenColor(hovered ? QStringLiteral("hover_strong")
-                                             : QStringLiteral("hover")));
+        painter->setBrush(
+            tokenColor(hovered ? QStringLiteral("hoverStrong") : QStringLiteral("hover")));
         painter->drawRoundedRect(rect, 6, 6);
 
         const int left = rect.left() + 16;
@@ -623,36 +623,12 @@ public:
         setObjectName(QStringLiteral("VersionsPage"));
         buildContent();
         loadVersions();
-        // 【临时自查】SXCL_UI_DUMP=1 时把版面几何打到 stderr(验收报告用;用完删)
-        if (qEnvironmentVariableIsSet("SXCL_UI_DUMP")) {
-            QTimer::singleShot(900, this, [this] {
-                QWidget *root = window();
-                auto g = [root](const QWidget *w) {
-                    const QPoint p = w->mapTo(root, QPoint(0, 0));
-                    return QStringLiteral("%1,%2 %3x%4")
-                        .arg(p.x())
-                        .arg(p.y())
-                        .arg(w->width())
-                        .arg(w->height());
-                };
-                qWarning("DUMP page=%s viewport=%s view=%s title=%s sub=%s toolbar=%s status=%s "
-                         "list=%s listvp=%s stack=%s",
-                         qUtf8Printable(g(this)), qUtf8Printable(g(viewport())),
-                         qUtf8Printable(g(view())), qUtf8Printable(g(titleLabel())),
-                         qUtf8Printable(g(subtitleLabel())), qUtf8Printable(g(m_toolbar)),
-                         qUtf8Printable(g(m_status)), qUtf8Printable(g(m_list)),
-                         qUtf8Printable(g(m_list->viewport())),
-                         qUtf8Printable(g(window()->findChild<QWidget *>(
-                             QStringLiteral("sxclStack")))));
-            });
-        }
     }
 
 private:
     void buildContent() {
         // ---- 工具栏(versions_page.py:321-348)----
         auto *toolbar = new QWidget(view());
-        m_toolbar = toolbar;
         auto *toolbarLayout = new QHBoxLayout(toolbar);
         toolbarLayout->setContentsMargins(0, 0, 0, 0);
         toolbarLayout->setSpacing(12);
@@ -724,8 +700,8 @@ private:
                            "QScrollBar::handle:vertical:hover { background: %2; }"
                            "QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }"
                            "QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }")
-                .arg(tokenColor(QStringLiteral("border_strong")).name(),
-                     tokenColor(QStringLiteral("text_tertiary")).name()));
+                .arg(tokenColor(QStringLiteral("borderStrong")).name(),
+                     tokenColor(QStringLiteral("textTertiary")).name()));
 
         m_model = new VersionListModel(this);
         m_delegate = new VersionRowDelegate(this);
@@ -764,6 +740,9 @@ private:
         // 取数据放到工作线程(对应 Python 的 FetchWorker);UI 线程只负责回填。
         auto *thread = QThread::create([this] {
             QString error;
+            // 已安装集合/加载器标签/problem 与清单无关,任何时候都要扫一遍
+            // (Python 的 _refresh_installed() 也是这么做的)。
+            m_instances = scanLocalInstances(gameDirectory());
             QByteArray text = fetchManifestText(&error);
             QVector<GameVersion> versions;
             bool fromManifest = false;
@@ -788,7 +767,6 @@ private:
     // TODO(需要主代理加一行 CMake):sxcl_ui_core 拿到 include/ 搜索路径后,这里换成
     // sxcl_instance_scan(),加载器小标签与 problem 提示就会一起出现。
     QVector<GameVersion> localInstanceVersions(QString *error) {
-        m_instances = scanLocalInstances(gameDirectory());
         if (m_instances.isEmpty()) {
             if (error)
                 *error = QStringLiteral("本地没有已安装的版本");
@@ -897,7 +875,6 @@ private:
                       QStringLiteral("即将进入 %1 服务端下载页 (功能开发中)").arg(v.id), this, 3000);
     }
 
-    QWidget *m_toolbar = nullptr;
     SearchLineEdit *m_search = nullptr;
     ComboBox *m_category = nullptr;
     PushButton *m_refresh = nullptr;

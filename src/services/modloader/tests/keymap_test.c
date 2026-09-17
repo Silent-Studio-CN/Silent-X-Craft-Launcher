@@ -652,7 +652,10 @@ static void test_fcl(void)
     const sxcl_keymap_direction *move = sxcl_keymap_direction_by_id(&layout, "move0");
     check(move != NULL, "FCL: 没写 id 的方向控件按 move<序号> 命名");
     if (move) {
-        check_str(move->style, "rocker", "FCL: rocker 保留");
+        /* fcl.py 只看**视图类型**决定 style:类型是 "direction" 就给 dpad_compact,
+         * 视图里那个显式的 "style": "rocker" 它不认(C 版原来多认了这个字段,
+         * 为了一致性已改成与 fcl.py 相同;要 rocker 请把类型写成 joystick/rocker)。 */
+        check_str(move->style, "dpad_compact", "FCL: direction -> dpad_compact(与 fcl.py 一致)");
         check_near(move->x, 72.0 / 2400.0, "FCL: 方向 x 归一化");
         check_near(move->w, 480.0 / 2400.0, "FCL: 方向 w 归一化");
         check_str(move->up, "KEY_W", "FCL: 方向键码 87 -> KEY_W");

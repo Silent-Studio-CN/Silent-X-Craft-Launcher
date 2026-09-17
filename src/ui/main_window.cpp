@@ -14,6 +14,22 @@
 
 #include "fluent/fluent_controls.h" // Min/Max/CloseButton(qf 三键的 libqf 基类)
 
+// 窗口边缘命中(WM_NCHITTEST)要用的 Win32 常量/macro。windows.h 自带 min/max 宏会污染
+// 后面的 C++ 代码,先关掉(NOMINMAX);Windows SDK 头在 /W4 下有杂音,整段静音。
+#ifdef _MSC_VER
+#pragma warning(push, 0)
+#endif
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <windowsx.h> // GET_X_LPARAM / GET_Y_LPARAM
+#endif
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
 #include "theme_bridge.h"
 
 // 版本号:标题栏显示的文字 = f"{APP_NAME} {APP_VERSION}"(Python src/app/main_window.py:54)。
@@ -293,6 +309,72 @@ void MainWindow::switchToRoute(const QString &routeKey) {
         return;
     m_stack->setCurrentWidget(page);
     m_nav->setCurrent(routeKey);
+}
+
+bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result) {
+#ifdef Q_OS_WIN
+    // 边缘缩放命中:按参考实现 qframelesswindow/windows/__init__.py:22,111-145 覆写。
+    //   * qf 用 ScreenToClient + GetClientRect 的**物理像素**判定,带宽 = BORDER_WIDTH = 5;
+    //     角优先,其次上/下,再次左/右;最大化/全屏时 bw = 0(不接管)。
+    //   * libqf 的 FluentWindowBase::nativeEvent(fluent_window.cpp:133-176)把
+    //     FluentWindow::kWinMargin=30(fluent_window.h:221)整条阴影带当 resize 热区,
+    //     那是给它自己的 FluentWindow 形态用的(窗口内留 30px 阴影带,:599)。
+    //     我们的窗口内容贴边(根布局边距 0),30 物理像素 = 逻辑 20px 会把
+    //     导航面板左侧 42% 的宽度、标题栏上半部整片变成 resize 热区 → 用户点不到汉堡/拖动不了标题栏。
+    // 注意:不在命中带内时**不能**退回基类(基类的 30px 带会命中),要直接返回 false 交给系统默认(HTCLIENT)。
+    MSG *msg = static_cast<MSG *>(message);
+    if (msg->message != WM_NCHITTEST || isMaximized() || isFullScreen())
+        return FluentWindowBase::nativeEvent(eventType, message, result);
+
+    HWND hwnd = reinterpret_cast<HWND>(winId());
+    POINT pt{GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
+    if (!::ScreenToClient(hwnd, &pt))
+        return false;
+    RECT cr{};
+    if (!::GetClientRect(hwnd, &cr))
+        return false;
+    const int w = int(cr.right - cr.left), h = int(cr.bottom - cr.top);
+    const int x = int(pt.x), y = int(pt.y);
+    const bool lx = x < kResizeBandPx;
+    const bool rx = x > w - kResizeBandPx;
+    const bool ty = y < kResizeBandPx;
+    const bool by = y > h - kResizeBandPx;
+    if (lx && ty) {
+        *result = HTTOPLEFT;
+        return true;
+    }
+    if (rx && by) {
+        *result = HTBOTTOMRIGHT;
+        return true;
+    }
+    if (rx && ty) {
+        *result = HTTOPRIGHT;
+        return true;
+    }
+    if (lx && by) {
+        *result = HTBOTTOMLEFT;
+        return true;
+    }
+    if (ty) {
+        *result = HTTOP;
+        return true;
+    }
+    if (by) {
+        *result = HTBOTTOM;
+        return true;
+    }
+    if (lx) {
+        *result = HTLEFT;
+        return true;
+    }
+    if (rx) {
+        *result = HTRIGHT;
+        return true;
+    }
+    return false;
+#else
+    return FluentWindowBase::nativeEvent(eventType, message, result);
+#endif
 }
 
 void MainWindow::paintEvent(QPaintEvent *) {
