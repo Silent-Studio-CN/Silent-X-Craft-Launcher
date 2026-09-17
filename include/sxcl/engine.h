@@ -22,6 +22,11 @@
 extern "C" {
 #endif
 
+/** 单文件分片的门槛:小于这个大小不分片(分片的握手开销比省下的时间还多)。 */
+#define SXCL_SEGMENT_MIN_SIZE ((int64_t)4 * 1024 * 1024)
+/** 每片的最小字节数:片太小会让连接数虚高、尾片拖尾。 */
+#define SXCL_SEGMENT_MIN_PART ((int64_t)1 * 1024 * 1024)
+
 /** 慢源判定阈值(字节/秒)与宽限(秒),与 Python 版保持一致。 */
 #define SXCL_MIN_SOURCE_SPEED (512 * 1024)
 #define SXCL_SLOW_SOURCE_GRACE 8.0
@@ -61,6 +66,9 @@ typedef struct sxcl_engine_opts {
     double rate_bps;        /**< 全局限速(字节/秒);0 = 不限速 */
     const char *user_agent; /**< User-Agent(可空,用默认值) */
     int retry_per_source;   /**< 每条候选路的额外重试次数;<=0 视为 1 */
+    /** 单文件最大连接数:<=1 表示不分片(默认 1);>1 时大文件按 Range 切片并发下载。
+     *  只有"时长足够长"的大文件才值得分片(小文件分片反而更慢),阈值见 SXCL_SEGMENT_MIN_SIZE。 */
+    int max_conn_per_file;
     /** 哈希缓存文件路径(可空 = 不用缓存)。有缓存时重复校验走查表:
      *  启动器第二次运行要核对 5000+ 个资源文件,不缓存就得把几百 MB 重新读一遍。 */
     const char *cache_path;

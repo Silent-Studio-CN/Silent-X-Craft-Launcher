@@ -40,6 +40,7 @@ add_library(sxcl STATIC
   src/core/dl/hashcache.c
   src/services/metadata/manifest.c
   src/services/minecraft/options.c
+  src/core/settings.c
 )
 target_include_directories(sxcl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 sxcl_warnings(sxcl)
@@ -108,6 +109,7 @@ if(SXCL_BUILD_TESTS)
     options_test tests/options_test.c
     process_test tests/process_test.c
     hashcache_test tests/hashcache_test.c
+    settings_test tests/settings_test.c
   )
   list(LENGTH SXCL_TESTS _n)
   math(EXPR _last "${_n} - 1")

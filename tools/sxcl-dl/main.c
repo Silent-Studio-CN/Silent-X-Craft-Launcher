@@ -229,8 +229,11 @@ static int cmd_get(int argc, char **argv, const cli_opts *o)
         } else if (strcmp(a, "--mirror") == 0 && v) {
             task.urls[1] = v;
             ++i;
-        } else if (strcmp(a, "--rate") == 0 || strcmp(a, "--workers") == 0) {
-            ++i;
+        } else if (strcmp(a, "--rate") == 0 || strcmp(a, "--workers") == 0 ||
+                   strcmp(a, "--conn") == 0 || strcmp(a, "--cache") == 0) {
+            ++i; /* 通用参数已在 main 里解析,这里只需跳过它的值 */
+        } else if (strcmp(a, "--no-cache") == 0 || strcmp(a, "--verbose") == 0) {
+            /* 无值参数 */
         } else {
             fprintf(stderr, "未知参数: %s\n", a);
             return usage();

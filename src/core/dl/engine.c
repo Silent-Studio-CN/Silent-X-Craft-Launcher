@@ -466,6 +466,304 @@ static int try_source(sxcl_worker *w, sxcl_task *t, const char *part, int src, i
     return 1;
 }
 
+/* ── 多连接分片:大文件按 Range 切片并发,每片一个线程,写入同一 .part 的不同偏移 ── */
+
+typedef struct sxcl_segment {
+    struct sxcl_engine *engine;
+    sxcl_task *task;
+    const char *part; /* 所有分片写同一个 .part,靠绝对偏移互不干扰 */
+    const char *url;
+    int64_t start;
+    int64_t end;    /* 闭区间 */
+    int64_t cursor; /* 该片下一个要写的绝对偏移 */
+    int index;
+    int rc; /* 0 = 成功,-1 = 失败 */
+    char error[128];
+} sxcl_segment;
+
+static char *part_json_path(const char *part)
+{
+    const size_t n = strlen(part);
+    char *p = (char *)malloc(n + 6);
+    if (!p) {
+        return NULL;
+    }
+    memcpy(p, part, n);
+    memcpy(p + n, ".json", 6);
+    return p;
+}
+
+/* .part.json:极简行式,记录每个分片已完成的游标,便于续传 */
+static int load_part_json(const char *path, int64_t size, sxcl_segment *segs, int count)
+{
+    FILE *fh = fopen(path, "rb");
+    if (!fh) {
+        return 0; /* 没有文件 = 全新下载 */
+    }
+    char line[256];
+    int64_t file_size = -1;
+    int matched = 0;
+    while (fgets(line, (int)sizeof(line), fh)) {
+        if (strncmp(line, "size=", 5) == 0) {
+            file_size = (int64_t)strtoll(line + 5, NULL, 10);
+            continue;
+        }
+        int idx = 0;
+        long long st = 0, en = 0, cur = 0;
+        if (sscanf(line, "seg %d %lld %lld %lld", &idx, &st, &en, &cur) == 4) {
+            if (idx >= 0 && idx < count && segs[idx].start == st && segs[idx].end == en &&
+                cur >= st && cur <= en + 1) {
+                segs[idx].cursor = cur;
+                ++matched;
+            }
+        }
+    }
+    fclose(fh);
+    if (file_size != size || matched == 0) {
+        return 0; /* 文件变了或布局对不上:当作全新下载 */
+    }
+    return 1;
+}
+
+static int save_part_json(const char *path, int64_t size, const sxcl_segment *segs, int count)
+{
+    const size_t len = strlen(path);
+    char *tmp = (char *)malloc(len + 5);
+    if (!tmp) {
+        return -1;
+    }
+    memcpy(tmp, path, len);
+    memcpy(tmp + len, ".tmp", 5);
+    int rc = -1;
+    if (sxcl_fs_mkdirs_for_file(path) == 0) {
+        FILE *fh = fopen(tmp, "wb");
+        if (fh) {
+            rc = 0;
+            fprintf(fh, "sxcl-part 1\nsize=%lld\n", (long long)size);
+            for (int i = 0; i < count; ++i) {
+                fprintf(fh, "seg %d %lld %lld %lld\n", i, (long long)segs[i].start,
+                        (long long)segs[i].end, (long long)segs[i].cursor);
+            }
+            if (fclose(fh) != 0) {
+                rc = -1;
+            }
+            if (rc == 0 && sxcl_fs_rename_replace(tmp, path) != 0) {
+                rc = -1;
+            }
+        }
+    }
+    if (rc != 0) {
+        sxcl_fs_remove(tmp);
+    }
+    free(tmp);
+    return rc;
+}
+
+SXCL_THREAD_FN(segment_main)
+{
+    sxcl_segment *seg = (sxcl_segment *)arg;
+    sxcl_engine *e = seg->engine;
+    sxcl_transport *tr = e->opts.transport_factory ? e->opts.transport_factory(e->opts.userdata) : NULL;
+    if (!tr) {
+        snprintf(seg->error, sizeof(seg->error), "没有可用的传输后端");
+        seg->rc = -1;
+        SXCL_THREAD_RETURN(-1);
+    }
+    unsigned char *buf = (unsigned char *)malloc(SXCL_READ_BLOCK);
+    sxcl_file *file = sxcl_file_open_write(seg->part, seg->task->size);
+    if (!buf || !file) {
+        snprintf(seg->error, sizeof(seg->error), "内存/文件不可用");
+        seg->rc = -1;
+        free(buf);
+        tr->destroy(tr->ctx);
+        SXCL_THREAD_RETURN(-1);
+    }
+
+    sxcl_http_request req;
+    memset(&req, 0, sizeof(req));
+    req.url = seg->url;
+    req.method = "GET";
+    req.range_start = seg->cursor;
+    req.range_end = seg->end;
+    req.extra_headers = e->headers;
+    req.timeout_ms = 30000;
+
+    sxcl_http_response resp;
+    sxcl_http_body *body = NULL;
+    const int rc = tr->request(tr->ctx, &req, &resp, &body);
+    if (rc != SXCL_NET_OK) {
+        snprintf(seg->error, sizeof(seg->error), "候选 #1 连接失败");
+        seg->rc = -1;
+    } else if (resp.status != 206 && !(seg->cursor == seg->start && resp.status == 200)) {
+        snprintf(seg->error, sizeof(seg->error), "HTTP %d(分片需要 206)", resp.status);
+        seg->rc = -1;
+    } else {
+        seg->rc = 0;
+        for (;;) {
+            if (e->cancelled) {
+                seg->rc = -1;
+                snprintf(seg->error, sizeof(seg->error), "已取消");
+                break;
+            }
+            const int64_t n = tr->read(tr->ctx, body, buf, SXCL_READ_BLOCK);
+            if (n < 0) {
+                seg->rc = -1;
+                snprintf(seg->error, sizeof(seg->error), "传输中断(片 #%d,%lld 处)", seg->index + 1,
+                         (long long)seg->cursor);
+                break;
+            }
+            if (n == 0) {
+                break; /* 本片读完 */
+            }
+            sxcl_limiter_consume(e->limiter, (uint64_t)n);
+            const int64_t wrote = sxcl_file_write_at(file, buf, (size_t)n, seg->cursor);
+            if (wrote != n) {
+                seg->rc = -1;
+                snprintf(seg->error, sizeof(seg->error), "写盘失败(片 #%d)", seg->index + 1);
+                break;
+            }
+            seg->cursor += n;
+            sxcl_lock_acquire(&e->lock);
+            seg->task->bytes_done += n;
+            e->bytes_done += n;
+            sxcl_lock_release(&e->lock);
+        }
+        if (seg->rc == 0 && seg->cursor != seg->end + 1) {
+            seg->rc = -1;
+            snprintf(seg->error, sizeof(seg->error), "片 #%d 字节数不足", seg->index + 1);
+        }
+    }
+    if (body) {
+        tr->close_body(tr->ctx, body);
+    }
+    sxcl_file_close(file);
+    free(buf);
+    tr->destroy(tr->ctx);
+    SXCL_THREAD_RETURN(seg->rc);
+}
+/** 多连接分片下载。成功返回 0(已校验并落位);失败返回 -1(残片与 .part.json 留给下次续传)。 */
+static int segmented_download(sxcl_engine *e, sxcl_task *t, const char *part, const char *url)
+{
+    if (!url || t->size < SXCL_SEGMENT_MIN_SIZE) {
+        return -1;
+    }
+    int n = (int)(t->size / SXCL_SEGMENT_MIN_PART);
+    if (n > e->opts.max_conn_per_file) {
+        n = e->opts.max_conn_per_file;
+    }
+    if (n < 2) {
+        return -1;
+    }
+    sxcl_segment *segs = (sxcl_segment *)calloc((size_t)n, sizeof(sxcl_segment));
+    if (!segs) {
+        return -1;
+    }
+    const int64_t part_size = t->size / n;
+    for (int i = 0; i < n; ++i) {
+        segs[i].engine = e;
+        segs[i].task = t;
+        segs[i].part = part;
+        segs[i].url = url;
+        segs[i].index = i;
+        segs[i].start = (int64_t)i * part_size;
+        segs[i].end = (i == n - 1) ? (t->size - 1) : ((int64_t)(i + 1) * part_size - 1);
+        segs[i].cursor = segs[i].start;
+    }
+    char *pj = part_json_path(part);
+    if (pj) {
+        (void)load_part_json(pj, t->size, segs, n);
+    }
+    sxcl_file *probe = sxcl_file_open_write(part, t->size);
+    if (!probe) {
+        free(pj);
+        free(segs);
+        return -1;
+    }
+    sxcl_file_close(probe);
+
+    int64_t done = 0;
+    for (int i = 0; i < n; ++i) {
+        done += segs[i].cursor - segs[i].start;
+    }
+    t->bytes_done = done;
+
+    sxcl_thread_t *threads = (sxcl_thread_t *)calloc((size_t)n, sizeof(sxcl_thread_t));
+    int started = 0;
+    if (threads) {
+        for (int i = 0; i < n; ++i) {
+            if (sxcl_thread_start(&threads[i], segment_main, &segs[i]) != 0) {
+                break;
+            }
+            ++started;
+        }
+        for (int i = 0; i < started; ++i) {
+            sxcl_thread_join(threads[i]);
+        }
+    }
+    int ok = (threads != NULL && started == n);
+    done = 0;
+    for (int i = 0; i < n; ++i) {
+        if (segs[i].rc != 0) {
+            ok = 0;
+        }
+        done += segs[i].cursor - segs[i].start;
+    }
+    free(threads);
+    t->bytes_done = done;
+
+    if (!ok) {
+        if (pj) {
+            (void)save_part_json(pj, t->size, segs, n);
+        }
+        const char *why = "分片下载失败";
+        for (int i = 0; i < n; ++i) {
+            if (segs[i].rc != 0 && segs[i].error[0]) {
+                why = segs[i].error;
+                break;
+            }
+        }
+        snprintf(t->error, sizeof(t->error), "%s", why);
+        free(pj);
+        free(segs);
+        return -1;
+    }
+
+    sxcl_verify_result vr;
+    const sxcl_verify_status st = sxcl_verify_file_cached(part, t->size, t->sha1, t->algo, e->cache, &vr);
+    if (st != SXCL_VERIFY_OK) {
+        snprintf(t->error, sizeof(t->error), "校验失败(%s)", sxcl_verify_status_name(st));
+        sxcl_fs_remove(part);
+        if (pj) {
+            sxcl_fs_remove(pj);
+        }
+        free(pj);
+        free(segs);
+        return -1;
+    }
+    if (sxcl_fs_rename_replace(part, t->dest) != 0) {
+        snprintf(t->error, sizeof(t->error), "改名到目标失败: %s", t->dest);
+        free(pj);
+        free(segs);
+        return -1;
+    }
+    if (e->cache && vr.actual_hex[0] != '\0') {
+        int64_t fsize = 0, fmtime = 0;
+        if (sxcl_fs_stat(t->dest, &fsize, &fmtime) == 0) {
+            sxcl_hash_cache_put(e->cache, t->dest, fsize, fmtime, vr.actual_hex);
+        }
+    }
+    if (pj) {
+        sxcl_fs_remove(pj);
+    }
+    t->bytes_done = t->size;
+    t->total_bytes = t->size;
+    t->source_index = 0;
+    snprintf(t->error, sizeof(t->error), "%s", "ok");
+    free(pj);
+    free(segs);
+    return 0;
+}
+
 static int run_task(sxcl_worker *w, sxcl_task *t)
 {
     sxcl_engine *e = w->engine;
@@ -491,6 +789,22 @@ static int run_task(sxcl_worker *w, sxcl_task *t)
         offset = 0; /* 没有半成品 → 从头下 */
     }
     t->bytes_done = offset;
+
+    /* 大文件先试多连接分片:成功就直接结束;不满足前提或失败就清掉残片退回单连接 */
+    if (t->size >= SXCL_SEGMENT_MIN_SIZE && e->opts.max_conn_per_file > 1) {
+        if (segmented_download(e, t, part, t->urls[0]) == 0) {
+            free(part);
+            return 0;
+        }
+        char *pj = part_json_path(part);
+        if (pj) {
+            sxcl_fs_remove(pj);
+            free(pj);
+        }
+        sxcl_fs_remove(part);
+        offset = 0;
+        t->bytes_done = 0;
+    }
 
     int rc = 1;
     for (int src = 0; src < 4 && t->urls[src]; ++src) {
