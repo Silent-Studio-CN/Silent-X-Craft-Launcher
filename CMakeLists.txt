@@ -38,6 +38,18 @@ function(sxcl_deploy_qt target)
       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_dlls} "$<TARGET_FILE_DIR:${target}>"
       COMMENT "Qt 运行时 -> $<TARGET_FILE_DIR:${target}>(同目录,免得找不到 Qt*.dll)")
   endif()
+  # 平台插件也要铺:否则连"找不到 Qt platform plugin"都过不去,更别说离屏跑测试。
+  # 注意 windeployqt 只铺 windows 插件(对 GUI 是对的),离屏(qoffscreen)得我们自己带上 ——
+  # 实测:只铺 DLL 不铺插件时,-platform offscreen 直接报 "Could not find the Qt platform plugin"。
+  set(_qt_plugins "${Qt6_DIR}/../../../plugins/platforms")
+  if(EXISTS "${_qt_plugins}")
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/platforms"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${_qt_plugins}/qwindows.dll" "${_qt_plugins}/qoffscreen.dll"
+              "$<TARGET_FILE_DIR:${target}>/platforms/"
+      COMMENT "Qt 平台插件(qwindows+qoffscreen)-> $<TARGET_FILE_DIR:${target}>/platforms")
+  endif()
 endfunction()
 
 function(sxcl_deploy_qt_full target)
@@ -53,6 +65,8 @@ function(sxcl_deploy_qt_full target)
   else()
     sxcl_deploy_qt(${target})
   endif()
+  # windeployqt 不铺离屏插件,但我们常要离屏起窗(截图/自动化):补上
+  sxcl_deploy_qt(${target})
 endfunction()
 
 # 警告口径统一:库与测试用同一套,避免"库干净、测试脏"
