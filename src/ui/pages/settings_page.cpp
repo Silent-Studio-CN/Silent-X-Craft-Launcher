@@ -307,12 +307,23 @@ QString resolveJavaPath(const QString &path) {
     if (path.isEmpty())
         return path;
     std::error_code ec;
+#if defined(_WIN32)
+    // Windows:宽字符路径 -> canonical() 走 GetFinalPathNameByHandle,联接点一并解掉
     const std::filesystem::path resolved =
         std::filesystem::canonical(path.toStdWString(), ec);
+#else
+    // POSIX/Android:没有联接点;Qt 的 toStdString() 是 UTF-8,fs::path 直接吃
+    const std::filesystem::path resolved =
+        std::filesystem::canonical(path.toStdString(), ec);
+#endif
     if (ec || resolved.empty())
         return path;
+#if defined(_WIN32)
     return QDir::fromNativeSeparators(
         QString::fromStdWString(resolved.native())); // 返回 Qt 口径('/'),显示时再转回本地分隔符
+#else
+    return QDir::fromNativeSeparators(QString::fromStdString(resolved.native()));
+#endif
 }
 
 // java_setting_card.py:176-184 _norm:路径比较要归一化(Windows 短名 / 符号链接 / 大小写)

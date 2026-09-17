@@ -8,8 +8,8 @@
 
 ## 0. 结论
 
-**已产出带真界面的 APK**:`build/_android/out/sxcl-debug.apk`,**41,627,275 字节**,
-`sha256=884f172a97b30f26d20ad2b3b134440bfd9b4ff5acc26bfad0799e2a3ff9320c`。
+**已产出带真界面的 APK**:`build/_android/out/sxcl-debug.apk`,**41,649,990 字节**,
+`sha256=103d136947f527e02f2f1e89a3dd2b604a2ee43291a5a9551b41f8c56da73fe5`(含应用图标;上一版无图标的是 41,627,275 字节 / `884f172a…`)。
 里面是 `src/ui/**`(Qt Widgets + libqf)**原样**编出来的 `libsxclui_arm64-v8a.so` +
 Qt 6.11.2 的 Widgets/Gui/Core/Svg/Network + qtforandroid/offscreen 平台插件 + `assets/theme/qf_exact/**`。
 
@@ -21,7 +21,16 @@ Qt 6.11.2 的 Widgets/Gui/Core/Svg/Network + qtforandroid/offscreen 平台插件
 | `classes.dex` | ✅ 4 个:`classes.dex` 6,496,740 + classes2/3/4 |
 | `lib/arm64-v8a/*.so` | ✅ 19 个:Qt6Core/Gui/Widgets/Svg/Network/OpenGL/OpenGLWidgets/PrintSupport/Sql/Concurrent + `libsxclui_arm64-v8a.so`(5,669,608)+ qtforandroid/qoffscreen/qandroidstyle + qsvg/qjpeg/qgif/qico + libc++_shared |
 | `assets/theme/qf_exact/*` | ✅ **522 个文件**(dark/light 共 68 个 .qss + images),另有 `assets/icons/blocks` 14 个、`assets/icons/pcl` 54 个 |
+| 应用图标 | ✅ `application: ... icon='res/mipmap-mdpi-v4/ic_launcher.png'` 且 `launchable-activity: ... icon='res/mipmap-mdpi-v4/ic_launcher.png'`(mdpi/hdpi/xhdpi/xxhdpi/xxxhdpi 五档,由 `assets/icons/blocks/Grass.png` 64x64 以 NEAREST 放大) |
 | 设备侧 1:1 像素 | ❌ **未取得** —— 本机当前没有任何 API≥28 的 arm64 真机/模拟器(见 §6),如实列出卡点 |
+
+**三句必须说的真话**:
+
+1. 这个 APK 是**本机**用 Qt 6.11.2 `android_arm64_v8a` + **NDK 28.2.13676358**(不是 r27)编出来的,**不是 WS2025 的产物** ——
+   远端那趟两次都卡在控制通道(§7.3),只走到 native 编译与 overlay 验证;
+2. **没有在真机/模拟器上验证过启动与像素**。所以"Android 上 1:1"目前**只有静态证据**(§5 的资产/库/清单/签名),
+   **没有设备侧 DIFF**;§8.5 那套九页/弹层数字是**桌面 Windows** 上的回归证据,不能当作 Android 的设备侧结论;
+3. 设备一回来怎么取设备侧像素:`r3_device.ps1`(装包→可见运行截图→九页 `offscreen` 1100x750@1.5 抓图)+ `compare_all.ps1`(对 `build/ref/py_*.png` 跑 `tools/ui_compare.py`),命令见 §6。
 
 **在哪里编的(重要)**:WS2025 在本次任务中途把控制通道卡死了(见 §7.3),为不空等,按主代理指示改用
 **本机兜底**:本机装 Qt 6.11.2 android_arm64_v8a 套件 + NDK r28 + Gradle 9.3.1,用**同一套打包层文件**出包。
@@ -318,6 +327,44 @@ overlay 落位与 A/B 验证(§7.1)、native 编译(37/107 时静态库 libsxcl.
 | 结果 | `D:\Qt\6.11.2\android_arm64_v8a\` 齐活:`lib/cmake/Qt6/qt.toolchain.cmake`、`lib/libQt6{Core,Gui,Widgets,Svg,Network}_arm64-v8a.so`、`jar/Qt6Android.jar`、`plugins/platforms/{qtforandroid,qoffscreen}`、`plugins/styles/qandroidstyle`、`src/android/java` |
 
 所有下载/临时/构建目录都在 **D 盘**(C 盘当时只剩 2.2GB):`TEMP=D:\aqt-temp`、`-O D:\Qt`、`GRADLE_USER_HOME=D:\gradle-home`、构建目录 `D:\sxcl_local`。
+
+## 8.5 桌面零回归证据(libqf Clang 可移植性修正的验收)
+
+改 libqf 那 4 处(§10)后,按主代理指定的口径在本机复验,**数字与基线逐项相同**:
+
+| 页面 | 本次复验 vs 参考图 `build/ref/py_*.png` | 主代理给的基线 | 本次 vs 改动前 `build/ref/c_*.png` |
+|---|---|---|---|
+| home | **0.09%** | 0.09 | **0.00%** |
+| versions | **1.54%** | 1.54 | **0.00%** |
+| tasks | **0.00%** | 0.00 | **0.00%** |
+| keymap | **0.21%** | 0.21 | **0.00%** |
+| multiplayer | **0.15%** | 0.15 | **0.00%** |
+| settings | **0.98%** | 0.98 | **0.00%** |
+| download_config | **2.33%** | 2.33 | **0.00%** |
+| download_progress | **0.01%** | 0.01 | **0.00%** |
+| launch | **0.01%** | 0.01 | **0.00%** |
+
+弹层 5 个使用点(`SXCL_UI_POPUP`:settings 2/3、versions 0、keymap 0/1)对 Python 参考
+(`PyQf to C\_scratch\popup\py_popup_*.png`)**全部 0.00%**,对改动前 `c_popup_*.png` 也全部 **0.00%**。
+
+桌面构建:`cmake --build build-ui --config Release --target sxcl-ui` → **EXIT=0,0 error / 0 warning**(/W4 /WX 口径)。
+
+libqf 自带测试:`ctest -C Release`(PATH 先加 `D:\Qt\6.11.2\msvc2022_64\bin`,否则 0xC0000135)→
+**3/3 全过**:`anim_parity_test` 0.18s、`scroll_wiring_test` 3.65s、`metrics_parity_test` 1.15s,`100% tests passed out of 3`。
+
+抓图口径(复现用;`QT_SCALE_FACTOR` **不能**用,会把屏幕已有的 150% 再乘一遍 → 2475x1688):
+
+```powershell
+Remove-Item Env:QT_SCALE_FACTOR -ErrorAction SilentlyContinue
+$env:QT_SCREEN_SCALE_FACTORS = '1.5'      # 覆盖屏幕 DPR = 1.5 → 1650x1125,与参考图同口径
+$env:SXCL_UI_ACCENT = '#c044a3'           # 原始色(不是推导后的 #ff75df)
+$env:SXCL_UI_ROUTE  = 'home'              # 九页路由之一
+$env:SXCL_UI_SHOT   = '<out>\home.png'
+& '<仓库>\build-ui\src\ui\Release\sxcl-ui.exe'
+# 弹层:SXCL_UI_POPUP=<序号> 与 SXCL_UI_SHOT 一起给
+```
+
+一键脚本:`build/_android/scripts/regress.ps1`。
 
 ## 9. 已知限制(诚实清单)
 
