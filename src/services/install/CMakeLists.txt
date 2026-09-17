@@ -6,9 +6,9 @@ target_sources(sxcl PRIVATE
 )
 
 if(SXCL_BUILD_TESTS)
-  # 根 CMakeLists 的 enable_testing() 在 add_subdirectory 之后才调用,所以子目录里
-  # **必须自己再调一次**:否则本目录的 CTestTestfile.cmake 根本不会生成,add_test 静默丢失
-  # (实测:不调这一行,ctest 里看不到 sxcl_install_test)。
+  # 根 CMakeLists 现在把 enable_testing() 提到了 add_subdirectory 之前(必要的),
+  # 这里再调一次是幂等的保险:万一顺序被人改回去,子目录里的 add_test 会被**静默丢掉**
+  # (实测过一次:ctest 里根本看不到 sxcl_install_test,不报任何错)。
   enable_testing()
 
   add_executable(sxcl_install_test ${CMAKE_SOURCE_DIR}/tests/install_test.c)
