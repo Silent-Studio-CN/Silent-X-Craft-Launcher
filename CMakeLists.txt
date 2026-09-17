@@ -54,6 +54,13 @@ add_library(sxcl STATIC
   src/services/modloader/installer.c
 )
 target_include_directories(sxcl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# 各模块自带的 CMakeLists(用 target_sources 追加到 sxcl)。
+# 这样做是为了让多个并行改动**不再抢同一份 CMakeLists.txt**(已经因此出过两次中间态事故)。
+add_subdirectory(src/services/minecraft)
+add_subdirectory(src/services/modloader)
+add_subdirectory(src/services/install)
+add_subdirectory(src/core/instance)
 sxcl_warnings(sxcl)
 
 # 平台实现二选一(WinHTTP/UTF-16 转换在 win32 侧,POSIX 侧用通用 API)
@@ -146,6 +153,10 @@ if(SXCL_BUILD_TESTS)
     target_link_libraries(sxcl_net_qt_test PRIVATE sxcl_net_qt)
     sxcl_warnings(sxcl_net_qt_test)
     add_test(NAME sxcl_net_qt_test COMMAND sxcl_net_qt_test)
+    # Qt 的 DLL 不在 PATH 时这个用例会以 STATUS_DLL_NOT_FOUND(0xC0000135) 失败 ——
+    # 本地一直靠手工往 PATH 里塞 Qt bin 才过,CI 里换个环境就会红。测试自己带上 Qt 的 bin 目录。
+    set_tests_properties(sxcl_net_qt_test PROPERTIES
+      ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Network>")
   endif()
 endif()
 
