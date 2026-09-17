@@ -46,12 +46,12 @@ sxcl_warnings(sxcl)
 
 # 平台实现二选一(WinHTTP/UTF-16 转换在 win32 侧,POSIX 侧用通用 API)
 if(WIN32)
-  target_sources(sxcl PRIVATE src/platform/platform_win32.c)
+  target_sources(sxcl PRIVATE src/platform/platform_win32.c src/platform/process_win32.c)
 elseif(ANDROID)
   # Android 的 pthread 就在 libc 里:FindThreads 的探测会失败,不要去找它
-  target_sources(sxcl PRIVATE src/platform/platform_posix.c)
+  target_sources(sxcl PRIVATE src/platform/platform_posix.c src/platform/process_posix.c)
 else()
-  target_sources(sxcl PRIVATE src/platform/platform_posix.c)
+  target_sources(sxcl PRIVATE src/platform/platform_posix.c src/platform/process_posix.c)
   find_package(Threads REQUIRED)
   target_link_libraries(sxcl PUBLIC Threads::Threads)
 endif()
@@ -106,6 +106,7 @@ if(SXCL_BUILD_TESTS)
     json_test    tests/json_test.c
     manifest_test tests/manifest_test.c
     options_test tests/options_test.c
+    process_test tests/process_test.c
     hashcache_test tests/hashcache_test.c
   )
   list(LENGTH SXCL_TESTS _n)
