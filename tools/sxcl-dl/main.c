@@ -99,6 +99,7 @@ typedef struct cli_opts {
 #  endif
 #  include <windows.h>
 #  include <dbghelp.h>
+#  include <shellapi.h> /* CommandLineToArgvW:拿 UTF-16 命令行,避免中文实参乱码 */
 #  include <stdio.h>
 
 static void crash_frame_name(HANDLE proc, DWORD64 addr, char *out, size_t out_len)
@@ -617,6 +618,17 @@ static void loader_progress(void *userdata, int percent, const char *status)
     fflush(stdout);
 }
 
+/* --verbose 时把安装器吐出来的原始每一行也打出来(排查"退出码 1"这种只有结论没有原因的情况)。 */
+static int loader_raw_line(void *userdata, int is_stderr, const char *line)
+{
+    const cli_opts *o = (const cli_opts *)userdata;
+    if (o && o->verbose) {
+        printf("      [%s] %s\n", is_stderr ? "err" : "out", line);
+        fflush(stdout);
+    }
+    return 0;
+}
+
 /* 读一行文本(去掉首尾空白)。返回 0 成功。 */
 static int read_trimmed_line(const char *path, char *out, size_t cap)
 {
@@ -968,6 +980,8 @@ static int cmd_loader(int argc, char **argv, const cli_opts *opts_in)
     req.no_fallback = no_fallback;
     req.on_progress = loader_progress;
     req.is_cancelled = loader_cancelled;
+    req.userdata = (void *)o;   /* 给 loader_raw_line 看 --verbose;进度回调不看它 */
+    req.on_line = loader_raw_line;
 
     sxcl_loader_install_result res;
     const int rc = sxcl_loader_install(&req, &res);
@@ -986,10 +1000,46 @@ static int cmd_loader(int argc, char **argv, const cli_opts *opts_in)
     return 0;
 }
 
+#if defined(_WIN32)
+/* Windows 上 CRT 给 main 的 argv 是按**当前 ANSI 代码页**解码的,中文实参(实例名、路径)会变乱码。
+ * 这里用 GetCommandLineW + CommandLineToArgvW 拿到 UTF-16,再转成 UTF-8 重建 argv ——
+ * 只影响 CLI 自身;GUI 直接调 sxcl_* 接口本来就走 UTF-8,不受影响。 */
+static void rebuild_argv_utf8(int *argc_io, char ***argv_io)
+{
+    static char storage[8192];
+    static char *utf8_argv[128];
+    int wargc = 0;
+    LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+    if (!wargv) {
+        return;
+    }
+    size_t used = 0;
+    int n = 0;
+    for (int i = 0; i < wargc && n < (int)(sizeof(utf8_argv) / sizeof(utf8_argv[0])) - 1; ++i) {
+        const int need = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, NULL, 0, NULL, NULL);
+        if (need <= 0 || used + (size_t)need > sizeof(storage)) {
+            break;
+        }
+        WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, storage + used, need, NULL, NULL);
+        utf8_argv[n++] = storage + used;
+        used += (size_t)need;
+    }
+    LocalFree(wargv);
+    if (n > 0) {
+        utf8_argv[n] = NULL;
+        *argc_io = n;
+        *argv_io = utf8_argv;
+    }
+}
+#endif
+
 int main(int argc, char **argv)
 {
     /* 无缓冲输出:崩溃时不会把最后一段输出留在缓冲区里丢掉(排查跨平台崩溃吃过这个亏) */
     setvbuf(stdout, NULL, _IONBF, 0);
+#if defined(_WIN32)
+    rebuild_argv_utf8(&argc, &argv); /* 必须在解析参数之前:否则中文实例名/路径就是乱码 */
+#endif
 #if defined(_WIN32)
     AddVectoredExceptionHandler(1, sxcl_veh_handler); /* 第一现场,栈还没展开 */
     SetUnhandledExceptionFilter(sxcl_crash_handler);

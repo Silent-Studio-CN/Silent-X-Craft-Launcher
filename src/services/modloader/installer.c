@@ -905,9 +905,11 @@ static int install_on_line(void *ud, int is_stderr, const char *line)
 {
     install_ctx *ctx = (install_ctx *)ud;
     if (line && line[0]) {
-        /* 原始行:先给调用方(CLI 的 --verbose / 启动器的日志),再自己留一份尾巴。 */
-        if (ctx->req->on_line) {
-            ctx->req->on_line(ctx->req->userdata, is_stderr, line);
+        /* 原始行:先给调用方(CLI 的 --verbose / 启动器的日志),再自己留一份尾巴。
+         * 回调返回非 0 = 调用方要求终止这次安装(与 process.h 的 on_line 同语义)。 */
+        if (ctx->req->on_line && ctx->req->on_line(ctx->req->userdata, is_stderr, line) != 0) {
+            ctx->cancelled = 1;
+            return 1;
         }
         const size_t copy = strlen(line) < sizeof(ctx->last_lines[0]) - 1
                                 ? strlen(line)
