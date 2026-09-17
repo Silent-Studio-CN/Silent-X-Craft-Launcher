@@ -57,6 +57,13 @@ target_include_directories(sxcl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # 各模块自带的 CMakeLists(用 target_sources 追加到 sxcl)。
 # 这样做是为了让多个并行改动**不再抢同一份 CMakeLists.txt**(已经因此出过两次中间态事故)。
+#
+# 注意:enable_testing() 必须在这批 add_subdirectory **之前**调用 ——
+# 子目录里写的 add_test 只有在 enable_testing 已生效时才会被 ctest 看到,
+# 否则测试**静默不注册**(cntest -N 少几个,还看不出来为什么)。子代理实测踩过。
+if(SXCL_BUILD_TESTS)
+  enable_testing()
+endif()
 add_subdirectory(src/services/minecraft)
 add_subdirectory(src/services/modloader)
 add_subdirectory(src/services/install)
