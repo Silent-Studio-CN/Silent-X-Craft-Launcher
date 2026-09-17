@@ -18,6 +18,43 @@ if(MSVC)
   add_compile_options(/utf-8)
 endif()
 
+# ── Qt 运行时部署:把需要的 DLL 放到 exe 同目录 ──
+# 为什么必须在构建里做(用户反馈"总是提示找不到 Qt*.dll"):靠 PATH 或手工拷贝都不稳,
+# 换机器、换 shell、在别处双击都会失败。这里让构建产物自带运行时。
+#   sxcl_deploy_qt(target)      —— 拷直接依赖的几个 DLL(测试用,轻)
+#   sxcl_deploy_qt_full(target) —— 用 windeployqt 连平台/TLS 插件一起铺开(界面程序用)
+function(sxcl_deploy_qt target)
+  if(NOT WIN32)
+    return()
+  endif()
+  set(_dlls "")
+  foreach(_qt_target Qt6::Core Qt6::Gui Qt6::Network Qt6::Svg)
+    if(TARGET ${_qt_target})
+      list(APPEND _dlls "$<TARGET_FILE:${_qt_target}>")
+    endif()
+  endforeach()
+  if(_dlls)
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_dlls} "$<TARGET_FILE_DIR:${target}>"
+      COMMENT "Qt 运行时 -> $<TARGET_FILE_DIR:${target}>(同目录,免得找不到 Qt*.dll)")
+  endif()
+endfunction()
+
+function(sxcl_deploy_qt_full target)
+  if(NOT WIN32)
+    return()
+  endif()
+  find_program(SXCL_WINDEPLOYQT NAMES windeployqt HINTS "${QT_BIN_DIR}" "${Qt6_DIR}/../../../bin")
+  if(SXCL_WINDEPLOYQT)
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND "${SXCL_WINDEPLOYQT}" --no-translations --no-opengl-sw --no-system-d3d-compiler
+              --no-compiler-runtime --dir "$<TARGET_FILE_DIR:${target}>" "$<TARGET_FILE:${target}>"
+      COMMENT "windeployqt -> $<TARGET_FILE_DIR:${target}>(含 platforms/tls 插件)")
+  else()
+    sxcl_deploy_qt(${target})
+  endif()
+endfunction()
+
 # 警告口径统一:库与测试用同一套,避免"库干净、测试脏"
 function(sxcl_warnings target)
   if(SXCL_WERROR)
@@ -161,6 +198,7 @@ if(SXCL_BUILD_TESTS)
     target_link_libraries(sxcl_net_qt_test PRIVATE sxcl_net_qt)
     sxcl_warnings(sxcl_net_qt_test)
     add_test(NAME sxcl_net_qt_test COMMAND sxcl_net_qt_test)
+    sxcl_deploy_qt(sxcl_net_qt_test) # Qt6Core/Qt6Network 放到 exe 同目录(不再依赖 PATH)
     # Qt 的 DLL 不在 PATH 时这个用例会以 STATUS_DLL_NOT_FOUND(0xC0000135) 失败 ——
     # 本地一直靠手工往 PATH 里塞 Qt bin 才过,CI 里换个环境就会红。测试自己带上 Qt 的 bin 目录。
     set_tests_properties(sxcl_net_qt_test PROPERTIES

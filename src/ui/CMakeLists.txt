@@ -38,6 +38,9 @@ target_link_libraries(sxcl_ui_core PUBLIC fluent Qt6::Svg)
 # ---- 可执行 ----
 qt_add_executable(sxcl-ui main.cpp)
 target_link_libraries(sxcl-ui PRIVATE sxcl_ui_core sxcl)
+# 界面程序需要 platforms/tls 插件才能起窗:用 windeployqt 把 Qt 运行时铺到 exe 同目录
+# (用户反馈"总是提示找不到 Qt*.dll" —— 不能靠 PATH,产物必须自带)
+sxcl_deploy_qt_full(sxcl-ui)
 
 # 警告口径与库/测试一致(工程既有的函数)。Qt/libqf 的头文件都能过 /W4 /WX,
 # 过不了就把具体文件降级,不要整个目标去掉警告。
@@ -49,6 +52,7 @@ if(SXCL_BUILD_TESTS)
   add_executable(sxcl_ui_smoke_test "${CMAKE_SOURCE_DIR}/tests/ui_smoke_test.cpp")
   target_link_libraries(sxcl_ui_smoke_test PRIVATE sxcl_ui_core)
   sxcl_warnings(sxcl_ui_smoke_test)
+  sxcl_deploy_qt(sxcl_ui_smoke_test) # 同样:测试的 exe 旁边也要有 Qt DLL
 
   # Qt 的 DLL 不在 PATH 的机器上也要能跑:把 Qt 的 bin 目录并进测试环境
   get_target_property(_sxcl_qt_core Qt6::Core IMPORTED_LOCATION_RELEASE)
