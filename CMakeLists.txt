@@ -43,6 +43,12 @@ add_library(sxcl STATIC
   src/services/archive/zip.c
   src/services/minecraft/options.c
   src/core/settings.c
+  src/services/launch/java.c
+  src/services/launch/args.c
+  src/services/launch/logscan.c
+  src/services/modloader/compat.c
+  src/services/modloader/profiles.c
+  src/services/modloader/installer.c
 )
 target_include_directories(sxcl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 sxcl_warnings(sxcl)
@@ -114,6 +120,8 @@ if(SXCL_BUILD_TESTS)
     settings_test tests/settings_test.c
     inflate_test tests/inflate_test.c
     zip_test     tests/zip_test.c
+    launch_test  tests/launch_test.c
+    loader_test  tests/loader_test.c
   )
   list(LENGTH SXCL_TESTS _n)
   math(EXPR _last "${_n} - 1")

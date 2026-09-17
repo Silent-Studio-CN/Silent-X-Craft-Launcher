@@ -67,6 +67,9 @@ const char *sxcl_json_string(const sxcl_json_value *value);
 /** 数字;非数字返回 0。 */
 double sxcl_json_number(const sxcl_json_value *value);
 
+/** 布尔节点的值;非布尔返回 0。数组里/根位置的布尔必须用这个读(键级接口读不到)。 */
+int sxcl_json_bool(const sxcl_json_value *value);
+
 /** 便捷取值:对象成员缺失或类型不符时返回 def。 */
 const char *sxcl_json_get_string(const sxcl_json_value *object, const char *key, const char *def);
 int64_t sxcl_json_get_int64(const sxcl_json_value *object, const char *key, int64_t def);

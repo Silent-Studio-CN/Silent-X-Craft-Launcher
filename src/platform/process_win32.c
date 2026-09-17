@@ -101,6 +101,94 @@ static int drain(HANDLE pipe, int is_stderr, char *pending, size_t *pending_len,
     return 0;
 }
 
+/* 构造子进程环境块:父环境 + 覆盖/追加项(同名覆盖,大小写不敏感)。
+ * 原来这里是空的(只写了注释),导致 OptiFine 的 APPDATA 沙箱在 Windows 上不生效 —— 由模组加载器
+ * 那边的实测发现。返回的块必须整块传给 CreateProcessW(lpEnvironment)。 */
+static wchar_t *build_env_block(const char *const *extra)
+{
+    wchar_t *src = GetEnvironmentStringsW();
+    if (!src) {
+        return NULL;
+    }
+    size_t cap = 4096, len = 0;
+    wchar_t *out = (wchar_t *)malloc(cap * sizeof(wchar_t));
+    if (!out) {
+        FreeEnvironmentStringsW(src);
+        return NULL;
+    }
+    for (const wchar_t *p = src; *p; p += wcslen(p) + 1) {
+        int overridden = 0;
+        const wchar_t *eq = wcschr(p, L'=');
+        const size_t key_len = eq ? (size_t)(eq - p) : wcslen(p);
+        for (const char *const *e = extra; e && *e; ++e) {
+            const char *eeq = strchr(*e, '=');
+            const size_t ekey_len = eeq ? (size_t)(eeq - *e) : strlen(*e);
+            if (ekey_len != key_len) {
+                continue;
+            }
+            int same = 1;
+            for (size_t i = 0; i < key_len; ++i) {
+                wchar_t a = p[i];
+                char b = (*e)[i];
+                if (a >= L'a' && a <= L'z') {
+                    a = (wchar_t)(a - 32);
+                }
+                if (b >= 'a' && b <= 'z') {
+                    b = (char)(b - 32);
+                }
+                if ((char)a != b) {
+                    same = 0;
+                    break;
+                }
+            }
+            if (same) {
+                overridden = 1;
+                break;
+            }
+        }
+        if (overridden) {
+            continue;
+        }
+        const size_t need = wcslen(p) + 1;
+        if (len + need + 1 > cap) {
+            cap = (len + need + 1) * 2;
+            wchar_t *grown = (wchar_t *)realloc(out, cap * sizeof(wchar_t));
+            if (!grown) {
+                free(out);
+                FreeEnvironmentStringsW(src);
+                return NULL;
+            }
+            out = grown;
+        }
+        wmemcpy(out + len, p, need);
+        len += need;
+    }
+    for (const char *const *e = extra; e && *e; ++e) {
+        wchar_t *w = to_wide(*e);
+        if (!w) {
+            continue;
+        }
+        const size_t need = wcslen(w) + 1;
+        if (len + need + 1 > cap) {
+            cap = (len + need + 1) * 2;
+            wchar_t *grown = (wchar_t *)realloc(out, cap * sizeof(wchar_t));
+            if (!grown) {
+                free(w);
+                free(out);
+                FreeEnvironmentStringsW(src);
+                return NULL;
+            }
+            out = grown;
+        }
+        wmemcpy(out + len, w, need);
+        len += need;
+        free(w);
+    }
+    out[len] = L'\0'; /* 结尾双 NUL */
+    FreeEnvironmentStringsW(src);
+    return out;
+}
+
 int sxcl_process_run(const sxcl_process_opts *opts, sxcl_process_result *out)
 {
     if (!opts || !opts->program || !out) {
@@ -136,13 +224,14 @@ int sxcl_process_run(const sxcl_process_opts *opts, sxcl_process_result *out)
     SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation(err_r, HANDLE_FLAG_INHERIT, 0);
 
-    /* 环境块:父环境 + 追加项 */
-    char *envblock = NULL;
+    wchar_t *envblock = NULL;
+    DWORD flags = CREATE_NO_WINDOW;
     if (opts->env && opts->env[0]) {
-        /* 简单做法:不改父环境块,改用 "set KEY=VAL && cmd" 是 shell 思路,这里不取;
-         * 需要自定义环境时由调用方传完整列表(见 README 的进程接口说明)。 */
+        envblock = build_env_block(opts->env);
+        if (envblock) {
+            flags |= CREATE_UNICODE_ENVIRONMENT;
+        }
     }
-    (void)envblock;
 
     STARTUPINFOW si;
     memset(&si, 0, sizeof(si));
@@ -156,10 +245,11 @@ int sxcl_process_run(const sxcl_process_opts *opts, sxcl_process_result *out)
     wchar_t *wdir = to_wide(opts->work_dir);
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof(pi));
-    const BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
-                                   NULL, wdir, &si, &pi);
+    const BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, flags,
+                                   envblock, wdir, &si, &pi);
     free(wcmd);
     free(wdir);
+    free(envblock);
     CloseHandle(out_w);
     CloseHandle(err_w);
     if (!ok) {

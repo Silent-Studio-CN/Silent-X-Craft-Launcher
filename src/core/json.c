@@ -1049,6 +1049,14 @@ const char *sxcl_json_string(const sxcl_json_value *value)
     return (value && value->type == SXCL_JSON_STRING) ? value->u.string.ptr : NULL;
 }
 
+int sxcl_json_bool(const sxcl_json_value *value)
+{
+    if (!value || value->type != SXCL_JSON_BOOL) {
+        return 0;
+    }
+    return value->u.boolean;
+}
+
 double sxcl_json_number(const sxcl_json_value *value)
 {
     return (value && value->type == SXCL_JSON_NUMBER) ? value->u.number : 0.0;
