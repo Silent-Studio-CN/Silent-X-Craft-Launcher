@@ -59,7 +59,10 @@ int sxcl_fs_stat(const char *path, int64_t *size, int64_t *mtime_ns)
         ULARGE_INTEGER ul;
         ul.HighPart = info.ftLastWriteTime.dwHighDateTime;
         ul.LowPart = info.ftLastWriteTime.dwLowDateTime;
-        *mtime_ns = (int64_t)(ul.QuadPart * 100ULL);
+        /* FILETIME 是"1601-01-01 起的 100ns 计数":必须先减掉到 Unix 纪元的偏移(11644473600 秒),
+         * 再乘 100 转纳秒。直接 *100 会溢出 int64(实测回绕成 -5012648075019669516),
+         * 虽然"稳定"但当 key 之外的一切用途(显示/比较)都是错的 —— 由启动层的实测发现。 */
+        *mtime_ns = (int64_t)((ul.QuadPart - 116444736000000000ULL) * 100ULL);
     }
     return 0;
 }

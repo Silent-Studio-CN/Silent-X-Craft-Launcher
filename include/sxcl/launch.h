@@ -339,6 +339,8 @@ typedef struct sxcl_launch_result {
     char requested_backend[16]; /**< 本次要求写进 options.txt 的后端 */
     char actual_backend[16];    /**< 日志显示实际生效的后端 */
     char options_path[SXCL_JAVA_PATH_MAX]; /**< 写过的 options.txt 路径 */
+    char natives_dir[SXCL_JAVA_PATH_MAX];  /**< 原生库目录(-Djava.library.path 指向的那个) */
+    int natives_count;          /**< 原生库目录里就绪的文件数;0 = 这个版本没有原生库 */
     char game_dir[SXCL_JAVA_PATH_MAX];
     char error[256];            /**< 人话失败原因;空 = 没失败 */
     char missing[160];          /**< 从日志里原样带出来的"缺什么"(不做补全,只报告) */

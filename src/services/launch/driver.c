@@ -10,7 +10,8 @@
  *   2. 按 javaVersion.majorVersion 选 Java —— 选不出来就给"装哪个版本、去哪装"的人话,而不是抛个错误码;
  *   3. **启动前**把实例的渲染后端写进 options.txt —— options.h 的实测结论是:游戏在 Vulkan 起不来时
  *      会静默回退并把 options.txt 改成自己觉得合适的值,所以这个设置必须每次启动前由启动器重写;
- *   4. natives 目录先建好 —— 差一个目录就是 LWJGL 原生库加载失败,游戏启动即崩;
+ *   4. natives 目录先建好,并把 classifier jar 里的 .dll/.so 解进去 —— 目录空着等于
+ *      LWJGL 加载原生库时抛 UnsatisfiedLinkError,启动参数拼得再对也没用;
  *   5. 拼 argv 起进程,on_line 同时喂给 logscan 与调用方(取消/提前收工都靠回调返回非 0);
  *   6. 结束后拿 logscan 的汇总当结论;如果设置的是 Vulkan 而日志出现回退,就明说"你选的 Vulkan 没生效,
  *      实际跑的是 OpenGL",并把实际后端写回 instance.<实例名>.lastGraphicsApi。
@@ -24,6 +25,7 @@
 #include "sxcl/launch.h"
 
 #include "sxcl/fs.h"
+#include "sxcl/natives.h"
 #include "sxcl/options.h"
 #include "sxcl/process.h"
 #include "sxcl/settings.h"
@@ -295,7 +297,9 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
     sxcl_options_free(options);
     options = NULL;
 
-    /* ── 4. natives 目录先建好 ── */
+    /* ── 4. natives 目录 + 把原生库解出来 ──
+     * 目录本身在拼参数前必须存在;里面有没有 .dll/.so 决定了 LWJGL 能不能加载 ——
+     * 所以这一步失败就直接不启动(与 options.txt 写不进去同理:启动了也必然挂)。 */
     (void)snprintf(leaf, sizeof(leaf), "%s-natives", req->version_name);
     join_path(natives, sizeof(natives), versions_dir, leaf);
     if (sxcl_fs_mkdirs(natives) != 0) {
@@ -304,6 +308,14 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
         set_error(out, err, err_len, msg);
         goto done;
     }
+    copy_str(out->natives_dir, sizeof(out->natives_dir), natives);
+    if (sxcl_natives_prepare_json(doc, req->game_dir, natives, errbuf, sizeof(errbuf)) != 0) {
+        char msg[256];
+        (void)snprintf(msg, sizeof(msg), "准备原生库失败:%s", errbuf);
+        set_error(out, err, err_len, msg);
+        goto done;
+    }
+    out->natives_count = sxcl_natives_last_count();
 
     /* ── 5. 拼 argv ── */
     memset(&ctx, 0, sizeof(ctx));

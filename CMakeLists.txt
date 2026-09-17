@@ -42,6 +42,7 @@ add_library(sxcl STATIC
   src/services/metadata/manifest.c
   src/services/archive/zip.c
   src/services/minecraft/options.c
+  src/services/minecraft/natives.c
   src/core/settings.c
   src/services/launch/java.c
   src/services/launch/args.c
@@ -123,6 +124,7 @@ if(SXCL_BUILD_TESTS)
     zip_test     tests/zip_test.c
     launch_test  tests/launch_test.c
     launch_driver_test tests/launch_driver_test.c
+    natives_test tests/natives_test.c
     loader_test  tests/loader_test.c
   )
   list(LENGTH SXCL_TESTS _n)

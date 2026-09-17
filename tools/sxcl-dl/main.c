@@ -178,7 +178,7 @@ static int usage(void)
            "      [--no-fallback] [--verbose]\n"
            "  sxcl-dl launch <版本名> <游戏目录> [--java PATH] [--memory MB] [--instance NAME]\n"
            "      [--offline 玩家名] [--backend default|vulkan|opengl] [--timeout 秒] [--settings PATH]\n"
-           "      [--verbose]\n"
+           "      [--dry-run] [--verbose]\n"
            "      └ 读版本 JSON -> 选 Java -> 按实例设置写 options.txt(渲染后端)-> 起进程\n"
            "        -> 每行归类 -> 出一条人话结论(发现 Vulkan 回退会写回 lastGraphicsApi)\n");
     return 2;
@@ -721,6 +721,7 @@ typedef struct launch_cli_opts {
     int memory_mb;
     int timeout_ms;
     int verbose;
+    int dry_run;
 } launch_cli_opts;
 
 static int launch_echo_line(void *userdata, int is_stderr, const char *line)
@@ -762,6 +763,8 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
         } else if (strcmp(a, "--settings") == 0 && v) {
             lo.settings = v;
             ++i;
+        } else if (strcmp(a, "--dry-run") == 0) {
+            lo.dry_run = 1; /* 只准备(选 Java / 写 options.txt / 解 natives / 拼 argv),不起进程 */
         } else if (strcmp(a, "--verbose") == 0) {
             lo.verbose = 1;
         } else {
@@ -789,6 +792,7 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
     req.backend = lo.backend;
     req.settings_path = lo.settings;
     req.timeout_ms = lo.timeout_ms;
+    req.dry_run = lo.dry_run;
     req.on_line = lo.verbose ? launch_echo_line : NULL;
 
     sxcl_launch_result res;
@@ -810,15 +814,25 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
     if (res.options_path[0]) {
         printf("options.txt: %s\n", res.options_path);
     }
+    if (res.natives_dir[0]) {
+        printf("natives: 解出 %d 个文件 -> %s\n", res.natives_count, res.natives_dir);
+    }
     if (res.missing[0]) {
         printf("缺东西: %s\n", res.missing);
     }
-    printf("退出码: %d   用时 %.2f s%s\n", res.exit_code, (double)res.elapsed_ms / 1000.0,
-           res.timed_out ? "  (超时被终止)" : (res.killed_by_client ? "  (按请求终止)" : ""));
+    if (lo.dry_run) {
+        printf("退出码: (dry-run 没起进程)   用时 %.2f s\n", (double)res.elapsed_ms / 1000.0);
+    } else {
+        printf("退出码: %d   用时 %.2f s%s\n", res.exit_code, (double)res.elapsed_ms / 1000.0,
+               res.timed_out ? "  (超时被终止)" : (res.killed_by_client ? "  (按请求终止)" : ""));
+    }
     printf("结论: %s\n", res.conclusion_text);
     if (rc != 0) {
         fprintf(stderr, "启动失败: %s\n", err);
         return 1;
+    }
+    if (lo.dry_run) {
+        return 0; /* 只准备不启动:没起进程就没有"退出码"可言,准备成功就是成功 */
     }
     return res.exit_code == 0 ? 0 : 1;
 }
