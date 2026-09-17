@@ -3,6 +3,10 @@
  * 为什么必须单独提供:MSVC 的 fopen 按**当前 ANSI 代码页**解释路径,中文目录(国内用户是常态)
  * 会直接失败 —— 实测 `sxcl-dl options build\中文测试\选项.txt --set ...` 报"保存失败",
  * 而同一路径用 CreateFileW/_wfopen 就正常。本工程所有读写文件的地方都该走它。 */
+#if defined(_MSC_VER)
+#  define _CRT_SECURE_NO_WARNINGS 1 /* _wfopen 在 MSVC 下被标记弃用;C4996 在 /WX 下会直接打挂构建 */
+#endif
+
 #include "sxcl/fs.h"
 
 #include <stdio.h>
