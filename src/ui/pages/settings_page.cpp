@@ -999,7 +999,10 @@ void SettingsPage::buildContent() {
     m_aboutCard = new SettingCard( // :399-404
         FluentIcon::qicon(FluentIcon::INFO),
         QStringLiteral("%1 %2").arg(QString::fromUtf8(kAppName), QString::fromUtf8(kAppVersion)),
-        QStringLiteral("基于 PySide6 与 QFluentWidgets 构建，支持 Windows / macOS / Linux"),
+        // 注意:Python 原文是"基于 PySide6 与 QFluentWidgets 构建,支持 Windows / macOS / Linux",
+        // C 版必须写自己的技术栈 —— 照抄会谎报实现。JQt 是 SilentStudio 自有的 Qt 框架,
+        // 也是 C 版出 Android 安装包所依赖的流水线(JQt-for-Android)。
+        QStringLiteral("基于 Qt6 · libqf · JQt 构建，支持 Windows / macOS / Linux / Android"),
         aboutGroup);
     m_websiteCard = new HyperlinkCard( // :405-411
         QString::fromUtf8(kAppRepoUrl), QStringLiteral("访问官网"),
