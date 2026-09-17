@@ -33,12 +33,14 @@ endfunction()
 add_library(sxcl STATIC
   src/core/version.c
   src/core/json.c
+  src/core/inflate.c
   src/core/dl/hash.c
   src/core/dl/limiter.c
   src/core/dl/verify.c
   src/core/dl/engine.c
   src/core/dl/hashcache.c
   src/services/metadata/manifest.c
+  src/services/archive/zip.c
   src/services/minecraft/options.c
   src/core/settings.c
 )
@@ -110,6 +112,8 @@ if(SXCL_BUILD_TESTS)
     process_test tests/process_test.c
     hashcache_test tests/hashcache_test.c
     settings_test tests/settings_test.c
+    inflate_test tests/inflate_test.c
+    zip_test     tests/zip_test.c
   )
   list(LENGTH SXCL_TESTS _n)
   math(EXPR _last "${_n} - 1")

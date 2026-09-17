@@ -1,0 +1,2 @@
+Hello from SXCL-C zip test!
+second line
