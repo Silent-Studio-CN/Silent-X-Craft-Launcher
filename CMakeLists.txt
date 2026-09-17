@@ -34,6 +34,7 @@ add_library(sxcl STATIC
   src/core/version.c
   src/core/json.c
   src/platform/platform_fopen.c
+  src/platform/fs_tree.c
   src/core/inflate.c
   src/core/dl/hash.c
   src/core/dl/limiter.c

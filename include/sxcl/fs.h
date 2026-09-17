@@ -38,6 +38,11 @@ int sxcl_fs_mkdirs_for_file(const char *path);
  *  必须用它:MSVC 的 fopen 按 ANSI 代码页解释路径,中文目录会直接失败(实测踩过)。 */
 FILE *sxcl_fs_fopen(const char *path, const char *mode);
 
+/** 递归删除目录树(文件、子目录都删)。路径不存在算成功。
+ *  **安全性由调用方负责**:只删自己刚建的目录(例如失败的安装留下的实例目录),
+ *  绝不拿它去删用户已有的实例 —— 本函数不做这种判断,它只是"递归删"。 */
+int sxcl_fs_remove_tree(const char *path);
+
 /* ── 下载落盘用的文件句柄(支持按绝对偏移写入,分片之间互不干扰) ── */
 
 typedef struct sxcl_file sxcl_file;
