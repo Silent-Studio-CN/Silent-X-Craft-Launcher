@@ -25,6 +25,7 @@
 #include "sxcl/launch.h"
 
 #include "sxcl/fs.h"
+#include "sxcl/instance.h" /* sxcl_instance_read_json:PCL 式目录名与 id 不一致的版本也能启动 */
 #include "sxcl/natives.h"
 #include "sxcl/options.h"
 #include "sxcl/process.h"
@@ -209,18 +210,24 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
     }
     copy_str(out->game_dir, sizeof(out->game_dir), req->game_dir);
 
-    /* ── 1. 版本 JSON ── */
+    /* ── 1. 版本 JSON ──
+     * 用实例扫描的读法而不是"只认 <版本名>/<版本名>.json":
+     * PCL 式目录里常有"目录名与 JSON 里的 id 不一致"的版本(整合包/手改过的),只认同名文件会
+     * 让这些实例**永远启动不了**。sxcl_instance_read_json 实现了 PCL 的兜底规则
+     * (同名优先,否则取目录里任意含 mainClass+type+id 的 JSON),并把**实际读到的路径**回给我们,
+     * 后面的 jar/参数都按这个路径来,保持自洽。 */
     join3(versions_dir, sizeof(versions_dir), req->game_dir, "versions", req->version_name);
-    (void)snprintf(leaf, sizeof(leaf), "%s.json", req->version_name);
-    join_path(vjson, sizeof(vjson), versions_dir, leaf);
-    doc = sxcl_json_parse_file(vjson, errbuf, sizeof(errbuf));
+    char read_err[192] = {0};
+    doc = sxcl_instance_read_json(req->game_dir, req->version_name, vjson, sizeof(vjson), read_err,
+                                  sizeof(read_err));
     if (!doc) {
-        char msg[256];
-        (void)snprintf(msg, sizeof(msg), "读不到版本 JSON:%s(%s)。这个版本可能没装好。", vjson,
-                       errbuf);
+        char msg[320];
+        (void)snprintf(msg, sizeof(msg), "读不到版本 JSON:%s(%s)。这个版本可能没装好。", versions_dir,
+                       read_err[0] ? read_err : errbuf);
         set_error(out, err, err_len, msg);
         goto done;
     }
+    (void)leaf;
 
     /* ── 2. 选 Java:指定的优先,没指定才探测 ── */
     required = sxcl_java_required_major(doc);
