@@ -970,7 +970,6 @@ static int dump_button(sxcl_kp_buf *buf, const sxcl_keymap_button *button, int i
         rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_json_number(buf, numbers[i].value) : rc;
         rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, ",") : rc;
     }
-    struct field_plain { const char *head; const char *raw; };
     sxcl_kp_buf_indent(buf, indent + 1);
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_puts(buf, "\"shape\": ") : rc;
     rc = (rc == SXCL_KEYMAP_OK) ? sxcl_kp_buf_json_string(buf, button->shape) : rc;
