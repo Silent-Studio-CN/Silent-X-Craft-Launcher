@@ -52,6 +52,13 @@ public:
         setWidgetResizable(true);                           // base_page.py:43
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); // base_page.py:44
 
+        // 页面底色钉令牌 bg(#202020):抓参考图时 Python 也是这么钉的(grab_reference_ui.py:141
+        //   page.setStyleSheet("QWidget { background: %s }" % token("bg")))——参考图的内容区
+        // 就是 #202020,不是内容栈那层半透明白。栈自己的 rgba(255,255,255,0.0314) 只该在
+        // 窗口左上圆角那半像素露出来(见 main_window.cpp 的圆角取证),页面不钉底色整片会变 #272727。
+        setStyleSheet(QStringLiteral("QScrollArea { background: %1; }")
+                          .arg(FluentTheme::instance().tokens().bg.name()));
+
         m_view = new QWidget(this);                         // base_page.py:46
         m_view->setStyleSheet(QStringLiteral("background: transparent;")); // base_page.py:47
         setWidget(m_view);                                  // base_page.py:48

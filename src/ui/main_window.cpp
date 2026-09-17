@@ -180,14 +180,24 @@ void MainWindow::buildUi() {
     m_stack->setObjectName(QStringLiteral("sxclStack"));
     // qf FluentWindowBase.__init__: FluentStyleSheet.FLUENT_WINDOW.apply(self.stackedWidget)
     //   -> border: 1px solid rgba(0,0,0,0.18); border-right: none; border-bottom: none;
-    //      border-top-left-radius: 10px(贴住窗口右边与底边)
+    //      border-top-left-radius: 10px; background-color: rgba(255,255,255,0.0314)
+    //      (assets/theme/qf_exact/dark/fluent_window.qss:63-69,贴住窗口右边与底边)
     FluentStyleSheet::apply(m_stack, FluentStyleSheet::FLUENT_WINDOW);
-    // ...但底色要是**透明**:SXCL global_qss(theme.py:196
-    //   "QScrollArea, QStackedWidget, QWidget#qt_scrollarea_viewport { background: transparent; }")
-    // 把内容栈设成透出窗口底(#202020)。应用级那条规则会被这里的控件级 qss 压住,
-    // 所以在同一份控件级 qss 后面再写一次(qf 的 border/圆角保留)。
-    m_stack->setStyleSheet(m_stack->styleSheet() +
-                           QStringLiteral("\nStackedWidget { background-color: transparent; }\n"));
+    // 这里**不能**在控件级 qss 后面再补一条 "StackedWidget { background-color: transparent; }"。
+    // 曾经补过,因为它让内容区看起来"正好"是 #202020(见 fluent_theme.cpp:380 同样的思路),
+    // 但那条规则会连 qf 自己那层 rgba(255,255,255,0.0314) 一起抹掉,而**窗口左上角那个
+    // 10px 圆角正是靠它画出来的**:圆角内侧、栈自己的 1px 边框与页面 1px 边框之间露出的
+    // 那半像素,在参考图里是 #24(36 = 39 抗锯齿),抹掉后只剩窗口底 #202020 的 #1d(29) →
+    // 圆弧本身(=23)还在,但圆角里侧那条亮带没了,肉眼就是"圆角被内容盖平了"。
+    // 实测证据(build/ref):py_home.png 该处 x=72/73/74 = 28/36/25,c_home.png = 26/29/25。
+    // 两条必须一起成立的结论:
+    //   * 参考图里的页面底色是**不透明**的 —— 抓图脚本 grab_reference_ui.py:141 自己钉了
+    //     page.setStyleSheet("QWidget { background: %s }" % token("bg")),所以内容区仍是
+    //     #202020,圆角那半像素才轮到内容栈自己上色(它的底色是故意留着的,不是漏配)。
+    //   * 控件级 qss 压得住应用级:参考实现已实证 —— py_download_config_apptheme.png
+    //     (补了 apply_theme() 的全局 QSS)与 py_download_config.png 的圆角逐像素相同,
+    //     即 fluent_theme.cpp:380 的 "QStackedWidget { background: transparent; }" 压不过 qf 这条。
+    // 结论:栈保留 qf 的边框 + 左上圆角 + 自身底色;页面各自钉不透明底色(与参考图同口径)。
     bodyLay->addWidget(m_stack);
     row->addWidget(body, 1);
 
