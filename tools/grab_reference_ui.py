@@ -23,6 +23,12 @@ try:
 except Exception as e:
     print("LANG_FAIL", e)
 
+# Python main.py:150 会调 apply_theme()(库主题 + 应用调色板 + global_qss)。
+# 以前抓图漏了这一步 → 参考图没有 global_qss,而 C 版一直装着等价的应用级 QSS,
+# 两边口径不一致(临时页代理实测:download_config 的输入框因此差 9px)。
+from src.app.theme import apply_theme
+apply_theme()
+
 from src.app.main_window import MainWindow
 from qfluentwidgets import isDarkTheme
 
@@ -63,6 +69,72 @@ def stable_bytes(widget, interval=400, max_rounds=12):
             return img, i + 1
         prev = data
     return widget.grab().toImage(), max_rounds
+
+# ── 临时页分支(SXCL_GRAB_TEMP=1)─────────────────────────────────────────────
+# 三个"临时页"(下载配置 / 下载进度 / 启动进度)不在常驻导航里,只能经主窗口的
+# 会话机制进入(switch_to_download_config / switch_to_download_progress / switch_to_launch)。
+# 后两个页面一建好就会起工作线程去做网络/进程动作,C 版没有这些服务(核心库未移植),
+# 页面停在**初始态**;为了让参考图确定可复现,这里把三个 worker 的 start() 换成空操作
+# (页面构造、布局、控件全部照原样,只是不进入后续异步状态)。
+TEMP = os.environ.get("SXCL_GRAB_TEMP")
+if TEMP:
+    from src.services.minecraft.manifest import GameVersion
+    import src.app.pages.download_config_page as _dcp
+    import src.app.pages.download_progress_page as _dpp
+    import src.app.pages.launch_page as _lp
+    # SXCL_GRAB_APPTHEME=1:补上 main.py:150 的 apply_theme()(全局 QSS)。
+    # 默认**不**装 —— 保持与既有 6 张参考图完全相同的抓图条件;
+    # 装上是"与真实启动器一致"的那一套,用来核对 C 版(它总是装了应用级 QSS)。
+    if os.environ.get("SXCL_GRAB_APPTHEME") == "1":
+        from src.app.theme import apply_theme
+        apply_theme()
+        print("临时页抓图: 已 apply_theme()(全局 QSS 与真实启动一致)")
+    _dcp.LoaderFetchWorker.start = lambda self: None
+    _dpp.InstallWorker.start = lambda self: None
+    _lp.LaunchWorker.start = lambda self: None
+    print("临时页抓图: 已冻结三个后台 worker(页面停在初始态)")
+
+    ver = GameVersion(id="1.21.11", version_type="release", url="", release_time="2026-01-01T00:00:00+00:00")
+    temp_pages = [
+        ("download_config", lambda: w.switch_to_download_config(ver)),
+        ("download_progress", lambda: w.switch_to_download_progress(ver, "1.21.11")),
+        ("launch", lambda: w.switch_to_launch(ver)),
+    ]
+    for name, enter in temp_pages:
+        try:
+            enter()
+            page = w._active_temp_page
+            if page is None:
+                print("FAIL", name, "没有活动临时页")
+                continue
+            if os.environ.get("SXCL_GRAB_NOQSS") != "1":
+                page.setStyleSheet("QWidget { background: %s; }" % _token("bg"))
+            ok = False
+            for _ in range(20):
+                pump(150)
+                if w.stackedWidget.currentWidget() is page:
+                    ok = True
+                    break
+            if not ok:
+                cur = w.stackedWidget.currentWidget()
+                print("FAIL", name, "栈没切过去,当前是",
+                      type(cur).__name__ if cur is not None else None)
+                continue
+            img, rounds = stable_bytes(w)
+            if w.stackedWidget.currentWidget() is not page:
+                print("WARN", name, "抓图后栈又变了")
+            suffix = ""
+            if os.environ.get("SXCL_GRAB_NOQSS") == "1":
+                suffix = "_noqss"
+            elif os.environ.get("SXCL_GRAB_APPTHEME") == "1":
+                suffix = "_apptheme"
+            p = OUT / ("py_" + name + suffix + ".png")
+            img.save(str(p))
+            print("SAVED", p.name, img.width(), "x", img.height(), p.stat().st_size, "稳定于第", rounds, "轮")
+        except Exception:
+            print("FAIL", name, traceback.format_exc().splitlines()[-1])
+    print("DARK", isDarkTheme(), "SIZE", w.width(), "x", w.height())
+    sys.exit(0)
 
 for name, page in pages:
     try:

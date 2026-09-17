@@ -28,6 +28,8 @@ set(SXCL_UI_SOURCES
   pages/home_page.cpp     pages/versions_page.cpp
   pages/tasks_page.cpp    pages/keymap_page.cpp
   pages/multiplayer_page.cpp pages/settings_page.cpp
+  # 三个临时页(会话页;不进导航,由 main_window 的会话机制按需创建)
+  pages/download_config_page.cpp pages/download_progress_page.cpp pages/launch_page.cpp
   fluent_theme.cpp   fluent_theme.h
   sxcl_icons.cpp     sxcl_icons.h
   theme_bridge.cpp   theme_bridge.h

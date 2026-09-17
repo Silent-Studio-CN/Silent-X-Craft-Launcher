@@ -55,7 +55,10 @@ public:
     void toggle();
 
     // ---- 强调色（对应 qconfig.themeColor + qf ThemeColor 派生）----
+    // 推导后的强调色 = Python theme.py 的 themeColor()(页面/自绘/QSS 都用它)
     QColor accent() const;
+    // 配置里的原始色 = Python qconfig.themeColor(设置页的取色器显示/保存用这个)
+    QColor rawAccent() const { return m_accent; }
     void setAccent(const QColor &c);
     // index: 0=Primary 1=Dark1 2=Dark2 3=Dark3 4=Light1 5=Light2 6=Light3
     QColor accentVariant(int index) const;

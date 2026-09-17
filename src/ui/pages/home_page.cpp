@@ -561,15 +561,19 @@ void HomePage::openDirectory() { // home_page.py:297-314
 }
 
 void HomePage::launchVersion(const QString &versionId) { // home_page.py:245-258
-    Q_UNUSED(versionId);
     // Python:if not cfg.javaPath.value -> 警告"请先在设置中选择 Java 运行时";
-    //        否则 mw.switch_to_launch(v),没有这个钩子就报"启动器未初始化"。
-    // C 版主窗口还没有启动页(switch_to_launch 的对应物),设置层也还没接上,
-    // 所以这里走到 Python 的兜底分支;等主代理加上启动页后把这里换成它即可。
+    //        否则 v = GameVersion(id=version_id, ...); mw.switch_to_launch(v);
+    //        没有这个钩子才报"启动器未初始化"。
+    // switch_to_launch 的对应物 = MainWindow::switchToLaunch(临时页机制,见 main_window.cpp),
+    // 启动页与下载/安装进度页同批接进来,这里按 Python 的顺序先查 Java 再切页。
     const QString javaPath = legacyConfigString(QStringLiteral("Game"), QStringLiteral("javaPath"));
     if (javaPath.isEmpty()) {
         InfoBar::push(InfoBar::Type::Warning, QStringLiteral("未选择 Java"),
                       QStringLiteral("请先在设置中选择 Java 运行时"), window(), 4000);
+        return;
+    }
+    if (auto *mw = qobject_cast<MainWindow *>(window())) {
+        mw->switchToLaunch(versionId);
         return;
     }
     InfoBar::push(InfoBar::Type::Error, QStringLiteral("错误"),

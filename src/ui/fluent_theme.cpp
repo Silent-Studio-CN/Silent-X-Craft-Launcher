@@ -125,7 +125,16 @@ void FluentTheme::setDark(bool dark) {
 
 void FluentTheme::toggle() { setDark(!m_dark); }
 
-QColor FluentTheme::accent() const { return m_accent; }
+QColor FluentTheme::accent() const {
+    // Python theme.py:135/168 —— `data["accent"] = themeColor().name()`:
+    // 页面拿到的 accent 是 qf **推导后**的颜色,而配置里存的是**原始色**。
+    // 参考机配置原始色 #c044a3 → 暗色推导 → #ff75df(参考图上的主色底)。
+    // libqf 已按 qf style_sheet.py:463-504 实现推导,这里直接取它的结果,保证
+    // libqf 自己画的控件 与 我们 QSS/自绘 用的强调色完全同源。
+    if (fluent::FluentStyle *st = fluent::FluentStyle::instance())
+        return st->themeColor();
+    return accentVariant(0);
+}
 
 void FluentTheme::setAccent(const QColor &c) {
     if (c.isValid())
@@ -207,7 +216,7 @@ const ThemeTokens &FluentTheme::tokens() const {
         fill(light, false);
         inited = true;
     }
-    t.accent = m_accent;
+    t.accent = accent(); // 推导后的强调色(与 theme.py 的 tokens()["accent"] 同义)
     return t;
 }
 
@@ -428,11 +437,10 @@ void FluentTheme::apply(QApplication *app) {
     pal.setColor(QPalette::Disabled, QPalette::WindowText, t.textDisabled);
     pal.setColor(QPalette::Disabled, QPalette::ButtonText, t.textDisabled);
 
-    QFont font = QApplication::font();
-    QStringList families;
-    families << QStringLiteral("Segoe UI") << QStringLiteral("Microsoft YaHei") << QStringLiteral("PingFang SC");
-    font.setFamilies(families);
-    QApplication::setFont(font);
+    // **不要**设应用字体:Python main.py 只做 app.setStyle("Fusion"),从不 setFont;
+    // qf 的字体只通过 QSS 的 --FontFamilies 影响 qf 控件,原生控件用系统默认
+    // (Microsoft YaHei UI 9pt)。我们以前在这里设 Segoe UI,导致原生控件高 1px、
+    // 页面自上而下累计错位 1~2px(临时页代理实测:返回键 33→34、输入框 36→37)。
 
     if (app) {
         app->setPalette(pal);

@@ -10,6 +10,8 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QResizeEvent>
+#include <QSet>
+#include <QStringList>
 #include <QVBoxLayout>
 
 #include "fluent/fluent_controls.h" // Min/Max/CloseButton(qf 三键的 libqf 基类)
@@ -260,6 +262,7 @@ void MainWindow::buildUi() {
     connect(m_nav, &NavPanel::routeChanged, this, &MainWindow::switchToRoute);
     switchToRoute(QStringLiteral("home"));
 
+
     layoutTitleBar();
 }
 
@@ -304,12 +307,163 @@ const QVector<NavItem> &MainWindow::navItems() const { return m_nav->items(); }
 QString MainWindow::currentRouteKey() const { return m_nav->currentRouteKey(); }
 
 void MainWindow::switchToRoute(const QString &routeKey) {
+    // ---- 验收/自检通路:三个临时页不在导航里,但要能像常驻页一样被 SXCL_UI_ROUTE 直接打开 ----
+    // (main.cpp:60-63 只做 window.switchToRoute(SXCL_UI_ROUTE);临时页的创建参数需要版本 id,
+    //  所以这里用 SXCL_UI_VERSION 传,默认值就是参考图抓取脚本用的那个 1.21.11。)
+    if (routeKey == QLatin1String("download_config") ||
+        routeKey == QLatin1String("download_progress") || routeKey == QLatin1String("launch")) {
+        const QString versionId =
+            qEnvironmentVariable("SXCL_UI_VERSION", QStringLiteral("1.21.11"));
+        if (routeKey == QLatin1String("download_config"))
+            switchToDownloadConfig(versionId);
+        else if (routeKey == QLatin1String("download_progress"))
+            switchToDownloadProgress(versionId, versionId);
+        else
+            switchToLaunch(versionId);
+        return;
+    }
+
     QWidget *page = m_pages.value(routeKey, nullptr);
     if (!page)
         return;
+
+    // Python main_window.py:127-147 _onCurrentInterfaceChanged(挂在 FluentWindow 的
+    // stackedWidget.currentChanged 上):切到"版本"且会话没结束时,**恢复活动临时页**并把
+    // 导航选中态清空(None)。用户从下载/启动页点侧栏"版本"回到的就是那一页,不是版本列表。
+    if (routeKey == QLatin1String("versions") && m_sessionActive && m_activeTempPage) {
+        m_stack->setCurrentWidget(m_activeTempPage);
+        m_nav->setCurrent(QString());
+        return;
+    }
+
+    m_lastNavItem = routeKey; // main_window.py:147
     m_stack->setCurrentWidget(page);
     m_nav->setCurrent(routeKey);
 }
+
+// ─────────────────── 临时页机制(main_window.py:153-283)───────────────────
+
+void MainWindow::showTempPage(QWidget *page, const QString &key) { // :153-166
+    if (!page)
+        return;
+    // 换页时把上一个临时页从内容栈摘下来(**不销毁**:它还在会话池里,再进来状态照旧)
+    if (m_activeTempPage && m_activeTempPage != page) {
+        m_activeTempPage->setParent(nullptr);
+        m_stack->removeWidget(m_activeTempPage);
+    }
+    if (m_stack->indexOf(page) < 0)
+        m_stack->addWidget(page); // :159-160
+
+    m_activeTempPage = page;
+    m_tempPageKey = key;
+    m_sessionActive = true;
+    m_stack->setCurrentWidget(page);
+    m_nav->setCurrent(QString()); // setCurrentItem(None):临时页不选中任何导航项
+}
+
+void MainWindow::hideTempPage(bool endSession) { // :168-182
+    if (!m_activeTempPage)
+        return;
+    if (endSession)
+        m_sessionActive = false;
+
+    // Python: target = self._last_nav_item or "versions";在会话池里找这个名字的页面
+    const QString target =
+        m_lastNavItem.isEmpty() ? QStringLiteral("versions") : m_lastNavItem;
+    if (m_pages.contains(target)) { // 会话池里有这个名字的页面 -> 回它
+        switchToRoute(target);
+        return;
+    }
+    switchToRoute(QStringLiteral("versions")); // 兜底:回版本列表页
+}
+
+void MainWindow::registerSessionPage(const QString &key, QWidget *page) { // :245-264
+    m_pages.insert(key, page);
+    // 常驻页不参与淘汰
+    static const QSet<QString> persistent{QStringLiteral("home"), QStringLiteral("versions"),
+                                          QStringLiteral("tasks"), QStringLiteral("settings")};
+    if (m_pages.size() <= kMaxSessionPages)
+        return;
+    for (auto it = m_pages.begin(); it != m_pages.end(); ++it) {
+        if (persistent.contains(it.key()) || it.key() == key)
+            continue;
+        QWidget *stale = it.value();
+        m_pages.erase(it);
+        if (m_activeTempPage == stale)
+            m_activeTempPage = nullptr;
+        m_stack->removeWidget(stale);
+        stale->setParent(nullptr);
+        stale->deleteLater();
+        break; // Python 也只淘汰一个
+    }
+}
+
+void MainWindow::addOrUpdateTask(const QString &taskId, const QString &title,
+                                 const QString &status) {
+    // Python: self.tasks_page.add_or_update_task(...)(main_window.py:220-223,238-241)。
+    // 任务页的登记 API 是 Q_INVOKABLE(tasks_page.cpp:333),用 invokeMethod 调,
+    // 免得主窗口为了一个调用把 TasksPage 的私有类型拖进头文件。
+    QWidget *tasks = m_pages.value(QStringLiteral("tasks"), nullptr);
+    if (!tasks)
+        return;
+    QMetaObject::invokeMethod(tasks, "addOrUpdateTask", Qt::DirectConnection,
+                              Q_ARG(QString, taskId), Q_ARG(QString, title), Q_ARG(int, 0),
+                              Q_ARG(QString, status), Q_ARG(QString, QString()));
+}
+
+void MainWindow::switchToDownloadConfig(const QString &versionId) { // :188-199
+    const QString key = QStringLiteral("download_config_") + versionId;
+    QWidget *page = m_pages.value(key, nullptr);
+    if (!page) {
+        page = createDownloadConfigPage(VersionRef{versionId}, this);
+        registerSessionPage(key, page);
+    }
+    showTempPage(page, key);
+}
+
+void MainWindow::switchToDownloadProgress(const QString &versionId, const QString &versionName,
+                                          const QString &loaderType,
+                                          const QString &loaderVersion) { // :201-225
+    const QString key = QStringLiteral("download_progress_") + versionName;
+    QWidget *page = m_pages.value(key, nullptr);
+    if (!page) {
+        page = createDownloadProgressPage(VersionRef{versionId}, versionName, loaderType,
+                                          loaderVersion, this);
+        registerSessionPage(key, page);
+    }
+    // 在任务页登记(:220-223)
+    addOrUpdateTask(key, QStringLiteral("下载 %1").arg(versionName),
+                    QStringLiteral("准备中"));
+    showTempPage(page, key);
+}
+
+void MainWindow::switchToLaunch(const QString &versionId) { // :227-243
+    const QString key = QStringLiteral("launch_") + versionId;
+    QWidget *page = m_pages.value(key, nullptr);
+    if (!page) {
+        page = createLaunchPage(VersionRef{versionId}, this);
+        registerSessionPage(key, page);
+    }
+    addOrUpdateTask(key, QStringLiteral("启动 %1").arg(versionId), QStringLiteral("启动中"));
+    showTempPage(page, key);
+}
+
+void MainWindow::goBackToVersions() { // :266-273
+    // 返回**版本列表页**并结束会话:下载/安装/启动都发生在版本页,回它就对了
+    m_lastNavItem = QStringLiteral("versions");
+    hideTempPage(true);
+}
+
+void MainWindow::goBackFromLaunch() { // :275-277
+    hideTempPage(true);
+}
+
+void MainWindow::navigateToTask(const QString &taskId) { // :279-283
+    if (QWidget *page = m_pages.value(taskId, nullptr))
+        showTempPage(page, QString());
+}
+
+QStringList MainWindow::sessionPageKeys() const { return m_pages.keys(); }
 
 bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result) {
 #ifdef Q_OS_WIN
