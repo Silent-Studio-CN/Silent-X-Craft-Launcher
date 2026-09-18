@@ -851,6 +851,9 @@ const char *sxcl_settings_resolved_language(sxcl_settings *settings)
     /* 不在这里统一大小写:设置文件里一直是 "zh-CN"/"en-US"(与 launcher_config.py 的
      * 枚举值一致),归一化交给 sxcl_lang_open/sxcl_lang_normalize_code。 */
     const char *env = env_utf8("SXCL_UI_LANG");
+    if (!env || !*env) {
+        env = env_utf8("SXCL_UI_LANGUAGE"); /* 界面层先用过的名字:两个都认,不许悄悄失效 */
+    }
     if (env && *env) {
         return env;
     }

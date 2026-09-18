@@ -66,6 +66,7 @@ int sxcl_settings_remove(sxcl_settings *settings, const char *key);
 #define SXCL_SETTINGS_ERR_ARG       (-1)
 #define SXCL_SETTINGS_ERR_UNSUPPORTED (-2)
 #define SXCL_SETTINGS_ERR_SPACE     (-3)
+#define SXCL_SETTINGS_ERR_MAX       256   /**< 人话错误缓冲长度 */
 
 /** 设置**目录**(不含文件名)。 */
 int sxcl_settings_default_dir(char *out, size_t out_len, char *err, size_t err_len);
@@ -100,7 +101,7 @@ const char *sxcl_settings_ui_language(sxcl_settings *settings);
  *
  *   SXCL_UI_THEME   = auto|light|dark   (默认 auto)
  *   SXCL_UI_ACCENT  = #rrggbb           (默认 #0067c0,与 fluent_theme.h 的默认主题色一致)
- *   SXCL_UI_LANG    = zh-CN|en-US       (默认 zh-CN)
+ *   SXCL_UI_LANG    = zh-CN|en-US       (默认 zh-CN;旧名 SXCL_UI_LANGUAGE 也认,界面层先用过它)
  *   SXCL_GAME_DIR   = 游戏目录           (默认空 = 由 sxcl_paths_* 取平台默认)
  *   SXCL_DL_WORKERS / SXCL_DL_RATE / SXCL_DL_MAX_CONN / SXCL_DL_CACHE_DIR
  *

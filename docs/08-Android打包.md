@@ -637,6 +637,210 @@ I ActivityManager: Process com.silentstudio.sxcl (pid 6857) has died: cch CRE
 
 ---
 
+## 14. Android 上的 Java 与游戏目录检测(用户反馈驱动 · 全部有实测原文)
+
+### 14.0 用户原话与结论先说
+
+> "针对安卓做优化,包括 JAVA 检测,MC 目录检测。**我平板有 HMCL 不可能没有 JAVA 和游戏目录,
+> 我设置为 HMCL 游戏目录成功检出游戏,但是没检出 JAVA**"
+
+三个事实,全部在 `192.168.220.33:5555`(G6012BS,Android 16 / arm64-v8a,targetSdk 34)上量过:
+
+| 问题 | 结论 |
+|---|---|
+| 别的启动器(HMCL/FCL/PojavLauncher)装好的 Java 能不能用? | **不能。** 私有目录被沙箱挡住(stat EACCES);共享存储是 noexec 挂载 |
+| 为什么以前"检不出 JAVA"? | 老代码 `path_is_file()` 对 EACCES 直接返回 0,候选被**静默跳过** —— 不是没扫,是扫到了读不了 |
+| 游戏目录自动扫描覆盖到了吗? | **没覆盖**,安卓候选表根本没有 FCL/HMCL/Pojav 的位置;而且共享存储当时**连读的权限都没有** |
+
+顺带一个必须纠正的事实:**这台设备上并没有装 HMCL**。
+
+```
+$ adb -s 192.168.220.33:5555 shell "pm list packages | grep -iE 'hmcl|jackhuang'"
+(无输出)
+$ adb -s 192.168.220.33:5555 shell "pm list packages -3 | grep -iE 'tungsten|mojang'"
+package:com.tungsten.fcl          # FCL(Fold Craft Launcher)
+package:com.mojang.minecraftpe     # 基岩版
+```
+
+用户看到的"HMCL"很可能就是 **FCL**;但候选表把 HMCL / PojavLauncher 的位置**一并覆盖**了
+(别的设备可能真的装了),所以下面三家的路径都在扫描范围内。
+
+### 14.1 硬证据一:别的应用的 JRE —— 沙箱拒绝
+
+FCL 的 Java 具体在哪,不用猜:它自己的日志里写着。
+
+```
+$ adb -s 192.168.220.33:5555 shell "grep -aoiE '/[A-Za-z0-9_./-]*(java|jre|jdk)[A-Za-z0-9_./-]*' /sdcard/FCL/log/*.log | sort -u | head"
+/sdcard/FCL/log/latest_api_installer.log:/data/user/0/com.tungsten.fcl/app_runtime/java/jre8/bin/java
+/sdcard/FCL/log/latest_game.log:/data/user/0/com.tungsten.fcl/app_runtime/java/jre25/bin/java
+```
+
+然后**真的去执行/读取**它:
+
+```
+$ adb -s .33 shell "ls -la /data/user/0/com.tungsten.fcl/app_runtime/java/jre25/bin/java"
+ls: /data/user/0/com.tungsten.fcl/app_runtime/java/jre25/bin/java: Permission denied
+$ adb -s .33 shell "/data/user/0/com.tungsten.fcl/app_runtime/java/jre25/bin/java -version"
+/system/bin/sh: /data/user/0/com.tungsten.fcl/app_runtime/java/jre25/bin/java: inaccessible or not found
+```
+
+对照:同一台设备上,**我们自己的**私有目录是可执行的(所以"装一份我们自己的 Java"这条路成立):
+
+```
+$ adb -s .33 shell 'run-as com.silentstudio.sxcl sh -c "cp /system/bin/toybox files/exec_test/echo && chmod 755 files/exec_test/echo && files/exec_test/echo EXEC_PRIVATE_OK"'
+EXEC_PRIVATE_OK
+```
+
+### 14.2 硬证据二:共享存储是 noexec
+
+```
+$ adb -s .33 shell "mount | grep emulated"
+/dev/fuse on /storage/emulated type fuse (rw,lazytime,nosuid,nodev,noexec,noatime,user_id=0,group_id=0,allow_other)
+```
+
+不只看挂载表,**真的放一个可执行文件去跑**:
+
+```
+$ adb -s .33 shell "cp /system/bin/toybox /sdcard/exec_probe; chmod 755 /sdcard/exec_probe; /sdcard/exec_probe echo X"
+/system/bin/sh: /sdcard/exec_probe: can't execute: Permission denied
+$ adb -s .33 shell "cp /system/bin/toybox /data/local/tmp/echo; chmod 755 /data/local/tmp/echo; /data/local/tmp/echo X"
+EXEC_TMP_OK                     # 同样一个二进制,放在非 noexec 的地方就能跑
+```
+
+→ **共享存储上的 Java 一定起不来**;`/data/data/<包名>/files/**` 可以。
+
+### 14.3 硬证据三:共享存储连读都读不了(权限缺口)
+
+这一条是做这轮才暴露出来的,它解释了"设置成 HMCL 目录也不一定能用":
+
+```
+$ adb -s .33 shell "dumpsys package com.silentstudio.sxcl | grep -A4 'requested permissions'"
+      android.permission.INTERNET
+      android.permission.ACCESS_NETWORK_STATE          # 就这两个,没有任何存储权限
+$ adb -s .33 shell "appops get com.silentstudio.sxcl | grep EXTERNAL"
+READ_EXTERNAL_STORAGE: ignore
+```
+
+`targetSdk=34` + 零存储权限 ⇒ 共享存储一律 EACCES。**以应用自己的 uid 跑设备侧探针**验证:
+
+```
+$ adb -s .33 shell 'run-as com.silentstudio.sxcl sh -c "files/sxcl_probe"'
+[uid] 10167                      # = u0_a167,应用自己的 uid
+[mount] /storage/emulated/0/x -> noexec=1
+[mount] /data/data/x/files/runtime/jre/bin/java -> noexec=0
+denied   /data/data/com.tungsten.fcl/app_runtime/java/jre25/bin/java
+denied   /data/data/com.tungsten.fcl/app_runtime/java/jre8/bin/java
+denied   /data/data/com.tungsten.fcl/app_runtime/java
+missing  /data/data/org.jackhuang.hmcl/files/runtime
+missing  /data/data/net.kdt.pojavlaunch/files/runtime
+denied   /storage/emulated/0/Android/data/com.tungsten.fcl/files/runtime
+denied   /storage/emulated/0/FCL/.minecraft          # ← 游戏目录也读不了!
+ok       /data/data/com.silentstudio.sxcl/files
+missing  /data/data/com.silentstudio.sxcl/files/runtime
+ok       /system/bin/sh                              # 阳性对照:分类器不是一律拒绝
+```
+
+`sxcl_probe` 编的就是仓库里的 `src/core/instance/android.c`(NDK arm64 交叉编译),
+所以这不是"另写一个脚本验证",而是**同一份判定代码在真机上跑**。源码见
+`build/_android/scripts/device_probe.c`。
+
+**run-as 是不是假象?** 不是。App 进程自己的挂载表与 run-as 会话完全一致:
+
+```
+$ adb -s .33 shell "grep emulated /proc/$(pidof com.silentstudio.sxcl)/mounts"
+/dev/fuse /storage/emulated fuse rw,lazytime,nosuid,nodev,noexec,noatime,user_id=0,group_id=0,allow_other 0 0
+```
+
+所以:**要在共享存储上做检测,必须拿 `MANAGE_EXTERNAL_STORAGE`**(见 14.4)。
+
+### 14.4 产品行为(不是"知道了",是改成了这样)
+
+1. **核心库新增可访问性分类**(`include/sxcl/android.h` + `src/core/instance/android.c`),
+   结论只有六种,每种都带**原始原因**与**下一步建议**:
+
+   | 结论 | 键 | 含义 |
+   |---|---|---|
+   | 可用 | `ok` | 存在、可读、可执行(该要执行时) |
+   | 不存在 | `missing` | ENOENT |
+   | 沙箱拒绝 | `denied` | EACCES:别人的私有目录,或本应用没有共享存储权限 |
+   | 共享存储不能执行 | `noexec` | 落在 noexec 挂载上 |
+   | 没有执行位 | `not_executable` | 有文件,但没有 x 位 |
+   | 读不了 | `unreadable` | 其它 IO 错误 |
+
+   `noexec` 由 `/proc/self/mounts` 的**最长前缀挂载点**判定(纯文本解析,可注入文本单测),
+   并用逐级回退的 `realpath` 解析符号链接 —— 否则 `/sdcard/x` 这种**还不存在**的路径会退化成
+   "/",把 noexec 判成可执行(设备实测踩过,已有回归测试)。
+
+2. **Java 检测不再静默**(`sxcl_java_probe_android`,java.c):列出"本应用私有目录 +
+   别的启动器私有目录 + 共享存储"共 15 个候选,逐个体检;`sxcl_java_verdict_hint()` 直接给用户话:
+
+   > 这是别的启动器(HMCL/FCL/PojavLauncher)装在它自己私有目录里的 Java。
+   > 安卓不允许一个应用读另一个应用的私有目录,所以我们看不到也用不了。
+   > 请在本应用里装一份自己的 Java。
+
+   设置页把**一句话结论**放回原来那行 `CaptionLabel`(不加控件、不动布局),逐条明细进 tooltip。
+
+3. **游戏目录自动扫描**(`sxcl_paths_detect_android` / `sxcl_paths_probe_android`,paths.c)
+   候选表(实测核对过 FCL/共享存储两项):
+
+   ```
+   <files>/.minecraft                                  本应用(私有目录)
+   /storage/emulated/0/FCL/.minecraft                  FCL(实测存在,4 个版本)
+   /storage/emulated/0/games/FCL/.minecraft            FCL 旧位置
+   /storage/emulated/0/.minecraft                      共享存储根
+   /storage/emulated/0/HMCL/.minecraft                 HMCL
+   /storage/emulated/0/games/PojavLauncher/.minecraft  PojavLauncher
+   /storage/emulated/0/Android/data/com.tungsten.fcl/files/.minecraft        FCL 应用数据目录
+   /storage/emulated/0/Android/data/org.jackhuang.hmcl/files/.minecraft      HMCL 应用数据目录
+   /storage/emulated/0/Android/data/net.kdt.pojavlaunch/files/.minecraft     PojavLauncher 应用数据目录
+   /storage/emulated/0/Android/data/com.silentstudio.sxcl/files/.minecraft   本应用(共享存储侧)
+   ```
+
+   用户配置的目录**永远排第一**(`sxcl_paths_resolve_game_dir` 直接采用,不经择优);
+   设置页点"游戏目录"会先弹出候选列表,每项显示"路径(谁留的 / 几个版本)",
+   最后一项是"手动选择其它目录…"。一个都没扫到时,弹窗把"找过哪些地方、为什么没用上"
+   逐条摊开(含 `hint`),再让用户手填。
+
+4. **打包层补齐权限与引导**
+
+   - `build/_android/pkg/AndroidManifest.xml` 增加 `MANAGE_EXTERNAL_STORAGE`
+     (Android 10 及以下用 `READ_EXTERNAL_STORAGE` maxSdkVersion=32 / `WRITE_EXTERNAL_STORAGE` maxSdkVersion=28);
+   - 无权限时点"游戏目录"直接引导到 `ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION`
+     (系统设置 → 应用 → 特殊应用权限 → 所有文件访问权限);
+   - **授权后回到本应用立即重扫并刷新**(监听 `applicationStateChanged == Active`),不用重启;
+     若此时还没配过游戏目录,会把扫到的"确实有版本"的目录落进设置,让卡片与各页面用的目录一致;
+   - `MANAGE_EXTERNAL_STORAGE` 是 **Google Play 受限权限**(上架需申报说明);侧载 / 自用无影响。
+
+5. **打包层开机就把结论写进 logcat**(tag `sxcl`),设备不需要点界面就能查:
+
+   ```
+   adb -s .33 logcat -d -s sxcl:* | Select-String 'java-probe|gamedir-probe|java-discover|gamedir-detect'
+   ```
+
+### 14.5 单测与验收
+
+- 新增 `sxcl_android_test`(103 项):挂载表解析用的夹具是**设备 `/proc/self/mounts` 原文**,
+  含 `/storage/emulated` 的 `noexec` 与 `/data` 的非 noexec;另外覆盖候选表、自动扫描、诊断文案。
+- `sxcl_launch_test` 增加 `[4b] Android 的 Java 探测` 一节(293 项),锁住
+  "扫描根只在私有目录 / 不再拼出 `files/files/runtime` / 共享存储不当扫描根 / 结论文案"。
+- 桌面标准流程:`cmake --build build --config Release` **0 error / 0 warning**(/W4 /WX);
+  `ctest --test-dir build -C Release` → **32/32 通过**。
+
+### 14.6 诚实清单(没做到的 / 有限制的)
+
+- **共享存储检测在授权之前一定失败**,这不是 bug 而是 Android 的模型;我们已经把它变成
+  "明确告知 + 一键去授权 + 授权后自动重扫",但**用户不授权就只能在应用私有目录里玩**。
+- **别的启动器的 JRE 永远用不了**(沙箱 + noexec 双锁),唯一出路是我们自己装 Java
+  (见 `include/sxcl/java_runtime.h` 那一路);本轮只做检测与引导,**没有实现安装**。
+- HMCL 在 `.33` 上**没有安装**,所以 "HMCL 的目录"这条只有候选表覆盖,没有真机命中记录;
+  真机命中的是 FCL(`/storage/emulated/0/FCL/.minecraft`,4 个版本)。
+- `sxcl_java_probe_*` 全程**不执行** java(与 `sxcl_java_discover` 的约定一致):
+  能用不能用由"可执行 + 读得出 release"判定;真正的 `java -version` 由启动层去跑。
+- 设备侧探针在 `run-as` 会话里跑:私有目录与共享存储的**挂载表与 App 进程一致**(已核对),
+  所以结论对 App 本体成立;但授权后的"能真正读到"以 APK 内的 logcat 证据为准(见 14.5 的复验)。
+
+---
+
 ## 附录 A:此前的「Java 壳 + C 核心」路线(已被本文取代)
 
 旧文(git `0770dfc`)走的是"Java 壳画界面 + `libsxcl.so` 提供 JNI 核心",产物 `app-debug.apk` 943,941 字节,

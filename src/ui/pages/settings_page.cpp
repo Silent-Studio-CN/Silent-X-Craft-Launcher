@@ -47,10 +47,13 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #if defined(_MSC_VER)
@@ -59,6 +62,7 @@
 #include "fluent/fluent_controls.h"      // PushButton / InfoBar
 #include "fluent/fluent_dialog.h"        // MessageBox(注销二次确认;账户功能新增)
 #include "fluent/fluent_labels.h"        // TitleLabel / SubtitleLabel / CaptionLabel
+#include "fluent/fluent_menu.h"          // RoundMenu(「下载 Java」的组件菜单,对应 qf RoundMenu)
 #include "fluent/fluent_scroll.h"        // ScrollArea(= Python qf ScrollArea)
 #include "fluent/fluent_setting_cards.h" // SettingCard 家族 / ComboBox / SettingCardGroup
 #if defined(_MSC_VER)
@@ -73,12 +77,16 @@
 #include "dialogs/auth_dialog.h"
 
 // 核心库(纯 C):UI 层已链 sxcl 并挂了 include/
-#include "sxcl/launch.h"   // Java 运行时探测(替代 Python services/java/finder.py)
-#include "sxcl/limiter.h"  // sxcl_limiter_parse_rate("512K" 这类文本 → 字节/秒)
-#include "sxcl/android.h"   // Android:"能不能读"的分类(沙箱拒绝/noexec)
-#include "sxcl/paths.h"    // 平台默认游戏目录 + 安卓候选扫描
-#include "sxcl/settings.h" // 设置读写(key=value,UTF-8)
-#include "sxcl/sysinfo.h"  // 物理内存(设置页内存滑块的数据源)
+#include "sxcl/launch.h"        // Java 运行时探测(替代 Python services/java/finder.py)
+#include "sxcl/limiter.h"       // sxcl_limiter_parse_rate("512K" 这类文本 → 字节/秒)
+#include "sxcl/android.h"       // Android:"能不能读"的分类(沙箱拒绝/noexec)
+#include "sxcl/fs.h"            // sxcl_fs_mkdirs(哈希缓存目录)/ sxcl_fs_exists
+#include "sxcl/java_runtime.h"  // 官方 JRE 安装(替代 Python services/java/mojang_runtime.py)
+#include "sxcl/lang.h"          // 语言表(键 -> 文案;.lang 与 Python 版逐字段兼容)
+#include "sxcl/net.h"           // sxcl_transport_qt_create(JRE 下载的传输后端)
+#include "sxcl/paths.h"         // 平台默认游戏目录 + 安卓候选扫描
+#include "sxcl/settings.h"      // 设置读写(key=value,UTF-8)+ 跨平台设置路径
+#include "sxcl/sysinfo.h"       // 物理内存(设置页内存滑块的数据源)
 
 namespace sxcl::ui {
 namespace {
@@ -172,21 +180,42 @@ int valueIndex(const QStringList &values, const QString &value, int fallback) {
 
 // ─────────────────────────── 设置文件路径 ───────────────────────────
 //
-// 与核心库 modloader/keymap_store.c:95-108 的"配置目录"口径一致
-// (Python platform.py:default_config_directory("SilentXCraftLauncher"))。
-// **缺口**:核心库没有公开的"sxcl_paths_config_dir",这里只能自己拼;见交付报告。
+// 唯一权威在核心库:include/sxcl/settings.h 的 sxcl_settings_default_path()。
+// 为什么不再自己拼:这段三分支代码以前在本页 / home_page / versions_page / dialogs/account.cpp
+// 各有一份,而**安卓那一支全是错的** —— 安卓的 $HOME 是 "/",于是 "~/.config/SilentXCraftLauncher"
+// 拼出 "/.config/..."(只读根文件系统,写不进去):设置能改、看着也成功,重启就没了。
+// 核心库那份按平台走,安卓落到应用私有目录($SXCL_ANDROID_FILES/SilentXCraftLauncher),
+// 另外支持 SXCL_CONFIG_DIR 覆盖(便携版/测试)。
 QString settingsFilePath() {
-#if defined(Q_OS_WIN)
-    QString base = qEnvironmentVariable("APPDATA");
-    if (base.isEmpty())
-        base = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-    return base + QStringLiteral("/SilentXCraftLauncher/settings.conf");
-#elif defined(Q_OS_MACOS)
-    return QDir::homePath() +
-           QStringLiteral("/Library/Application Support/SilentXCraftLauncher/settings.conf");
-#else
+    char path[1024];
+    char err[SXCL_SETTINGS_ERR_MAX];
+    err[0] = '\0';
+    if (sxcl_settings_default_path(path, sizeof(path), err, sizeof(err)) == SXCL_SETTINGS_OK)
+        return QDir::fromNativeSeparators(QString::fromUtf8(path)); // 统一 '/' 口径(Qt 惯例)
+    // 连配置目录都拼不出来(极端受限环境):退回旧口径,至少不让设置页整个不可用。
+    // 这条兜底不会在正常平台上走到(Windows 有 APPDATA/macOS 有 HOME/Linux 有 HOME)。
     return QDir::homePath() + QStringLiteral("/.config/SilentXCraftLauncher/settings.conf");
-#endif
+}
+
+// ─────────────────────────── 语言(i18n)───────────────────────────
+//
+// 文案从核心库的语言表取(include/sxcl/lang.h):内置中英两份,磁盘上的 .lang 可覆盖,
+// 找不到的键回落中文。这里只绑**与 Python 版 .lang 逐字一致**的键 —— 见下。
+// 取不到就用 fallback(C 侧字面量),所以没初始化语言表时界面与从前一模一样。
+QString trText(const char *key, const char *fallback) {
+    return QString::fromUtf8(sxcl_lang_tr(key, fallback));
+}
+
+// 带 {name} 占位符的文案(java.downloading / java.success / java.failed 就是这种键)。
+// 语言表没初始化时用 fallback(中文),行为与从前一致。
+QString trName(const char *key, const char *fallback, const QString &name) {
+    const char *names[1] = { "name" };
+    const QByteArray value = name.toUtf8();
+    const char *values[1] = { value.constData() };
+    char out[256];
+    out[0] = '\0';
+    (void)sxcl_lang_format(sxcl_lang_default(), key, fallback, names, values, 1, out, sizeof(out));
+    return QString::fromUtf8(out); // 截断也照样显示(format 的返回值是"截断了",不是"没内容")
 }
 
 // 设置存储:一个核心库句柄 + 每次改动落盘(对应 Python launcher_config.save_config())
@@ -666,8 +695,14 @@ public:
         hBox()->addSpacing(16);                       // :130
 
         connect(m_importButton, &QPushButton::clicked, this, [this] { importJava(); });   // :132
-        connect(m_downloadButton, &QPushButton::clicked, this,
-                [this] { showDownloadMenu(); });                                          // :133
+        connect(m_downloadButton, &QPushButton::clicked, this, [this] {                // :133
+            // 下载中再点一次 = 取消(核心库的取消是异步的,会在文件边界停下)
+            if (m_worker.joinable()) {
+                cancelDownload();
+                return;
+            }
+            showDownloadMenu();
+        });
         connect(m_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
                 [this](int index) { onSelectionChanged(index); });                        // :134
 
@@ -796,14 +831,146 @@ private:
             m_onSelection(entry.path);      // :272
     }
 
-    // java_setting_card.py:211-231 _show_download_menu / _start_download
-    // 官方 JRE(java-runtime-*)要 Mojang 运行时清单 + 逐文件 SHA1 校验 + 解包,C 核心库目前
-    // **没有**对应接口(mojang_runtime.py 的 install_runtime / find_installed_runtimes)。
-    // 这里如实提示,不假装成功;接口建议见交付报告。
+    // ── 官方 JRE 下载(java_setting_card.py:211-248 的 C 版)──
+    //
+    // 核心库接口:include/sxcl/java_runtime.h 的 sxcl_java_runtime_install ——
+    // 组件清单(all.json -> 组件清单)从 Mojang 取、**每个文件按 downloads.raw.sha1 强校验**、
+    // 文件交给下载引擎(断点续传/换源/已存在且校验通过就跳过)、装完写 .sxcl_runtime.json。
+    // 线程模型:安装在**工作线程**里跑(核心库的进度回调来自引擎的工作线程),这里只把
+    // 文案/百分比用 Qt 队列投递回界面线程;取消用一个原子标志 + 核心库的 is_cancelled 回调。
+    // java_setting_card.py:211-219 _show_download_menu(候选表来自核心库,与 Python COMPONENT_PREVIEW 同源)
     void showDownloadMenu() {
-        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("暂时无法下载官方 JRE"),
-                      QStringLiteral("核心库还没有 Mojang 运行时安装接口（见交付报告）"),
-                      window(), 5000);
+        if (m_worker.joinable()) {
+            return; // 正在下载:按钮此刻是"取消下载",菜单不该弹出来
+        }
+        auto *menu = new RoundMenu(this);
+        menu->setAttribute(Qt::WA_DeleteOnClose);
+        menu->addAction(FluentIcon::qicon(FluentIcon::DOWNLOAD),
+                        QStringLiteral("自动（按最新正式版选择）"),
+                        [this] { startDownload(QString()); });
+        menu->addSeparator();
+        for (size_t i = 0; i < sxcl_java_runtime_preset_count(); ++i) {
+            const sxcl_java_runtime_preset *preset = sxcl_java_runtime_preset_at(i);
+            if (preset == nullptr)
+                continue;
+            const QString component = QString::fromUtf8(preset->component);
+            menu->addAction(FluentIcon::qicon(FluentIcon::DOWNLOAD),
+                            QString::fromUtf8(preset->label),
+                            [this, component] { startDownload(component); });
+        }
+        // 与 Python 同一处:菜单从按钮左下角弹出(exec 会开嵌套事件循环,这里用 popupAt)
+        menu->popupAt(m_downloadButton->mapToGlobal(m_downloadButton->rect().bottomLeft()));
+    }
+
+    // java_setting_card.py:221-232 _start_download
+    void startDownload(const QString &component) {
+        if (m_worker.joinable())
+            return;
+#if !defined(SXCL_UI_HAVE_QT_TRANSPORT)
+        // 没有传输后端就如实说 —— 不做"假进度条"这种事(界面层不许假装成功)
+        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("下载 Java 需要网络后端"),
+                      QStringLiteral("本次构建没有链接 Qt Network 传输后端(sxcl_net_qt)，无法下载官方 JRE。"),
+                      window(), 6000);
+#else
+        char root[SXCL_JAVA_RUNTIME_PATH_MAX];
+        char err[SXCL_JAVA_RUNTIME_ERROR_MAX];
+        err[0] = '\0';
+        if (sxcl_java_runtime_default_root(root, sizeof(root), err, sizeof(err)) !=
+            SXCL_JAVA_RUNTIME_OK) {
+            InfoBar::push(InfoBar::Type::Error, QStringLiteral("找不到 Java 安装目录"),
+                          QString::fromUtf8(err), window(), 8000);
+            return;
+        }
+        m_cancelRequested.store(false);
+        m_downloadButton->setText(QStringLiteral("取消下载"));
+        m_statusLabel->setText(QStringLiteral("正在获取官方 JRE 清单…"));
+        m_statusLabel->setTextColor(QColor(0x00, 0x78, 0xd4), QColor(0x00, 0xbc, 0xf2));
+
+        // 这两份 QByteArray 必须活到 install 调用结束(绝不能写成 xxx.toUtf8().constData():
+        // 那是临时对象,语句一结束就失效 —— request 里存的是裸指针)
+        const QByteArray componentUtf8 = component.toUtf8();
+        const QByteArray rootUtf8 = QByteArray(root);
+        m_worker = std::thread([this, componentUtf8, rootUtf8] {
+            // 下载参数从设置读(环境变量优先:SXCL_DL_*),与其它下载路径同一口径
+            sxcl_settings_download dl;
+            memset(&dl, 0, sizeof(dl));
+            char cfg[1024];
+            char cfgErr[128];
+            if (sxcl_settings_default_path(cfg, sizeof(cfg), cfgErr, sizeof(cfgErr)) ==
+                SXCL_SETTINGS_OK) {
+                if (sxcl_settings *settings = sxcl_settings_open(cfg)) {
+                    sxcl_settings_resolve_download(settings, &dl);
+                    sxcl_settings_free(settings);
+                }
+            }
+            char cacheFile[600];
+            cacheFile[0] = '\0';
+            if (dl.cache_dir[0] != '\0' && sxcl_fs_mkdirs(dl.cache_dir) == 0) {
+                // 与命令行前端同口径:<缓存目录>/hashes.txt(sxcl-dl main.c:447)
+                snprintf(cacheFile, sizeof(cacheFile), "%s/hashes.txt", dl.cache_dir);
+            }
+
+            sxcl_engine_opts opts;
+            memset(&opts, 0, sizeof(opts));
+            opts.workers = dl.workers;
+            opts.rate_bps = dl.rate_bps;
+            opts.max_conn_per_file = dl.max_conn_per_file;
+            opts.cache_path = cacheFile[0] ? cacheFile : nullptr;
+
+            sxcl_java_runtime_request request;
+            memset(&request, 0, sizeof(request));
+            request.component = componentUtf8.isEmpty() ? nullptr : componentUtf8.constData();
+            request.required_major = 0; // 0 = 核心库自己定(没有 MC 版本时为 21,与 Python 一致)
+            request.target_root = rootUtf8.constData();
+            request.use_mirror = 1;     // 官方失败就换 BMCLAPI(与 Python 的两条路一致)
+            request.transport_factory = sxcl_transport_qt_create;
+            request.engine_opts = &opts;
+            request.on_progress = &JavaSettingCard::progressTrampoline;
+            request.is_cancelled = &JavaSettingCard::cancelTrampoline;
+            request.ud = this;
+
+            sxcl_java_runtime_result result;
+            const int rc = sxcl_java_runtime_install(&request, &result);
+
+            const bool ok = (rc == SXCL_JAVA_RUNTIME_OK);
+            const QString detail = ok ? QString::fromUtf8(result.version)
+                                      : QString::fromUtf8(result.error);
+            const QString javaPath =
+                ok ? QDir::fromNativeSeparators(QString::fromUtf8(result.java_path)) : QString();
+            const bool cancelled = (rc == SXCL_JAVA_RUNTIME_ERR_CANCELLED);
+            QMetaObject::invokeMethod(
+                this,
+                [this, ok, cancelled, detail, javaPath] {
+                    onInstallFinished(ok, cancelled, detail, javaPath);
+                },
+                Qt::QueuedConnection);
+        });
+#endif
+    }
+
+    // 下载中再点一次 = 取消(请求是异步的,核心库会在文件边界上停下来)
+    void cancelDownload() {
+        m_cancelRequested.store(true);
+        m_statusLabel->setText(QStringLiteral("正在取消…"));
+    }
+
+    bool cancelRequested() const { return m_cancelRequested.load(); }
+    bool installing() const { return m_worker.joinable(); }
+
+    // 工作线程 -> 界面线程的进度投递(核心库的进度回调在工作线程里)
+    void postProgress(const QString &message, int percent) {
+        QMetaObject::invokeMethod(
+            this, [this, message, percent] { onInstallProgress(message, percent); },
+            Qt::QueuedConnection);
+    }
+
+    ~JavaSettingCard() override {
+        // 页面被销毁时先请工作线程收工:取消是异步的,join 等它真的退出(不 detach,
+        // 否则线程会拿着已经析构的 this 去回调 —— 那是崩溃,不是"偶发")
+        if (m_worker.joinable()) {
+            m_cancelRequested.store(true);
+            m_worker.join();
+        }
     }
 
     ComboBox *m_combo = nullptr;
@@ -812,6 +979,48 @@ private:
     CaptionLabel *m_statusLabel = nullptr;
     QVector<JavaEntry> m_installations;
     SelectionHandler m_onSelection;
+
+    // 核心库的进度回调(**工作线程**):只做投递,不碰控件
+    static void progressTrampoline(void *ud, const sxcl_java_runtime_progress *progress) {
+        if (ud == nullptr || progress == nullptr)
+            return;
+        static_cast<JavaSettingCard *>(ud)->postProgress(
+            QString::fromUtf8(progress->message ? progress->message : ""), progress->percent);
+    }
+    static int cancelTrampoline(void *ud) {
+        return (ud != nullptr && static_cast<JavaSettingCard *>(ud)->cancelRequested()) ? 1 : 0;
+    }
+
+    // 界面线程:一行状态 + 百分比(进度条不新加控件,复用卡片里那行 CaptionLabel)
+    void onInstallProgress(const QString &message, int percent) {
+        m_statusLabel->setText(QStringLiteral("%1（%2%）").arg(message, QString::number(percent)));
+    }
+
+    // java_setting_card.py:237-248 _on_download_finished
+    void onInstallFinished(bool ok, bool cancelled, const QString &detail,
+                           const QString &javaPath) {
+        m_downloadButton->setText(QStringLiteral("下载 Java"));
+        if (ok) {
+            m_statusLabel->setText(QStringLiteral("✅ 已安装官方 JRE"));
+            m_statusLabel->setTextColor(QColor(0x52, 0xc4, 0x1a), QColor(0x73, 0xd1, 0x3d));
+            refresh(javaPath); // :244 装完立刻选中它
+            if (m_onSelection)
+                m_onSelection(javaPath); // :245 selectionChanged -> 设置页落盘 game.java_path
+            InfoBar::push(InfoBar::Type::Success, QStringLiteral("Java 安装完成"),
+                          trName("java.success", "{name} 安装完成", detail), window(), 6000);
+        } else if (cancelled) {
+            m_statusLabel->setText(QStringLiteral("已取消下载"));
+            m_statusLabel->setTextColor(QColor(0xfa, 0x8c, 0x16), QColor(0xff, 0xa9, 0x40));
+        } else {
+            m_statusLabel->setText(QStringLiteral("❌ %1").arg(detail.left(80)));
+            m_statusLabel->setTextColor(QColor(0xff, 0x4d, 0x4f), QColor(0xff, 0x78, 0x75));
+            InfoBar::push(InfoBar::Type::Error, QStringLiteral("Java 安装失败"),
+                          trName("java.failed", "{name} 下载失败，请检查网络", detail), window(), 10000);
+        }
+    }
+
+    std::thread m_worker;
+    std::atomic<bool> m_cancelRequested{false};
 };
 
 // ─────────────── 内存范围(settings_page.py:288-307 的整数运算,逐行照抄)───────────────
@@ -950,6 +1159,8 @@ private:
     void refreshPageBackground();
     void onThemeChanged();                        // :511-514
     void onLanguageChanged(const QString &value); // :494-509
+    // 语言热切换:把绑了语言键的文案重新取一遍(不重建窗口、不重启)
+    void applyLanguageTexts();
     void onDownloadSourceChanged(const QString &value); // :525-528
     void pickGameDirectory();                     // :441-450
     void resetSettings();                         // :452-492
@@ -993,6 +1204,7 @@ private:
 
     SettingCard *m_aboutCard = nullptr;
     HyperlinkCard *m_websiteCard = nullptr;
+    SettingCardGroup *m_aboutGroup = nullptr; // 语言热切换要改它的组标题(绑 page.settings.about_group)
 
     // 账户(新增):状态卡 + 登录/刷新/注销三张动作卡;同一时刻只跑一个后台任务。
     AccountStatusCard *m_accountCard = nullptr;
@@ -1031,7 +1243,19 @@ SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
     m_vBox->setSpacing(16);                       // :52
     m_vBox->setAlignment(Qt::AlignTop);           // :53
 
-    m_title = new TitleLabel(QString::fromUtf8(kPageTitle), m_view); // :55
+    // 页面标题:绑核心库语言表(键与 Python .lang 里 page.settings.title 逐字一致 ——
+    // zh-cn 那份的值就是"设置",所以中文下的显示与 1:1 规格完全一致)
+    // 语言表:按设置里的 ui.language 初始化(幂等 —— main.cpp 启动时已经设过一次,
+    // 这里再设一次是为了"直接建设置页"的入口(UI 冒烟测试 / 后续单页预览)也能拿到正确文案)。
+    // 找不到 .lang 不算失败:核心库有内置中英两份(见 include/sxcl/lang.h)。
+    {
+        char lerr[SXCL_LANG_ERR_MAX];
+        lerr[0] = '\0';
+        const QByteArray code = m_store.text(kKeyLanguage, QStringLiteral("zh-CN")).toUtf8();
+        (void)sxcl_lang_set_default(code.constData(), nullptr, lerr, sizeof(lerr));
+    }
+
+    m_title = new TitleLabel(trText("page.settings.title", kPageTitle), m_view); // :55
     m_subtitle = new SubtitleLabel(QString(), m_view);               // :56
     m_subtitle->hide();                                             // :209 subtitleLabel.hide()
     m_vBox->addWidget(m_title);                                     // :59
@@ -1130,8 +1354,8 @@ void SettingsPage::buildContent() {
     const QStringList languageTexts = textList(kLanguageTexts, 2); // :242
     const QStringList languageValues = stringList(kLanguageValues, 2);
     m_languageCard = new ComboBoxSettingCard( // :238-244
-        FluentIcon::qicon(FluentIcon::LANGUAGE), QStringLiteral("语言"), QString(), languageTexts,
-        languageValues,
+        FluentIcon::qicon(FluentIcon::LANGUAGE), trText("page.settings.language", "语言"), QString(),
+        languageTexts, languageValues,
         valueIndex(languageValues, m_store.text(kKeyLanguage, QStringLiteral("zh-CN")), 0),
         generalGroup);
 
@@ -1172,7 +1396,7 @@ void SettingsPage::buildContent() {
     auto *gameGroup = new SettingCardGroup(QString::fromUtf8(kGroupGame), m_view);
 
     m_isolationCard = new SwitchSettingCard( // :276-282
-        FluentIcon::qicon(FluentIcon::FOLDER), QStringLiteral("版本隔离"),
+        FluentIcon::qicon(FluentIcon::FOLDER), trText("page.settings.version_isolation", "版本隔离"),
         QStringLiteral("每个版本使用独立的 .minecraft 目录"),
         m_store.flag(kKeyVersionIsolation, false), gameGroup);
     gameGroup->addSettingCard(m_isolationCard); // :283
@@ -1203,7 +1427,7 @@ void SettingsPage::buildContent() {
 
     m_gameDirCard = new PushSettingCard( // :326-332
         QStringLiteral("选择目录"), FluentIcon::qicon(FluentIcon::FOLDER),
-        QStringLiteral("游戏目录"), gameDirectory(), gameGroup);
+        trText("page.settings.game_dir", "游戏目录"), gameDirectory(), gameGroup);
 
     gameGroup->addSettingCard(m_memoryCard);  // :334
     gameGroup->addSettingCard(m_windowCard);  // :335
@@ -1278,7 +1502,7 @@ void SettingsPage::buildContent() {
     accountGroup->addSettingCard(m_logoutCard);
 
     // ── 关于(settings_page.py:397-413)──
-    auto *aboutGroup = new SettingCardGroup(QString::fromUtf8(kGroupAbout), m_view);
+    m_aboutGroup = new SettingCardGroup(trText("page.settings.about_group", kGroupAbout), m_view);
     m_aboutCard = new SettingCard( // :399-404
         FluentIcon::qicon(FluentIcon::INFO),
         QStringLiteral("%1 %2").arg(QString::fromUtf8(kAppName), QString::fromUtf8(kAppVersion)),
@@ -1286,19 +1510,19 @@ void SettingsPage::buildContent() {
         // C 版必须写自己的技术栈 —— 照抄会谎报实现。JQt 是 SilentStudio 自有的 Qt 框架,
         // 也是 C 版出 Android 安装包所依赖的流水线(JQt-for-Android)。
         QStringLiteral("基于 Qt6 · libqf · JQt 构建，支持 Windows / macOS / Linux / Android"),
-        aboutGroup);
+        m_aboutGroup);
     m_websiteCard = new HyperlinkCard( // :405-411
         QString::fromUtf8(kAppRepoUrl), QStringLiteral("访问官网"),
-        FluentIcon::qicon(FluentIcon::LINK), QStringLiteral("项目主页"), QString(), aboutGroup);
-    aboutGroup->addSettingCard(m_aboutCard);   // :412
-    aboutGroup->addSettingCard(m_websiteCard); // :413
+        FluentIcon::qicon(FluentIcon::LINK), QStringLiteral("项目主页"), QString(), m_aboutGroup);
+    m_aboutGroup->addSettingCard(m_aboutCard);   // :412
+    m_aboutGroup->addSettingCard(m_websiteCard); // :413
 
     m_vBox->addWidget(generalGroup);  // :415
     m_vBox->addWidget(gameGroup);     // :416
     m_vBox->addWidget(downloadGroup); // :417
     m_vBox->addWidget(advancedGroup); // :418
     m_vBox->addWidget(accountGroup);  // 新增:「账户」组,按交付要求放在「关于」之前
-    m_vBox->addWidget(aboutGroup);    // :419
+    m_vBox->addWidget(m_aboutGroup);  // :419
     m_vBox->addStretch(1);            // :420
 
     // :422-426 配过 Java 就按它选中,否则自动推荐
@@ -1449,15 +1673,47 @@ void SettingsPage::onThemeChanged() {
     FluentTheme::instance().apply(qApp);
 }
 
-// settings_page.py:494-509 _on_language_changed
+// settings_page.py:494-509 _on_language_changed → init_language(code)
+//
+// C 版的对应物是核心库的语言表(include/sxcl/lang.h):**立即生效**,不重启。
+// 三步:落盘 -> 换进程级语言表(核心库热切换)-> 本页文案重取一遍。
+// 如实说明生效范围:本页绑了键的文案 + Java 下载提示(java.* 键)立刻变;
+// 导航与其它页面的文案还是 C 侧字面量(它们没有对应的 Python .lang 键,硬绑会破坏 1:1 文案),
+// 这一条写进 docs/10-Java安装与国际化.md,不糊弄用户。
 void SettingsPage::onLanguageChanged(const QString &value) {
     m_store.set(kKeyLanguage, value);
+
+    char err[SXCL_LANG_ERR_MAX];
+    err[0] = '\0';
+    const QByteArray code = value.toUtf8();
+    if (sxcl_lang_set_default(code.constData(), nullptr, err, sizeof(err)) != SXCL_LANG_OK) {
+        InfoBar::push(InfoBar::Type::Error, QStringLiteral("语言切换失败"),
+                      QString::fromUtf8(err), this, 8000);
+        return;
+    }
+    applyLanguageTexts();
+
     const QString display = value == QLatin1String("en-US") ? QStringLiteral("English")
                                                            : QStringLiteral("简体中文");
-    // Python 这里还会 init_language(code) 切 .qm 翻译;C 版界面层还没有 i18n(见交付报告)。
-    InfoBar::push(InfoBar::Type::Success, QStringLiteral("语言已切换"),
-                  QStringLiteral("已切换至 %1，部分界面需要重启应用后完全生效").arg(display), this,
-                  5000);
+    InfoBar::push(InfoBar::Type::Success, QStringLiteral("语言已切换 / Language switched"),
+                  QStringLiteral("已切换至 %1：设置页文案与 Java 下载提示已立即生效；"
+                                 "其余页面文案尚未绑定语言键（见 docs/10）。")
+                      .arg(display),
+                  this, 6000);
+}
+
+// 把绑了语言键的文案重新取一遍(语言热切换;不重建窗口、不重启)
+void SettingsPage::applyLanguageTexts() {
+    if (m_title != nullptr)
+        m_title->setText(trText("page.settings.title", kPageTitle));
+    if (m_languageCard != nullptr)
+        m_languageCard->setTitle(trText("page.settings.language", "语言"));
+    if (m_isolationCard != nullptr)
+        m_isolationCard->setTitle(trText("page.settings.version_isolation", "版本隔离"));
+    if (m_gameDirCard != nullptr)
+        m_gameDirCard->setTitle(trText("page.settings.game_dir", "游戏目录"));
+    if (m_aboutGroup != nullptr)
+        m_aboutGroup->setTitle(trText("page.settings.about_group", kGroupAbout));
 }
 
 // settings_page.py:525-528 _on_download_source_changed → window().on_download_source_changed(source)

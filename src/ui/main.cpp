@@ -25,7 +25,8 @@
 // 设置文件路径(uiSettingsPath)与取证用的登录对话框。
 #include "dialogs/account.h"
 #include "dialogs/auth_dialog.h"
-#include "sxcl/settings.h" // 启动恢复:ui.theme / ui.accent / ui.language
+#include "sxcl/lang.h"     // 语言表(键 -> 文案;.lang 与 Python 版逐字段兼容)
+#include "sxcl/settings.h" // 启动恢复:ui.theme / ui.accent / ui.language(环境变量优先)
 
 // ComboBox:弹出层取证要用它的 showPopup()
 #include "fluent/fluent_setting_cards.h"
@@ -106,13 +107,16 @@ int main(int argc, char *argv[]) {
     {
         const QByteArray settingsPath = sxcl::ui::uiSettingsPath().toUtf8();
         if (sxcl_settings *settings = sxcl_settings_open(settingsPath.constData())) {
-            // 用 sxcl_settings_get(键, nullptr) 而不是便捷函数:必须能区分
-            // 「没存过」(用内置默认)与「存了 auto」(跟随系统)。
-            if (const char *value = sxcl_settings_get(settings, "ui.theme", nullptr))
+            // 取值一律走核心库的"启动期解析"(settings.h:环境变量优先,再设置文件,最后默认值):
+            //   SXCL_UI_THEME / SXCL_UI_ACCENT / SXCL_UI_LANG(旧名 SXCL_UI_LANGUAGE 也认)
+            // 这样"环境变量优先"这条规则只写在核心库一处,界面层不再自己判一遍。
+            // 顺带:核心库会校验取值(主题只认 auto/light/dark,强调色只认 #rrggbb),
+            // 写错的值一律回默认,不会把怪颜色套到界面上。
+            if (const char *value = sxcl_settings_resolved_theme(settings))
                 savedTheme = QString::fromUtf8(value);
-            if (const char *value = sxcl_settings_get(settings, "ui.accent", nullptr))
+            if (const char *value = sxcl_settings_resolved_accent(settings))
                 savedAccent = QString::fromUtf8(value);
-            if (const char *value = sxcl_settings_get(settings, "ui.language", nullptr))
+            if (const char *value = sxcl_settings_resolved_language(settings))
                 savedLanguage = QString::fromUtf8(value);
             sxcl_settings_free(settings);
         }
@@ -139,13 +143,32 @@ int main(int argc, char *argv[]) {
         theme.setAccent(QColor::fromString(accentText));
     theme.apply(&app);
 
-    // 语言:设置页写 ui.language(zh-CN / en-US)。界面层目前**没有** i18n(.qm 加载还没做,
-    // 设置页也如实这么告诉用户),这里只把语言环境套上(影响 Qt 的日期/数字格式与文件对话框),
-    // 并把它打出来,便于确认恢复真的生效。
+    // 语言:设置页写 ui.language(zh-CN / en-US)。
+    //   1) 语言表(核心库 include/sxcl/lang.h):内置中英两份,磁盘 <配置目录>/lang/<code>.lang
+    //      或 SXCL_LANG_DIR 下的同名文件会逐键覆盖;查不到的键回落中文。
+    //      **必须在这里设**:窗口与各页面随后才构造,页面取文案时表已就位(设置页再设一次是幂等)。
+    //      界面层不用 Qt 的 .qm —— 文案表就在核心库里,离网/首次运行也有完整两份。
+    //   2) Qt 区域设置:影响日期/数字格式与文件对话框。
     const QString languageEnv = qEnvironmentVariable("SXCL_UI_LANGUAGE");
     const QString language = !languageEnv.isEmpty() ? languageEnv : savedLanguage;
     if (!language.isEmpty())
         QLocale::setDefault(QLocale(language));
+
+    char langErr[SXCL_LANG_ERR_MAX];
+    langErr[0] = '\0';
+    {
+        const QByteArray code =
+            (language.isEmpty() ? QStringLiteral("zh-CN") : language).toUtf8();
+        const int rc = sxcl_lang_set_default(code.constData(), nullptr, langErr, sizeof(langErr));
+        if (rc == SXCL_LANG_OK) {
+            const sxcl_lang *lang = sxcl_lang_default();
+            std::fprintf(stderr, "[sxcl-ui] 语言表: %s(%d 条)%s%s\n",
+                         sxcl_lang_code(lang), (int)sxcl_lang_count(lang),
+                         langErr[0] ? "; " : "", langErr);
+        } else {
+            std::fprintf(stderr, "[sxcl-ui] 语言表初始化失败(%d): %s\n", rc, langErr);
+        }
+    }
 
     std::fprintf(stderr, "[sxcl-ui] 主题: %s(mode=%s), 强调色 %s, 语言 %s, QSS %d 个文件(%s)\n",
                  theme.isDark() ? "深色" : "浅色",

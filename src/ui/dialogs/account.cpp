@@ -112,9 +112,20 @@ AccountTask::~AccountTask() {
     cancel();
     if (m_thread != nullptr) {
         // 线程必须在 QThread 对象析构前结束(否则 Qt 会警告并可能崩)。
-        // 取消位已经置上,轮询循环下一次检查就会返回;在飞的 HTTP 也被 cancel() 撤掉了。
-        m_thread->wait();
-        delete m_thread;
+        // 取消位已经置上,核心库的轮询循环每 200ms 查一次;在飞的 HTTP 也被 cancel() 撤掉,
+        // 所以正常情况这里几毫秒就返回。
+        //
+        // **有界等待**:实测过"取消后不等、把任务脱手"的写法 —— 退出时留着一个活线程,
+        // 整个进程会卡在退出路径上(必须强杀)。所以这里最多等 3 秒:
+        //   等到了 → 正常删除;
+        //   等不到(极罕见:卡在系统调用里)→ 如实打一条诊断,**把 QThread 脱手**,
+        //   宁可泄漏一个对象,也不让用户关不掉窗口 / 退不出程序。
+        if (m_thread->wait(3000)) {
+            delete m_thread;
+        } else {
+            std::fprintf(stderr, "[sxcl-ui] 登录线程 3 秒内没有结束,退出时不再等它(对象脱手)\n");
+            m_thread->setParent(nullptr);
+        }
         m_thread = nullptr;
     }
 }
