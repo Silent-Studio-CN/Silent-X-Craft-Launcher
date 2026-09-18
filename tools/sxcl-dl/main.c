@@ -29,6 +29,7 @@
 #include "sxcl/fs.h"
 #include "sxcl/json.h"
 #include "sxcl/launch.h"
+#include "sxcl/install.h" /* 版本 JSON 落盘 sxcl_install_write_version_json;缺它会 C4013 -> C2220 */
 #include "sxcl/limiter.h"
 #include "sxcl/loader.h"
 #include "sxcl/manifest.h"
@@ -454,6 +455,7 @@ static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
     cli_state st;
     memset(&st, 0, sizeof(st));
     st.verbose = o->verbose;
+    int failed_version_json = 0; /* 版本 JSON 落盘失败也算这次没成功 */
     sxcl_engine *engine = NULL;
     if (make_engine(o, &st, &engine) != 0) {
         return 1;
@@ -518,6 +520,19 @@ static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
         sxcl_engine_destroy(engine);
         return 1;
     }
+    /* 版本 JSON 落盘到启动层要的位置(<游戏目录>/versions/<id>/<id>.json)。
+     * 以前只留在缓存目录,导致"文件都下完了却启动不了"(实测踩过)。 */
+    {
+        char werr[256];
+        werr[0] = '\0';
+        if (sxcl_install_write_version_json(game_dir, entry->id, vjson_path, werr, sizeof(werr)) == 0) {
+            printf("版本 JSON 已写入: %s/versions/%s/%s.json\n", game_dir, entry->id, entry->id);
+        } else {
+            fprintf(stderr, "写版本 JSON 失败: %s\n", werr);
+            ++failed_version_json;
+        }
+    }
+
     sxcl_version_plan *plan = sxcl_version_plan_build(vdoc, game_dir, entry->id, err, sizeof(err));
     if (!plan) {
         fprintf(stderr, "生成下载计划失败: %s\n", err);
@@ -600,6 +615,12 @@ static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
     sxcl_version_list_free(list);
     sxcl_json_free(doc);
     sxcl_engine_destroy(engine);
+    if (failed_version_json != 0) {
+        /* 文件都下好了但版本 JSON 没落盘 = 用户"装完了却启动不了",必须算失败 */
+        fprintf(stderr, "注意:版本 JSON 没能写到 versions/%s/%s.json,启动层会报找不到版本\n",
+                entry->id, entry->id);
+        return 1;
+    }
     return failed == 0 ? 0 : 1;
 }
 

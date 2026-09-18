@@ -5,8 +5,13 @@
 #include <QApplication>
 #include <QColor>
 #include <QCursor>
+#include <QGuiApplication>
+#include <QLocale>
 #include <QPainter>
 #include <QPixmap>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QStyleHints>
 #include <QTimer>
 
 #include <cstdio>
@@ -16,9 +21,52 @@
 #include "fluent_theme.h"
 #include "theme_bridge.h"
 
+// 账户(正版登录;Python 版无此功能,新增):主程序这边只需要两件事 ——
+// 设置文件路径(uiSettingsPath)与取证用的登录对话框。
+#include "dialogs/account.h"
+#include "dialogs/auth_dialog.h"
+#include "sxcl/settings.h" // 启动恢复:ui.theme / ui.accent / ui.language
+
 // ComboBox:弹出层取证要用它的 showPopup()
 #include "fluent/fluent_setting_cards.h"
 
+// 取证通路:把控件树按文本打出来(SXCL_UI_DUMP=1)。
+//
+// 为什么需要它:截图只能"看",而验收要求每条结论都给可核对的证据。
+// 这份 dump 给的是**可以逐行读**的事实:账户组/各张卡片的类名与文字、按钮文案、
+// 几何位置与可见性 —— 与 build/ref/TREE_py_*.txt 是同一类产物(只读,不改任何状态)。
+static void dumpWidgetTree(QWidget *root, int maxDepth) {
+    struct Walker {
+        static void walk(QWidget *widget, int depth, int maxDepth) {
+            if (widget == nullptr || depth > maxDepth)
+                return;
+            const QPoint topLeft = widget->mapTo(widget->window(), QPoint(0, 0));
+            QString text;
+            if (auto *label = qobject_cast<QLabel *>(widget))
+                text = label->text();
+            else if (auto *button = qobject_cast<QAbstractButton *>(widget))
+                text = button->text();
+            text.replace(QLatin1Char('\n'), QLatin1Char(' '));
+            if (text.size() > 80)
+                text = text.left(80) + QStringLiteral("…");
+            std::fprintf(stderr, "%*s%s", depth * 2, "",
+                         widget->metaObject()->className());
+            if (!widget->objectName().isEmpty())
+                std::fprintf(stderr, " #%s", widget->objectName().toUtf8().constData());
+            std::fprintf(stderr, " (%d,%d %dx%d)%s%s", topLeft.x(), topLeft.y(), widget->width(),
+                         widget->height(), widget->isVisible() ? "" : " hidden",
+                         widget->isEnabled() ? "" : " disabled");
+            if (!text.isEmpty())
+                std::fprintf(stderr, " \"%s\"", text.toUtf8().constData());
+            std::fprintf(stderr, "\n");
+            const QList<QWidget *> children = widget->findChildren<QWidget *>(
+                QString(), Qt::FindDirectChildrenOnly);
+            for (QWidget *child : children)
+                walk(child, depth + 1, maxDepth);
+        }
+    };
+    Walker::walk(root, 0, maxDepth);
+}
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     // Python main.py:96 —— app.setStyle("Fusion")。不设的话 Windows 默认样式的控件度量
@@ -45,17 +93,65 @@ int main(int argc, char *argv[]) {
         std::fprintf(stderr, "[sxcl-ui] 共 %d 个图标没读到,界面会用空白图标继续跑\n",
                      missing);
 
-    // 主题:1:1 主题层(令牌 = Python theme.py;样式 = qf 原版 QSS)
-    // 默认深色 + Fluent 默认蓝;验收脚本用 SXCL_UI_ACCENT / SXCL_UI_THEME 覆盖成参考图的条件
+    // ── 主题:1:1 主题层(令牌 = Python theme.py;样式 = qf 原版 QSS)──
+    //
+    // 启动恢复(新增):读我们自己的设置 sxcl_settings 里的 ui.theme / ui.accent / ui.language
+    // 并**套用**,这样用户上次在设置页选的主题/强调色/语言重启后还在。
+    // 优先级与核心库其它配置同一口径:**环境变量 > sxcl_settings > 内置默认**。
+    // 环境变量优先是验收的硬要求:SXCL_UI_THEME / SXCL_UI_ACCENT 是抓参考图/取证时钉条件的
+    // 开关(见 docs/05-UI-1to1规格.md §11),不能被本机配置悄悄改掉,否则取证不可复现。
+    QString savedTheme;
+    QString savedAccent;
+    QString savedLanguage;
+    {
+        const QByteArray settingsPath = sxcl::ui::uiSettingsPath().toUtf8();
+        if (sxcl_settings *settings = sxcl_settings_open(settingsPath.constData())) {
+            // 用 sxcl_settings_get(键, nullptr) 而不是便捷函数:必须能区分
+            // 「没存过」(用内置默认)与「存了 auto」(跟随系统)。
+            if (const char *value = sxcl_settings_get(settings, "ui.theme", nullptr))
+                savedTheme = QString::fromUtf8(value);
+            if (const char *value = sxcl_settings_get(settings, "ui.accent", nullptr))
+                savedAccent = QString::fromUtf8(value);
+            if (const char *value = sxcl_settings_get(settings, "ui.language", nullptr))
+                savedLanguage = QString::fromUtf8(value);
+            sxcl_settings_free(settings);
+        }
+    }
+
     sxcl::ui::FluentTheme &theme = sxcl::ui::FluentTheme::instance();
     const QString themeEnv = qEnvironmentVariable("SXCL_UI_THEME");
-    theme.setDark(themeEnv.compare(QStringLiteral("light"), Qt::CaseInsensitive) != 0);
+    const QString themeMode =
+        (!themeEnv.isEmpty() ? themeEnv : savedTheme).trimmed().toLower();
+    bool dark = true; // 内置默认:深色(C 版此前一直是这个默认值,不变)
+    if (themeMode == QLatin1String("light")) {
+        dark = false;
+    } else if (themeMode == QLatin1String("auto")) {
+        // 跟随系统:与设置页 _on_theme_changed 同一条判据(QStyleHints::colorScheme)。
+        dark = QGuiApplication::styleHints()->colorScheme() != Qt::ColorScheme::Light;
+    }
+    theme.setDark(dark);
+
+    // 强调色:环境变量是**配置里的原始色**(docs/05 §11.1),setAccent 收的就是原始色,
+    // 推导(qf ThemeColor)由主题层自己做 —— 这里不要预推一次。
     const QString accentEnv = qEnvironmentVariable("SXCL_UI_ACCENT");
-    if (!accentEnv.isEmpty())
-        theme.setAccent(QColor::fromString(accentEnv));
+    const QString accentText = !accentEnv.isEmpty() ? accentEnv : savedAccent;
+    if (!accentText.isEmpty())
+        theme.setAccent(QColor::fromString(accentText));
     theme.apply(&app);
-    std::fprintf(stderr, "[sxcl-ui] 主题: %s, 强调色 %s, QSS %d 个文件(%s)\n",
-                 theme.isDark() ? "深色" : "浅色", theme.accent().name().toUtf8().constData(),
+
+    // 语言:设置页写 ui.language(zh-CN / en-US)。界面层目前**没有** i18n(.qm 加载还没做,
+    // 设置页也如实这么告诉用户),这里只把语言环境套上(影响 Qt 的日期/数字格式与文件对话框),
+    // 并把它打出来,便于确认恢复真的生效。
+    const QString languageEnv = qEnvironmentVariable("SXCL_UI_LANGUAGE");
+    const QString language = !languageEnv.isEmpty() ? languageEnv : savedLanguage;
+    if (!language.isEmpty())
+        QLocale::setDefault(QLocale(language));
+
+    std::fprintf(stderr, "[sxcl-ui] 主题: %s(mode=%s), 强调色 %s, 语言 %s, QSS %d 个文件(%s)\n",
+                 theme.isDark() ? "深色" : "浅色",
+                 themeMode.isEmpty() ? "(未设置)" : themeMode.toUtf8().constData(),
+                 theme.accent().name().toUtf8().constData(),
+                 language.isEmpty() ? "(未设置)" : language.toUtf8().constData(),
                  theme.qssFileCount(), theme.themeDir().toUtf8().constData());
 
     sxcl::ui::ThemeBridge::instance().refreshAll();
@@ -126,8 +222,72 @@ int main(int argc, char *argv[]) {
         });
     }
 
+    // 取证通路:登录对话框(SXCL_UI_AUTH_DIALOG=1)—— 用于"没有真实登录也要能演示"的验收。
+    //   * 默认走真网络:能拿到真实的 user_code(用户手动完成那一步);
+    //   * 配 SXCL_UI_AUTH_REPLAY=<tests/fixtures/auth> 走夹具回放(实测响应脱敏副本):
+    //     即使不联网也能把整条链跑完;再加 SXCL_UI_AUTH_REPLAY_HOP6=1,
+    //     第 6 跳会返回实测的 403 正文,**原样**显示在对话框里(见 docs/09 §9.2)。
+    //
+    // **走产品路径**:这里不自己 new 对话框,而是**点设置页上的「登录」按钮** ——
+    // 这样"对话框由设置页打开 → 登录成功后设置页收到 accountChanged 去刷账户卡"
+    // 也一起被验到(需配 SXCL_UI_ROUTE=settings)。
+    if (qEnvironmentVariableIntValue("SXCL_UI_AUTH_DIALOG") == 1) {
+        QTimer::singleShot(400, &app, [&window] {
+            QWidget *page = window.sessionPage(QStringLiteral("settings"));
+            if (page == nullptr) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] SXCL_UI_AUTH_DIALOG 需要设置页:请加 SXCL_UI_ROUTE=settings\n");
+                return;
+            }
+            const QList<PushSettingCard *> cards = page->findChildren<PushSettingCard *>();
+            for (PushSettingCard *card : cards) {
+                if (card->button() != nullptr &&
+                    card->button()->text() == QStringLiteral("登录")) {
+                    card->button()->click();
+                    std::fprintf(stderr, "[sxcl-ui] 已点击设置页「账户 → 登录」\n");
+                    return;
+                }
+            }
+            std::fprintf(stderr, "[sxcl-ui] 设置页里没找到「登录」按钮\n");
+        });
+    }
+
     if (!shot.isEmpty() && popup.isEmpty()) {
-        QTimer::singleShot(1500, &app, [&window, shot]() {
+        // SXCL_UI_SHOT_DELAY=<ms>:等对话框拿到 user_code / 走到第 6 跳再抓图(默认 1500)。
+        const int delayMs = qEnvironmentVariableIntValue("SXCL_UI_SHOT_DELAY");
+        const int waitMs = delayMs > 0 ? delayMs : 1500;
+        QTimer::singleShot(waitMs, &app, [&window, shot]() {
+            // 取证通路:SXCL_UI_SCROLL=bottom|<像素> —— 抓图前把当前页面的滚动区滚过去。
+            // 账户组在设置页靠下的位置,不滚动的话默认视口里看不到(等价 Python 端
+            // page.verticalScrollBar().setValue(...) 之后再 widget.grab())。
+            const QString scrollSpec = qEnvironmentVariable("SXCL_UI_SCROLL");
+            if (!scrollSpec.isEmpty() && window.pageStack() != nullptr) {
+                QWidget *page = window.pageStack()->currentWidget();
+                // 页面自己就是 ScrollArea(各页都继承 libqf 的 ScrollArea)→ 先按自己判,
+                // 再退回找子控件(临时页那种外壳里嵌滚动区的结构)。
+                QScrollArea *area = qobject_cast<QScrollArea *>(page);
+                if (area == nullptr && page != nullptr)
+                    area = page->findChild<QScrollArea *>();
+                if (area != nullptr && area->verticalScrollBar() != nullptr) {
+                    QScrollBar *bar = area->verticalScrollBar();
+                    const bool toBottom =
+                        scrollSpec.compare(QStringLiteral("bottom"), Qt::CaseInsensitive) == 0;
+                    bar->setValue(toBottom ? bar->maximum() : scrollSpec.toInt());
+                    std::fprintf(stderr, "[sxcl-ui] 滚动到 %d/%d\n", bar->value(), bar->maximum());
+                }
+            }
+            if (qEnvironmentVariableIntValue("SXCL_UI_DUMP") == 1) {
+                // 深度 6:页面 → 视口 → view → 分组 → 卡片 → 卡片里的标签/按钮
+                // (少了这一层就只能看到卡片本身,看不到卡片上的文字 —— 实测踩过)
+                std::fprintf(stderr, "[sxcl-ui] 控件树 dump(当前页面):\n");
+                dumpWidgetTree(window.pageStack()->currentWidget(), 6);
+                if (auto *dialog = window.findChild<sxcl::ui::AuthLoginDialog *>()) {
+                    if (dialog->isVisible()) {
+                        std::fprintf(stderr, "[sxcl-ui] 控件树 dump(登录对话框):\n");
+                        dumpWidgetTree(dialog, 5);
+                    }
+                }
+            }
             // libqf 的窗口开着 WA_TranslucentBackground(亚克力/Mica 区域在屏幕上是系统画的),
             // 直接 grab() 会得到 alpha=0 的洞。验收图必须与参考图同样不透明,
             // 所以先铺一层令牌底色(等价于"关掉系统合成"时用户看到的画面)再叠上去。
@@ -138,6 +298,14 @@ int main(int argc, char *argv[]) {
             {
                 QPainter p(&pm);
                 p.drawPixmap(0, 0, raw);
+                // 遮罩对话框是独立的顶层窗口(QDialog),不在 window.grab() 里:
+                // 它自己带整窗大小的遮罩,叠在 (0,0) 就是用户看到的画面。
+                // 登录成功后对话框会自己关闭 —— 那时这里抓到的就是"账户卡已刷新"的设置页。
+                auto *dialog = window.findChild<sxcl::ui::AuthLoginDialog *>();
+                if (dialog != nullptr && dialog->isVisible()) {
+                    p.drawPixmap(0, 0, dialog->grab());
+                    std::fprintf(stderr, "[sxcl-ui] 登录对话框在画面上(已叠进截图)\n");
+                }
             }
             const bool ok = pm.save(shot);
             std::fprintf(stderr, "[sxcl-ui] 截图 %s %dx%d %s\n", shot.toUtf8().constData(),

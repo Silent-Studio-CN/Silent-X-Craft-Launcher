@@ -46,6 +46,32 @@ int sxcl_settings_set(sxcl_settings *settings, const char *key, const char *valu
 /** 删除键(不存在不算错)。返回 0 成功。 */
 int sxcl_settings_remove(sxcl_settings *settings, const char *key);
 
+/* ── 跨平台设置位置(四平台;Android 走**应用私有目录**) ──
+ *
+ * 为什么要有它:界面层原先各自拼路径(settings_page/home_page/versions_page 各一份),
+ * 安卓上全都落到 "~/.config/..." —— 而安卓的 $HOME 是 "/",那个路径**根本写不进去**,
+ * 于是设置能改、看着也成功,重启就没了。唯一权威放核心库:
+ *   Windows  %APPDATA%/SilentXCraftLauncher(没有 APPDATA 用 %USERPROFILE%/AppData/Roaming/...)
+ *   macOS    ~/Library/Application Support/SilentXCraftLauncher
+ *   Linux    $XDG_CONFIG_HOME/silentxcraftlauncher 或 ~/.config/silentxcraftlauncher
+ *            (小写短横线:与 Python platform.py:148-157 的 app_name.lower() 一致,
+ *             也与 src/services/modloader/keymap_store.c 的 default_root 一致)
+ *   Android  $SXCL_ANDROID_FILES/SilentXCraftLauncher(应用 files 目录,零权限即可读写;
+ *            与 src/core/instance/paths.c 的默认游戏目录同一个口径)
+ * 环境变量 **SXCL_CONFIG_DIR** 覆盖一切(便携版/测试/多配置并存)。
+ *
+ * 返回码:SXCL_SETTINGS_OK / ERR_ARG / ERR_UNSUPPORTED(拼不出,如安卓没有 SXCL_ANDROID_FILES)/
+ * ERR_SPACE(缓冲不够)。err 可空。 */
+#define SXCL_SETTINGS_OK              0
+#define SXCL_SETTINGS_ERR_ARG       (-1)
+#define SXCL_SETTINGS_ERR_UNSUPPORTED (-2)
+#define SXCL_SETTINGS_ERR_SPACE     (-3)
+
+/** 设置**目录**(不含文件名)。 */
+int sxcl_settings_default_dir(char *out, size_t out_len, char *err, size_t err_len);
+/** 设置**文件**全路径 = 目录 + "/settings.conf"(与界面层一直用的文件名一致)。 */
+int sxcl_settings_default_path(char *out, size_t out_len, char *err, size_t err_len);
+
 int64_t sxcl_settings_get_int(sxcl_settings *settings, const char *key, int64_t def);
 double  sxcl_settings_get_double(sxcl_settings *settings, const char *key, double def);
 int     sxcl_settings_get_bool(sxcl_settings *settings, const char *key, int def);
@@ -66,6 +92,41 @@ const char *sxcl_settings_download_cache_dir(sxcl_settings *settings);
 const char *sxcl_settings_game_default_dir(sxcl_settings *settings);
 const char *sxcl_settings_ui_theme(sxcl_settings *settings);
 const char *sxcl_settings_ui_language(sxcl_settings *settings);
+
+/** ── 启动期解析(环境变量优先) ──
+ *
+ * 口径:先看环境变量,没有再看设置文件,都没有再用默认值。这样"临时改一次"不用动配置,
+ * 验收/自动化也能钉死取值(界面层以前只有主题/强调色认环境变量,其余项落盘了却没人读)。
+ *
+ *   SXCL_UI_THEME   = auto|light|dark   (默认 auto)
+ *   SXCL_UI_ACCENT  = #rrggbb           (默认 #0067c0,与 fluent_theme.h 的默认主题色一致)
+ *   SXCL_UI_LANG    = zh-CN|en-US       (默认 zh-CN)
+ *   SXCL_GAME_DIR   = 游戏目录           (默认空 = 由 sxcl_paths_* 取平台默认)
+ *   SXCL_DL_WORKERS / SXCL_DL_RATE / SXCL_DL_MAX_CONN / SXCL_DL_CACHE_DIR
+ *
+ * 返回的指针:来自设置文件的归句柄所有(settings 释放即失效);来自环境变量的一直有效。
+ * settings 传 NULL 时只认环境变量(调用方还没打开设置文件也能用)。 */
+const char *sxcl_settings_resolved_theme(sxcl_settings *settings);
+const char *sxcl_settings_resolved_accent(sxcl_settings *settings);
+const char *sxcl_settings_resolved_language(sxcl_settings *settings);
+const char *sxcl_settings_resolved_game_dir(sxcl_settings *settings);
+
+/** 强调色的默认值(#0067c0)。 */
+#define SXCL_SETTINGS_DEFAULT_ACCENT "#0067c0"
+/** 主题模式的默认值。 */
+#define SXCL_SETTINGS_DEFAULT_THEME "auto"
+
+/** 启动期解析出的下载参数(核心库只给值,建引擎由调用方做)。零初始化 = 全默认。 */
+typedef struct sxcl_settings_download {
+    int workers;             /**< <=0 = 引擎自动(min(8, CPU*2)) */
+    double rate_bps;         /**< 0 = 不限速(字节/秒) */
+    int max_conn_per_file;   /**< <=1 = 单文件不分片 */
+    char cache_dir[512];     /**< 哈希缓存目录;空 = 不用缓存 */
+} sxcl_settings_download;
+
+/** 读 download.workers / download.rate / download.max_conn / download.cache_dir(环境变量优先)
+ *  并填进 out(out 必须非空;函数内部先清零)。 */
+void sxcl_settings_resolve_download(sxcl_settings *settings, sxcl_settings_download *out);
 
 /** 每实例设置:内部键名是 "instance.<实例名>.<键>"。
  *  实例名与键里不允许出现 '.' 之外的怪字符由调用方保证;返回的指针在 settings 释放前有效。 */

@@ -239,6 +239,86 @@ static int path_join(char *out, size_t cap, const char *dir, const char *rel) {
     return 0;
 }
 
+/* ── 把版本 JSON 放到启动层要的位置(见 install.h 的说明) ──
+ * 下载路径(sxcl-dl version)与安装路径(sxcl_install_run)都走这里,
+ * 免得两边对"版本 JSON 该放哪"有不同理解。 */
+int sxcl_install_write_version_json(const char *game_dir, const char *version_id,
+                                   const char *json_path, char *err, size_t err_len) {
+    if (game_dir == NULL || game_dir[0] == 0 || version_id == NULL || version_id[0] == 0 ||
+        json_path == NULL || json_path[0] == 0) {
+        set_text(err, err_len, "参数不合法(游戏目录/版本名/JSON 路径都不能为空)");
+        return SXCL_INSTALL_ERR_ARG;
+    }
+    /* 版本名是路径的一段:只允许安全字符,不让它跳出 versions/ */
+    for (const char *p = version_id; *p != 0; ++p) {
+        const char c = *p;
+        const int ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+                       (c >= 'a' && c <= 'z') || c == '.' || c == '_' || c == '-';
+        if (!ok) {
+            set_text(err, err_len, "版本名里有不允许的字符(只允许字母数字与 . _ -):%s", version_id);
+            return SXCL_INSTALL_ERR_ARG;
+        }
+    }
+    if (strstr(version_id, "..") != NULL) {
+        set_text(err, err_len, "版本名里不允许出现 ..:%s", version_id);
+        return SXCL_INSTALL_ERR_ARG;
+    }
+
+    char rel[SXCL_INSTALL_PATH_MAX];
+    char dest[SXCL_INSTALL_PATH_MAX];
+    set_text(rel, sizeof(rel), "versions/%s/%s.json", version_id, version_id);
+    if (path_join(dest, sizeof(dest), game_dir, rel) != 0) {
+        set_text(err, err_len, "版本 JSON 路径太长:%s", rel);
+        return SXCL_INSTALL_ERR_ARG;
+    }
+
+    FILE *src = sxcl_fs_fopen(json_path, "rb");
+    if (src == NULL) {
+        set_text(err, err_len, "读不了版本 JSON 源文件:%s", json_path);
+        return SXCL_INSTALL_ERR_IO;
+    }
+    char tmp[SXCL_INSTALL_PATH_MAX + 8];
+    set_text(tmp, sizeof(tmp), "%s.tmp", dest);
+    if (sxcl_fs_mkdirs_for_file(dest) != 0) {
+        fclose(src);
+        set_text(err, err_len, "建不了版本目录:%s", dest);
+        return SXCL_INSTALL_ERR_IO;
+    }
+    FILE *dst = sxcl_fs_fopen(tmp, "wb");
+    if (dst == NULL) {
+        fclose(src);
+        set_text(err, err_len, "写不了版本 JSON(临时文件):%s", tmp);
+        return SXCL_INSTALL_ERR_IO;
+    }
+    char buf[16 * 1024];
+    int failed = 0;
+    for (;;) {
+        const size_t got = fread(buf, 1, sizeof(buf), src);
+        if (got > 0 && fwrite(buf, 1, got, dst) != got) {
+            failed = 1;
+            break;
+        }
+        if (got < sizeof(buf)) {
+            break;
+        }
+    }
+    fclose(src);
+    if (fclose(dst) != 0) {
+        failed = 1;
+    }
+    if (failed) {
+        (void)sxcl_fs_remove(tmp);
+        set_text(err, err_len, "版本 JSON 写不完整:%s", tmp);
+        return SXCL_INSTALL_ERR_IO;
+    }
+    if (sxcl_fs_rename_replace(tmp, dest) != 0) {
+        (void)sxcl_fs_remove(tmp);
+        set_text(err, err_len, "版本 JSON 改名失败(目标被占用?):%s", dest);
+        return SXCL_INSTALL_ERR_IO;
+    }
+    return 0;
+}
+
 /** 取路径最后一段(用于"当前文件"显示)。 */
 static const char *path_leaf(const char *path) {
     const char *leaf = path ? path : "";

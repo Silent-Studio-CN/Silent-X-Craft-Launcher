@@ -611,6 +611,299 @@ const char *sxcl_settings_ui_language(sxcl_settings *settings)
     return sxcl_settings_get(settings, "ui.language", "zh-CN");
 }
 
+/* ── 跨平台设置位置(见 settings.h 的语义) ── */
+
+/* UTF-8 环境变量:Windows 走 _wgetenv + CP_UTF8(中文用户名/路径不被代码页毁掉);
+ * POSIX 直接 getenv。返回的指针:Windows 侧是静态缓冲(下一次调用会被覆盖),
+ * 所以调用方要**立刻**用掉或拷走 —— 本文件内部都只在本函数附近用。 */
+static const char *env_utf8(const char *name)
+{
+    if (!name || !*name) {
+        return NULL;
+    }
+#if defined(_WIN32)
+    static char buf[1024];
+    wchar_t name_w[64];
+    if (MultiByteToWideChar(CP_UTF8, 0, name, -1, name_w, 64) <= 0) {
+        return NULL;
+    }
+    const wchar_t *value = _wgetenv(name_w);
+    if (!value || !*value) {
+        return NULL;
+    }
+    if (WideCharToMultiByte(CP_UTF8, 0, value, -1, buf, (int)sizeof(buf), NULL, NULL) <= 0) {
+        return NULL;
+    }
+    return buf;
+#else
+    const char *value = getenv(name);
+    return (value && *value) ? value : NULL;
+#endif
+}
+
+#if defined(_WIN32)
+#  define SXCL_SETTINGS_SEP "\\"
+#else
+#  define SXCL_SETTINGS_SEP "/"
+#endif
+
+/* dir + 分隔符 + leaf;装不下返回 -1。dir 末尾已有分隔符就不重复加。 */
+static int settings_join(char *out, size_t out_len, const char *dir, const char *leaf)
+{
+    if (!out || !dir || !leaf) {
+        return -1;
+    }
+    const size_t dlen = strlen(dir);
+    const size_t llen = strlen(leaf);
+    const int need_sep = (dlen > 0 && (dir[dlen - 1] == '/' || dir[dlen - 1] == '\\')) ? 0 : 1;
+    if (dlen + (size_t)need_sep + llen + 1 > out_len) {
+        return -1;
+    }
+    memcpy(out, dir, dlen);
+    size_t n = dlen;
+    if (need_sep) {
+        memcpy(out + n, SXCL_SETTINGS_SEP, strlen(SXCL_SETTINGS_SEP));
+        n += strlen(SXCL_SETTINGS_SEP);
+    }
+    memcpy(out + n, leaf, llen + 1);
+    return 0;
+}
+
+static int settings_arg_err(char *err, size_t err_len, const char *text)
+{
+    if (err && err_len) {
+        snprintf(err, err_len, "%s", text);
+    }
+    return SXCL_SETTINGS_ERR_ARG;
+}
+
+int sxcl_settings_default_dir(char *out, size_t out_len, char *err, size_t err_len)
+{
+    if (!out || out_len == 0) {
+        return settings_arg_err(err, err_len, "参数不合法");
+    }
+    out[0] = '\0';
+    /* 显式覆盖:便携版/测试/多配置并存都用它 */
+    const char *override_dir = env_utf8("SXCL_CONFIG_DIR");
+    if (override_dir && *override_dir) {
+        if (strlen(override_dir) + 1 > out_len) {
+            return settings_arg_err(err, err_len, "SXCL_CONFIG_DIR 太长");
+        }
+        memcpy(out, override_dir, strlen(override_dir) + 1);
+        return SXCL_SETTINGS_OK;
+    }
+#if defined(_WIN32)
+    {
+        const char *appdata = env_utf8("APPDATA");
+        if (appdata && *appdata) {
+            /* env_utf8 在 Windows 上返回静态缓冲,先拷进局部再用(settings_join 不会再取环境变量,
+             * 但拷一份能免掉"将来有人在这里插一次 env 调用"的隐患) */
+            char base[768];
+            snprintf(base, sizeof(base), "%s", appdata);
+            if (settings_join(out, out_len, base, "SilentXCraftLauncher") == 0) {
+                return SXCL_SETTINGS_OK;
+            }
+            return settings_arg_err(err, err_len, "配置目录路径太长");
+        }
+        const char *home = env_utf8("USERPROFILE");
+        if (home && *home) {
+            char base[768];
+            snprintf(base, sizeof(base), "%s\\AppData\\Roaming", home);
+            if (settings_join(out, out_len, base, "SilentXCraftLauncher") == 0) {
+                return SXCL_SETTINGS_OK;
+            }
+            return settings_arg_err(err, err_len, "配置目录路径太长");
+        }
+        return settings_arg_err(err, err_len, "拿不到 APPDATA/USERPROFILE,拼不出配置目录");
+    }
+#elif defined(__ANDROID__)
+    {
+        /* Android:HOME 是 "/",~/.config 写不进去。应用私有 files 目录由打包层通过
+         * SXCL_ANDROID_FILES 传进来(Activity 的 getFilesDir()),与 paths.c 同口径。 */
+        const char *files = env_utf8("SXCL_ANDROID_FILES");
+        if (files && *files) {
+            char base[768];
+            snprintf(base, sizeof(base), "%s", files);
+            if (settings_join(out, out_len, base, "SilentXCraftLauncher") == 0) {
+                return SXCL_SETTINGS_OK;
+            }
+            return settings_arg_err(err, err_len, "配置目录路径太长");
+        }
+        return settings_arg_err(err, err_len,
+                                "Android 上没拿到 SXCL_ANDROID_FILES(打包层入口应设为应用 files 目录)");
+    }
+#elif defined(__APPLE__)
+    {
+        const char *home = env_utf8("HOME");
+        if (home && *home) {
+            char base[768];
+            snprintf(base, sizeof(base), "%s/Library/Application Support", home);
+            if (settings_join(out, out_len, base, "SilentXCraftLauncher") == 0) {
+                return SXCL_SETTINGS_OK;
+            }
+            return settings_arg_err(err, err_len, "配置目录路径太长");
+        }
+        return settings_arg_err(err, err_len, "拿不到 HOME,拼不出配置目录");
+    }
+#else
+    {
+        /* 与 Python platform.py:156-157 一致:XDG 优先,目录名小写短横线形式 */
+        const char *xdg = env_utf8("XDG_CONFIG_HOME");
+        if (xdg && *xdg) {
+            char base[768];
+            snprintf(base, sizeof(base), "%s", xdg);
+            if (settings_join(out, out_len, base, "silentxcraftlauncher") == 0) {
+                return SXCL_SETTINGS_OK;
+            }
+            return settings_arg_err(err, err_len, "配置目录路径太长");
+        }
+        const char *home = env_utf8("HOME");
+        if (home && *home) {
+            char base[768];
+            snprintf(base, sizeof(base), "%s/.config", home);
+            if (settings_join(out, out_len, base, "silentxcraftlauncher") == 0) {
+                return SXCL_SETTINGS_OK;
+            }
+            return settings_arg_err(err, err_len, "配置目录路径太长");
+        }
+        return settings_arg_err(err, err_len, "拿不到 HOME/XDG_CONFIG_HOME,拼不出配置目录");
+    }
+#endif
+}
+
+int sxcl_settings_default_path(char *out, size_t out_len, char *err, size_t err_len)
+{
+    if (!out || out_len == 0) {
+        return settings_arg_err(err, err_len, "参数不合法");
+    }
+    out[0] = '\0';
+    char dir[768];
+    const int rc = sxcl_settings_default_dir(dir, sizeof(dir), err, err_len);
+    if (rc != SXCL_SETTINGS_OK) {
+        return rc;
+    }
+    if (settings_join(out, out_len, dir, "settings.conf") != 0) {
+        return settings_arg_err(err, err_len, "设置文件路径太长");
+    }
+    return SXCL_SETTINGS_OK;
+}
+
+/* ── 启动期解析(环境变量优先,见 settings.h) ── */
+
+static int text_is_one_of(const char *value, const char *const *items, size_t count)
+{
+    if (!value) {
+        return 0;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (value_is(value, items[i])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+const char *sxcl_settings_resolved_theme(sxcl_settings *settings)
+{
+    static const char *const kThemes[] = { "auto", "light", "dark" };
+    const char *env = env_utf8("SXCL_UI_THEME");
+    if (env && text_is_one_of(env, kThemes, 3)) {
+        return env;
+    }
+    const char *stored = sxcl_settings_ui_theme(settings);
+    if (stored && text_is_one_of(stored, kThemes, 3)) {
+        return stored;
+    }
+    return SXCL_SETTINGS_DEFAULT_THEME;
+}
+
+/* #rrggbb(大小写不敏感)。不合法的值一律回默认,免得把"随手写错的颜色"套到界面上。 */
+static int accent_looks_valid(const char *value)
+{
+    if (!value || value[0] != '#' || strlen(value) != 7) {
+        return 0;
+    }
+    for (int i = 1; i < 7; ++i) {
+        const char c = value[i];
+        const int hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!hex) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+const char *sxcl_settings_resolved_accent(sxcl_settings *settings)
+{
+    const char *env = env_utf8("SXCL_UI_ACCENT");
+    if (accent_looks_valid(env)) {
+        return env;
+    }
+    const char *stored = sxcl_settings_get(settings, "ui.accent", NULL);
+    if (accent_looks_valid(stored)) {
+        return stored;
+    }
+    return SXCL_SETTINGS_DEFAULT_ACCENT;
+}
+
+const char *sxcl_settings_resolved_language(sxcl_settings *settings)
+{
+    /* 不在这里统一大小写:设置文件里一直是 "zh-CN"/"en-US"(与 launcher_config.py 的
+     * 枚举值一致),归一化交给 sxcl_lang_open/sxcl_lang_normalize_code。 */
+    const char *env = env_utf8("SXCL_UI_LANG");
+    if (env && *env) {
+        return env;
+    }
+    return sxcl_settings_ui_language(settings);
+}
+
+const char *sxcl_settings_resolved_game_dir(sxcl_settings *settings)
+{
+    const char *env = env_utf8("SXCL_GAME_DIR");
+    if (env && *env) {
+        return env;
+    }
+    return sxcl_settings_game_default_dir(settings);
+}
+
+void sxcl_settings_resolve_download(sxcl_settings *settings, sxcl_settings_download *out)
+{
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+
+    const char *env_workers = env_utf8("SXCL_DL_WORKERS");
+    int64_t workers = 0;
+    if (env_workers && parse_int64(env_workers, &workers) == 0) {
+        out->workers = (int)workers;
+    } else {
+        out->workers = (int)sxcl_settings_download_workers(settings);
+    }
+
+    const char *env_rate = env_utf8("SXCL_DL_RATE");
+    double rate = 0.0;
+    if (env_rate && parse_double(env_rate, &rate) == 0) {
+        out->rate_bps = rate;
+    } else {
+        out->rate_bps = sxcl_settings_get_double(settings, "download.rate", 0.0);
+    }
+
+    const char *env_conn = env_utf8("SXCL_DL_MAX_CONN");
+    int64_t conn = 0;
+    if (env_conn && parse_int64(env_conn, &conn) == 0) {
+        out->max_conn_per_file = (int)conn;
+    } else {
+        out->max_conn_per_file = (int)sxcl_settings_download_max_conn(settings);
+    }
+
+    const char *env_cache = env_utf8("SXCL_DL_CACHE_DIR");
+    const char *cache = (env_cache && *env_cache) ? env_cache : sxcl_settings_download_cache_dir(settings);
+    if (cache && *cache) {
+        snprintf(out->cache_dir, sizeof(out->cache_dir), "%s", cache);
+    }
+}
+
 /* ── 每实例设置("instance.<实例名>.<键>") ── */
 
 static char *make_instance_key(const char *instance, const char *key)

@@ -5,6 +5,7 @@
 #endif
 
 #include <stdio.h>
+#include <stdlib.h>   /* _putenv_s / setenv(启动期解析的环境变量优先) */
 #include <string.h>
 
 #include "sxcl/fs.h"
@@ -317,6 +318,155 @@ int main(void)
         check_str(sxcl_settings_ui_theme(s5), "深色", "UTF-8 路径往返 ui.theme");
         check_str(sxcl_settings_get(s5, "中文键", NULL), "ok", "UTF-8 路径往返中文键");
         sxcl_settings_free(s5);
+    }
+
+    /* ── 9) 启动期解析(环境变量优先)+ 跨平台默认路径 ──
+     * "改设置 -> 落盘 -> 重启 -> 生效"这条闭环的**核心侧**证据:
+     * 落盘的值能在重开句柄后被 resolved_* 读出来,而且环境变量能压过它。 */
+    {
+        const char *cfg = "build/_settings_tmp/startup.conf";
+        sxcl_fs_remove(cfg);
+        sxcl_settings *s6 = sxcl_settings_open(cfg);
+        check(s6 != NULL, "启动配置:打开空文件");
+        check(sxcl_settings_set(s6, "ui.theme", "dark") == 0, "写入 ui.theme");
+        check(sxcl_settings_set(s6, "ui.accent", "#123456") == 0, "写入 ui.accent");
+        check(sxcl_settings_set(s6, "ui.language", "en-US") == 0, "写入 ui.language");
+        check(sxcl_settings_set(s6, "game.default_dir", "D:/mc/game") == 0, "写入 game.default_dir");
+        check(sxcl_settings_set(s6, "download.rate", "524288") == 0, "写入 download.rate");
+        check(sxcl_settings_set(s6, "download.workers", "3") == 0, "写入 download.workers");
+        check(sxcl_settings_set(s6, "download.max_conn", "8") == 0, "写入 download.max_conn");
+        check(sxcl_settings_set(s6, "download.cache_dir", "D:/mc/cache") == 0, "写入 download.cache_dir");
+        check(sxcl_settings_save(s6, cfg) == 0, "启动配置落盘");
+        sxcl_settings_free(s6);
+
+        /* 重新打开 = 模拟"重启":这些值必须原样读回来 */
+        sxcl_settings *s7 = sxcl_settings_open(cfg);
+        check(s7 != NULL, "重启后重新打开设置");
+        check_str(sxcl_settings_resolved_theme(s7), "dark", "重启后 ui.theme 生效(环境变量未设)");
+        check_str(sxcl_settings_resolved_accent(s7), "#123456", "重启后 ui.accent 生效");
+        check_str(sxcl_settings_resolved_language(s7), "en-US", "重启后 ui.language 生效");
+        check_str(sxcl_settings_resolved_game_dir(s7), "D:/mc/game", "重启后 game.default_dir 生效");
+
+        sxcl_settings_download dl;
+        sxcl_settings_resolve_download(s7, &dl);
+        check(dl.workers == 3, "download.workers -> 引擎 workers");
+        check_dbl(dl.rate_bps, 524288.0, "download.rate -> 引擎 rate_bps");
+        check(dl.max_conn_per_file == 8, "download.max_conn -> 引擎 max_conn_per_file");
+        check_str(dl.cache_dir, "D:/mc/cache", "download.cache_dir -> 引擎 cache_path");
+
+        /* 环境变量优先(界面层的 SXCL_UI_THEME/SXCL_UI_ACCENT 走的就是这条路) */
+#if defined(_WIN32)
+        _putenv_s("SXCL_UI_THEME", "light");
+        _putenv_s("SXCL_UI_ACCENT", "#abcdef");
+        _putenv_s("SXCL_UI_LANG", "zh-CN");
+        _putenv_s("SXCL_GAME_DIR", "E:/other");
+        _putenv_s("SXCL_DL_WORKERS", "7");
+        _putenv_s("SXCL_DL_RATE", "1024");
+        _putenv_s("SXCL_DL_MAX_CONN", "2");
+        _putenv_s("SXCL_DL_CACHE_DIR", "E:/cache");
+#else
+        setenv("SXCL_UI_THEME", "light", 1);
+        setenv("SXCL_UI_ACCENT", "#abcdef", 1);
+        setenv("SXCL_UI_LANG", "zh-CN", 1);
+        setenv("SXCL_GAME_DIR", "E:/other", 1);
+        setenv("SXCL_DL_WORKERS", "7", 1);
+        setenv("SXCL_DL_RATE", "1024", 1);
+        setenv("SXCL_DL_MAX_CONN", "2", 1);
+        setenv("SXCL_DL_CACHE_DIR", "E:/cache", 1);
+#endif
+        check_str(sxcl_settings_resolved_theme(s7), "light", "SXCL_UI_THEME 压过设置文件");
+        check_str(sxcl_settings_resolved_accent(s7), "#abcdef", "SXCL_UI_ACCENT 压过设置文件");
+        check_str(sxcl_settings_resolved_language(s7), "zh-CN", "SXCL_UI_LANG 压过设置文件");
+        check_str(sxcl_settings_resolved_game_dir(s7), "E:/other", "SXCL_GAME_DIR 压过设置文件");
+        sxcl_settings_resolve_download(s7, &dl);
+        check(dl.workers == 7, "SXCL_DL_WORKERS 压过设置文件");
+        check_dbl(dl.rate_bps, 1024.0, "SXCL_DL_RATE 压过设置文件");
+        check(dl.max_conn_per_file == 2, "SXCL_DL_MAX_CONN 压过设置文件");
+        check_str(dl.cache_dir, "E:/cache", "SXCL_DL_CACHE_DIR 压过设置文件");
+
+        /* 坏值不该把界面弄崩:回默认 */
+#if defined(_WIN32)
+        _putenv_s("SXCL_UI_THEME", "紫色");
+        _putenv_s("SXCL_UI_ACCENT", "不是颜色");
+#else
+        setenv("SXCL_UI_THEME", "紫色", 1);
+        setenv("SXCL_UI_ACCENT", "不是颜色", 1);
+#endif
+        check_str(sxcl_settings_resolved_theme(s7), "dark", "环境变量写错值 = 忽略它,用设置文件里的");
+        check_str(sxcl_settings_resolved_accent(s7), "#123456", "强调色写错值同理");
+#if defined(_WIN32)
+        _putenv_s("SXCL_UI_THEME", "");
+        _putenv_s("SXCL_UI_ACCENT", "");
+        _putenv_s("SXCL_UI_LANG", "");
+        _putenv_s("SXCL_GAME_DIR", "");
+        _putenv_s("SXCL_DL_WORKERS", "");
+        _putenv_s("SXCL_DL_RATE", "");
+        _putenv_s("SXCL_DL_MAX_CONN", "");
+        _putenv_s("SXCL_DL_CACHE_DIR", "");
+#else
+        unsetenv("SXCL_UI_THEME");
+        unsetenv("SXCL_UI_ACCENT");
+        unsetenv("SXCL_UI_LANG");
+        unsetenv("SXCL_GAME_DIR");
+        unsetenv("SXCL_DL_WORKERS");
+        unsetenv("SXCL_DL_RATE");
+        unsetenv("SXCL_DL_MAX_CONN");
+        unsetenv("SXCL_DL_CACHE_DIR");
+#endif
+        check_str(sxcl_settings_resolved_theme(s7), "dark", "环境变量清掉后又回到设置文件的值");
+        check_str(sxcl_settings_resolved_accent(s7), "#123456", "accent 同理");
+        sxcl_settings_resolve_download(s7, &dl);
+        check(dl.workers == 3, "下载参数同理");
+
+        /* 设置文件里没有的键:回默认(默认值就是"重启后该有的样子") */
+        sxcl_settings *s8 = sxcl_settings_open("build/_settings_tmp/startup_empty.conf");
+        check_str(sxcl_settings_resolved_theme(s8), SXCL_SETTINGS_DEFAULT_THEME, "空设置里 theme = auto");
+        check_str(sxcl_settings_resolved_accent(s8), SXCL_SETTINGS_DEFAULT_ACCENT, "空设置里 accent = #0067c0");
+        check_str(sxcl_settings_resolved_language(s8), "zh-CN", "空设置里 language = zh-CN");
+        check_str(sxcl_settings_resolved_game_dir(s8), "", "空设置里 game.default_dir = 空(由 paths 取平台默认)");
+        sxcl_settings_resolve_download(s8, &dl);
+        check(dl.workers == 0, "空设置里 workers = 0(引擎自动)");
+        check(dl.max_conn_per_file == 1, "空设置里 max_conn = 1(不分片)");
+        check_str(dl.cache_dir, "", "空设置里 cache_dir = 空");
+        sxcl_settings_free(s8);
+        sxcl_settings_free(s7);
+    }
+
+    /* ── 10) 跨平台设置位置(Android 走应用私有目录) ── */
+    {
+        char out[1024];
+        char err[256];
+        err[0] = '\0';
+
+        /* 显式覆盖:任何平台都一样(便携版/多配置并存/自动化) */
+#if defined(_WIN32)
+        _putenv_s("SXCL_CONFIG_DIR", "D:/portable/config");
+#else
+        setenv("SXCL_CONFIG_DIR", "/tmp/portable/config", 1);
+#endif
+        check(sxcl_settings_default_dir(out, sizeof(out), err, sizeof(err)) == SXCL_SETTINGS_OK,
+              "SXCL_CONFIG_DIR 覆盖成功");
+        check(strstr(out, "portable") != NULL, "目录取自环境变量");
+        check(sxcl_settings_default_path(out, sizeof(out), err, sizeof(err)) == SXCL_SETTINGS_OK,
+              "设置文件路径拼得出来");
+        check(strstr(out, "settings.conf") != NULL, "文件名固定 settings.conf");
+#if defined(_WIN32)
+        _putenv_s("SXCL_CONFIG_DIR", "");
+#else
+        unsetenv("SXCL_CONFIG_DIR");
+#endif
+        check(sxcl_settings_default_dir(out, sizeof(out), err, sizeof(err)) == SXCL_SETTINGS_OK,
+              "没有覆盖时也能拼出平台默认目录");
+        check(strstr(out, "SilentXCraftLauncher") != NULL || strstr(out, "silentxcraftlauncher") != NULL,
+              "平台默认目录名与 Python default_config_directory 同源");
+        check(sxcl_settings_default_dir(NULL, 0, err, sizeof(err)) == SXCL_SETTINGS_ERR_ARG,
+              "参数不合法 = ERR_ARG");
+        check(sxcl_settings_default_path(out, 4, err, sizeof(err)) == SXCL_SETTINGS_ERR_ARG,
+              "缓冲太小 = ERR_ARG(而不是写坏内存)");
+
+        /* Android 分支:核心层按 $SXCL_ANDROID_FILES 走应用私有目录。
+         * 本机不是安卓,编不到那个分支,所以这里只断言"安卓口径的路径拼法"这件事本身
+         * 由 paths.c/android.c 的测试覆盖;详见 docs/10。 */
     }
 
     printf("settings 测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);

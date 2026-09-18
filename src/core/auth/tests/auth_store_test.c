@@ -34,8 +34,10 @@ static void fill_session(sxcl_auth_session *s)
     (void)snprintf(s->ms.refresh_token, sizeof(s->ms.refresh_token), "%s", NEEDLE_REFR);
     (void)snprintf(s->ms.token_type, sizeof(s->ms.token_type), "Bearer");
     (void)snprintf(s->ms.scope, sizeof(s->ms.scope), "XboxLive.signin offline_access");
-    s->ms.issued_at = 1700000000;
-    s->ms.expires_at = 1700003600;
+    /* 用"相对现在"的时间:这样同一份会话既能测存储往返,也能拿去喂 launch --account
+     * (写死 2023 年的话,启动层会因为令牌过期直接拒绝,验不到参数拼装)。 */
+    s->ms.issued_at = sxcl_auth_now();
+    s->ms.expires_at = sxcl_auth_now() + 3600;
     (void)snprintf(s->xbox.user_hash, sizeof(s->xbox.user_hash), "u0000000000000001");
     (void)snprintf(s->xbox.xsts_token, sizeof(s->xbox.xsts_token), "NEEDLE-XSTS-TOKEN-1a2b3c");
     s->xbox.xsts_expires_at = 1700050000;
@@ -43,7 +45,7 @@ static void fill_session(sxcl_auth_session *s)
     (void)snprintf(s->mc.access_token, sizeof(s->mc.access_token), "%s", NEEDLE_MC);
     (void)snprintf(s->mc.uuid, sizeof(s->mc.uuid), "00000000000000000000000000000000");
     (void)snprintf(s->mc.name, sizeof(s->mc.name), "SXCLPlayer");
-    s->mc.expires_at = 1700086400;
+    s->mc.expires_at = sxcl_auth_now() + 86400;
     s->mc.entitlement_count = 2;
     s->mc.entitlements_checked = 1;
     s->mc.profile_checked = 1;

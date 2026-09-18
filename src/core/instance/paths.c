@@ -340,7 +340,8 @@ int sxcl_paths_is_game_dir(const char *path)
     return (sxcl_paths_count_versions(path) > 0) ? 1 : 0;
 }
 
-int sxcl_paths_inspect(const char *path, const char *label, sxcl_game_folder *out)
+int sxcl_paths_inspect_full(const char *path, const char *label, const char *owner,
+                            sxcl_game_folder *out)
 {
     if (path == NULL || path[0] == '\0' || out == NULL) {
         return SXCL_PATHS_ERR_ARG;
@@ -348,6 +349,7 @@ int sxcl_paths_inspect(const char *path, const char *label, sxcl_game_folder *ou
     (void)memset(out, 0, sizeof(*out));
     paths_copy(out->path, sizeof(out->path), path);
     paths_copy(out->label, sizeof(out->label), (label != NULL && label[0] != '\0') ? label : "自定义目录");
+    paths_copy(out->owner, sizeof(out->owner), (owner != NULL) ? owner : "");
 
     out->exists = sxcl_fs_is_dir(path) ? 1 : 0;
     if (out->exists) {
@@ -369,6 +371,11 @@ int sxcl_paths_inspect(const char *path, const char *label, sxcl_game_folder *ou
     }
     (void)sxcl_paths_describe(out, out->describe, sizeof(out->describe));
     return SXCL_PATHS_OK;
+}
+
+int sxcl_paths_inspect(const char *path, const char *label, sxcl_game_folder *out)
+{
+    return sxcl_paths_inspect_full(path, label, NULL, out);
 }
 
 int sxcl_paths_push(sxcl_game_folders *folders, const sxcl_game_folder *folder)
@@ -540,7 +547,14 @@ int sxcl_paths_resolve_game_dir(const char *configured_dir, char *out, size_t ou
     }
     sxcl_game_folders folders;
     char detect_err[SXCL_PATHS_ERROR_MAX];
+#if defined(__ANDROID__)
+    /* 安卓走**专用候选表**(共享存储 + 各家启动器),桌面那五条在安卓上几乎全是空的。
+     * 两个环境变量都由安卓打包层设置;SXCL_ANDROID_SHARED 可空(默认 /storage/emulated/0)。 */
+    (void)sxcl_paths_detect_android(env_value("SXCL_ANDROID_FILES"), env_value("SXCL_ANDROID_SHARED"),
+                                    &folders, NULL, detect_err, sizeof(detect_err));
+#else
     (void)sxcl_paths_detect(&folders, NULL, detect_err, sizeof(detect_err));
+#endif
     const sxcl_game_folder *best = sxcl_paths_best(&folders);
     if (best != NULL && best->exists) {
         if (strlen(best->path) >= out_len) {
@@ -562,3 +576,233 @@ int sxcl_paths_resolve_game_dir(const char *configured_dir, char *out, size_t ou
     }
     return SXCL_PATHS_OK;
 }
+
+/* ══════════════════════ Android:候选表 / 探测 / 诊断 ══════════════════════ */
+
+/* 相对共享存储根的候选(实测依据见 docs/08 第 14 节):
+ *   FCL    默认把游戏数据放 getExternalFilesDir()/.minecraft,也允许用户改成
+ *          /storage/emulated/0/FCL/.minecraft —— 这台平板(.33)用的就是后者;
+ *   HMCL   安卓版的数据目录在 Android/data/org.jackhuang.hmcl/files 下;
+ *   PojavLauncher 在 Android/data/net.kdt.pojavlaunch/files 与 games/PojavLauncher 下。
+ * 列表只是"去哪儿找",**不代表能读**(共享存储要 MANAGE_EXTERNAL_STORAGE;
+ * Android/data/<别人的包名> 在 Android 11+ 对别的应用完全不可见)。能不能读由
+ * sxcl_paths_probe_android 如实告诉用户。 */
+typedef struct android_rel_root {
+    const char *rel;
+    const char *label;
+    const char *owner;
+} android_rel_root;
+
+static const android_rel_root kAndroidRelRoots[] = {
+    { "FCL/.minecraft", "FCL 游戏目录（共享存储）", "FCL" },
+    { "games/FCL/.minecraft", "FCL 游戏目录（旧版位置）", "FCL" },
+    { ".minecraft", "共享存储根目录", "共享存储" },
+    { "HMCL/.minecraft", "HMCL 游戏目录（共享存储）", "HMCL" },
+    { "games/PojavLauncher/.minecraft", "PojavLauncher 游戏目录", "PojavLauncher" },
+    { "Android/data/com.tungsten.fcl/files/.minecraft", "FCL 应用数据目录", "FCL" },
+    { "Android/data/org.jackhuang.hmcl/files/.minecraft", "HMCL 应用数据目录", "HMCL" },
+    { "Android/data/net.kdt.pojavlaunch/files/.minecraft", "PojavLauncher 应用数据目录",
+      "PojavLauncher" },
+    { "Android/data/com.silentstudio.sxcl/files/.minecraft", "本应用（共享存储侧）", "本应用" },
+};
+
+#define SXCL_ANDROID_DEFAULT_SHARED "/storage/emulated/0"
+
+static void android_push_root(sxcl_android_root *out, size_t cap, size_t *n, const char *path,
+                              const char *label, const char *owner)
+{
+    if (*n >= cap || path == NULL || path[0] == '\0') {
+        return;
+    }
+    (void)memset(&out[*n], 0, sizeof(out[*n]));
+    paths_copy(out[*n].path, sizeof(out[*n].path), path);
+    paths_copy(out[*n].label, sizeof(out[*n].label), (label != NULL) ? label : "");
+    paths_copy(out[*n].owner, sizeof(out[*n].owner), (owner != NULL) ? owner : "");
+    ++(*n);
+}
+
+size_t sxcl_paths_android_roots(const char *files_dir, const char *shared_root,
+                                sxcl_android_root *out, size_t cap)
+{
+    size_t n = 0;
+    size_t i = 0;
+    char shared[SXCL_PATHS_PATH_MAX];
+    if (out == NULL || cap == 0) {
+        return 0;
+    }
+    /* 1) 本应用自己的私有目录 —— 唯一**一定能读**的那个 */
+    if (files_dir != NULL && files_dir[0] != '\0') {
+        char mine[SXCL_PATHS_PATH_MAX];
+        if (paths_join(mine, sizeof(mine), files_dir, ".minecraft")) {
+            android_push_root(out, cap, &n, mine, "本应用（私有目录）", "本应用");
+        }
+    }
+    /* 2) 共享存储上的各家目录 */
+    paths_copy(shared, sizeof(shared),
+               (shared_root != NULL && shared_root[0] != '\0') ? shared_root
+                                                                : SXCL_ANDROID_DEFAULT_SHARED);
+    for (i = 0; i < sizeof(kAndroidRelRoots) / sizeof(kAndroidRelRoots[0]); ++i) {
+        char path[SXCL_PATHS_PATH_MAX];
+        if (!paths_join(path, sizeof(path), shared, kAndroidRelRoots[i].rel)) {
+            continue;
+        }
+        android_push_root(out, cap, &n, path, kAndroidRelRoots[i].label, kAndroidRelRoots[i].owner);
+    }
+    return n;
+}
+
+static int android_folders_has(const sxcl_game_folders *folders, const char *path)
+{
+    size_t k = 0;
+    for (k = 0; k < folders->count; ++k) {
+        if (sxcl_dir_name_compare(folders->items[k].path, path) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int sxcl_paths_detect_android(const char *files_dir, const char *shared_root,
+                              sxcl_game_folders *folders, const char *configured_dir,
+                              char *err, size_t err_len)
+{
+    sxcl_android_root roots[SXCL_PATHS_MAX_PROBES];
+    size_t rn = 0;
+    size_t i = 0;
+    if (folders == NULL) {
+        paths_err(err, err_len, "参数不合法");
+        return SXCL_PATHS_ERR_ARG;
+    }
+    (void)memset(folders, 0, sizeof(*folders));
+
+    /* 用户手动配置的目录排第一:他说的算(哪怕目录不存在也要如实列出来) */
+    if (configured_dir != NULL && configured_dir[0] != '\0' &&
+        strlen(configured_dir) < SXCL_PATHS_PATH_MAX) {
+        sxcl_game_folder folder;
+        if (sxcl_paths_inspect_full(configured_dir, "当前配置", NULL, &folder) == SXCL_PATHS_OK &&
+            folder.exists) {
+            (void)sxcl_paths_push(folders, &folder);
+        }
+    }
+
+    rn = sxcl_paths_android_roots(files_dir, shared_root, roots, SXCL_PATHS_MAX_PROBES);
+    for (i = 0; i < rn; ++i) {
+        sxcl_game_folder folder;
+        if (android_folders_has(folders, roots[i].path)) {
+            continue;
+        }
+        if (sxcl_paths_inspect_full(roots[i].path, roots[i].label, roots[i].owner, &folder) !=
+            SXCL_PATHS_OK) {
+            continue;
+        }
+        if (!folder.exists) {
+            continue; /* 不存在的候选不进列表(与桌面语义一致) */
+        }
+        (void)sxcl_paths_push(folders, &folder);
+    }
+    sxcl_paths_sort(folders);
+    if (folders->count == 0) {
+        paths_err(err, err_len,
+                  "没找到游戏目录（安卓上找过共享存储 .minecraft 与 FCL/HMCL/PojavLauncher 的数据目录）："
+                  "请在设置里指定 .minecraft 目录");
+    }
+    return SXCL_PATHS_OK;
+}
+
+/** 填一条诊断。返回 1 = 这条是真能用的游戏目录。 */
+static int android_fill_probe(sxcl_game_probe *probe, const char *path, const char *label,
+                              const char *owner)
+{
+    char detail[SXCL_PATHS_DESC_MAX];
+    sxcl_game_folder folder;
+    (void)memset(probe, 0, sizeof(*probe));
+    paths_copy(probe->path, sizeof(probe->path), path);
+    paths_copy(probe->label, sizeof(probe->label), (label != NULL) ? label : "");
+    paths_copy(probe->owner, sizeof(probe->owner), (owner != NULL) ? owner : "");
+    detail[0] = '\0';
+    probe->access = sxcl_android_probe_path(path, 0, detail, sizeof(detail));
+    if (probe->access == SXCL_ANDROID_OK &&
+        sxcl_paths_inspect_full(path, label, owner, &folder) == SXCL_PATHS_OK) {
+        probe->exists = folder.exists;
+        probe->versions = folder.versions;
+    }
+    if (probe->exists) {
+        if (probe->versions > 0) {
+            (void)snprintf(probe->reason, sizeof(probe->reason), "找到游戏目录:%d 个版本",
+                           probe->versions);
+            (void)snprintf(probe->hint, sizeof(probe->hint), "可以直接选它启动游戏。");
+            return 1;
+        }
+        (void)snprintf(probe->reason, sizeof(probe->reason),
+                       "目录在,但里面没有 versions/,不像游戏目录");
+        (void)snprintf(probe->hint, sizeof(probe->hint),
+                       "如果游戏装在别处,请手动指定那个 .minecraft 目录。");
+        return 0;
+    }
+    /* 怎么办:按**游戏目录**的场景写,别拿 Java 那套文案糊上去 */
+    switch (probe->access) {
+    case SXCL_ANDROID_DENIED:
+        (void)snprintf(probe->hint, sizeof(probe->hint),
+                       "安卓不让本应用读这里。共享存储上的游戏目录需要在 系统设置 - 应用 - 特殊应用权限 -"
+                       " 所有文件访问权限 里给本应用授权;没有这个权限时,只认本应用私有目录里的"
+                       " .minecraft。");
+        break;
+    case SXCL_ANDROID_NOT_READABLE:
+        (void)snprintf(probe->hint, sizeof(probe->hint), "读这个位置时出错,可能是权限或存储已卸载。");
+        break;
+    case SXCL_ANDROID_NOEXEC:
+        (void)snprintf(probe->hint, sizeof(probe->hint), "共享存储是 noexec,游戏数据放这里跑不起来。");
+        break;
+    case SXCL_ANDROID_MISSING:
+    default:
+        (void)snprintf(probe->hint, sizeof(probe->hint),
+                       "这个位置没有游戏数据;在设置里手动指定你的 .minecraft 目录即可。");
+        break;
+    }
+    /* 原样带出体检的**原始原因**(含路径与原话) —— "为什么没检测到"要能拿给用户看,
+     * 不能只回一句"没找到";怎么办由 sxcl_android_access_hint 另外给。 */
+    (void)snprintf(probe->reason, sizeof(probe->reason), "%s", detail);
+    return 0;
+}
+
+size_t sxcl_paths_probe_android(const char *files_dir, const char *shared_root,
+                                const char *configured_dir, sxcl_game_probes *out)
+{
+    sxcl_android_root roots[SXCL_PATHS_MAX_PROBES];
+    size_t rn = 0;
+    size_t i = 0;
+    if (out == NULL) {
+        return 0;
+    }
+    (void)memset(out, 0, sizeof(*out));
+
+    if (configured_dir != NULL && configured_dir[0] != '\0' &&
+        strlen(configured_dir) < SXCL_PATHS_PATH_MAX && out->count < SXCL_PATHS_MAX_PROBES) {
+        if (android_fill_probe(&out->items[out->count], configured_dir, "当前配置", NULL)) {
+            ++out->usable;
+        }
+        ++out->count;
+    }
+
+    rn = sxcl_paths_android_roots(files_dir, shared_root, roots, SXCL_PATHS_MAX_PROBES);
+    for (i = 0; i < rn && out->count < SXCL_PATHS_MAX_PROBES; ++i) {
+        int dup = 0;
+        size_t k = 0;
+        for (k = 0; k < out->count; ++k) {
+            if (sxcl_dir_name_compare(out->items[k].path, roots[i].path) == 0) {
+                dup = 1;
+                break;
+            }
+        }
+        if (dup) {
+            continue;
+        }
+        if (android_fill_probe(&out->items[out->count], roots[i].path, roots[i].label,
+                               roots[i].owner)) {
+            ++out->usable;
+        }
+        ++out->count;
+    }
+    return out->count;
+}
+

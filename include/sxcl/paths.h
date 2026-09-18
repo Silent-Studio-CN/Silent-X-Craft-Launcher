@@ -19,6 +19,8 @@
 
 #include <stddef.h>
 
+#include "sxcl/android.h" /* Android 侧的"能不能读/能不能执行"分类 */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,9 +34,11 @@ extern "C" {
 #define SXCL_PATHS_ERR_EMPTY      (-5)  /* 一个候选都没有(连默认路径都拼不出来) */
 
 /* ── 尺寸上限 ── */
-#define SXCL_PATHS_MAX_CANDIDATES 8     /* 一次探测最多列出几个候选 */
+#define SXCL_PATHS_MAX_CANDIDATES 16    /* 一次探测最多列出几个候选(安卓候选多,8 不够用) */
 #define SXCL_PATHS_PATH_MAX       640   /* 单个路径的字节数上限(UTF-8,中文一个 3 字节) */
 #define SXCL_PATHS_LABEL_MAX      64    /* "官方启动器(APPDATA)" 这类来源标签 */
+#define SXCL_PATHS_OWNER_MAX      64    /* 这份目录是谁的:"本应用"/"FCL"/"HMCL"/"共享存储" */
+#define SXCL_PATHS_MAX_PROBES     20    /* 安卓诊断一次最多列几个"我们找过的地方" */
 #define SXCL_PATHS_DESC_MAX       256   /* 人话描述 */
 #define SXCL_PATHS_ERROR_MAX      256   /* 人话错误 */
 
@@ -42,6 +46,7 @@ extern "C" {
 typedef struct sxcl_game_folder {
     char path[SXCL_PATHS_PATH_MAX];       /**< 绝对/原样路径(UTF-8) */
     char label[SXCL_PATHS_LABEL_MAX];     /**< 这是谁留下的目录:官方启动器(APPDATA)/用户目录/… */
+    char owner[SXCL_PATHS_OWNER_MAX];     /**< 谁拥有的目录:"本应用"/"FCL"/"HMCL"/"共享存储";桌面版留空 */
     char describe[SXCL_PATHS_DESC_MAX];   /**< 人话:"<路径>(<label>,N 个版本)" */
     int versions;                         /**< versions/ 下数出来的版本数(0 = 没有 versions/ 或空) */
     int has_assets;                       /**< 有 assets/ 说明真的玩过 */
@@ -72,7 +77,12 @@ int sxcl_paths_program_dir(char *out, size_t out_len, char *err, size_t err_len)
 
 /** 探测单个候选目录(Python 的 _inspect)。只读不写,失败不报错:
  *  目录不存在时 exists=0、versions=0、score=-1,仍然返回 SXCL_PATHS_OK
- *  (界面要能把"当前配置的目录不存在"显示出来,所以这不是错误)。 */
+ *  (界面要能把"当前配置的目录不存在"显示出来,所以这不是错误)。
+ *  owner 是"这份目录是谁的"(可空;桌面版不区分,安卓上用来显示 FCL/HMCL)。 */
+int sxcl_paths_inspect_full(const char *path, const char *label, const char *owner,
+                            sxcl_game_folder *out);
+
+/** 等价于 sxcl_paths_inspect_full(path, label, NULL, out)(老调用点不用改)。 */
 int sxcl_paths_inspect(const char *path, const char *label, sxcl_game_folder *out);
 
 /** 把一个候选追加到列表(满了丢最差的:分数更低者,记 dropped)。 */
@@ -111,6 +121,64 @@ int sxcl_paths_is_game_dir(const char *path);
  *  成功返回 SXCL_PATHS_OK;连平台默认都拼不出来返回 SXCL_PATHS_ERR_EMPTY。 */
 int sxcl_paths_resolve_game_dir(const char *configured_dir, char *out, size_t out_len,
                                 char *err, size_t err_len);
+
+/* ══════════════════════ Android:自动扫描(第 5 条候选之外) ══════════════════════
+ *
+ * 桌面的五条候选(便携/APPDATA/用户目录/桌面/当前配置)在安卓上几乎全是空的:
+ *   - 没有 APPDATA,没有"桌面";HOME 被安卓打包层指到应用私有 files 目录;
+ *   - 用户真正在玩的那份数据,在**共享存储**上,而且是别的启动器留下的:
+ *     实测(192.168.220.33)FCL 的目录是 /storage/emulated/0/FCL/.minecraft。
+ * 所以安卓必须另给一份候选表,否则用户"明明有游戏,自动扫描却说没找到"(用户反馈原文)。
+ *
+ * 与 Java 那边同一个道理:能不能读要**问文件系统**,不能假设 —— 所以除了探测,
+ * 还提供一份"我们找过哪些地方、为什么没用上"的诊断给设置页显示。
+ */
+
+/** 一个候选的更多字段:除了路径,还有"这是谁留下的"。 */
+typedef struct sxcl_android_root {
+    char path[SXCL_PATHS_PATH_MAX];
+    char label[SXCL_PATHS_LABEL_MAX]; /**< 来源标签,直接给界面用 */
+    char owner[SXCL_PATHS_OWNER_MAX]; /**< "本应用"/"FCL"/"HMCL"/"PojavLauncher"/"共享存储" */
+} sxcl_android_root;
+
+/** 安卓上放游戏目录的已知位置(**纯字符串,不碰文件系统**,所以能在桌面上单测)。
+ *  files_dir   : 本应用私有 files 目录(SXCL_ANDROID_FILES);可空。
+ *  shared_root : 共享存储根;可空 = /storage/emulated/0。
+ *  返回写入 out 的条数(≤ cap)。列表本身**不代表存在**,存在与否由 sxcl_paths_probe_android 判定。 */
+size_t sxcl_paths_android_roots(const char *files_dir, const char *shared_root,
+                                sxcl_android_root *out, size_t cap);
+
+/** Android 版探测:把安卓候选表 + 当前配置一起过一遍,只保留**真实存在**的目录,
+ *  按 score 降序。语义与 sxcl_paths_detect 完全一致,只是候选表不同 —— 单独暴露
+ *  是为了能在桌面上用夹具目录单测(安卓真机不方便跑单测)。
+ *  返回码与 sxcl_paths_detect 一致(永远 SXCL_PATHS_OK,没找到只是 count=0 + 人话 err)。 */
+int sxcl_paths_detect_android(const char *files_dir, const char *shared_root,
+                              sxcl_game_folders *folders, const char *configured_dir,
+                              char *err, size_t err_len);
+
+/** 一个候选的体检结论(给设置页"为什么没找到"用)。 */
+typedef struct sxcl_game_probe {
+    char path[SXCL_PATHS_PATH_MAX];
+    char label[SXCL_PATHS_LABEL_MAX];
+    char owner[SXCL_PATHS_OWNER_MAX];
+    int exists;                        /**< 1 = 这个目录真的在 */
+    sxcl_android_access access;        /**< 为什么没用上(OK/MISSING/DENIED/NOEXEC/...) */
+    int versions;                      /**< 数出来的版本数(0 = 没有 versions/ 或空) */
+    char reason[SXCL_PATHS_DESC_MAX];  /**< 人话:一行说清这个候选怎么了(原始原因,含路径) */
+    char hint[SXCL_PATHS_DESC_MAX];    /**< 人话:怎么办(按**游戏目录**的场景给,不是 Java 那套) */
+} sxcl_game_probe;
+
+typedef struct sxcl_game_probes {
+    sxcl_game_probe items[SXCL_PATHS_MAX_PROBES];
+    size_t count;
+    size_t usable;                     /**< 其中真的能当游戏目录用的条数(exists 且 versions>0) */
+} sxcl_game_probes;
+
+/** 安卓诊断:列出**全部**安卓候选(存在的不存在的、读得了读不了的),每人人话一句。
+ *  与 sxcl_paths_detect_android 共用同一张候选表,顺序也一致(配置在最前)。
+ *  返回写进 out->count 的条数。cfg 可空。 */
+size_t sxcl_paths_probe_android(const char *files_dir, const char *shared_root,
+                                const char *configured_dir, sxcl_game_probes *out);
 
 #ifdef __cplusplus
 }

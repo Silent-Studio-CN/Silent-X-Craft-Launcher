@@ -62,6 +62,9 @@ typedef struct sxcl_java_env {
     const char *app_data;          /**< %APPDATA%(官方运行时与 .minecraft 在这下面) */
     const char *user_home;         /**< $HOME / %USERPROFILE% */
     const char *path;              /**< PATH(';' 与 ':' 两种分隔都认) */
+    const char *android_files;     /**< Android:本应用私有 files 目录(环境变量 SXCL_ANDROID_FILES);
+                                        **唯一**能放可执行 Java 的地方,见 android.h 的说明 */
+    const char *android_shared;    /**< Android:共享存储根;空 = /storage/emulated/0(只在列表/诊断里用) */
 } sxcl_java_env;
 
 /** 环境变量 + 背后的存储。字段被 env 引用,别把它当成可随意拷贝的值。 */
@@ -74,6 +77,8 @@ typedef struct sxcl_java_env_store {
     char app_data[SXCL_JAVA_PATH_MAX];
     char user_home[SXCL_JAVA_PATH_MAX];
     char path[4096];
+    char android_files[SXCL_JAVA_PATH_MAX];
+    char android_shared[SXCL_JAVA_PATH_MAX];
 } sxcl_java_env_store;
 
 /** 一个候选安装点(java 可执行文件全路径 + 归属)。 */
@@ -81,6 +86,7 @@ typedef struct sxcl_java_candidate {
     char path[SXCL_JAVA_PATH_MAX];
     char home[SXCL_JAVA_PATH_MAX];
     char source[24];
+    char owner[64]; /**< 这份 Java 是谁的:"本应用"/"FCL"/"HMCL"/"PojavLauncher"/"共享存储";桌面版留空 */
 } sxcl_java_candidate;
 
 /** 本机平台。 */
@@ -123,6 +129,72 @@ int sxcl_java_inspect(const char *java_exe_or_home, sxcl_java_info *out);
  *  返回写入条数。env 传 NULL 表示现场抓一份真实环境。 */
 size_t sxcl_java_discover(const sxcl_java_env *env, sxcl_java_os os,
                           sxcl_java_info *out, size_t cap);
+
+
+/* ══════════════════════ 1b. Android:为什么检不出 Java(可读的结论) ══════════════════════
+ *
+ * 用户反馈原文(小米平板 192.168.220.33,Android 16):
+ *   "我平板有 HMCL 不可能没有 JAVA 和游戏目录…… 成功检出游戏,但是没检出 JAVA"。
+ * 原因不是"没扫",是**安卓不让用**:别的启动器的 Java 在它自己的私有目录里,
+ * 我们既 stat 不到(沙箱),共享存储上的又起不了进程(noexec)。
+ * 所以这里不只返回"能用的",还把**每个候选为什么用不了**分类带出来,界面照实显示。
+ * 分类规则见 sxcl/android.h;sxcl_java_probe_* 全程只读文件系统,**不执行** java
+ * (与 sxcl_java_discover 的约定一致)。
+ */
+
+/** 一个候选 Java 的体检结论。 */
+typedef enum sxcl_java_verdict {
+    SXCL_JAVA_VERDICT_USABLE = 0,   /**< 可执行、读得出 release —— 能用 */
+    SXCL_JAVA_VERDICT_MISSING,      /**< 这个位置没有东西 */
+    SXCL_JAVA_VERDICT_DENIED,       /**< 沙箱拒绝:通常是**别的应用**的私有目录 */
+    SXCL_JAVA_VERDICT_NOEXEC,       /**< 在 noexec 文件系统上(共享存储),起不了进程 */
+    SXCL_JAVA_VERDICT_NOT_EXECUTABLE, /**< 有文件,但没有执行位 */
+    SXCL_JAVA_VERDICT_NOT_A_JRE,    /**< 能执行,但读不出 JRE 画像(缺 release / 不是 Java) */
+    SXCL_JAVA_VERDICT_UNREADABLE,   /**< 存在但读不了(其它 IO 错误) */
+    SXCL_JAVA_VERDICT_COUNT
+} sxcl_java_verdict;
+
+#define SXCL_JAVA_MAX_PROBES 20
+
+/** 一条体检记录。path 是候选路径;usable=1 时它还带着完整画像(major/version)。 */
+typedef struct sxcl_java_probe {
+    char path[SXCL_JAVA_PATH_MAX];
+    char home[SXCL_JAVA_PATH_MAX];
+    char source[24];                       /**< 来源键:"AndroidPrivate"/"AndroidForeign"/… */
+    char owner[64];                        /**< "本应用"/"FCL"/"HMCL"/"PojavLauncher"/"共享存储" */
+    sxcl_java_verdict verdict;
+    int major;                             /**< USABLE 时的 Java 主版本,否则 0 */
+    char version[64];                      /**< USABLE 时的版本串 */
+    char reason[192];                      /**< 原始原因(带路径与 errno 原话) */
+} sxcl_java_probe;
+
+typedef struct sxcl_java_report {
+    sxcl_java_probe items[SXCL_JAVA_MAX_PROBES];
+    size_t count;
+    size_t usable;                         /**< 其中 verdict == USABLE 的条数 */
+} sxcl_java_report;
+
+/** 结论的中文短名("可用"/"不在"/"沙箱拒绝"/"共享存储不能执行"/"没有执行位"/"不是 JRE")。 */
+const char *sxcl_java_verdict_name(sxcl_java_verdict verdict);
+/** 结论的稳定英文键("usable"/"missing"/"denied"/"noexec"/"not_executable"/"not_a_jre")。 */
+const char *sxcl_java_verdict_key(sxcl_java_verdict verdict);
+/** 一条人话建议(为什么 + 下一步)。永远返回非空串。 */
+const char *sxcl_java_verdict_hint(sxcl_java_verdict verdict);
+
+/** 体检一串候选(os 决定 java 可执行文件名;mounts_text 传 NULL = 真的读 /proc/self/mounts)。
+ *  第 i 条候选对应 filter[i](0 = 只要不是 MISSING 就收,1 = 只收 USABLE)。
+ *  返回写进 out->count 的条数。out 为 NULL 返回 0。 */
+size_t sxcl_java_probe_candidates(const sxcl_java_candidate *cands, size_t cand_count,
+                                  sxcl_java_os os, const char *mounts_text, sxcl_java_report *out);
+
+/** Android 专用:把"已知会放 Java 的地方"全列出来逐个体检 ——
+ *   1) 本应用私有目录(<files>/runtime、<files>/jre、<files>/java、<data>/app_runtime/java)
+ *      —— 真的往下扫 bin/java,扫到就是 USABLE(这是**唯一**能用的一类);
+ *   2) 别的启动器(HMCL/FCL/PojavLauncher)的私有目录 —— 如实报 DENIED;
+ *   3) 共享存储上的运行时目录 —— 如实报 NOEXEC。
+ *  files_dir 可空;shared_root 可空(默认 /storage/emulated/0)。返回 out->count。 */
+size_t sxcl_java_probe_android(const char *files_dir, const char *shared_root,
+                               sxcl_java_report *out);
 
 /** 版本 JSON 要求的 Java 主版本(javaVersion.majorVersion)。
  *  字段缺失返回 8 —— 官方启动器的行为:1.13 之前一律 Java 8。 */

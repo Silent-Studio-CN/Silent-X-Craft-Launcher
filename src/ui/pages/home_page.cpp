@@ -60,6 +60,9 @@
 
 #include "fluent_theme.h"
 
+// 账户(正版登录)—— Python 版无此功能,新增;启动接线只用这一个入口(见 launchVersion)
+#include "dialogs/account.h"
+
 #include "main_window.h"
 
 // 我们自己的核心库(sxcl_ui_core 已经链了 sxcl,include/ 也挂着):
@@ -140,6 +143,17 @@ QString ownSettingsFilePath() {
 // 游戏目录:先读核心库设置 game.default_dir;空则问核心库要平台默认
 // (Windows = %APPDATA%/.minecraft;Android = $SXCL_ANDROID_FILES/.minecraft,见 paths.c)。
 // 两条都拿不到才退回 <home>/.minecraft(与旧行为一致,保底不空)。
+// 最大内存:读我们自己的设置(game.max_memory_mb —— 设置页写的就是这个键)。
+// 读不到返回 0 = 交给核心库按位数取默认(与 CLI 不给 --memory 时的行为一致)。
+int configuredMemoryMb() {
+    if (sxcl_settings *settings = sxcl_settings_open(ownSettingsFilePath().toUtf8().constData())) {
+        const int mb = static_cast<int>(sxcl_settings_get_int(settings, "game.max_memory_mb", 0));
+        sxcl_settings_free(settings);
+        return mb > 0 ? mb : 0;
+    }
+    return 0;
+}
+
 QString resolveGameDirectory() {
     char err[256];
     char buf[4096];
@@ -624,6 +638,33 @@ void HomePage::launchVersion(const QString &versionId) { // home_page.py:245-258
                       QStringLiteral("请先在设置中选择 Java 运行时"), window(), 4000);
         return;
     }
+    // ── 正版账户接线(**本文件唯一一处新增;Python 版没有账户功能**)──
+    //
+    // 有可用的登录账户 → 走**已登录账户启动**(核心的 launch 支持 --account 语义:
+    // sxcl_launch_request 的 player_name/uuid/access_token;判据与 CLI 的
+    //   sxcl-dl launch <版本> <目录> --account
+    // 完全一致,见 tools/sxcl-dl/main.c:831-889)。没有账户 → **保持原来的行为**
+    // (切启动页 / 离线提示),不做任何假装。
+    // 启动是同步阻塞的(要等到游戏退出),所以交给工作线程;结果用 InfoBar 如实汇报。
+    const AccountSnapshot account = loadAccountSnapshot();
+    if (accountCanLaunch(account)) {
+        if (startAccountLaunch(m_gameDir, versionId, javaPath, configuredMemoryMb()) != nullptr) {
+            InfoBar::push(InfoBar::Type::Info, QStringLiteral("正在启动"),
+                          QStringLiteral("用已登录的正版账户启动 %1（玩家名 %2）")
+                              .arg(versionId, account.playerName),
+                          window(), 4000);
+            return;
+        }
+    } else if (account.loggedIn) {
+        // 登录了但这次用不上:先如实说清原因,再按原来的离线路径走(不静默降级、不假装成功)。
+        const QString why =
+            (!account.hasMcToken || account.mcExpired)
+                ? QStringLiteral("登录凭据已过期：到 设置 → 账户 点「刷新」免密续期；不行就重新登录一次")
+                : QStringLiteral("这个账户没有 Java 版档案（没买或没取到），本次按离线身份启动");
+        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("本次没有用正版身份"), why, window(),
+                      8000);
+    }
+
     if (auto *mw = qobject_cast<MainWindow *>(window())) {
         mw->switchToLaunch(versionId);
         return;

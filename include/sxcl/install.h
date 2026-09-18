@@ -131,6 +131,21 @@ typedef struct sxcl_install_plan {
                                           *   默认表实现**必须**有 transport_factory,否则下载全失败。 */
 } sxcl_install_plan;
 
+/** 把版本清单 JSON 落到**启动层要的位置**:<game_dir>/versions/<version_id>/<version_id>.json。
+ *
+ * 为什么单独给一个函数:启动层(sxcl_launch_run)读的就是这个路径,而"下载一个版本"
+ * (sxcl-dl version)和"安装一个版本"(sxcl_install_run)是两条不同的路 ——
+ * 两边都必须把 JSON 写到同一个地方,否则会出现**文件都下完了却启动不了**这种产品级缺陷
+ * (实测踩过:sxcl-dl version 只把 JSON 留在缓存目录,启动层报找不到版本 JSON)。
+ *
+ * 做法:
+ *   - 先写 <目标>.tmp 再原子改名 -> **重复执行不会损坏已有的好文件**(改名是原子的);
+ *   - version_id 只允许 [0-9A-Za-z._-] -> 挡住 "../" 之类逃出 versions/ 的路径;
+ *   - 内容原样拷贝 json_path(调用方通常给缓存里那份已做过 SHA-1 校验的)。
+ * 成功返回 0;失败返回负错误码并写人话 err。 */
+int sxcl_install_write_version_json(const char *game_dir, const char *version_id,
+                                   const char *json_path, char *err, size_t err_len);
+
 /** 计划里实际会跑的阶段数(UI 照它画行)。plan 为空返回 0。 */
 size_t sxcl_install_plan_stage_count(const sxcl_install_plan *plan);
 /** 第 index 个阶段的枚举;越界返回 SXCL_INSTALL_STAGE_END。 */

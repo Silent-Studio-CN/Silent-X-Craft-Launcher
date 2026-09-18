@@ -15,6 +15,8 @@
 
 #include "sxcl/launch.h"
 
+#include "sxcl/android.h" /* 安卓:路径"能不能读/能不能执行"的分类 */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -391,6 +393,9 @@ void sxcl_java_env_capture(sxcl_java_env_store *store)
         get_env_utf8("HOME", store->user_home, sizeof(store->user_home));
     }
     get_env_utf8("PATH", store->path, sizeof(store->path));
+    /* 安卓打包层设置的两个口子:私有 files 目录(唯一能放可执行文件的地方)与共享存储根 */
+    get_env_utf8("SXCL_ANDROID_FILES", store->android_files, sizeof(store->android_files));
+    get_env_utf8("SXCL_ANDROID_SHARED", store->android_shared, sizeof(store->android_shared));
 
     store->env.java_home = store->java_home[0] ? store->java_home : NULL;
     store->env.program_files = store->program_files[0] ? store->program_files : NULL;
@@ -399,6 +404,8 @@ void sxcl_java_env_capture(sxcl_java_env_store *store)
     store->env.app_data = store->app_data[0] ? store->app_data : NULL;
     store->env.user_home = store->user_home[0] ? store->user_home : NULL;
     store->env.path = store->path[0] ? store->path : NULL;
+    store->env.android_files = store->android_files[0] ? store->android_files : NULL;
+    store->env.android_shared = store->android_shared[0] ? store->android_shared : NULL;
 }
 
 /* ────────────────────────── 版本串 → 主版本 ────────────────────────── */
@@ -655,8 +662,9 @@ int sxcl_java_parse_version_output(const char *text, size_t len, sxcl_java_info 
 
 /* ────────────────────────── 候选路径(纯字符串) ────────────────────────── */
 
-static void push_candidate(sxcl_java_candidate *out, size_t cap, size_t *count,
-                           const char *path, const char *home, const char *source)
+static void push_candidate_owner(sxcl_java_candidate *out, size_t cap, size_t *count,
+                                 const char *path, const char *home, const char *source,
+                                 const char *owner)
 {
     sxcl_java_candidate *slot = NULL;
     if (*count >= cap || !path || !*path) {
@@ -669,7 +677,15 @@ static void push_candidate(sxcl_java_candidate *out, size_t cap, size_t *count,
         copy_str(slot->home, sizeof(slot->home), home);
     }
     copy_str(slot->source, sizeof(slot->source), source ? source : "");
+    copy_str(slot->owner, sizeof(slot->owner), owner ? owner : "");
     ++(*count);
+}
+
+/* 不带归属的旧写法(桌面候选都是"这台机器的",不需要 owner) */
+static void push_candidate(sxcl_java_candidate *out, size_t cap, size_t *count,
+                           const char *path, const char *home, const char *source)
+{
+    push_candidate_owner(out, cap, count, path, home, source, NULL);
 }
 
 size_t sxcl_java_candidate_paths(const sxcl_java_env *env, sxcl_java_os os,
@@ -830,8 +846,36 @@ static size_t collect_scan_roots(const sxcl_java_env *env, sxcl_java_os os,
             push_root(out, cap, &count, tmp, "Sdkman");
         }
     } else { /* Android */
+        /* 安卓上**唯一**能放可执行 Java 的地方是本应用私有目录(见 sxcl/android.h):
+         *   <files>/runtime/<任意>/bin/java  —— 我们自己装的(见 sxcl/java_runtime.h);
+         *   <files>/jre、<files>/java        —— 用户手工拷进来时的常见命名;
+         *   <data>/app_runtime/java/<任意>   —— FCL 的风格,照抄一份,用户从别处拷过来就能用。
+         * 共享存储(/storage/emulated)是 noexec,**不当扫描根**:扫到了也起不来。
+         * 但它会被 sxcl_java_probe_android 列出来并如实标注 NOEXEC —— 用户有权知道。
+         *
+         * 修过的 bug:老代码拼的是 <user_home>/files/runtime。安卓打包层把 HOME 直接设成
+         * files 目录,于是实际拼成了 <files>/files/runtime —— 永远扫不到东西。 */
+        const char *base = env->android_files;
+        if (base && *base) {
+            static const char *const own[] = { "runtime", "jre", "java" };
+            size_t k = 0;
+            for (k = 0; k < sizeof(own) / sizeof(own[0]); ++k) {
+                join_path(tmp, sizeof(tmp), base, own[k], '/');
+                push_root(out, cap, &count, tmp, "AndroidPrivate");
+            }
+            {
+                char up[SXCL_JAVA_PATH_MAX];
+                path_parent(base, up, sizeof(up));
+                if (up[0] != '\0') {
+                    join_path(tmp, sizeof(tmp), up, "app_runtime/java", '/');
+                    push_root(out, cap, &count, tmp, "AndroidPrivate");
+                }
+            }
+        }
+        /* HOME 在安卓上就是 files 目录,这里等于再兜一遍;重复的根无害 ——
+         * sxcl_java_discover 最后按 home 去重。 */
         if (env->user_home && *env->user_home) {
-            join_path(tmp, sizeof(tmp), env->user_home, "files/runtime", '/');
+            join_path(tmp, sizeof(tmp), env->user_home, "runtime", '/');
             push_root(out, cap, &count, tmp, "Runtime");
             join_path(tmp, sizeof(tmp), env->user_home, "jre", '/');
             push_root(out, cap, &count, tmp, "Runtime");
@@ -1227,3 +1271,308 @@ size_t sxcl_java_rank(const sxcl_java_info *list, size_t count, int required_maj
     }
     return take;
 }
+
+/* ══════════════════════ 1b. Android:为什么检不出 Java(可读的结论) ══════════════════════
+ *
+ * 用户反馈(192.168.220.33,Android 16,平板):"我平板有 HMCL 不可能没有 JAVA……
+ * 成功检出游戏,但是没检出 JAVA"。
+ * 硬证据(设备实测,docs/08 第 14 节有原文):FCL 的 Java 在
+ *   /data/user/0/com.tungsten.fcl/app_runtime/java/jre25/bin/java
+ * —— 那是**别的应用**的私有目录:
+ *   * 我们 stat 它 -> EACCES(沙箱),所以老代码的 path_is_file() 直接返回 0,静默跳过;
+ *   * 共享存储上的同理不可执行(/storage/emulated 挂载带 noexec)。
+ * 结论:别的启动器的 Java **用不了**。本组函数把它变成产品行为 —— 不再是"没检出",
+ * 而是"检出了、但安卓不允许用",并给出原因与下一步。
+ */
+
+static const char *const kJavaVerdictNames[] = {
+    "可用", "不在", "沙箱拒绝", "共享存储不能执行", "没有执行位", "不是 JRE", "读不了",
+};
+
+static const char *const kJavaVerdictKeys[] = {
+    "usable", "missing", "denied", "noexec", "not_executable", "not_a_jre", "unreadable",
+};
+
+static const char *java_verdict_pick(const char *const *table, size_t n, sxcl_java_verdict verdict,
+                                     const char *fallback)
+{
+    const int i = (int)verdict;
+    if (i < 0 || (size_t)i >= n) {
+        return fallback;
+    }
+    return table[i];
+}
+
+const char *sxcl_java_verdict_name(sxcl_java_verdict verdict)
+{
+    return java_verdict_pick(kJavaVerdictNames,
+                             sizeof(kJavaVerdictNames) / sizeof(kJavaVerdictNames[0]), verdict,
+                             "未知");
+}
+
+const char *sxcl_java_verdict_key(sxcl_java_verdict verdict)
+{
+    return java_verdict_pick(kJavaVerdictKeys,
+                             sizeof(kJavaVerdictKeys) / sizeof(kJavaVerdictKeys[0]), verdict,
+                             "unknown");
+}
+
+const char *sxcl_java_verdict_hint(sxcl_java_verdict verdict)
+{
+    switch (verdict) {
+    case SXCL_JAVA_VERDICT_USABLE:
+        return "这份 Java 可以直接用来启动游戏。";
+    case SXCL_JAVA_VERDICT_MISSING:
+        return "这个位置没有 Java;如果刚装过,请确认装到了这里。";
+    case SXCL_JAVA_VERDICT_DENIED:
+        return "这是别的启动器(HMCL/FCL/PojavLauncher)装在它自己私有目录里的 Java。"
+               "安卓不允许一个应用读另一个应用的私有目录,所以我们看不到也用不了。"
+               "请在本应用里装一份自己的 Java(设置 - Java 运行路径 - 下载 Java)。";
+    case SXCL_JAVA_VERDICT_NOEXEC:
+        return "这份 Java 在共享存储(内部存储 / sdcard)上,而共享存储是 noexec 挂载,"
+               "里面的程序起不来。Java 必须放在应用私有目录里。";
+    case SXCL_JAVA_VERDICT_NOT_EXECUTABLE:
+        return "文件在,但没有执行位(解压/拷贝时丢了 x 权限);重新解压一份到应用私有目录即可。";
+    case SXCL_JAVA_VERDICT_NOT_A_JRE:
+        return "这里没有可用的 Java 运行时(缺 bin/java 或读不出 release);"
+               "请在本应用里装一份自己的 Java。";
+    case SXCL_JAVA_VERDICT_UNREADABLE:
+        return "读这个路径时出错;可能是权限问题或存储已卸载。";
+    case SXCL_JAVA_VERDICT_COUNT:
+    default:
+        return "未知情况。";
+    }
+}
+
+static sxcl_java_verdict verdict_of_access(sxcl_android_access access)
+{
+    switch (access) {
+    case SXCL_ANDROID_OK:             return SXCL_JAVA_VERDICT_USABLE;
+    case SXCL_ANDROID_MISSING:        return SXCL_JAVA_VERDICT_MISSING;
+    case SXCL_ANDROID_DENIED:         return SXCL_JAVA_VERDICT_DENIED;
+    case SXCL_ANDROID_NOEXEC:         return SXCL_JAVA_VERDICT_NOEXEC;
+    case SXCL_ANDROID_NOT_EXECUTABLE: return SXCL_JAVA_VERDICT_NOT_EXECUTABLE;
+    case SXCL_ANDROID_NOT_READABLE:   return SXCL_JAVA_VERDICT_UNREADABLE;
+    case SXCL_ANDROID_ACCESS_COUNT:
+    default:                          return SXCL_JAVA_VERDICT_MISSING;
+    }
+}
+
+/** 体检一条候选并追加到报告。want_exec=1 时要求能执行(目录会跳过这步)。 */
+static void java_probe_add(sxcl_java_report *out, const char *path, const char *home,
+                           const char *source, const char *owner, sxcl_java_os os,
+                           const char *mounts_text, int want_exec)
+{
+    sxcl_java_probe *probe = NULL;
+    sxcl_java_info info;
+    char detail[192];
+    sxcl_android_access access;
+    (void)os; /* 可执行文件名由候选路径本身决定,这里不需要再分平台 */
+    if (out->count >= SXCL_JAVA_MAX_PROBES || path == NULL || path[0] == '\0') {
+        return;
+    }
+    probe = &out->items[out->count];
+    (void)memset(probe, 0, sizeof(*probe));
+    copy_str(probe->path, sizeof(probe->path), path);
+    if (home && *home) {
+        copy_str(probe->home, sizeof(probe->home), home);
+    }
+    copy_str(probe->source, sizeof(probe->source), source ? source : "");
+    copy_str(probe->owner, sizeof(probe->owner), owner ? owner : "");
+    detail[0] = '\0';
+    access = sxcl_android_probe_path_with_mounts(mounts_text, path, want_exec, detail,
+                                                 sizeof(detail));
+    probe->verdict = verdict_of_access(access);
+    if (probe->verdict == SXCL_JAVA_VERDICT_USABLE) {
+        (void)memset(&info, 0, sizeof(info));
+        if (sxcl_java_inspect(path, &info) == 0 && info.major > 0) {
+            probe->major = info.major;
+            copy_str(probe->version, sizeof(probe->version), info.version);
+            if (probe->home[0] == '\0' && info.home[0] != '\0') {
+                copy_str(probe->home, sizeof(probe->home), info.home);
+            }
+            ++out->usable;
+        } else {
+            probe->verdict = SXCL_JAVA_VERDICT_NOT_A_JRE;
+            if (path_is_dir(path)) {
+                (void)snprintf(detail, sizeof(detail),
+                               "目录在,但里面没有 bin/java(还没装 Java):%s", path);
+            } else {
+                (void)snprintf(detail, sizeof(detail),
+                               "有文件但读不出 JRE 画像(缺 release 或不是 Java):%s", path);
+            }
+        }
+    }
+    copy_str(probe->reason, sizeof(probe->reason), detail);
+    ++out->count;
+}
+
+size_t sxcl_java_probe_candidates(const sxcl_java_candidate *cands, size_t cand_count,
+                                  sxcl_java_os os, const char *mounts_text, sxcl_java_report *out)
+{
+    size_t i = 0;
+    if (out == NULL) {
+        return 0;
+    }
+    (void)memset(out, 0, sizeof(*out));
+    if (cands == NULL) {
+        return 0;
+    }
+    for (i = 0; i < cand_count && out->count < SXCL_JAVA_MAX_PROBES; ++i) {
+        java_probe_add(out, cands[i].path, cands[i].home, cands[i].source, cands[i].owner, os,
+                       mounts_text, 1);
+    }
+    return out->count;
+}
+
+/* ── 安卓上"已知会放 Java"的地方 ──
+ * 别的启动器那一组必然读不到(沙箱),但**要列出来** —— 用户的疑问是
+ * "我明明装了 HMCL,怎么会没有 Java",答案恰恰是"有,但不能用"。
+ * 其中 FCL 的两条是**实测**出来的路径(设备 /sdcard/FCL/log 里的原文),不是猜的。 */
+typedef struct android_java_root {
+    const char *path;  /* 绝对路径,或相对共享存储根的路径 */
+    const char *owner;
+} android_java_root;
+
+static const android_java_root kForeignJavaRoots[] = {
+    { "/data/data/com.tungsten.fcl/app_runtime/java", "FCL" },
+    { "/data/data/com.tungsten.fcl/app_runtime/java/jre25/bin/java", "FCL" },
+    { "/data/data/com.tungsten.fcl/app_runtime/java/jre8/bin/java", "FCL" },
+    { "/data/data/com.tungsten.fcl/files/runtime", "FCL" },
+    { "/data/data/org.jackhuang.hmcl/files/runtime", "HMCL" },
+    { "/data/data/org.jackhuang.hmcl/app_runtime/java", "HMCL" },
+    { "/data/data/net.kdt.pojavlaunch/files/runtime", "PojavLauncher" },
+    { "/data/data/net.kdt.pojavlaunch/files/runtime/jre17/bin/java", "PojavLauncher" },
+};
+
+static const android_java_root kSharedJavaRoots[] = {
+    { "Android/data/com.tungsten.fcl/files/runtime", "FCL" },
+    { "FCL/runtime", "FCL" },
+    { "Android/data/org.jackhuang.hmcl/files/runtime", "HMCL" },
+};
+
+/* 在 <root> 下最多 depth 层找 bin/java。找到填 exe/home 并返回 1。 */
+typedef struct own_java_find {
+    char exe[SXCL_JAVA_PATH_MAX];
+    char home[SXCL_JAVA_PATH_MAX];
+    int found;
+} own_java_find;
+
+static void own_java_walk(own_java_find *find, const char *dir, int depth);
+
+typedef struct own_walk_ctx {
+    own_java_find *find;
+    const char *dir;
+    int depth;
+} own_walk_ctx;
+
+static int own_walk_cb(void *user, const char *name, int is_dir)
+{
+    own_walk_ctx *ctx = (own_walk_ctx *)user;
+    char full[SXCL_JAVA_PATH_MAX];
+    if (!is_dir || ctx->find->found) {
+        return ctx->find->found; /* 非 0 = 提前结束枚举 */
+    }
+    join_path(full, sizeof(full), ctx->dir, name, '/');
+    own_java_walk(ctx->find, full, ctx->depth);
+    return ctx->find->found;
+}
+
+static void own_java_walk(own_java_find *find, const char *dir, int depth)
+{
+    char bin[SXCL_JAVA_PATH_MAX];
+    char exe[SXCL_JAVA_PATH_MAX];
+    own_walk_ctx ctx;
+    if (find->found || !path_is_dir(dir)) {
+        return;
+    }
+    join_path(bin, sizeof(bin), dir, "bin", '/');
+    join_path(exe, sizeof(exe), bin, "java", '/');
+    if (path_is_file(exe)) {
+        copy_str(find->exe, sizeof(find->exe), exe);
+        copy_str(find->home, sizeof(find->home), dir);
+        find->found = 1;
+        return;
+    }
+    if (depth <= 0) {
+        return;
+    }
+    ctx.find = find;
+    ctx.dir = dir;
+    ctx.depth = depth - 1;
+    (void)dir_visit(dir, own_walk_cb, &ctx);
+}
+
+size_t sxcl_java_probe_android(const char *files_dir, const char *shared_root,
+                               sxcl_java_report *out)
+{
+    char shared[SXCL_JAVA_PATH_MAX];
+    size_t i = 0;
+    if (out == NULL) {
+        return 0;
+    }
+    (void)memset(out, 0, sizeof(*out));
+
+    /* 1) 本应用私有目录:唯一可能真的能用的一类,真的往下扫 bin/java */
+    if (files_dir != NULL && files_dir[0] != '\0') {
+        static const char *const own[] = { "runtime", "jre", "java" };
+        for (i = 0; i < sizeof(own) / sizeof(own[0]); ++i) {
+            char root[SXCL_JAVA_PATH_MAX];
+            own_java_find find;
+            join_path(root, sizeof(root), files_dir, own[i], '/');
+            (void)memset(&find, 0, sizeof(find));
+            own_java_walk(&find, root, 3);
+            if (find.found) {
+                java_probe_add(out, find.exe, find.home, "AndroidPrivate", "本应用",
+                               SXCL_JAVA_OS_ANDROID, NULL, 1);
+            } else {
+                java_probe_add(out, root, "", "AndroidPrivate", "本应用", SXCL_JAVA_OS_ANDROID,
+                               NULL, 0);
+            }
+        }
+        {
+            /* FCL 风格的 app_runtime/java:本应用也照抄一份,用户从别处拷进来就能用 */
+            char up[SXCL_JAVA_PATH_MAX];
+            char root[SXCL_JAVA_PATH_MAX];
+            own_java_find find;
+            path_parent(files_dir, up, sizeof(up));
+            if (up[0] != '\0') {
+                join_path(root, sizeof(root), up, "app_runtime/java", '/');
+                (void)memset(&find, 0, sizeof(find));
+                own_java_walk(&find, root, 3);
+                if (find.found) {
+                    java_probe_add(out, find.exe, find.home, "AndroidPrivate", "本应用",
+                                   SXCL_JAVA_OS_ANDROID, NULL, 1);
+                } else {
+                    java_probe_add(out, root, "", "AndroidPrivate", "本应用",
+                                   SXCL_JAVA_OS_ANDROID, NULL, 0);
+                }
+            }
+        }
+    } else {
+        /* 打包层没给 files 目录时也要有一条,不能整块静默消失 */
+        java_probe_add(out, "/data/data/com.silentstudio.sxcl/files/runtime", "",
+                       "AndroidPrivate", "本应用", SXCL_JAVA_OS_ANDROID, NULL, 0);
+    }
+
+    /* 2) 别的启动器:一定读不到,但要如实列出来并说清"是沙箱,不是没有" */
+    for (i = 0; i < sizeof(kForeignJavaRoots) / sizeof(kForeignJavaRoots[0]); ++i) {
+        java_probe_add(out, kForeignJavaRoots[i].path, "", "AndroidForeign",
+                       kForeignJavaRoots[i].owner, SXCL_JAVA_OS_ANDROID, NULL, 1);
+    }
+
+    /* 3) 共享存储:一定 noexec —— 用户自己拷到 sdcard 上的那份也救不了 */
+    if (shared_root != NULL && shared_root[0] != '\0') {
+        copy_str(shared, sizeof(shared), shared_root);
+    } else {
+        copy_str(shared, sizeof(shared), "/storage/emulated/0");
+    }
+    for (i = 0; i < sizeof(kSharedJavaRoots) / sizeof(kSharedJavaRoots[0]); ++i) {
+        char path[SXCL_JAVA_PATH_MAX];
+        join_path(path, sizeof(path), shared, kSharedJavaRoots[i].path, '/');
+        java_probe_add(out, path, "", "AndroidShared", kSharedJavaRoots[i].owner,
+                       SXCL_JAVA_OS_ANDROID, NULL, 1);
+    }
+    return out->count;
+}
+

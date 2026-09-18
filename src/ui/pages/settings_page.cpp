@@ -21,8 +21,14 @@
 #include <QApplication>
 #include <QColor>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDir>
 #include <QFileDialog>
+#include <QGuiApplication>
+#include <QInputDialog>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QStringList>
 #include <QFileInfo>
 #include <QFont>
 #include <QFrame>
@@ -51,6 +57,7 @@
 #pragma warning(push, 0) // libqf 是外部依赖,头文件在 /W4 下不干净(见 libqf.h 的说明)
 #endif
 #include "fluent/fluent_controls.h"      // PushButton / InfoBar
+#include "fluent/fluent_dialog.h"        // MessageBox(注销二次确认;账户功能新增)
 #include "fluent/fluent_labels.h"        // TitleLabel / SubtitleLabel / CaptionLabel
 #include "fluent/fluent_scroll.h"        // ScrollArea(= Python qf ScrollArea)
 #include "fluent/fluent_setting_cards.h" // SettingCard 家族 / ComboBox / SettingCardGroup
@@ -61,10 +68,15 @@
 #include "fluent_theme.h"
 #include "theme_bridge.h"
 
+// 账户(正版登录)—— Python 版无此功能,新增。实现见 dialogs/account.* 与 dialogs/auth_dialog.*
+#include "dialogs/account.h"
+#include "dialogs/auth_dialog.h"
+
 // 核心库(纯 C):UI 层已链 sxcl 并挂了 include/
 #include "sxcl/launch.h"   // Java 运行时探测(替代 Python services/java/finder.py)
 #include "sxcl/limiter.h"  // sxcl_limiter_parse_rate("512K" 这类文本 → 字节/秒)
-#include "sxcl/paths.h"    // 平台默认游戏目录
+#include "sxcl/android.h"   // Android:"能不能读"的分类(沙箱拒绝/noexec)
+#include "sxcl/paths.h"    // 平台默认游戏目录 + 安卓候选扫描
 #include "sxcl/settings.h" // 设置读写(key=value,UTF-8)
 #include "sxcl/sysinfo.h"  // 物理内存(设置页内存滑块的数据源)
 
@@ -84,6 +96,9 @@ const char *const kGroupGame = "游戏设置";
 const char *const kGroupDownload = "下载设置";
 const char *const kGroupAdvanced = "高级设置";
 const char *const kGroupAbout = "关于";
+// **Python 版没有「账户」组**(Python 版只有离线启动):这是新增功能,不是移植。
+// 只加内容,控件/令牌/字号一律用既有口径(SettingCard 家族 + docs/05 §2/§3/§4/§5)。
+const char *const kGroupAccount = "账户";
 
 // 主题模式:src/app/theme.py:59 THEME_LABELS = ["浅色","深色","跟随系统"]
 // 值用字符串(核心库 sxcl_settings_ui_theme 的口径是文本:auto/light/dark)。
@@ -533,6 +548,88 @@ private:
     std::function<void(int)> m_onChanged;
 };
 
+
+// ── Android:共享存储权限("所有文件访问权限")──
+//
+// 设备实测(192.168.220.33,Android 16,targetSdk 34):APK 只声明 INTERNET +
+// ACCESS_NETWORK_STATE 时,以本应用 uid 去 stat /storage/emulated/0/FCL/.minecraft
+// 直接 Permission denied —— 也就是说**没有这个权限,自动扫描在共享存储上一无所获**,
+// 而用户的 .minecraft/存档/模组全在那儿。所以:
+//   1) 打包层 manifest 声明 MANAGE_EXTERNAL_STORAGE(见 build/_android/pkg/AndroidManifest.xml);
+//   2) 这里负责"检查 + 引导 + 授权后立刻重扫",不依赖用户重启。
+#if defined(__ANDROID__)
+#include <QJniObject>
+namespace {
+bool androidHasAllFilesAccess() {
+    return QJniObject::callStaticMethod<jboolean>("com/silentstudio/sxcl/SxclActivity",
+                                                "hasAllFilesAccess", "()Z");
+}
+void androidRequestAllFilesAccess() {
+    QJniObject::callStaticMethod<void>("com/silentstudio/sxcl/SxclActivity",
+                                       "requestAllFilesAccess", "()V");
+}
+} // namespace
+#else
+namespace {
+bool androidHasAllFilesAccess() { return true; } // 桌面没有这回事,恒当"有权限"
+void androidRequestAllFilesAccess() {}
+} // namespace
+#endif
+// ── Android:Java 到底去哪儿找了、为什么没用上(用户反馈原文:”我平板有 HMCL
+//    不可能没有 JAVA…… 成功检出游戏,但是没检出 JAVA“)──
+//
+// 这一层只把核心库已经算好的结论(sxcl_java_probe_android)转成人看的两行文字:
+//   * shortText —— 塞进卡片上**已经有**的那行 CaptionLabel,不改页面结构、不加控件;
+//   * detail    —— 塞进 tooltip(悬停/长按可见),逐条列出每个候选与原始原因。
+// 逻辑放这里而不是核心库,是因为”显示成什么样“属于界面口径;结论本身在 core 里单测过。
+// 桌面平台也会走这段:候选表是安卓专用的,桌面上找不到就自然落回原来的空态文案。
+struct JavaProbeText {
+    QString shortText;  // 一行,给 CaptionLabel
+    QString detail;     // 全文,给 tooltip
+};
+
+JavaProbeText androidJavaProbeText() {
+    JavaProbeText out;
+    const QByteArray files = qEnvironmentVariable("SXCL_ANDROID_FILES").toUtf8();
+    sxcl_java_report report;
+    const size_t count = sxcl_java_probe_android(files.isEmpty() ? nullptr : files.constData(),
+                                                 nullptr, &report);
+    if (count == 0)
+        return out;
+
+    // 先说最值钱的那条:DENIED 意味着”有 Java,但安卓不让用“,这正是用户的疑问所在。
+    const sxcl_java_probe *lead = nullptr;
+    for (size_t i = 0; i < report.count && lead == nullptr; ++i) {
+        if (report.items[i].verdict == SXCL_JAVA_VERDICT_DENIED)
+            lead = &report.items[i];
+    }
+    for (size_t i = 0; i < report.count && lead == nullptr; ++i) {
+        if (report.items[i].verdict != SXCL_JAVA_VERDICT_MISSING &&
+            report.items[i].verdict != SXCL_JAVA_VERDICT_USABLE)
+            lead = &report.items[i];
+    }
+    if (lead != nullptr) {
+        out.shortText = QStringLiteral("未找到可用的 Java:检测到 %1 的 Java,但%2")
+                            .arg(QString::fromUtf8(lead->owner),
+                                 QString::fromUtf8(sxcl_java_verdict_name(lead->verdict)));
+    } else {
+        out.shortText = QStringLiteral("未找到可用的 Java:这台机器上还没有装(可点下载 Java)");
+    }
+
+    QStringList lines;
+    lines << QStringLiteral("我们找过这 %1 个地方:").arg(static_cast<int>(report.count));
+    for (size_t i = 0; i < report.count; ++i) {
+        const sxcl_java_probe &p = report.items[i];
+        lines << QStringLiteral("[%1] %2  %3\n    %4\n    %5")
+                     .arg(QString::fromUtf8(sxcl_java_verdict_name(p.verdict)),
+                          QString::fromUtf8(p.owner), QString::fromUtf8(p.path),
+                          QString::fromUtf8(p.reason),
+                          QString::fromUtf8(sxcl_java_verdict_hint(p.verdict)));
+    }
+    out.detail = lines.join(QStringLiteral("\n"));
+    return out;
+}
+
 // ──────────────────── 卡片:JavaSettingCard(java_setting_card.py:94-272)────────────────────
 class JavaSettingCard : public SettingCard {
 public:
@@ -587,9 +684,20 @@ public:
             m_combo->clear();                          // :141
 
             if (m_installations.isEmpty()) {           // :143-148
+                // 用户反馈的正是这一支:"没检出 JAVA"。不再只写"未找到",而是**如实说为什么**
+                // (别的启动器的 Java 在它自己的私有目录里,安卓不允许我们读;共享存储是 noexec)。
+                // 一行结论放回原来那行 CaptionLabel(不加控件、不改布局),逐条明细放 tooltip。
                 m_combo->addItem(QStringLiteral("未检测到 Java，请手动导入"));
                 m_statusLabel->setText(QStringLiteral("未找到可用的 Java 运行时"));
                 m_statusLabel->setTextColor(QColor(0xfa, 0x8c, 0x16), QColor(0xff, 0xa9, 0x40));
+                const JavaProbeText probe = androidJavaProbeText();
+                if (!probe.shortText.isEmpty())
+                    m_statusLabel->setText(probe.shortText); // 仍然是那一行 CaptionLabel(12px)
+                if (!probe.detail.isEmpty()) {
+                    m_statusLabel->setToolTip(probe.detail);
+                    m_combo->setToolTip(probe.detail);
+                    m_downloadButton->setToolTip(probe.detail);
+                }
                 return;
             }
 
@@ -746,6 +854,87 @@ MemoryRange computeMemoryRange() {
     return range;
 }
 
+// ─────────────── 卡片:AccountStatusCard(**新增**;Python 版没有账户功能) ───────────────
+//
+// 与 qf 的 SettingCard 同构(定高 70/图标 16x16/标题 14px/说明 11px,见文件头),
+// 右侧多一枚状态标签:样式用既有的 FluentTheme::chipQss()(对应 Python styles.py 的
+// chip_qss,docs/05 §5),颜色只取令牌 —— 不发明任何色值。
+// 展示内容就是交付要求的三件事:未登录 / 已登录 + 玩家名 / Java 版是否有权益。
+class AccountStatusCard : public SettingCard {
+public:
+    AccountStatusCard(const QIcon &icon, const QString &title, QWidget *parent)
+        : SettingCard(icon, title, QString(), parent) {
+        m_chip = new BodyLabel(QString(), this);
+        m_chip->setAlignment(Qt::AlignCenter);
+        hBox()->addStretch(1);
+        hBox()->addWidget(m_chip);
+        hBox()->addSpacing(20);
+    }
+
+    void updateState(const AccountSnapshot &snapshot) {
+        if (!snapshot.error.isEmpty()) {
+            setChip(QStringLiteral("读取失败"), QStringLiteral("danger"));
+            setContent(QStringLiteral("读取登录凭据失败：%1").arg(snapshot.error));
+            return;
+        }
+        if (!snapshot.loggedIn) {
+            setChip(QStringLiteral("未登录"), QStringLiteral("danger"));
+            setContent(QStringLiteral("还没有登录过。点「登录」用设备码方式登录 Microsoft 账户。"));
+            return;
+        }
+
+        // 已登录:玩家名 + Java 版权益分开说(核心库把这两件事分成两条接口,
+        // 详见 docs/09 §1 的 6a/6b;"没查" 与 "没有" 不许混为一谈)。
+        const bool entitled = snapshot.javaEntitled();
+        QString chipText;
+        QString chipToken;
+        if (!snapshot.hasMcToken || snapshot.mcExpired) {
+            chipText = QStringLiteral("凭据已过期");
+            chipToken = QStringLiteral("warning");
+        } else if (entitled) {
+            chipText = QStringLiteral("已登录");
+            chipToken = QStringLiteral("success");
+        } else {
+            chipText = QStringLiteral("已登录");
+            chipToken = QStringLiteral("warning");
+        }
+        setChip(chipText, chipToken);
+
+        QString player;
+        if (snapshot.playerName.isEmpty()) {
+            player = QStringLiteral("未取到 Java 版档案（这个账号可能没有 Java 版）");
+        } else {
+            player = QStringLiteral("%1（uuid %2）").arg(snapshot.playerName, snapshot.uuid);
+        }
+        QString entitlement;
+        if (!snapshot.entitlementChecked)
+            entitlement = QStringLiteral("权益：未查过");
+        else if (entitled)
+            entitlement = QStringLiteral("权益：拥有 Java 版（mcstore 条目 %1）")
+                              .arg(snapshot.entitlementCount);
+        else
+            entitlement = QStringLiteral("权益：商店里没有条目");
+        const QString expiry =
+            snapshot.mcExpiresAt > 0
+                ? QStringLiteral("；MC 令牌到 %1")
+                      .arg(QDateTime::fromSecsSinceEpoch(snapshot.mcExpiresAt)
+                               .toString(QStringLiteral("yyyy-MM-dd HH:mm")))
+                : QString();
+        const QString account = snapshot.accountName.isEmpty()
+                                    ? QString()
+                                    : QStringLiteral("；账户 %1").arg(snapshot.accountName);
+        setContent(QStringLiteral("玩家名 %1；%2%3%4").arg(player, entitlement, expiry, account));
+    }
+
+private:
+    void setChip(const QString &text, const QString &colorToken) {
+        m_chip->setText(text);
+        m_chip->setStyleSheet(FluentTheme::instance().chipQss(colorToken));
+    }
+
+    BodyLabel *m_chip = nullptr;
+};
+
 // ─────────────────────────── 页面本体 ───────────────────────────
 
 class SettingsPage : public ScrollArea {
@@ -765,6 +954,13 @@ private:
     void pickGameDirectory();                     // :441-450
     void resetSettings();                         // :452-492
     void applySpeedLimit(int kbps);                // :516-523
+
+    // ---- 账户(**新增**;Python 版没有账户功能,这一组从零加) ----
+    void refreshAccountCard();                                        // 读令牌文件 → 刷状态卡
+    void onLoginClicked();                                            // 开设备码登录对话框
+    void onRefreshClicked();                                          // 免密续期(后台线程)
+    void onLogoutClicked();                                           // 确认后删凭据(后台线程)
+    void runAccountAction(AccountTask::Operation operation, const QString &title);
 
     ConfigStore m_store;
     MemoryRange m_memoryRange;
@@ -797,6 +993,13 @@ private:
 
     SettingCard *m_aboutCard = nullptr;
     HyperlinkCard *m_websiteCard = nullptr;
+
+    // 账户(新增):状态卡 + 登录/刷新/注销三张动作卡;同一时刻只跑一个后台任务。
+    AccountStatusCard *m_accountCard = nullptr;
+    PushSettingCard *m_loginCard = nullptr;
+    PushSettingCard *m_refreshCard = nullptr;
+    PushSettingCard *m_logoutCard = nullptr;
+    AccountTask *m_accountTask = nullptr;
 };
 
 SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
@@ -839,6 +1042,40 @@ SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
     refreshPageBackground();
     connect(&FluentTheme::instance(), &FluentTheme::changed, this,
             [this] { refreshPageBackground(); });
+    // Android:用户去"所有文件访问权限"授权后回到本应用,要**立刻**重扫并刷新
+    // (父任务明确要求,不能让用户重启)。应用状态变回 Active 就是那个时刻。
+    connect(qApp, &QGuiApplication::applicationStateChanged, this,
+            [this](Qt::ApplicationState state) {
+                if (state != Qt::ApplicationActive)
+                    return;
+                static bool announced = false;
+                const bool granted = androidHasAllFilesAccess();
+                if (granted && !announced) {
+                    announced = true;
+                    // 没配过游戏目录时把刚扫到"确实有版本"的目录落进设置,
+                    // 这样卡片显示的值与各页面真正使用的目录一致。
+                    if (m_store.text(kKeyGameDir).isEmpty()) {
+                        const QByteArray files = qEnvironmentVariable("SXCL_ANDROID_FILES").toUtf8();
+                        sxcl_game_folders folders;
+                        char derr[SXCL_PATHS_ERROR_MAX];
+                        derr[0] = '\0';
+                        (void)sxcl_paths_detect_android(files.isEmpty() ? nullptr : files.constData(),
+                                                        nullptr, &folders, nullptr, derr, sizeof(derr));
+                        const sxcl_game_folder *best = sxcl_paths_best(&folders);
+                        if (best != nullptr && best->versions > 0) {
+                            m_store.set(kKeyGameDir,
+                                        QDir::fromNativeSeparators(QString::fromUtf8(best->path)));
+                        }
+                    }
+                    InfoBar::push(InfoBar::Type::Success, QStringLiteral("已获得共享存储权限"),
+                                  QStringLiteral("现在可以扫描共享存储上的 .minecraft 了"), window(),
+                                  4000);
+                }
+                if (m_gameDirCard)
+                    m_gameDirCard->setContent(gameDirectory());
+                if (m_javaCard)
+                    m_javaCard->refresh();
+            });
 
     buildContent();
     bindEvents();
@@ -898,8 +1135,17 @@ void SettingsPage::buildContent() {
         valueIndex(languageValues, m_store.text(kKeyLanguage, QStringLiteral("zh-CN")), 0),
         generalGroup);
 
-    const QStringList sourceTexts = textList(kSourceTexts, 3); // :252
-    const QStringList sourceValues = stringList(kSourceValues, 3);
+    QStringList sourceTexts = textList(kSourceTexts, 3); // :252
+    QStringList sourceValues = stringList(kSourceValues, 3);
+    // 验收夹具:仅当环境变量 SXCL_UI_TALLMENU=N(N>0)时,给「版本下载源」下拉追加 N 个测试项,
+    // 用来在真机上验证「弹层内部可拖动滚动」。默认(变量未设)完全不生效,不影响任何正常路径。
+    {
+        const int extra = qEnvironmentVariableIntValue("SXCL_UI_TALLMENU");
+        for (int i = 0; i < extra; ++i) {
+            sourceTexts << QStringLiteral("测试源 %1").arg(i + 1);
+            sourceValues << QStringLiteral("testsrc%1").arg(i + 1);
+        }
+    }
     m_sourceCard = new ComboBoxSettingCard( // :246-253
         FluentIcon::qicon(FluentIcon::DOWNLOAD), QStringLiteral("版本下载源"),
         QStringLiteral("选择版本清单与资源文件的下载源"), sourceTexts, sourceValues,
@@ -1005,6 +1251,32 @@ void SettingsPage::buildContent() {
     downloadGroup->addSettingCard(m_limitCard);  // :394
     downloadGroup->addSettingCard(m_verifyCard); // :395
 
+    // ── 账户(**新增**;Python 版没有这一组)──
+    //
+    // 位置:按交付要求放在「关于」之前。控件全部复用既有 SettingCard 家族
+    // (状态卡 = SettingCard + chip_qss;动作卡 = PushSettingCard),
+    // 因此外观与其它分组逐像素同源,不存在"自创一套账户界面"。
+    auto *accountGroup = new SettingCardGroup(QString::fromUtf8(kGroupAccount), m_view);
+    m_accountCard = new AccountStatusCard(FluentIcon::qicon(FluentIcon::PEOPLE),
+                                          QStringLiteral("登录状态"), accountGroup);
+    m_loginCard = new PushSettingCard( // 设备码流为主(核心库 --device-code 的那条路)
+        QStringLiteral("登录"), FluentIcon::qicon(FluentIcon::ACCEPT),
+        QStringLiteral("登录 Microsoft 账户"),
+        QStringLiteral("设备码登录：用浏览器输入 8 位代码即可，不需要本地监听端口"),
+        accountGroup);
+    m_refreshCard = new PushSettingCard( // 免密续期:refresh token → 重跑后半条链
+        QStringLiteral("刷新"), FluentIcon::qicon(FluentIcon::SYNC),
+        QStringLiteral("刷新登录状态"),
+        QStringLiteral("用已保存的 refresh token 免密续期并重查权益，不用再输一次设备码"),
+        accountGroup);
+    m_logoutCard = new PushSettingCard( // 删掉本机加密保存的凭据(幂等)
+        QStringLiteral("注销"), FluentIcon::qicon(FluentIcon::CANCEL),
+        QStringLiteral("退出登录"), QStringLiteral("删除本机加密保存的登录凭据"), accountGroup);
+    accountGroup->addSettingCard(m_accountCard);
+    accountGroup->addSettingCard(m_loginCard);
+    accountGroup->addSettingCard(m_refreshCard);
+    accountGroup->addSettingCard(m_logoutCard);
+
     // ── 关于(settings_page.py:397-413)──
     auto *aboutGroup = new SettingCardGroup(QString::fromUtf8(kGroupAbout), m_view);
     m_aboutCard = new SettingCard( // :399-404
@@ -1025,6 +1297,7 @@ void SettingsPage::buildContent() {
     m_vBox->addWidget(gameGroup);     // :416
     m_vBox->addWidget(downloadGroup); // :417
     m_vBox->addWidget(advancedGroup); // :418
+    m_vBox->addWidget(accountGroup);  // 新增:「账户」组,按交付要求放在「关于」之前
     m_vBox->addWidget(aboutGroup);    // :419
     m_vBox->addStretch(1);            // :420
 
@@ -1034,6 +1307,8 @@ void SettingsPage::buildContent() {
         m_javaCard->refresh(preferredJava);
     else
         m_javaCard->refresh();
+
+    refreshAccountCard(); // 新增:进设置页就把账户状态读出来(读的是加密令牌文件,不联网)
 }
 
 void SettingsPage::bindEvents() { // settings_page.py:428-435
@@ -1081,6 +1356,88 @@ void SettingsPage::bindEvents() { // settings_page.py:428-435
             [this](bool checked) { m_store.set(kKeyDebugMode, checked); });
     connect(m_downloadEngineCard, &SwitchSettingCard::checkedChanged, this,
             [this](bool checked) { m_store.set(kKeyDownloadEngine, checked); });
+
+    // ---- 账户(新增)----
+    connect(m_loginCard, &PushSettingCard::clicked, this, [this] { onLoginClicked(); });
+    connect(m_refreshCard, &PushSettingCard::clicked, this, [this] { onRefreshClicked(); });
+    connect(m_logoutCard, &PushSettingCard::clicked, this, [this] { onLogoutClicked(); });
+}
+
+// ─────────────────────────── 账户(新增;Python 版无此功能) ───────────────────────────
+//
+// 三条硬规矩:
+//   1) **主线程绝不阻塞** —— 登录/续期/注销全部交给 AccountTask 在 work 线程里跑
+//      (核心库是同步阻塞的,见 docs/09 与 dialogs/account.h 的线程纪律);
+//   2) 错误**原样**转达 —— InfoBar 里既有人话,也有核心库 err 的原文(第 6 跳 403 就是这条路);
+//   3) 不做假象 —— 没有真 token 就绝不说"已登录/启动成功"。
+
+void SettingsPage::refreshAccountCard() {
+    if (m_accountCard == nullptr)
+        return;
+    const AccountSnapshot snapshot = loadAccountSnapshot();
+    m_accountCard->updateState(snapshot);
+    // 没登录过就没有可刷新的凭据、也没有可注销的东西(两个动作都置灰,免得点了没反应)。
+    if (m_refreshCard != nullptr)
+        m_refreshCard->setEnabled(snapshot.tokenFileExists);
+    if (m_logoutCard != nullptr)
+        m_logoutCard->setEnabled(snapshot.tokenFileExists);
+}
+
+void SettingsPage::onLoginClicked() {
+    QWidget *host = window() != nullptr ? window() : this;
+    // 对话框自己管后台任务;这里只接"登录成功"的通知去刷账户卡(见 dialogs/auth_dialog.cpp)。
+    AuthLoginDialog *dialog = AuthLoginDialog::open(host);
+    connect(dialog, &AuthLoginDialog::accountChanged, this, [this] {
+        refreshAccountCard();
+        InfoBar::push(InfoBar::Type::Success, QStringLiteral("登录成功"),
+                      QStringLiteral("账户状态已刷新。"), window(), 5000);
+    });
+}
+
+void SettingsPage::onRefreshClicked() {
+    runAccountAction(AccountTask::Operation::Refresh, QStringLiteral("刷新登录状态"));
+}
+
+void SettingsPage::onLogoutClicked() {
+    // 注销会删掉 refresh token(下次要重新输一次设备码),所以先确认一次。
+    auto *box = new MessageBox(QStringLiteral("退出登录"),
+                               QStringLiteral("将删除本机加密保存的登录凭据；下次登录要重新输一次"
+                                              "设备码。确定退出吗？"),
+                               window());
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    if (box->yesButton() != nullptr)
+        box->yesButton()->setText(QStringLiteral("退出登录"));
+    if (box->cancelButton() != nullptr)
+        box->cancelButton()->setText(QStringLiteral("取消"));
+    connect(box, &MessageBox::yesSignal, this, [this] {
+        runAccountAction(AccountTask::Operation::Logout, QStringLiteral("退出登录"));
+    });
+    box->show();
+}
+
+void SettingsPage::runAccountAction(AccountTask::Operation operation, const QString &title) {
+    if (m_accountTask != nullptr && m_accountTask->running()) {
+        InfoBar::push(InfoBar::Type::Info, title,
+                      QStringLiteral("上一次账户操作还在进行中，请稍候…"), window(), 3000);
+        return;
+    }
+    auto *task = new AccountTask(operation, this);
+    m_accountTask = task;
+    connect(task, &AccountTask::finished, this,
+            [this, task, title](bool ok, const QString &message, const QString &rawError) {
+                QString detail = message;
+                if (!rawError.isEmpty())
+                    detail += QStringLiteral("\n核心库原文（原样）：") + rawError;
+                InfoBar::push(ok ? InfoBar::Type::Success : InfoBar::Type::Error, title, detail,
+                              window(), ok ? 6000 : 12000);
+                refreshAccountCard();
+                if (m_accountTask == task)
+                    m_accountTask = nullptr;
+                task->deleteLater();
+            });
+    InfoBar::push(InfoBar::Type::Info, title,
+                  QStringLiteral("正在后台进行（界面不会卡住）…"), window(), 2500);
+    task->start();
 }
 
 // settings_page.py:511-514 _on_theme_changed:
@@ -1114,10 +1471,97 @@ void SettingsPage::onDownloadSourceChanged(const QString &value) {
                                     Q_ARG(QString, value));
 }
 
+// Android 追加(用户反馈:”我设置为 HMCL 游戏目录成功检出游戏“,说明自动扫描当年没覆盖到)。
+// 先跑一遍安卓候选扫描(sxcl_paths_detect_android),把**真的存在**的目录连同
+// ”这是谁留的 / 有几个版本“列出来让用户点一下;想去别的地方就选最后一项走文件对话框。
+// 找不到任何候选时返回空串,调用方落回原行为 —— 桌面平台上这张表恒为空,行为完全不变。
+QString pickAndroidGameDir(QWidget *parent) {
+    // 没有共享存储权限时,扫描结果一定是空的 —— 这时候"列候选"没有意义,
+    // 直接说清原因并把用户送去授权页(而不是让他以为"我有游戏却说没有")。
+    if (!androidHasAllFilesAccess()) {
+        QMessageBox box(parent);
+        box.setIcon(QMessageBox::Information);
+        box.setWindowTitle(QStringLiteral("需要开启「所有文件访问权限」"));
+        box.setText(QStringLiteral(
+            "安卓限制了本应用读取共享存储,所以扫不到你的 .minecraft(HMCL/FCL/PojavLauncher "
+            "的游戏目录通常也在那里)。\n\n请到:\n系统设置 → 应用 → 特殊应用权限 → 所有文件访问权限\n"
+            "给「Silent X Craft Launcher」打开开关。\n\n"
+            "打开后回到本应用会自动重新扫描,不用重启。"));
+        QPushButton *go = box.addButton(QStringLiteral("去授权"), QMessageBox::AcceptRole);
+        box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == go)
+            androidRequestAllFilesAccess();
+        return QString();
+    }
+    const QByteArray files = qEnvironmentVariable("SXCL_ANDROID_FILES").toUtf8();
+    sxcl_game_folders folders;
+    char err[SXCL_PATHS_ERROR_MAX];
+    err[0] = '\0';
+    (void)sxcl_paths_detect_android(files.isEmpty() ? nullptr : files.constData(), nullptr, &folders,
+                                     nullptr, err, sizeof(err));
+    if (folders.count == 0) {
+        // 一个都自动找不到时**不再静默**:把"我们找过哪些地方、为什么没用上"如实摊开,
+        // 然后照旧让用户手动指定(用户反馈就是"自动扫描没覆盖到我的目录")。
+        sxcl_game_probes probes;
+        (void)sxcl_paths_probe_android(files.isEmpty() ? nullptr : files.constData(), nullptr, nullptr,
+                                       &probes);
+        QStringList lines;
+        for (size_t i = 0; i < probes.count; ++i) {
+            const sxcl_game_probe &g = probes.items[i];
+            if (g.access == SXCL_ANDROID_MISSING)
+                continue; // 不存在的那些不用占篇幅
+            lines << QStringLiteral("%1（%2）\n    %3\n    %4")
+                         .arg(QString::fromUtf8(g.path), QString::fromUtf8(g.owner),
+                              QString::fromUtf8(g.reason), QString::fromUtf8(g.hint));
+        }
+        QString text = lines.isEmpty()
+                           ? QStringLiteral("常见位置都没有游戏数据。\n请手动指定你的 .minecraft 目录。")
+                           : (QStringLiteral("自动扫描到的可用目录:%1 个。以下是看着像、但用不了的位置:\n\n")
+                                  .arg(static_cast<int>(probes.usable)) +
+                              lines.join(QStringLiteral("\n\n")));
+        QMessageBox::information(parent, QStringLiteral("没找到游戏目录"), text);
+        return QString();
+    }
+
+    QStringList items;
+    for (size_t i = 0; i < folders.count; ++i) {
+        const sxcl_game_folder &folder = folders.items[i];
+        const QString owner = QString::fromUtf8(folder.owner);
+        const QString label = QString::fromUtf8(folder.label);
+        if (owner.isEmpty()) {
+            items << QStringLiteral("%1（%2，%3 个版本）")
+                         .arg(QString::fromUtf8(folder.path), label)
+                         .arg(folder.versions);
+        } else {
+            items << QStringLiteral("%1（%2 / %3，%4 个版本）")
+                         .arg(QString::fromUtf8(folder.path), owner, label)
+                         .arg(folder.versions);
+        }
+    }
+    const QString manual = QStringLiteral("手动选择其它目录…");
+    items << manual;
+
+    bool ok = false;
+    const QString chosen = QInputDialog::getItem(parent, QStringLiteral("选择 Minecraft 游戏目录"),
+                                                QStringLiteral("自动找到这些，选一个："), items, 0,
+                                                false, &ok);
+    if (!ok || chosen.isEmpty() || chosen == manual)
+        return QString();
+    const int index = items.indexOf(chosen);
+    if (index < 0 || static_cast<size_t>(index) >= folders.count)
+        return QString();
+    return QDir::fromNativeSeparators(QString::fromUtf8(folders.items[index].path));
+}
+
 // settings_page.py:441-450 _pick_game_directory
 void SettingsPage::pickGameDirectory() {
-    const QString path = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("选择 Minecraft 游戏目录"), gameDirectory());
+    // 先给候选(安卓上才有;桌面上返回空串,直接落回文件对话框)
+    QString path = pickAndroidGameDir(this);
+    if (path.isEmpty()) {
+        path = QFileDialog::getExistingDirectory(this, QStringLiteral("选择 Minecraft 游戏目录"),
+                                                 gameDirectory());
+    }
     if (path.isEmpty())
         return;
     const QString stored = QDir::fromNativeSeparators(path); // Python 存 Qt 原样字符串(正斜杠)

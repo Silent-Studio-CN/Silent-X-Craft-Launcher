@@ -224,6 +224,20 @@ static void test_java_version_text(void) {
             (void)sxcl_file_write_at(fixture, "not a real exe", 14, 0);
             (void)sxcl_file_close(fixture);
         }
+        /* Android 用的夹具:<files>/runtime/jre21/{release,bin/java}
+         * (安卓上可执行文件名没有 .exe 后缀,这里也照安卓的布局建) */
+        (void)sxcl_fs_mkdirs("build/_launch_tmp/androidjre/runtime/jre21/bin");
+        sxcl_file *af = sxcl_file_open_write("build/_launch_tmp/androidjre/runtime/jre21/release", -1);
+        if (af) {
+            (void)sxcl_file_write_at(af, kReleaseJdk21, strlen(kReleaseJdk21), 0);
+            (void)sxcl_file_close(af);
+        }
+        af = sxcl_file_open_write("build/_launch_tmp/androidjre/runtime/jre21/bin/java", -1);
+        if (af) {
+            (void)sxcl_file_write_at(af, "#!/bin/sh\n", 9, 0);
+            (void)sxcl_file_close(af);
+        }
+
         memset(&info, 0, sizeof(info));
         check(sxcl_java_inspect("build/_launch_tmp/jdk-21", &info) == 0, "inspect(JAVA_HOME 目录)");
         check_int(info.major, 21, "inspect: 版本来自 release");
@@ -961,9 +975,134 @@ static void test_log_summary(void) {
     check_int(s.conclusion, SXCL_LOG_CONCLUSION_VULKAN_FALLBACK, "逐行接口也能得到结论");
 }
 
+/* ══════════════════ 2b. Android:为什么检不出 Java(用户反馈的那条) ══════════════════
+ *
+ * 用户原文:"我平板有 HMCL 不可能没有 JAVA 和游戏目录…… 成功检出游戏,但是没检出 JAVA"。
+ * 这里锁住两件事:
+ *   1) 扫描根**只**落在应用私有目录(唯一能执行的地方),而且不再拼出 files/files/runtime
+ *      (老 bug:HOME 在安卓上就是 files 目录);
+ *   2) 检不出来时要**说出为什么** —— verdict 表与 hint 文案是产品行为的一部分,不能被改没。
+ * 真实的"沙箱拒绝"结论由设备实测覆盖(docs/08 第 14 节);本机(Windows)造不出 EACCES,
+ * 所以这里只断言"要么 DENIED 要么 MISSING",不做假证据。
+ */
+static void test_java_android_probe(void) {
+    sxcl_java_env env;
+    char roots[64][SXCL_JAVA_PATH_MAX];
+    sxcl_java_candidate cands[4];
+    sxcl_java_report report;
+    size_t n = 0;
+    size_t i = 0;
+    int found = 0;
+    int saw_fcl = 0;
+    int saw_hmcl = 0;
+    int saw_pojav = 0;
+    int saw_mine = 0;
+    const char *kFiles = "build/_launch_tmp/androidjre";
+
+    printf("[4b] Android 的 Java 探测:扫描根 / 候选体检 / 结论文案\n");
+
+    /* ── 1) 扫描根 ── */
+    memset(&env, 0, sizeof(env));
+    env.android_files = "/data/user/0/com.silentstudio.sxcl/files";
+    n = sxcl_java_scan_roots(&env, SXCL_JAVA_OS_ANDROID, roots, 64);
+    check(n >= 3, "Android: 私有目录下至少 3 个扫描根");
+    for (i = 0; i < n; ++i) {
+        if (strcmp(roots[i], "/data/user/0/com.silentstudio.sxcl/files/runtime") == 0) found = 1;
+    }
+    check(found, "Android: <files>/runtime 是扫描根");
+    found = 0;
+    for (i = 0; i < n; ++i) {
+        if (strcmp(roots[i], "/data/user/0/com.silentstudio.sxcl/files/jre") == 0) found = 1;
+    }
+    check(found, "Android: <files>/jre 是扫描根");
+    found = 0;
+    for (i = 0; i < n; ++i) {
+        if (strcmp(roots[i], "/data/user/0/com.silentstudio.sxcl/files/java") == 0) found = 1;
+    }
+    check(found, "Android: <files>/java 是扫描根");
+    found = 0;
+    for (i = 0; i < n; ++i) {
+        if (strstr(roots[i], "app_runtime/java") != NULL) found = 1;
+    }
+    check(found, "Android: <data>/app_runtime/java 也是扫描根(FCL 风格,方便用户拷贝)");
+    found = 0;
+    for (i = 0; i < n; ++i) {
+        if (strstr(roots[i], "files/files") != NULL) found = 1;
+    }
+    check_int(found, 0, "Android: 不再拼出 files/files/runtime(HOME 在安卓上就是 files 目录)");
+    /* 共享存储不该成为扫描根:noexec,扫到也起不了进程 */
+    found = 0;
+    for (i = 0; i < n; ++i) {
+        if (strstr(roots[i], "/storage/emulated") != NULL || strstr(roots[i], "/sdcard") != NULL) {
+            found = 1;
+        }
+    }
+    check_int(found, 0, "Android: 共享存储(noexec)不当扫描根");
+
+    /* ── 2) 体检一串候选:能用的与不能用的都要如实说 ── */
+    memset(cands, 0, sizeof(cands));
+    snprintf(cands[0].path, sizeof(cands[0].path), "%s/runtime/jre21/bin/java", kFiles);
+    snprintf(cands[0].home, sizeof(cands[0].home), "%s/runtime/jre21", kFiles);
+    snprintf(cands[0].source, sizeof(cands[0].source), "%s", "AndroidPrivate");
+    snprintf(cands[0].owner, sizeof(cands[0].owner), "%s", "本应用");
+    snprintf(cands[1].path, sizeof(cands[1].path), "%s/runtime/not-here/bin/java", kFiles);
+    snprintf(cands[1].source, sizeof(cands[1].source), "%s", "AndroidPrivate");
+    snprintf(cands[1].owner, sizeof(cands[1].owner), "%s", "本应用");
+    memset(&report, 0, sizeof(report));
+    check_int((long)sxcl_java_probe_candidates(cands, 2, SXCL_JAVA_OS_ANDROID, NULL, &report), 2,
+              "体检:两条候选都进报告");
+    check_int((long)report.usable, 1, "体检:只有真装好的那条算 usable");
+    check_int(report.items[0].verdict, SXCL_JAVA_VERDICT_USABLE, "体检:夹具里的 Java 可用");
+    check_int(report.items[0].major, 21, "体检:版本来自 release");
+    check_str(report.items[0].version, "21.0.3", "体检:版本串来自 release");
+    check_str(report.items[0].owner, "本应用", "体检:归属透传");
+    check(report.items[0].reason[0] != '\0', "体检:可用的那条也有原因文本");
+    check_int(report.items[1].verdict, SXCL_JAVA_VERDICT_MISSING, "体检:不存在的候选举报 missing");
+    check(report.items[1].reason[0] != '\0', "体检:不存在的候选也有人话原因(不静默)");
+
+    /* ── 3) 安卓候选全表:本应用 + 三家别的启动器 + 共享存储 ── */
+    memset(&report, 0, sizeof(report));
+    n = sxcl_java_probe_android(kFiles, NULL, &report);
+    check(n >= 12, "安卓体检:候选条数覆盖本应用/别的启动器/共享存储");
+    check_int((long)report.usable, 1, "安卓体检:夹具里只装了一份 Java");
+    for (i = 0; i < report.count; ++i) {
+        const sxcl_java_probe *p = &report.items[i];
+        check(p->reason[0] != '\0', "安卓体检:每条都有原因(用户看到的不是空白)");
+        if (strcmp(p->owner, "FCL") == 0) {
+            saw_fcl = 1;
+            check(p->verdict == SXCL_JAVA_VERDICT_DENIED || p->verdict == SXCL_JAVA_VERDICT_MISSING,
+                  "安卓体检:FCL 的 Java 要么沙箱拒绝要么不在(绝不假装可用)");
+        }
+        if (strcmp(p->owner, "HMCL") == 0) saw_hmcl = 1;
+        if (strcmp(p->owner, "PojavLauncher") == 0) saw_pojav = 1;
+        if (strcmp(p->owner, "本应用") == 0) saw_mine = 1;
+    }
+    check(saw_fcl, "安卓体检:列出了 FCL 的 Java 位置");
+    check(saw_hmcl, "安卓体检:列出了 HMCL 的 Java 位置");
+    check(saw_pojav, "安卓体检:列出了 PojavLauncher 的 Java 位置");
+    check(saw_mine, "安卓体检:列出了本应用的 Java 位置");
+    check_int((long)sxcl_java_probe_android(NULL, NULL, NULL), 0, "安卓体检:out=NULL 返回 0");
+
+    /* ── 4) 结论文案(产品行为:不能静默"没检出") ── */
+    check_str(sxcl_java_verdict_key(SXCL_JAVA_VERDICT_DENIED), "denied", "结论键:denied");
+    check_str(sxcl_java_verdict_key(SXCL_JAVA_VERDICT_NOEXEC), "noexec", "结论键:noexec");
+    check_str(sxcl_java_verdict_name(SXCL_JAVA_VERDICT_DENIED), "沙箱拒绝", "结论名:沙箱拒绝");
+    check_str(sxcl_java_verdict_name(SXCL_JAVA_VERDICT_NOEXEC), "共享存储不能执行",
+              "结论名:共享存储不能执行");
+    check(strstr(sxcl_java_verdict_hint(SXCL_JAVA_VERDICT_DENIED), "别的启动器") != NULL,
+          "建议:沙箱拒绝要指出是别的启动器");
+    check(strstr(sxcl_java_verdict_hint(SXCL_JAVA_VERDICT_DENIED), "装一份自己的 Java") != NULL,
+          "建议:沙箱拒绝要指向我们自己装的 Java");
+    check(strstr(sxcl_java_verdict_hint(SXCL_JAVA_VERDICT_NOEXEC), "noexec") != NULL,
+          "建议:noexec 要说出根因");
+    check(sxcl_java_verdict_name(SXCL_JAVA_VERDICT_COUNT)[0] != '\0', "结论名:计数项不为空");
+}
+/* ── 4b. 测试入口 ── */
+
 int main(void) {
     test_java_version_text();
     test_java_paths();
+    test_java_android_probe();
     test_java_rank();
     test_args_new_format();
     test_args_old_format();

@@ -30,6 +30,13 @@ set(SXCL_UI_SOURCES
   pages/multiplayer_page.cpp pages/settings_page.cpp
   # 三个临时页(会话页;不进导航,由 main_window 的会话机制按需创建)
   pages/download_config_page.cpp pages/download_progress_page.cpp pages/launch_page.cpp
+  # 账户(正版登录)—— Python 版没有这个功能,新增:
+  #   account.*     账户快照 + 工作线程任务(登录/续期/注销/正版启动;主线程绝不阻塞)
+  #   auth_dialog.* 设备码登录对话框(qf 风格的 MessageBoxBase)
+  #   auth_replay.* 夹具回放传输(取证通路,默认不启用;见头文件说明)
+  dialogs/account.cpp     dialogs/account.h
+  dialogs/auth_dialog.cpp dialogs/auth_dialog.h
+  dialogs/auth_replay.c   dialogs/auth_replay.h
   fluent_theme.cpp   fluent_theme.h
   sxcl_icons.cpp     sxcl_icons.h
   theme_bridge.cpp   theme_bridge.h
@@ -49,6 +56,12 @@ target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_BLOCK_DIR="${CMAKE_SOURCE
 # 否则页面只能用 Qt 去读 Python 版的旧配置文件(主页代理踩过这个坑)。
 # 核心库不依赖 Qt,不存在循环依赖。
 target_link_libraries(sxcl_ui_core PUBLIC fluent Qt6::Svg sxcl)
+# 登录/续期要走 HTTPS:核心库的 Qt Network 传输后端(根 CMakeLists 里按 SXCL_BUILD_QT_TRANSPORT 建)。
+# 没有它时 account.cpp 会如实报"没有可用的网络后端",绝不假装登录成功。
+if(TARGET sxcl_net_qt)
+  target_link_libraries(sxcl_ui_core PUBLIC sxcl_net_qt)
+  target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_HAVE_QT_TRANSPORT=1)
+endif()
 # 核心库头文件目录:显式挂上,免得"链了库却看不到 include/sxcl/*.h"(页面代理踩过)
 target_include_directories(sxcl_ui_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
 

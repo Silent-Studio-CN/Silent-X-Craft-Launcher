@@ -355,6 +355,27 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
     if (req->dry_run) {
         (void)snprintf(out->conclusion_text, sizeof(out->conclusion_text),
                        "只准备不启动:Java 与参数都已就绪,options.txt 已写入 %s。", requested);
+        /* dry-run + 有 on_line 回调时,把"将要执行的命令行"逐行报出去。
+         * **必须打码**:accessToken 是真凭据,不能进日志(下一个参数是它时替换成 ***)。 */
+        if (req->on_line != NULL) {
+            char head[512];
+            (void)snprintf(head, sizeof(head), "argv: %s", out->java_path);
+            (void)req->on_line(req->userdata, 0, head);
+            const char *const *av = sxcl_launch_argv(args);
+            int mask_next = 0;
+            for (size_t i = 0; av != NULL && av[i] != NULL; ++i) {
+                const char *text = av[i];
+                if (mask_next) {
+                    text = "***（已打码：accessToken 不进日志）";
+                    mask_next = 0;
+                } else if (strcmp(av[i], "--accessToken") == 0) {
+                    mask_next = 1;
+                }
+                char line[1024];
+                (void)snprintf(line, sizeof(line), "  arg[%llu] %s", (unsigned long long)i, text);
+                (void)req->on_line(req->userdata, 0, line);
+            }
+        }
         rc = 0;
         goto done;
     }
