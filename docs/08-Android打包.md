@@ -22,15 +22,18 @@ Qt 6.11.2 的 Widgets/Gui/Core/Svg/Network + qtforandroid/offscreen 平台插件
 | `lib/arm64-v8a/*.so` | ✅ 19 个:Qt6Core/Gui/Widgets/Svg/Network/OpenGL/OpenGLWidgets/PrintSupport/Sql/Concurrent + `libsxclui_arm64-v8a.so`(5,669,608)+ qtforandroid/qoffscreen/qandroidstyle + qsvg/qjpeg/qgif/qico + libc++_shared |
 | `assets/theme/qf_exact/*` | ✅ **522 个文件**(dark/light 共 68 个 .qss + images),另有 `assets/icons/blocks` 14 个、`assets/icons/pcl` 54 个 |
 | 应用图标 | ✅ `application: ... icon='res/mipmap-mdpi-v4/ic_launcher.png'` 且 `launchable-activity: ... icon='res/mipmap-mdpi-v4/ic_launcher.png'`(mdpi/hdpi/xhdpi/xxhdpi/xxxhdpi 五档,由 `assets/icons/blocks/Grass.png` 64x64 以 NEAREST 放大) |
-| 设备侧 1:1 像素 | ❌ **未取得** —— 本机当前没有任何 API≥28 的 arm64 真机/模拟器(见 §6),如实列出卡点 |
+| 设备侧运行 | ✅ 真机 **G6012BS / Android 16 / arm64-v8a** 安装成功、窗口在前台、可见截图有我们的令牌色(§6.2) |
+| 设备侧 1:1 像素 | ✅ **已取得** —— 九页离屏渲染各 **1650x1125**,DIFF 实测见 §6.3(含 Android vs 参考图 与 Android vs 桌面 C 两组,差异归因见 §6.4) |
 
 **三句必须说的真话**:
 
 1. 这个 APK 是**本机**用 Qt 6.11.2 `android_arm64_v8a` + **NDK 28.2.13676358**(不是 r27)编出来的,**不是 WS2025 的产物** ——
    远端那趟两次都卡在控制通道(§7.3),只走到 native 编译与 overlay 验证;
-2. **没有在真机/模拟器上验证过启动与像素**。所以"Android 上 1:1"目前**只有静态证据**(§5 的资产/库/清单/签名),
-   **没有设备侧 DIFF**;§8.5 那套九页/弹层数字是**桌面 Windows** 上的回归证据,不能当作 Android 的设备侧结论;
-3. 设备一回来怎么取设备侧像素:`r3_device.ps1`(装包→可见运行截图→九页 `offscreen` 1100x750@1.5 抓图)+ `compare_all.ps1`(对 `build/ref/py_*.png` 跑 `tools/ui_compare.py`),命令见 §6。
+2. **设备侧已实跑**(§6):真机装包、窗口前台、可见截图不是黑/白屏;九页离屏渲染 1650x1125 全部拿到,
+   但 **Android 与参考图/桌面 C 版仍有 0.88%~58% 的差**,原因已逐条归因(平台字体回退 + 设备上是空数据目录),
+   **不是**"Android 上已经 1:1"——要 1:1 得先给设备放一份与参考机同口径的数据再重跑(§6.4 第三条);
+3. 每次运行**结束时**进程 `SIGABRT`(hwuiTask 的 FORTIFY:pthread_mutex_lock on destroyed mutex),发生在产物写完之后,
+   属待收口的拆除顺序问题(§6.2);
 
 **在哪里编的(重要)**:WS2025 在本次任务中途把控制通道卡死了(见 §7.3),为不空等,按主代理指示改用
 **本机兜底**:本机装 Qt 6.11.2 android_arm64_v8a 套件 + NDK r28 + Gradle 9.3.1,用**同一套打包层文件**出包。
@@ -163,21 +166,103 @@ assets/theme/qf_exact 522 文件(68 个 .qss 之外还有 images/) assets/icons/
 
 取证文件(已随仓库落盘):`build/_android/out/{sxcl-debug.apk, aapt2_badging.txt, apksigner_verify.txt, apk_contents.txt}`。
 
-## 6. 设备侧:未取得像素(如实)
+## 6. 设备侧实跑:**成功**(真机像素 + 九页 DIFF)
 
-本机 `adb devices` 当前可见的 10 台:
+### 6.1 装包
 
-| 设备 | 型号 | API | ABI | 能不能装 |
-|---|---|---|---|---|
-| 192.168.2.201-204:5555 | (无 getprop) | — | — | ❌ `getprop: not found`,不是标准 Android shell |
-| 192.168.206.6/9/13/14/15/16:5555 | rk3288 / TE1102 | **27** | armeabi-v7a | ❌ minSdk 28 → `INSTALL_FAILED_OLDER_SDK` |
-| 192.168.200.183 / 192.168.220.13:5555 | G6012BS(API 36,arm64-v8a,1600x2400@320) | 36 | arm64-v8a | ⚠️ **本任务期间掉线**,任务中段起一直不在线 |
+设备:`192.168.220.13:5555`,**G6012BS**,Android **16(API 36)**,`ro.product.cpu.abilist=arm64-v8a,armeabi-v7a,armeabi`,
+面板 `1600x2400`,density 320(DPR 2.0)。
 
-本机没有 `emulator.exe`、没有 system-images;`D:\SVM`(自研 Android VM)已装但**无镜像无引擎**
-(要 `svm install emulator` 440MB + `svm install aosp-35` 1.4GB,且 SVM 数据目录在 C 盘,当时 C 盘只剩 2.2GB —— 放弃)。
+```powershell
+adb -s 192.168.220.13:5555 install -r build\_android\out\sxcl-debug.apk
+# → Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Existing package com.silentstudio.sxcl
+#    signatures do not match newer version; ignoring!]
+#   原因:机上残留的是 2026-09-15 那版 Java 壳包(versionName 0.1.0),签名与本次 debug key 不同。
+adb -s 192.168.220.13:5555 uninstall com.silentstudio.sxcl   # Success
+adb -s 192.168.220.13:5555 install -r build\_android\out\sxcl-debug.apk   # Success
+```
 
-所以**卡在这一步**:APK 已就绪且清单/签名全部合规,但没有可用的 API≥28 arm64 设备/模拟器可安装。
-一旦 G6012BS 回来或起一个模拟器,取证脚本已经写好、可直接跑:
+不需要 `-t`/`--bypass-low-target-sdk-block`(targetSdk 34 已安装正常)。
+
+### 6.2 真起来了(不是黑屏、不是白屏)
+
+```
+adb shell am start -n com.silentstudio.sxcl/com.silentstudio.sxcl.SxclActivity
+# t+3s  mCurrentFocus=Window{55c2851 u0 com.silentstudio.sxcl/com.silentstudio.sxcl.SxclActivity}   ← 我们的窗口在前台
+#       截图 out/device/visible_t3.png (2400x1600;设备为这扇窗横了过来)
+#        像素构成:#202020 26.07% + #2b2b2b 3.76% + #e4e4e4 文字 —— 正是 SXCL 深色令牌
+# t+5s/t+8s 焦点被别人抢走(com.tungsten.fcl/FCL),那两张截图里**一点** #202020/#2b2b2b 都没有
+```
+
+机型分辨率 1600x2400 → 横屏逻辑约 1200x800,窗口按设计 1100x750 铺满,肉眼可见导航 + 内容卡片 + 文本。
+
+**已知缺陷(如实记录)**:每次运行**结束时**进程会 `SIGABRT`,不是启动崩:
+
+```
+I sxcl : event loop finished rc=0            ← Qt 事件循环正常返回
+F libc : Fatal signal 6 (SIGABRT), code -1 (SI_QUEUE) in tid … (hwuiTask0/hwuiTask1)
+F libc : FORTIFY: pthread_mutex_lock called on a destroyed mutex (0x71dafc9b88 / 0x71dafc9908)
+```
+
+即:Qt 主线程已经收工、产物已落盘,Android 16 的 HWUI 渲染线程在**拆机**时碰到已销毁的 mutex 触发 FORTIFY 中止。
+九次 offscreen 取证每次都复现(12:47:13 / 12:47:29 / 12:47:38 …),但**都在 PNG 写完之后**,不影响取证结果;
+影响是"进程不是干净退出"。归因方向:Qt 6.11.2 与 Android 16 的 activity/surface 拆除顺序(待后续收口)。
+
+### 6.3 九页 1:1 设备侧取证
+
+口径:同一次安装里用 `offscreen` QPA 让窗口保持 `MainWindow` 的 **1100x750 逻辑尺寸**,
+`scale=1.5` 让离屏 DPR = 1.5 → 每张 PNG **1650x1125**,与 `build/ref/py_*.png` 同尺寸(不做任何缩放、不做任何 Android 专用布局)。
+
+```powershell
+adb -s 192.168.220.13:5555 shell am force-stop com.silentstudio.sxcl
+adb -s 192.168.220.13:5555 shell am start -n com.silentstudio.sxcl/com.silentstudio.sxcl.SxclActivity `
+    --es route home --ez offscreen true --ez shot true --es scale 1.5 --es accent "'#c044a3'"
+# ⚠ accent 的值必须**带着引号**送到远端 shell:写成 --es accent '#c044a3' 会被当成注释,
+#   报 IllegalArgumentException: Argument expected after "accent"
+adb -s 192.168.220.13:5555 pull /sdcard/Android/data/com.silentstudio.sxcl/files/shots/home.png out\device\home_android.png
+```
+
+九张全部 1650x1125,落在 `build/_android/out/device/<route>_android.png`。**DIFF>12 实测**:
+
+| 页面 | **Android vs 参考图 `py_*`** | **Android vs 桌面 C 版 `c_*`** | 桌面 C vs py(对照) |
+|---|---|---|---|
+| home | 5.84% | 5.93% | 0.09% |
+| versions | **58.08%** | **57.82%** | 1.54% |
+| tasks | **0.88%** | 0.88% | 0.00% |
+| keymap | 12.32% | 12.32% | 0.21% |
+| multiplayer | 7.68% | 7.66% | 0.15% |
+| settings | 6.64% | 6.61% | 0.98% |
+| download_config | 3.98% | 4.88% | 2.33% |
+| download_progress | 3.34% | 3.34% | 0.01% |
+| launch | 2.49% | 2.48% | 0.01% |
+
+### 6.4 差异来自哪里(逐条,不含糊)
+
+**第一条:平台,不是我们的移植。** 每一页 `Android vs py` 与 `Android vs 桌面C` **几乎相等**(最大差 0.9pp,多数 ≤0.2pp)。
+若差异来自"Android 版改坏了界面",两边应该一个高一个低;两边同时升高说明**变的是环境**,不是 UI 结构。具体:
+
+1. **字体族缺失(主因)**:QSS 的 `--FontFamilies` 是 `"Segoe UI", "Microsoft YaHei UI"`,Android 上两个族都不存在 →
+   Qt 回落到系统字体(Roboto/Noto Sans CJK)。字宽/行高/字重渲染全变 → 文本块的位置与像素都移;
+2. **字体栅格化与抗锯齿**不同(Windows GDI/DirectWrite vs Android FreeType),同一字号的边缘灰度不同;
+3. **QPA/绘制后端**不同(`qtforandroid` 光栅 + `offscreen` vs Windows `qwindows`),圆角/半透明叠加的取整会差 1 个设备像素;
+4. **DPR**:两边都取 1.5,但离屏屏幕的 DPR 由 `QT_SCALE_FACTOR` 推出来,和 Windows 的 150% 缩放不是同一条代码路径。
+
+纯平台地板(不含数据的页):**tasks 0.88%**、**download_progress 3.34%**、**launch 2.49%**;也就是说
+"同一份代码换个平台"本身就会带 1~3 个点,页面上元素越多、字越多,这个数字越大(keymap 满满一屏控件 → 12.3%)。
+
+**第二条:数据。** 设备上是**全新安装、空数据目录**(证据:`run-as com.silentstudio.sxcl ls files` 只有
+`assets/`、我写的 `sxcl_boot.txt`/`sxcl_last_run.txt`,**没有任何版本/实例/按键映射/设置数据**),
+而桌面基线的参考机是有数据的。所以按数据渲染的页差异大得多:
+
+- **versions 58%**:设备上 `#202020` 占 **92.99%**(整页几乎空),桌面基线 `#2d2d2d` 占 **53.32%**(有版本行/输入框)
+  —— 就是"空列表 vs 有列表",属**功能数据差**,不是画错;
+- keymap 12.32%(没有已存布局)、multiplayer 7.68%、settings 6.64%、home 5.84%(没有实例)、download_config 3.98%。
+
+**第三条:没有静默降级。** 以上数字都是实测原样;我们没有为 Android 改任何布局、颜色、字号,
+也没有为了让数字好看去调 `ui_compare.py` 的阈值。要得到"有数据的 1:1"结论,需要在设备上先放一份与参考机同口径的数据
+(版本/实例/按键映射),再重跑 §6.3 的九页;
+
+### 6.5 复现脚本(就绪)
 
 ```powershell
 & powershell -File build\_android\scripts\r3_device.ps1 -Apk build\_android\out\sxcl-debug.apk
@@ -372,7 +457,8 @@ $env:SXCL_UI_SHOT   = '<out>\home.png'
    文字像素与参考图必然有差异(几何/配色/QSS 规则不变)。这是平台事实,不是布局改动。
 2. **只出了 `arm64-v8a`**(验收要求的那个 ABI);32 位/模拟器 ABI 需要再装 android_armv7/android_x86_64 套件重编。
 3. **debug 签名**(Android Debug),用于验证;发布需另配 keystore。
-4. **未做真机像素验证**(§6)。
+4. **设备侧已跑但没有"1:1 达标"**:九页 DIFF 0.88%~58%(§6.3),主要来自字体回退与设备空数据;
+   要收敛必须在设备上补一份与参考机同口径的数据后重跑(§6.4);另外每次运行结束进程 SIGABRT(§6.2),属待收口项。
 5. 打包层里 `app/CMakeLists.txt` 需要 `-DCMAKE_AUTOMOC=ON`(原因见 §4.2),这是**打包层的配置**,不是源码改动。
 
 ## 10. 为 Android 必须动共享代码的地方(清单,已上报待批)
