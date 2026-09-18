@@ -923,7 +923,9 @@ private:
             request.required_major = 0; // 0 = 核心库自己定(没有 MC 版本时为 21,与 Python 一致)
             request.target_root = rootUtf8.constData();
             request.use_mirror = 1;     // 官方失败就换 BMCLAPI(与 Python 的两条路一致)
-            request.transport_factory = sxcl_transport_qt_create;
+            // java_runtime.h 的字段是 sxcl_transport *(*)(void *ud),而 net.h 的 Qt 工厂是无参的
+            // sxcl_transport_qt_create(void) —— 用无捕获 lambda 适配(避免为了一个签名去改公共头)
+            request.transport_factory = [](void *) -> sxcl_transport * { return sxcl_transport_qt_create(); };
             request.engine_opts = &opts;
             request.on_progress = &JavaSettingCard::progressTrampoline;
             request.is_cancelled = &JavaSettingCard::cancelTrampoline;
