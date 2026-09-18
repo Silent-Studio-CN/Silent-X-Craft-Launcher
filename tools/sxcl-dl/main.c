@@ -21,7 +21,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
+#include "sxcl/auth.h"
+#include "sxcl/auth_store.h"
 #include "sxcl/engine.h"
 #include "sxcl/fs.h"
 #include "sxcl/json.h"
@@ -178,10 +181,15 @@ static int usage(void)
            "      [--java PATH] [--instance NAME] [--installer JAR] [--timeout MS] [--maven-mirror URL]\n"
            "      [--no-fallback] [--verbose]\n"
            "  sxcl-dl launch <版本名> <游戏目录> [--java PATH] [--memory MB] [--instance NAME]\n"
-           "      [--offline 玩家名] [--backend default|vulkan|opengl] [--timeout 秒] [--settings PATH]\n"
+           "      [--offline 玩家名 | --account [--token-file PATH]]\n"
+           "      [--backend default|vulkan|opengl] [--timeout 秒] [--settings PATH]\n"
+           "      └ --account:用 sxcl-dl auth login 存下的正版身份启动(令牌不明文进日志)\n"
            "      [--dry-run] [--verbose]\n"
            "      └ 读版本 JSON -> 选 Java -> 按实例设置写 options.txt(渲染后端)-> 起进程\n"
-           "        -> 每行归类 -> 出一条人话结论(发现 Vulkan 回退会写回 lastGraphicsApi)\n");
+           "        -> 每行归类 -> 出一条人话结论(发现 Vulkan 回退会写回 lastGraphicsApi)\n"
+           "  sxcl-dl auth <login|status|refresh|logout|bedrock> [...]\n"
+           "      └ 微软(Xbox Live)正版登录:授权码+PKCE+环回 / 设备码兜底 / 免密续期\n"
+           "        令牌加密落盘,输出只打前缀,绝不打印明文;详见 docs/09-正版登录.md\n");
     return 2;
 }
 
@@ -728,6 +736,8 @@ typedef struct launch_cli_opts {
     const char *java_path;
     const char *instance;
     const char *offline;
+    int use_account;          /* --account:用已登录的正版账户启动 */
+    const char *token_file;   /* --token-file:令牌文件路径(可空=默认) */
     const char *backend;
     const char *settings;
     int memory_mb;
@@ -766,6 +776,11 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
         } else if (strcmp(a, "--offline") == 0 && v) {
             lo.offline = v;
             ++i;
+        } else if (strcmp(a, "--account") == 0) {
+            lo.use_account = 1; /* 用已登录的正版账户(令牌从加密存储里读) */
+        } else if (strcmp(a, "--token-file") == 0 && v) {
+            lo.token_file = v;
+            ++i;
         } else if (strcmp(a, "--backend") == 0 && v) {
             lo.backend = v;
             ++i;
@@ -793,6 +808,46 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
         lo.settings = settings_path;
     }
 
+    /* --account:把加密存储里的正版身份读出来喂给启动层。
+     * 读的是内存里的明文(只在进程内),令牌**不会**出现在日志或命令行里。 */
+    sxcl_auth_session session;
+    int have_account = 0;
+    char acct_err[SXCL_AUTH_ERROR_MAX];
+    acct_err[0] = '\0';
+    if (lo.use_account) {
+        if (lo.offline != NULL) {
+            printf("--account 与 --offline 不能同时用:前者是正版身份,后者是离线身份。\n");
+            return 2;
+        }
+        char tf[SXCL_AUTH_STORE_PATH_MAX];
+        const char *path = lo.token_file;
+        if (path == NULL) {
+            if (sxcl_auth_store_default_path(tf, sizeof(tf), acct_err, sizeof(acct_err)) != SXCL_AUTH_OK) {
+                printf("拼不出令牌文件路径:%s\n", acct_err);
+                return 1;
+            }
+            path = tf;
+        }
+        if (sxcl_auth_store_load(path, &session, acct_err, sizeof(acct_err)) != SXCL_AUTH_OK) {
+            printf("读取已登录账户失败:%s\n  先跑 sxcl-dl auth login --device-code\n", acct_err);
+            return 1;
+        }
+        if (sxcl_auth_mc_expired(&session, sxcl_auth_now(), 120)) {
+            printf("Minecraft 令牌已过期或没有(需要重新走一次登录链):\n");
+            printf("  跑 sxcl-dl auth refresh(免密)试试;不行就 sxcl-dl auth login\n");
+            return 1;
+        }
+        if (session.mc.name[0] == '\0' || session.mc.access_token[0] == '\0') {
+            printf("这个账户没有可用的 Java 版身份(没买/没查到)。\n");
+            return 1;
+        }
+        char masked[160];
+        (void)sxcl_auth_mask_token(session.mc.access_token, masked, sizeof(masked));
+        printf("用已登录账户启动:name=%s uuid=%s(Minecraft 令牌 %s)\n", session.mc.name,
+               session.mc.uuid, masked);
+        have_account = 1;
+    }
+
     sxcl_launch_request req;
     memset(&req, 0, sizeof(req));
     req.game_dir = argv[3];
@@ -801,6 +856,17 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
     req.memory_mb = lo.memory_mb;
     req.instance = lo.instance;
     req.offline_name = lo.offline;
+    if (have_account) {
+        req.player_name = session.mc.name;
+        req.uuid = session.mc.uuid;
+        req.access_token = session.mc.access_token;
+        req.user_type = "msa";
+        char xuid[32];
+        if (session.xbox.xuid != 0) {
+            snprintf(xuid, sizeof(xuid), "%llu", (unsigned long long)session.xbox.xuid);
+            req.xuid = xuid;
+        }
+    }
     req.backend = lo.backend;
     req.settings_path = lo.settings;
     req.timeout_ms = lo.timeout_ms;
@@ -1033,6 +1099,505 @@ static void rebuild_argv_utf8(int *argc_io, char ***argv_io)
 }
 #endif
 
+/* ── auth 子命令:正版登录的端到端人工验收入口 ──
+ *
+ *   sxcl-dl auth login [--device-code] [--client-id ID] [--tenant T] [--no-browser]
+ *   sxcl-dl auth status | refresh | logout | bedrock | help
+ *
+ * 纪律:**绝不打印 token 明文** —— 只打前 6 位 + 过期时间(见 sxcl_auth_mask_token)。
+ */
+typedef struct auth_cli_ctx {
+    int verbose;
+    int got_user_code;
+    char token_file[SXCL_AUTH_STORE_PATH_MAX];
+    char settings_file[SXCL_AUTH_STORE_PATH_MAX];
+} auth_cli_ctx;
+
+static void auth_cli_on_user_code(void *userdata, const char *user_code, const char *verification_uri,
+                                  const char *message)
+{
+    auth_cli_ctx *ctx = (auth_cli_ctx *)userdata;
+    ctx->got_user_code = 1;
+    printf("\n");
+    printf("════════════════════════════════════════════════════════════\n");
+    printf("  请用浏览器打开：%s\n", verification_uri ? verification_uri : "(未给出)");
+    printf("  然后输入这个代码：\n\n");
+    printf("        %s\n\n", user_code ? user_code : "(未给出)");
+    if (message && message[0]) {
+        printf("  服务端提示：%s\n", message);
+    }
+    printf("  输入完成后本程序会自动继续（正在轮询，请勿关闭）。\n");
+    printf("════════════════════════════════════════════════════════════\n\n");
+    fflush(stdout);
+}
+
+static void auth_cli_on_device_code_info(void *userdata, int interval_seconds, int expires_in_seconds)
+{
+    (void)userdata;
+    printf("  设备码有效期：%d 秒（约 %d 分钟）；轮询间隔：%d 秒（按服务端要求，server 要求 slow_down 时自动加大）\n",
+           expires_in_seconds, expires_in_seconds / 60, interval_seconds);
+    fflush(stdout);
+}
+
+static void auth_cli_on_status(void *userdata, const char *message)
+{
+    (void)userdata;
+    printf("  · %s\n", message ? message : "");
+    fflush(stdout);
+}
+
+static void auth_cli_on_open_url(void *userdata, const char *url)
+{
+    (void)userdata;
+    printf("  授权链接（如果浏览器没自动打开，请手动复制）：\n    %s\n", url ? url : "");
+    fflush(stdout);
+}
+
+/* 建一个主线程用的传输后端(CLI 的 HTTPS 走 Qt Network;见根 CMakeLists 的说明) */
+static sxcl_transport *auth_cli_transport(void)
+{
+#if defined(SXCL_HAVE_QT_TRANSPORT)
+    sxcl_transport_qt_bootstrap();
+    return sxcl_transport_qt_create();
+#else
+    return NULL;
+#endif
+}
+
+static void auth_cli_fill_ctx(auth_cli_ctx *ctx, int argc, char **argv)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    char err[SXCL_AUTH_ERROR_MAX];
+    err[0] = '\0';
+    if (sxcl_auth_store_default_path(ctx->token_file, sizeof(ctx->token_file), err, sizeof(err)) !=
+        SXCL_AUTH_OK) {
+        ctx->token_file[0] = '\0';
+    }
+    char dir[SXCL_AUTH_STORE_PATH_MAX];
+    if (sxcl_auth_config_dir(dir, sizeof(dir), err, sizeof(err)) == SXCL_AUTH_OK) {
+        (void)snprintf(ctx->settings_file, sizeof(ctx->settings_file), "%s/settings.txt", dir);
+    }
+    for (int i = 2; i < argc; ++i) {
+        const char *a = argv[i];
+        const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
+        if (strcmp(a, "--verbose") == 0) {
+            ctx->verbose = 1;
+        } else if (strcmp(a, "--token-file") == 0 && v) {
+            (void)snprintf(ctx->token_file, sizeof(ctx->token_file), "%s", v);
+            ++i;
+        } else if (strcmp(a, "--settings") == 0 && v) {
+            (void)snprintf(ctx->settings_file, sizeof(ctx->settings_file), "%s", v);
+            ++i;
+        }
+    }
+}
+
+static const char *auth_cli_opt(int argc, char **argv, const char *name)
+{
+    for (int i = 2; i < argc; ++i) {
+        if (strcmp(argv[i], name) == 0 && i + 1 < argc) {
+            return argv[i + 1];
+        }
+    }
+    return NULL;
+}
+
+static int auth_cli_has(int argc, char **argv, const char *name)
+{
+    for (int i = 2; i < argc; ++i) {
+        if (strcmp(argv[i], name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int64_t auth_cli_opt_i64(int argc, char **argv, const char *name, int64_t def)
+{
+    const char *v = auth_cli_opt(argc, argv, name);
+    if (v == NULL) {
+        return def;
+    }
+    return (int64_t)atoll(v);
+}
+
+static void auth_cli_print_time(const char *label, int64_t when)
+{
+    if (when <= 0) {
+        printf("  %s：未知\n", label);
+        return;
+    }
+    const int64_t now = sxcl_auth_now();
+    const int64_t left = when - now;
+    char stamp[64];
+#if defined(_WIN32)
+    struct tm tmv;
+    const time_t tt = (time_t)when;
+    if (gmtime_s(&tmv, &tt) == 0) {
+        (void)strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S UTC", &tmv);
+    } else {
+        (void)snprintf(stamp, sizeof(stamp), "%lld", (long long)when);
+    }
+#else
+    struct tm tmv;
+    const time_t tt = (time_t)when;
+    if (gmtime_r(&tt, &tmv) != NULL) {
+        (void)strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S UTC", &tmv);
+    } else {
+        (void)snprintf(stamp, sizeof(stamp), "%lld", (long long)when);
+    }
+#endif
+    printf("  %s：%s（%s %lld 秒）\n", label, stamp, left >= 0 ? "还剩" : "已过期",
+           (long long)(left >= 0 ? left : -left));
+}
+
+static int auth_cli_save(const auth_cli_ctx *ctx, const sxcl_auth_session *session)
+{
+    char err[SXCL_AUTH_ERROR_MAX];
+    err[0] = '\0';
+    const sxcl_auth_store_kind kind = sxcl_auth_store_backend();
+    if (sxcl_auth_store_save(ctx->token_file, session, err, sizeof(err)) != SXCL_AUTH_OK) {
+        printf("  [失败] 令牌加密落盘失败：%s\n", err);
+        return 1;
+    }
+    printf("  · 令牌已加密保存到：%s（后端：%s）\n", ctx->token_file,
+           sxcl_auth_store_kind_name(kind));
+    return 0;
+}
+
+static int auth_cli_login(int argc, char **argv)
+{
+    auth_cli_ctx ctx;
+    auth_cli_fill_ctx(&ctx, argc, argv);
+    sxcl_transport *tr = auth_cli_transport();
+    if (tr == NULL) {
+        printf("错误：没有可用的传输后端（本构建没编 Qt Network），无法联网登录。\n");
+        return 1;
+    }
+    sxcl_settings *settings = sxcl_settings_open(ctx.settings_file);
+    sxcl_auth_opts opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.settings = settings;
+    opts.client_id = auth_cli_opt(argc, argv, "--client-id");
+    opts.tenant = auth_cli_opt(argc, argv, "--tenant");
+    opts.device_code = auth_cli_has(argc, argv, "--device-code") ? 1 : 0;
+    opts.no_browser = auth_cli_has(argc, argv, "--no-browser") ? 1 : 0;
+    opts.http_timeout_ms = auth_cli_opt_i64(argc, argv, "--http-timeout", 30000);
+    opts.loopback_timeout_ms = auth_cli_opt_i64(argc, argv, "--wait", 300000);
+    /* 设备码流默认给足 15 分钟(微软自己的 expires_in 就是 900 秒) */
+    opts.poll_timeout_ms = auth_cli_opt_i64(argc, argv, "--poll-ms", 0);
+    opts.cb.on_user_code = auth_cli_on_user_code;
+    opts.cb.on_device_code_info = auth_cli_on_device_code_info;
+    opts.cb.on_status = auth_cli_on_status;
+    opts.cb.on_open_url = auth_cli_on_open_url;
+    opts.cb.userdata = &ctx;
+
+    char cidbuf[SXCL_AUTH_CLIENT_ID_MAX];
+    char tenbuf[SXCL_AUTH_TENANT_MAX];
+    char err[SXCL_AUTH_ERROR_MAX];
+    err[0] = '\0';
+    if (sxcl_auth_resolve_client_id(opts.client_id, settings, cidbuf, sizeof(cidbuf)) ==
+        SXCL_AUTH_OK) {
+        opts.client_id = cidbuf;
+    }
+    if (sxcl_auth_resolve_tenant(opts.tenant, settings, tenbuf, sizeof(tenbuf)) == SXCL_AUTH_OK) {
+        opts.tenant = tenbuf;
+    }
+    printf("SXCL-C 正版登录（%s）\n",
+           opts.device_code ? "设备码流" : "授权码流 + PKCE + 环回重定向");
+    printf("  client_id = %s\n", opts.client_id ? opts.client_id : "(空)");
+    printf("  租户段    = %s（端点 https://login.microsoftonline.com/%s/oauth2/v2.0/…）\n",
+           opts.tenant ? opts.tenant : "(空)", opts.tenant ? opts.tenant : "");
+    printf("  提示：授权页面上出现的是我们注册的应用名“Silent X Craft Launcher”。\n\n");
+    fflush(stdout);
+
+    sxcl_auth_session session;
+    const int rc = sxcl_auth_login(tr, &opts, &session, err, sizeof(err));
+    if (rc != SXCL_AUTH_OK) {
+        printf("\n[失败] 登录没有完成（返回码 %d）\n  %s\n", rc, err);
+        /* **关键**:微软那段(token/refresh)是用户花时间换来的,后面任何一跳失败都不该把它丢掉。
+         * 落盘之后"修好配置再重试"只要 sxcl-dl auth refresh,不用再让用户输一次设备码。
+         * (第一版只在整链成功时才存,结果第 ⑥ 跳失败把用户的一次登录白扔了 —— 实测踩过。) */
+        if (session.ms.refresh_token[0] != '\0') {
+            printf("\n  注意：微软登录本身是成功的，凭据已保存 —— 修好问题后用下面的命令重试，**不用再输一次设备码**：\n");
+            printf("      sxcl-dl auth refresh\n");
+            (void)auth_cli_save(&ctx, &session);
+        }
+        if (rc == SXCL_AUTH_ERR_XBOX && session.last_error_xerr != 0) {
+            char human[SXCL_AUTH_MESSAGE_MAX];
+            (void)sxcl_auth_xsts_error_message((uint64_t)session.last_error_xerr, human, sizeof(human));
+            printf("  XSTS 原因：%s\n", human);
+        }
+        printf("\n  如果报的是 AADSTS 系列（应用配置问题）：\n");
+        printf("    · AADSTS50059 / AADSTS500011 / AADSTS700016 → 应用的“受支持的帐户类型”\n");
+        printf("      与租户段（默认 consumers）没对上；改 Azure 设置或用 --tenant 指定。\n");
+        printf("    · AADSTS70002 → 应用没被标记成“公共客户端/移动应用”（设备码流与环回流都会被拒）。\n");
+        printf("    · AADSTS900971 → 重定向地址没注册（要加 http://localhost）。\n");
+        printf("    · AADSTS7000012 → refresh token 是另一个租户段换来的（登录与续期必须同一个租户段）。\n");
+        printf("    · AADSTS70008 / AADSTS700082 → refresh token 过期，重新登录即可。\n");
+        if (settings != NULL) {
+            sxcl_settings_free(settings);
+        }
+        tr->destroy(tr->ctx);
+        return 1;
+    }
+
+    printf("\n[成功] 登录完成（client_id=%s，租户段=%s）\n", session.client_id, session.tenant);
+    printf("  账号      ：%s\n", session.account_name[0] ? session.account_name : "(未取到)");
+    printf("  Xbox uhs  ：%s\n", session.xbox.user_hash);
+    printf("  Xbox XUID ：%llu\n", (unsigned long long)session.xbox.xuid);
+    printf("  Java 版   ：name=%s  uuid=%s\n", session.mc.name, session.mc.uuid);
+    printf("  权益      ：%s（mcstore 条目数 %d）\n",
+           session.mc.entitlement_count > 0 ? "拥有 Java 版权益" : "mcstore 里没有条目",
+           session.mc.entitlement_count);
+    char masked[160];
+    (void)sxcl_auth_mask_token(session.ms.access_token, masked, sizeof(masked));
+    printf("  微软令牌  ：%s\n", masked);
+    auth_cli_print_time("微软令牌过期", session.ms.expires_at);
+    (void)sxcl_auth_mask_token(session.mc.access_token, masked, sizeof(masked));
+    printf("  MC 令牌   ：%s\n", masked);
+    auth_cli_print_time("MC 令牌过期", session.mc.expires_at);
+    (void)sxcl_auth_mask_token(session.ms.refresh_token, masked, sizeof(masked));
+    printf("  refresh   ：%s（已加密落盘，续期用）\n", masked);
+    (void)auth_cli_save(&ctx, &session);
+    if (settings != NULL) {
+        sxcl_settings_free(settings);
+    }
+    tr->destroy(tr->ctx);
+    return 0;
+}
+
+static int auth_cli_load(const auth_cli_ctx *ctx, sxcl_auth_session *session)
+{
+    char err[SXCL_AUTH_ERROR_MAX];
+    err[0] = '\0';
+    if (sxcl_auth_store_load(ctx->token_file, session, err, sizeof(err)) != SXCL_AUTH_OK) {
+        printf("读取令牌失败：%s\n", err);
+        return 1;
+    }
+    return 0;
+}
+
+static int auth_cli_status(int argc, char **argv)
+{
+    auth_cli_ctx ctx;
+    auth_cli_fill_ctx(&ctx, argc, argv);
+    const sxcl_auth_store_kind kind = sxcl_auth_store_backend();
+    printf("SXCL-C 正版登录状态\n");
+    printf("  令牌文件  ：%s（%s）\n", ctx.token_file,
+           sxcl_auth_store_exists(ctx.token_file) ? "存在" : "不存在（还没登录过）");
+    printf("  加密后端  ：%s\n", sxcl_auth_store_kind_name(kind));
+    printf("  后端说明  ：%s\n", sxcl_auth_store_kind_note(kind));
+    sxcl_settings *settings = sxcl_settings_open(ctx.settings_file);
+    char cid[SXCL_AUTH_CLIENT_ID_MAX];
+    char ten[SXCL_AUTH_TENANT_MAX];
+    (void)sxcl_auth_resolve_client_id(NULL, settings, cid, sizeof(cid));
+    (void)sxcl_auth_resolve_tenant(NULL, settings, ten, sizeof(ten));
+    printf("  client_id ：%s\n", cid);
+    printf("  租户段    ：%s\n", ten);
+    if (!sxcl_auth_store_exists(ctx.token_file)) {
+        printf("\n  还没有登录过。先跑：sxcl-dl auth login --device-code\n");
+        if (settings != NULL) {
+            sxcl_settings_free(settings);
+        }
+        return 0;
+    }
+    sxcl_auth_session session;
+    if (auth_cli_load(&ctx, &session) != 0) {
+        if (settings != NULL) {
+            sxcl_settings_free(settings);
+        }
+        return 1;
+    }
+    char masked[160];
+    printf("\n  账号      ：%s\n", session.account_name[0] ? session.account_name : "(未取到)");
+    printf("  Java 版   ：name=%s  uuid=%s\n", session.mc.name[0] ? session.mc.name : "(空)",
+           session.mc.uuid[0] ? session.mc.uuid : "(空)");
+    printf("  Java 权益 ：%s（%d 条）\n",
+           session.mc.entitlement_count > 0 ? "有" : "没有/没查到", session.mc.entitlement_count);
+    printf("  基岩联机链：%s（%d 段）\n",
+           session.bedrock.chain_count > 0 ? "有" : "没有（跑 sxcl-dl auth bedrock 获取）",
+           session.bedrock.chain_count);
+    (void)sxcl_auth_mask_token(session.ms.access_token, masked, sizeof(masked));
+    printf("  微软令牌  ：%s%s\n", masked,
+           sxcl_auth_ms_expired(&session, sxcl_auth_now(), 60) ? "  已过期" : "");
+    auth_cli_print_time("微软令牌过期", session.ms.expires_at);
+    (void)sxcl_auth_mask_token(session.ms.refresh_token, masked, sizeof(masked));
+    printf("  refresh   ：%s\n", masked);
+    (void)sxcl_auth_mask_token(session.mc.access_token, masked, sizeof(masked));
+    printf("  MC 令牌   ：%s%s\n", masked, sxcl_auth_mc_expired(&session, sxcl_auth_now(), 60) ? "  已过期" : "");
+    auth_cli_print_time("MC 令牌过期", session.mc.expires_at);
+    if (settings != NULL) {
+        sxcl_settings_free(settings);
+    }
+    return 0;
+}
+
+static int auth_cli_refresh(int argc, char **argv)
+{
+    auth_cli_ctx ctx;
+    auth_cli_fill_ctx(&ctx, argc, argv);
+    sxcl_auth_session session;
+    if (auth_cli_load(&ctx, &session) != 0) {
+        return 1;
+    }
+    if (session.ms.refresh_token[0] == '\0') {
+        printf("本地没有 refresh token，免密续期不可能：请重新登录。\n");
+        return 1;
+    }
+    sxcl_transport *tr = auth_cli_transport();
+    if (tr == NULL) {
+        printf("错误：没有可用的传输后端。\n");
+        return 1;
+    }
+    sxcl_settings *settings = sxcl_settings_open(ctx.settings_file);
+    sxcl_auth_opts opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.settings = settings;
+    opts.client_id = auth_cli_opt(argc, argv, "--client-id");
+    opts.tenant = auth_cli_opt(argc, argv, "--tenant");
+    opts.http_timeout_ms = auth_cli_opt_i64(argc, argv, "--http-timeout", 30000);
+    opts.cb.on_status = auth_cli_on_status;
+    opts.cb.userdata = &ctx;
+
+    char err[SXCL_AUTH_ERROR_MAX];
+    err[0] = '\0';
+    printf("用 refresh token 免密续期…\n");
+    const int rc = sxcl_auth_refresh(tr, &opts, &session, err, sizeof(err));
+    if (rc != SXCL_AUTH_OK) {
+        printf("\n[失败] 续期没有完成（返回码 %d）\n  %s\n", rc, err);
+        if (rc == SXCL_AUTH_ERR_EXPIRED) {
+            printf("  refresh token 过期/被撤销 → 需要重新登录（auth login）。\n");
+        }
+        if (settings != NULL) {
+            sxcl_settings_free(settings);
+        }
+        tr->destroy(tr->ctx);
+        return 1;
+    }
+    printf("[成功] 免密续期完成（没有让用户重新登录）\n");
+    char masked[160];
+    (void)sxcl_auth_mask_token(session.ms.access_token, masked, sizeof(masked));
+    printf("  新微软令牌：%s\n", masked);
+    auth_cli_print_time("微软令牌过期", session.ms.expires_at);
+    printf("  Java 版   ：name=%s  uuid=%s\n", session.mc.name, session.mc.uuid);
+    (void)auth_cli_save(&ctx, &session);
+    if (settings != NULL) {
+        sxcl_settings_free(settings);
+    }
+    tr->destroy(tr->ctx);
+    return 0;
+}
+
+static int auth_cli_logout(int argc, char **argv)
+{
+    auth_cli_ctx ctx;
+    auth_cli_fill_ctx(&ctx, argc, argv);
+    char err[SXCL_AUTH_ERROR_MAX];
+    err[0] = '\0';
+    const int existed = sxcl_auth_store_exists(ctx.token_file);
+    if (sxcl_auth_store_clear(ctx.token_file, err, sizeof(err)) != SXCL_AUTH_OK) {
+        printf("退出登录失败：%s\n", err);
+        return 1;
+    }
+    printf("已退出登录：%s（%s）\n", ctx.token_file,
+           existed ? "令牌文件已删除" : "本来就没有令牌文件");
+    /* 顺手把盐文件也留着(它不含令牌,删了反而会让下次的密钥变),只说明一下 */
+    return 0;
+}
+
+static int auth_cli_bedrock(int argc, char **argv)
+{
+    auth_cli_ctx ctx;
+    auth_cli_fill_ctx(&ctx, argc, argv);
+    sxcl_auth_session session;
+    if (auth_cli_load(&ctx, &session) != 0) {
+        return 1;
+    }
+    sxcl_transport *tr = auth_cli_transport();
+    if (tr == NULL) {
+        printf("错误：没有可用的传输后端。\n");
+        return 1;
+    }
+    sxcl_settings *settings = sxcl_settings_open(ctx.settings_file);
+    sxcl_auth_opts opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.settings = settings;
+    opts.client_id = auth_cli_opt(argc, argv, "--client-id");
+    opts.tenant = auth_cli_opt(argc, argv, "--tenant");
+    opts.http_timeout_ms = auth_cli_opt_i64(argc, argv, "--http-timeout", 30000);
+    opts.cb.on_status = auth_cli_on_status;
+    opts.cb.userdata = &ctx;
+    char err[SXCL_AUTH_ERROR_MAX];
+    err[0] = '\0';
+    printf("跑基岩链（XSTS 中继方 = https://multiplayer.minecraft.net/）…\n");
+    const int rc = sxcl_auth_session_bedrock(tr, &opts, &session, err, sizeof(err));
+    if (rc != SXCL_AUTH_OK) {
+        printf("\n[失败] 基岩链没有完成（返回码 %d）\n  %s\n", rc, err);
+        if (rc == SXCL_AUTH_ERR_NO_ENTITLE) {
+            printf("  结论：这个账号**没有基岩版权益**（Java 版与基岩版是分开购买的，不能互相推断）。\n");
+        }
+        if (settings != NULL) {
+            sxcl_settings_free(settings);
+        }
+        tr->destroy(tr->ctx);
+        return 1;
+    }
+    printf("[成功] 基岩联机证书链已取回：%d 段\n", session.bedrock.chain_count);
+    printf("  身份公钥  ：%s\n", session.bedrock.identity_public_key);
+    printf("  基岩权益  ：%s（与 Java 版权益各自独立判断）\n",
+           session.bedrock.entitled ? "有" : "没有");
+    printf("  说明：链只打印长度与前缀，不打印全文（它是凭据）。\n");
+    for (int i = 0; i < session.bedrock.chain_count; ++i) {
+        char masked[160];
+        (void)sxcl_auth_mask_token(session.bedrock.chain[i], masked, sizeof(masked));
+        printf("    chain[%d] = %s\n", i, masked);
+    }
+    (void)auth_cli_save(&ctx, &session);
+    if (settings != NULL) {
+        sxcl_settings_free(settings);
+    }
+    tr->destroy(tr->ctx);
+    return 0;
+}
+
+static int cmd_auth(int argc, char **argv)
+{
+    if (argc < 3) {
+        printf("sxcl-dl auth <login|status|refresh|logout|bedrock> [选项]\n"
+               "  login   [--device-code] [--client-id ID] [--tenant T] [--no-browser]\n"
+               "          [--wait MS] [--poll-ms MS] [--http-timeout MS] [--token-file PATH]\n"
+               "          [--settings PATH]\n"
+               "          └ 授权码流（PKCE + 127.0.0.1 环回）；--device-code 走设备码兜底\n"
+               "  status  [--token-file PATH]     看当前登录状态（只打令牌前缀与过期时间）\n"
+               "  refresh [--client-id ID]        用 refresh token 免密续期并重跑后半条链\n"
+               "  logout  [--token-file PATH]     删除加密令牌文件\n"
+               "  bedrock [--token-file PATH]     跑基岩链（multiplayer.minecraft.net）\n"
+               "\n"
+               "配置优先级：命令行 > 环境变量 SXCL_AUTH_CLIENT_ID / SXCL_AUTH_TENANT >\n"
+               "           设置项 auth.client_id / auth.tenant > 内置默认\n"
+               "本命令**永不打印 token 明文**。\n");
+        return 0;
+    }
+    const char *sub = argv[2];
+    if (strcmp(sub, "login") == 0) {
+        return auth_cli_login(argc, argv);
+    }
+    if (strcmp(sub, "status") == 0) {
+        return auth_cli_status(argc, argv);
+    }
+    if (strcmp(sub, "refresh") == 0) {
+        return auth_cli_refresh(argc, argv);
+    }
+    if (strcmp(sub, "logout") == 0) {
+        return auth_cli_logout(argc, argv);
+    }
+    if (strcmp(sub, "bedrock") == 0) {
+        return auth_cli_bedrock(argc, argv);
+    }
+    return cmd_auth(1, NULL);
+}
+
 int main(int argc, char **argv)
 {
     /* 无缓冲输出:崩溃时不会把最后一段输出留在缓冲区里丢掉(排查跨平台崩溃吃过这个亏) */
@@ -1102,6 +1667,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "launch") == 0) {
         return cmd_launch(argc, argv, &o);
+    }
+    if (strcmp(argv[1], "auth") == 0) {
+        return cmd_auth(argc, argv);
     }
     return usage();
 }

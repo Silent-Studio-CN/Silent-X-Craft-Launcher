@@ -1,0 +1,8 @@
+{
+  "error": "invalid_grant",
+  "error_description": "AADSTS9002325: Proof Key for Code Exchange is required for cross-origin authorization code redemption. Trace ID: 00000000-0000-0000-0000-000000000000",
+  "error_codes": [
+    9002325
+  ],
+  "timestamp": "2026-02-14 10:00:00Z"
+}

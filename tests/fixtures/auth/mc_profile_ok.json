@@ -1,0 +1,13 @@
+{
+  "id": "00000000000000000000000000000000",
+  "name": "SXCLPlayer",
+  "skins": [
+    {
+      "id": "6a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "state": "ACTIVE",
+      "url": "http://textures.minecraft.net/texture/0000000000000000000000000000000000000000000000000000000000000000",
+      "variant": "CLASSIC"
+    }
+  ],
+  "capes": []
+}

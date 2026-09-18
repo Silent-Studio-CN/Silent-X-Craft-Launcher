@@ -82,7 +82,17 @@ void harvestReply(QtBody *b) {
     b->finished = true;
     const QNetworkReply::NetworkError err = b->reply->error();
     if (err != QNetworkReply::NoError && err != QNetworkReply::OperationCanceledError) {
-        b->ioError = true;
+        /* 关键区分:Qt 把 4xx/5xx 也报成 error()(ContentNotFoundError /
+         * ProtocolInvalidOperationError / InternalServerError…),但那**不是**传输故障 ——
+         * 响应头与正文都好好的。把它们当 IO 错误会毁掉两件事:
+         *   - 登录链:OAuth 的 authorization_pending / slow_down / expired_token
+         *     全写在 400 的 JSON 正文里,读不到正文就没法轮询(实测踩过);
+         *   - 下载引擎:404 的正文(错误页/换源提示)同样读不到。
+         * 只有"连 HTTP 状态码都没有"才算真正的传输层故障。 */
+        const QVariant status = b->reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+        if (!status.isValid() || status.toInt() == 0) {
+            b->ioError = true;
+        }
     }
     b->pending += b->reply->readAll();
 }
@@ -157,7 +167,18 @@ int qtRequest(void *ctx, const sxcl_http_request *req, sxcl_http_response *resp,
     }
 
     const QByteArray method = (req->method && *req->method) ? QByteArray(req->method) : QByteArray("GET");
-    QNetworkReply *reply = (method == "HEAD") ? t->nam->head(qreq) : t->nam->get(qreq);
+    /* 请求体:正版登录要 POST JSON/表单。req->body 非空才算带体(GET 请求不允许有体)。
+     * Qt 的 sendCustomRequest 会自己补 Content-Length;Content-Type 由调用方放进 extra_headers。 */
+    QByteArray bodyBytes;
+    if (req->body != nullptr && req->body_len > 0)
+        bodyBytes = QByteArray(reinterpret_cast<const char *>(req->body), int(req->body_len));
+    QNetworkReply *reply = nullptr;
+    if (method == "HEAD")
+        reply = t->nam->head(qreq);
+    else if (req->body != nullptr)
+        reply = t->nam->sendCustomRequest(qreq, method, bodyBytes);
+    else
+        reply = t->nam->get(qreq);
 
     // 循环等"有响应头":每轮最多泵 50ms,超时由这里判(不让心跳误判成没响应)
     QElapsedTimer clock;
@@ -186,6 +207,15 @@ int qtRequest(void *ctx, const sxcl_http_request *req, sxcl_http_response *resp,
         const QList<QPair<QByteArray, QByteArray>> pairs = reply->rawHeaderPairs();
         for (const QPair<QByteArray, QByteArray> &p : pairs) {
             qInfo("   %s: %s", p.first.constData(), p.second.constData());
+        }
+    }
+
+    /* 响应头回调:必须在返回前发完(头这时已经全到了)。name/value 都是 QByteArray 的
+     * NUL 结尾缓冲,直接当 C 串用;回调里存指针是错的(函数返回后就没了)。 */
+    if (req->on_header != nullptr) {
+        const QList<QPair<QByteArray, QByteArray>> pairs = reply->rawHeaderPairs();
+        for (const QPair<QByteArray, QByteArray> &p : pairs) {
+            req->on_header(req->header_userdata, p.first.constData(), p.second.constData());
         }
     }
 

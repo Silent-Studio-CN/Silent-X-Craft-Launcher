@@ -40,6 +40,17 @@ typedef struct sxcl_http_request {
     int force_http1;                 /* 0=允许 HTTP/2(默认);1=强制 HTTP/1.1。
                                       * 用途:某些后端/CDN 在 h2 下不兑现 Range(实测 Qt h2 会忽略 Range
                                       * 返回 200 全量),这时必须按请求降级,否则续传会静默变成全量重下。 */
+    /* ── 请求体(正版登录要 POST JSON / 表单;2026-02 加) ──
+     * body 非空 = 带请求体,配合 method 用 POST/PUT。body_len 是字节数(允许 0)。
+     * Content-Type 由调用方通过 extra_headers 给(下载引擎不需要它)。 */
+    const void *body;
+    size_t body_len;
+    /* ── 响应头回调(可选;2026-02 加) ──
+     * 每收到一个响应头调用一次(name/value 都是 NUL 结尾,大小写保留服务器原样,可以重复)。
+     * 只在 request() 调用期间有效,回调里不要把指针存下来。NULL = 不要响应头。
+     * 用途:登录链要读 Retry-After(限流退避)这类头,而固定字段塞不下所有头。 */
+    void (*on_header)(void *userdata, const char *name, const char *value);
+    void *header_userdata;
 } sxcl_http_request;
 
 typedef struct sxcl_http_response {

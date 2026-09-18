@@ -1,0 +1,12 @@
+{
+  "IssueInstant": "2026-02-14T10:00:01.1234567Z",
+  "NotAfter": "2026-02-28T10:00:01.1234567Z",
+  "Token": "FAKE.eyJhbGciOiJSU0EtT0FFUCIsImVuYyI6IkExMjhDQkMtSFMyNTYifQ.XBL-USER-TOKEN-PLACEHOLDER.dQw4w9WgXcQ",
+  "DisplayClaims": {
+    "xui": [
+      {
+        "uhs": "u0000000000000001"
+      }
+    ]
+  }
+}

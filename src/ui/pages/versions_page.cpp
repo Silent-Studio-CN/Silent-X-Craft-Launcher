@@ -792,6 +792,19 @@ private:
     }
     void onLoaded(const QVector<GameVersion> &versions, const QString &error, bool ok) {
         m_refresh->setEnabled(true);
+        // 「一个版本都没有」是【空态】,不是失败:全新设备、还没装版本、游戏目录里没有
+        // versions/ —— 都是正常情况(用户原话:检测不到版本能死吗?)。
+        // 只有「清单拿不到/解析失败」才是错误,走下面的原错误路径并带真实原因。
+        const bool emptyButFine =
+            !ok && versions.isEmpty() && error == QStringLiteral("本地没有已安装的版本");
+        if (emptyButFine) {
+            m_all.clear();
+            m_loading->setVisible(false); // 不转圈
+            m_status->setVisible(true);
+            m_status->setText(QStringLiteral("暂无已安装的版本 · 前往「下载」页安装"));
+            m_model->setVersions({}, m_installed); // 列表留空
+            return;                                // 不弹 InfoBar.error
+        }
         if (!ok && versions.isEmpty()) { // versions_page.py:480-492(错误路径)
             m_loading->setVisible(false);
             m_status->setVisible(true);

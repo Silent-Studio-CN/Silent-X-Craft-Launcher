@@ -326,10 +326,15 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
 
     /* ── 5. 拼 argv ── */
     memset(&ctx, 0, sizeof(ctx));
-    ctx.player_name = pick(req->offline_name, "Player");
-    ctx.uuid = "00000000-0000-0000-0000-000000000000"; /* 离线:全零 UUID */
-    ctx.access_token = "0";                            /* 离线:accessToken 用 0 */
-    ctx.user_type = "legacy";                          /* 离线:让游戏不去查档案 */
+    /* 身份:有正版令牌就用正版那套,没有就退回离线那套(与从前完全一致)。
+     * 判据是 access_token —— 没有它时 uuid/userType 说什么都没意义(游戏会去验档案)。 */
+    const int online = (req->access_token != NULL && req->access_token[0] != '\0');
+    ctx.player_name = pick(req->player_name, pick(req->offline_name, "Player"));
+    ctx.uuid = pick(req->uuid, "00000000-0000-0000-0000-000000000000");
+    ctx.access_token = pick(req->access_token, "0");
+    ctx.user_type = pick(req->user_type, online ? "msa" : "legacy");
+    ctx.xuid = req->xuid;
+    ctx.client_id = req->client_id;
     ctx.version_name = req->version_name;
     ctx.game_directory = req->game_dir;
     ctx.natives_directory = natives;

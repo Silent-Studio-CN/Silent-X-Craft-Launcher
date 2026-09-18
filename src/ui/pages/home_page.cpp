@@ -60,7 +60,14 @@
 
 #include "fluent_theme.h"
 
-#include "main_window.h" // 联机入口要跳到 multiplayer 路由(Python 里是 mw.switchTo(page))
+#include "main_window.h"
+
+// 我们自己的核心库(sxcl_ui_core 已经链了 sxcl,include/ 也挂着):
+// 游戏目录要读【本启动器的设置】与【核心库的平台默认】,不再读 Python 版旧配置。
+extern "C" {
+#include "sxcl/paths.h"
+#include "sxcl/settings.h"
+} // 联机入口要跳到 multiplayer 路由(Python 里是 mw.switchTo(page))
 
 namespace sxcl::ui {
 namespace {
@@ -113,15 +120,60 @@ QString legacyConfigString(const QString &group, const QString &key) {
     return value.isString() ? value.toString() : QString();
 }
 
-// home_page.py:77 str(cfg.gameDirectory.value):用户配了就用配置里的原样字符串
-// (Python 显示的就是配置里的写法,例如 C:/Users/x/Desktop/.minecraft);
-// 没配就退回 platform.py:165-167 的平台默认 <home>/.minecraft(Path 的 str 也是正斜杠)。
+// 我们自己的设置文件(与 settings_page.cpp 的 settingsFilePath() 同口径)。
+// 旧版(Python)的 %APPDATA%/SilentXCraftLauncher/config.json 是历史包袱:
+// 安卓上根本没有那个文件,继续读它只会让新设备显示 Windows 路径/空值。
+QString ownSettingsFilePath() {
+#if defined(Q_OS_WIN)
+    QString base = qEnvironmentVariable("APPDATA");
+    if (base.isEmpty())
+        base = QDir::homePath() + QStringLiteral("/AppData/Roaming");
+    return base + QStringLiteral("/SilentXCraftLauncher/settings.conf");
+#elif defined(Q_OS_MACOS)
+    return QDir::homePath() +
+           QStringLiteral("/Library/Application Support/SilentXCraftLauncher/settings.conf");
+#else
+    return QDir::homePath() + QStringLiteral("/.config/SilentXCraftLauncher/settings.conf");
+#endif
+}
+
+// 游戏目录:先读核心库设置 game.default_dir;空则问核心库要平台默认
+// (Windows = %APPDATA%/.minecraft;Android = $SXCL_ANDROID_FILES/.minecraft,见 paths.c)。
+// 两条都拿不到才退回 <home>/.minecraft(与旧行为一致,保底不空)。
 QString resolveGameDirectory() {
-    // 键名 = launcher_config.py 里的属性名(Game/gameDirectory,首字母小写)
-    const QString configured = legacyConfigString(QStringLiteral("Game"),
-                                                  QStringLiteral("gameDirectory"));
-    if (!configured.isEmpty())
-        return configured;
+    char err[256];
+    char buf[4096];
+    err[0] = '\0';
+    QString configured;
+    if (sxcl_settings *st = sxcl_settings_open(ownSettingsFilePath().toUtf8().constData())) {
+        configured = QString::fromUtf8(sxcl_settings_game_default_dir(st));
+        sxcl_settings_free(st);
+    }
+    // 一次性迁移:从 Python 版配置里把 gameDirectory 导入我们自己的设置。
+    // 只在我们自己的设置里没有该项时导一次(之后以我们自己的为准),
+    // 这样从 Python 版转过来的用户看到的仍是同一个游戏目录;
+    // Android 上该文件不存在 → 自然跳过,走核心库的 Android 默认。
+    if (configured.isEmpty()) {
+        const QString legacy = legacyConfigString(QStringLiteral("Game"),
+                                                 QStringLiteral("gameDirectory"));
+        if (!legacy.isEmpty()) {
+            const QByteArray own = ownSettingsFilePath().toUtf8();
+            if (sxcl_settings *st = sxcl_settings_open(own.constData())) {
+                sxcl_settings_set(st, "game.default_dir", legacy.toUtf8().constData());
+                sxcl_settings_save(st, own.constData());
+                sxcl_settings_free(st);
+            }
+            configured = legacy;
+        }
+    }
+    if (!configured.isEmpty()) {
+        if (sxcl_paths_resolve_game_dir(configured.toUtf8().constData(), buf, sizeof(buf), err,
+                                        sizeof(err)) == SXCL_PATHS_OK)
+            return QDir::fromNativeSeparators(QString::fromUtf8(buf));
+        return QDir::fromNativeSeparators(configured);
+    }
+    if (sxcl_paths_default_game_dir(buf, sizeof(buf), err, sizeof(err)) == SXCL_PATHS_OK)
+        return QDir::fromNativeSeparators(QString::fromUtf8(buf));
     return QDir::fromNativeSeparators(QDir::homePath()) + QStringLiteral("/.minecraft");
 }
 

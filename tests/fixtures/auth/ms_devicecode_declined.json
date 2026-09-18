@@ -1,0 +1,8 @@
+{
+  "error": "authorization_declined",
+  "error_description": "The end user denied the authorization request.",
+  "error_codes": [
+    70016
+  ],
+  "timestamp": "2026-02-14 10:00:30Z"
+}

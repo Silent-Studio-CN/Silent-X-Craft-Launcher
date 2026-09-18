@@ -1,0 +1,8 @@
+{
+  "error": "expired_token",
+  "error_description": "The device_code has expired. The device_code is valid for 900 seconds.",
+  "error_codes": [
+    70016
+  ],
+  "timestamp": "2026-02-14 10:20:00Z"
+}

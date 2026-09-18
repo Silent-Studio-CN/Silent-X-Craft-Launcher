@@ -1,0 +1,14 @@
+{
+  "IssueInstant": "2026-02-14T10:00:02.1234567Z",
+  "NotAfter": "2026-02-15T02:00:02.1234567Z",
+  "Token": "FAKE.eyJhbGciOiJSU0EtT0FFUCIsImVuYyI6IkExMjhDQkMtSFMyNTYifQ.XSTS-TOKEN-PLACEHOLDER.9pQr4StU6vWx8yZa1Bc3De5Fg7Hi9Jk2Lm",
+  "DisplayClaims": {
+    "xui": [
+      {
+        "uhs": "u0000000000000001",
+        "xid": "2533274800000001",
+        "agg": "Adult"
+      }
+    ]
+  }
+}

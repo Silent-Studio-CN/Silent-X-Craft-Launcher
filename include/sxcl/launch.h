@@ -157,6 +157,8 @@ typedef struct sxcl_launch_ctx {
     const char *uuid;           /**< 默认全零 UUID */
     const char *access_token;   /**< 默认 "0"(离线) */
     const char *user_type;      /**< 默认 "msa" */
+    const char *xuid;           /**< ${auth_xuid}(1.20.2+ 的 --xuid);空 = "0" */
+    const char *client_id;      /**< ${clientid}(1.20.2+ 的 --clientId);空 = "" */
     /* 版本与目录 */
     const char *version_name;   /**< ${version_name},也用于推断客户端 jar 路径 */
     const char *version_type;   /**< ${version_type},默认 "release" */
@@ -312,6 +314,15 @@ typedef struct sxcl_launch_request {
     int memory_mb;              /**< <=0 = 按位数取默认(见 sxcl_launch_default_memory_mb) */
     const char *instance;       /**< 可空:实例名(读写每实例设置);空 = 用 version_name */
     const char *offline_name;   /**< 可空:离线用户名;空 = "Player" */
+    /* ── 正版登录身份(2026-02 加)。都给空 = 与从前完全一致(走离线默认值) ──
+     * 注意:给了 access_token 就**必须**同时给 uuid 与 player_name,并且 user_type 用 "msa"
+     * (游戏会拿 access_token 去验档案,三者对不上会被踢回主菜单)。 */
+    const char *player_name;    /**< 可空:正版玩家名(优先于 offline_name) */
+    const char *uuid;           /**< 可空:32 位无横线 uuid(带横线的也接受) */
+    const char *access_token;   /**< 可空:Minecraft access_token(真实凭据;**只在内存里传,别落日志**) */
+    const char *user_type;      /**< 可空:"msa"(正版)/ "legacy"(离线);空 = 有 token 就是 msa,否则 legacy */
+    const char *xuid;           /**< 可空:Xbox XUID(字符串);空 = "0" */
+    const char *client_id;      /**< 可空:${clientid};空 = "" */
     const char *backend;        /**< 可空:后端覆盖;空 = 读实例设置(默认 "default") */
     const char *settings_path;  /**< 可空:设置文件;空 = 不读也不写设置 */
     const char *launcher_name;  /**< 可空:覆盖 launcher_name 占位符 */

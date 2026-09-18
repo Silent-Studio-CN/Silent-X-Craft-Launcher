@@ -341,6 +341,8 @@ typedef struct resolved {
     const char *uuid;
     const char *access_token;
     const char *user_type;
+    const char *xuid;
+    const char *client_id;
     const char *version_name;
     const char *version_type;
     const char *launcher_name;
@@ -363,6 +365,14 @@ static const char *resolve_placeholder(const char *key, const resolved *res)
     }
     if (strcmp(key, "user_type") == 0) {
         return res->user_type;
+    }
+    /* 1.20.2+ 的启动参数里有 ${auth_xuid} 与 ${clientid}:以前不认识,会把字面量
+     * "${auth_xuid}" 当成 --xuid 的值传给游戏。这里补上,默认 "0" / ""(离线时也就这个值)。 */
+    if (strcmp(key, "auth_xuid") == 0) {
+        return res->xuid;
+    }
+    if (strcmp(key, "clientid") == 0) {
+        return res->client_id;
     }
     if (strcmp(key, "version_name") == 0) {
         return res->version_name;
@@ -477,6 +487,8 @@ static void resolve_context(const sxcl_json_value *root, const sxcl_launch_ctx *
     res->uuid = pick(ctx->uuid, "00000000-0000-0000-0000-000000000000");
     res->access_token = pick(ctx->access_token, "0");
     res->user_type = pick(ctx->user_type, "msa");
+    res->xuid = pick(ctx->xuid, "0");
+    res->client_id = pick(ctx->client_id, "");
     res->version_name = pick(ctx->version_name, sxcl_json_get_string(root, "id", ""));
     res->version_type = pick(ctx->version_type, sxcl_json_get_string(root, "type", "release"));
     res->launcher_name = pick(ctx->launcher_name, "SilentXCraftLauncher");

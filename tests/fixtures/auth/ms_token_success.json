@@ -1,0 +1,9 @@
+{
+  "token_type": "Bearer",
+  "scope": "XboxLive.signin XboxLive.offline_access",
+  "expires_in": 3600,
+  "ext_expires_in": 3600,
+  "access_token": "FAKE.EwBAA8l6BAAUO9ZitICJgVqPkRz0mQ2nX7tYbH1sVwKeLpMuGdAcRfTjZnQxWvYbNmLkIhGfEdCbA.q3Zr8xP1nV5yW9tB7dF4hJ2kL6mN0pQ8rS-user-access-token-placeholder",
+  "refresh_token": "FAKE.MCIMBgGCSqGSIb3DQEHAqIuMCwCAQExDzANBgkqhkiG9w0BAQsFADAbBgkqhkiG9w0BBwGgDgQMYh1c2QvA0lRt7pYuXw.refresh-token-placeholder-9F2kLzQxWvYbNmLkIhGfEdCbA",
+  "id_token": "FAKE.eyJhbGciOiJSUzI1NiIsImtpZCI6ImtpZC1wbGFjZWhvbGRlciJ9.eyJhdWQiOiJhYTRlODFjOC1mNTUwLTQ3MjAtYmM1MS1jOWIxMjZmNDU2ZDEifQ.id-token-signature-placeholder"
+}

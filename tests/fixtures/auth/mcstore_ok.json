@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "name": "product_minecraft",
+      "signature": "FAKE-SIGNATURE-PLACEHOLDER-1"
+    },
+    {
+      "name": "game_minecraft",
+      "signature": "FAKE-SIGNATURE-PLACEHOLDER-2"
+    }
+  ],
+  "signature": "FAKE-ENTITLEMENT-SIGNATURE-PLACEHOLDER",
+  "keyId": "1"
+}

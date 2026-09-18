@@ -120,6 +120,7 @@ add_subdirectory(src/services/minecraft)
 add_subdirectory(src/services/modloader)
 add_subdirectory(src/services/install)
 add_subdirectory(src/core/instance)
+add_subdirectory(src/core/auth)   # 正版登录(微软/Xbox Live);自己的 CMakeLists 追加源文件与测试
 sxcl_warnings(sxcl)
 
 # 平台实现二选一(WinHTTP/UTF-16 转换在 win32 侧,POSIX 侧用通用 API)

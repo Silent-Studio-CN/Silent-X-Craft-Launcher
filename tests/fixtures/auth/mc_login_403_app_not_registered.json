@@ -1,0 +1,6 @@
+{
+  "path": "/authentication/login_with_xbox",
+  "errorType": "FORBIDDEN",
+  "error": "FORBIDDEN",
+  "errorMessage": "Invalid app registration, see https://aka.ms/AppRegInfo for more information"
+}

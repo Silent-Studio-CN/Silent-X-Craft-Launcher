@@ -73,9 +73,13 @@ static int http_is_success(int status)
     return (status >= 200 && status < 300) ? 1 : 0;
 }
 
-int sxcl_http_get_text_ex(sxcl_transport *tr, const char *url, const char *const *headers,
-                          const sxcl_http_opts *opts, char **out, size_t *out_len,
-                          char *err, size_t err_len)
+/* 通用实现:get_text_ex / post_text_ex 都走它。
+ *   method_default —— opts->method 为空时用什么方法("GET" / "POST");
+ *   body/body_len  —— 非空 = 带请求体(覆盖 opts->body)。 */
+static int http_fetch(sxcl_transport *tr, const char *url, const char *const *headers,
+                      const char *method_default, const char *req_body, size_t req_body_len,
+                      const sxcl_http_opts *opts, char **out, size_t *out_len,
+                      char *err, size_t err_len)
 {
     if (out == NULL || out_len == NULL) {
         http_err(err, err_len, "参数不合法（out/out_len 不能为空）");
@@ -94,15 +98,33 @@ int sxcl_http_get_text_ex(sxcl_transport *tr, const char *url, const char *const
 
     size_t max_bytes = (opts != NULL && opts->max_bytes > 0) ? opts->max_bytes : SXCL_HTTP_DEFAULT_MAX_BYTES;
 
+    const char *method = (opts != NULL && opts->method != NULL) ? opts->method : method_default;
+    if (req_body == NULL && opts != NULL) {
+        req_body = opts->body;
+        if (req_body != NULL) {
+            req_body_len = opts->body_len;
+        }
+    }
+    if (req_body != NULL && req_body_len == 0) {
+        req_body_len = strlen(req_body); /* 文本体的便捷写法(length 字段是给二进制体准备的) */
+    }
+    if (req_body == NULL) {
+        req_body_len = 0;
+    }
+
     sxcl_http_request req;
     (void)memset(&req, 0, sizeof(req));
     req.url = url;
-    req.method = "GET";
+    req.method = method;
     req.range_start = -1;
     req.range_end = -1;
     req.extra_headers = headers;
     req.timeout_ms = (opts != NULL) ? opts->timeout_ms : 0;
     req.force_http1 = (opts != NULL) ? opts->force_http1 : 0;
+    req.body = req_body;
+    req.body_len = req_body_len;
+    req.on_header = (opts != NULL) ? opts->on_header : NULL;
+    req.header_userdata = (opts != NULL) ? opts->header_userdata : NULL;
 
     sxcl_http_response resp;
     (void)memset(&resp, 0, sizeof(resp));
@@ -127,7 +149,8 @@ int sxcl_http_get_text_ex(sxcl_transport *tr, const char *url, const char *const
         http_err(err, err_len, "传输层没有返回响应体句柄：%s", url);
         return SXCL_HTTP_ERR_NET;
     }
-    if (!http_is_success(resp.status)) {
+    const int allow_error = (opts != NULL && opts->accept_error_status) ? 1 : 0;
+    if (!http_is_success(resp.status) && !allow_error) {
         char message[SXCL_HTTP_ERROR_MAX];
         (void)sxcl_http_status_message(resp.status, message, sizeof(message));
         http_err(err, err_len, "%s：%s", message, url);
@@ -230,10 +253,24 @@ int sxcl_http_get_text_ex(sxcl_transport *tr, const char *url, const char *const
     return SXCL_HTTP_OK;
 }
 
+int sxcl_http_get_text_ex(sxcl_transport *tr, const char *url, const char *const *headers,
+                          const sxcl_http_opts *opts, char **out, size_t *out_len,
+                          char *err, size_t err_len)
+{
+    return http_fetch(tr, url, headers, "GET", NULL, 0, opts, out, out_len, err, err_len);
+}
+
+int sxcl_http_post_text_ex(sxcl_transport *tr, const char *url, const char *const *headers,
+                           const char *body, size_t body_len, const sxcl_http_opts *opts,
+                           char **out, size_t *out_len, char *err, size_t err_len)
+{
+    return http_fetch(tr, url, headers, "POST", body, body_len, opts, out, out_len, err, err_len);
+}
+
 int sxcl_http_get_text(sxcl_transport *tr, const char *url, const char *const *headers,
                        char **out, size_t *out_len, char *err, size_t err_len)
 {
-    return sxcl_http_get_text_ex(tr, url, headers, NULL, out, out_len, err, err_len);
+    return http_fetch(tr, url, headers, "GET", NULL, 0, NULL, out, out_len, err, err_len);
 }
 
 int sxcl_http_get_text_sha1(sxcl_transport *tr, const char *url, const char *const *headers,

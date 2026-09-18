@@ -1,0 +1,8 @@
+{
+  "user_code": "K7QP4M2XZ",
+  "device_code": "FAKE.GAB6BgIYACBqRgMDAxMDCwMDAwMDAwMDAwMDAwMDA-device-code-placeholder-x7Kq2LmN9pQr4StU6vWx8yZa1Bc3De5Fg7Hi9Jk",
+  "verification_uri": "https://microsoft.com/devicelogin",
+  "expires_in": 900,
+  "interval": 5,
+  "message": "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code K7QP4M2XZ to authenticate."
+}

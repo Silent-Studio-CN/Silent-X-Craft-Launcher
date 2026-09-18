@@ -1,0 +1,6 @@
+{
+  "path": "/authentication/login_with_xbox",
+  "errorType": "UNAUTHORIZED",
+  "error": "UNAUTHORIZED",
+  "errorMessage": "Invalid app registration, the app is not allowed to use this API."
+}

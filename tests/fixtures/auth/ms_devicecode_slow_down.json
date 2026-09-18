@@ -1,0 +1,8 @@
+{
+  "error": "slow_down",
+  "error_description": "A variant of authorization_pending that indicates the client is polling too frequently. The client should increase its polling interval by 5 seconds.",
+  "error_codes": [
+    70016
+  ],
+  "timestamp": "2026-02-14 10:00:06Z"
+}

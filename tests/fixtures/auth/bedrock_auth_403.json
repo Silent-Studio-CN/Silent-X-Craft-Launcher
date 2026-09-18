@@ -1,0 +1,5 @@
+{
+  "error": "FORBIDDEN",
+  "errorMessage": "The account does not own Minecraft.",
+  "path": "/authentication"
+}

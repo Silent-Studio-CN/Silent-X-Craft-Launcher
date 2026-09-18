@@ -22,7 +22,11 @@ Qt 6.11.2 的 Widgets/Gui/Core/Svg/Network + qtforandroid/offscreen 平台插件
 | `lib/arm64-v8a/*.so` | ✅ 19 个:Qt6Core/Gui/Widgets/Svg/Network/OpenGL/OpenGLWidgets/PrintSupport/Sql/Concurrent + `libsxclui_arm64-v8a.so`(5,669,608)+ qtforandroid/qoffscreen/qandroidstyle + qsvg/qjpeg/qgif/qico + libc++_shared |
 | `assets/theme/qf_exact/*` | ✅ **522 个文件**(dark/light 共 68 个 .qss + images),另有 `assets/icons/blocks` 14 个、`assets/icons/pcl` 54 个 |
 | 应用图标 | ✅ `application: ... icon='res/mipmap-mdpi-v4/ic_launcher.png'` 且 `launchable-activity: ... icon='res/mipmap-mdpi-v4/ic_launcher.png'`(mdpi/hdpi/xhdpi/xxhdpi/xxxhdpi 五档,由 `assets/icons/blocks/Grass.png` 64x64 以 NEAREST 放大) |
-| 设备侧运行 | ✅ 真机 **G6012BS / Android 16 / arm64-v8a** 安装成功、窗口在前台、可见截图有我们的令牌色(§6.2) |
+| 设备侧运行 | ✅ 真机 **G6012BS / Android 16 / arm64-v8a**:`.13` 首验、**`.33` 全新安装终验**、窗口在前台、可见截图有我们的令牌色(§6.2/§6.6) |
+| 新设备状态 | ✅ 游戏目录 = **Android 应用私有路径**(`/data/user/0/com.silentstudio.sxcl/files/.minecraft`,logcat 实测)、版本列表为空 = 空态;两条真缺陷已修(§6.6/§6.7) |
+| 空态 | ✅ 版本页「没有版本」不再当失败:danger InfoBar **1.49% → 0.00%**、文案改为「暂无已安装的版本 · 前往「下载」页安装」(§6.7) |
+| 触屏 | ⚠️ 部分完成:QScroller 已挂 18 个 viewport,**设置页 swipe 0 → -358px 闭环**;主页/按键映射因 swipe 落点被内部子区吃掉未测到位移(§11,未完成项) |
+| 退出 SIGABRT | ⚠️ 已知缺陷:Activity 销毁时 hwuiTask FORTIFY abort;BACK 必现 / HOME 不现;**无系统崩溃弹窗、无 ANR**,仅日志噪声(§12) |
 | 设备侧 1:1 像素 | ✅ **已取得** —— 九页离屏渲染各 **1650x1125**,DIFF 实测见 §6.3(含 Android vs 参考图 与 Android vs 桌面 C 两组,差异归因见 §6.4) |
 
 **三句必须说的真话**:
@@ -274,6 +278,82 @@ adb -s 192.168.220.13:5555 pull /sdcard/Android/data/com.silentstudio.sxcl/files
   → 从 `/sdcard/Android/data/com.silentstudio.sxcl/files/shots/` 拉回本机;
 - `compare_all.ps1`:对九页跑 `tools/ui_compare.py build/ref/py_<route>.png out/device/<route>.png` 并汇总 DIFF。
 
+### 6.6 换设备终验(192.168.220.33,全新安装,**不预置任何数据**)
+
+> **口径撤回**:此前曾把 Windows 参考机的 settings.conf + 10 个版本目录种进设备,用来"把数字做漂亮" —— 那条做法**作废**。
+> 新设备装出来必须是**它自己的状态**;九页比对只报"平台地板可比页" + "同为全新空数据"的对照,数据驱动的页明确标注不可比。
+
+```
+adb -s 192.168.220.33:5555 uninstall com.silentstudio.sxcl      # 清掉旧壳包,保证全新
+adb -s 192.168.220.33:5555 install -r build/_android/out/sxcl-debug.apk   # Success
+adb -s 192.168.220.33:5555 shell am start -n com.silentstudio.sxcl/com.silentstudio.sxcl.SxclActivity
+```
+
+**"显示的是它自己的状态"的硬证据(logcat)**:
+
+```
+I sxcl : android entry, filesDir=/data/user/0/com.silentstudio.sxcl/files
+I sxcl : default game dir = /data/user/0/com.silentstudio.sxcl/files/.minecraft
+I sxcl : touch scroller attached to 18 viewport(s) [deferred]
+```
+
+游戏目录是**Android 应用私有路径**(不是任何 Windows 路径),版本列表为空 = 全新设备应有的空态。
+
+### 6.7 空态不是错误(缺陷 + 修复 + 数字)
+
+**复现**(全新安装 → 版本页):截图里出现 danger 底色的 InfoBar —— `#442726` 占 **1.49%**,状态行写"加载失败"。
+同一份代码在**桌面**用空 `APPDATA` 跑也复现(`#442726` 2.60%)→ 与平台无关,是代码把"没有版本"当成了失败。
+
+**根因**(`src/ui/pages/versions_page.cpp`):`localInstanceVersions()` 在没有任何本地实例时写
+error="本地没有已安装的版本" 返回空,而 `onLoaded()` 的 `if (!ok && versions.isEmpty())` 一律走错误路径
+(状态行「加载失败」+ `InfoBar.error("无法获取版本清单:…")`)。
+
+**修复**(只改 `onLoaded`):把"一个版本都没有"识别为空态 →
+状态行显示 **暂无已安装的版本 · 前往「下载」页安装**、列表留空、**不弹 InfoBar**;
+"清单拿不到/解析失败"仍走原错误路径并带真实原因。
+
+**实测(同一台全新设备,修复后)**:
+
+| | #442726(danger 底) | #202020(空页) |
+|---|---|---|
+| 修复前 | **1.49%** | 90.65% |
+| 修复后 | **0.00%** | 94.80% |
+
+### 6.8 平台地板(同为全新空数据 + 同为离屏渲染)
+
+设备(Android 16 / arm64,离屏 1100x750@1.5)vs 桌面 C 版(**空 APPDATA**、同离屏、同 1.5):
+
+| 页面 | Android(空) vs 桌面C(空) |
+|---|---|
+| home | 2.23% |
+| versions | 0.87% |
+| tasks | **0.55%** |
+| keymap | 2.81% |
+| multiplayer | 4.28% |
+| settings | 2.16% |
+| download_config | 0.79% |
+| download_progress | 0.99% |
+| launch | 0.87% |
+
+即:**同一份代码、同为全新状态、同一条离屏光栅路径**时,Android 与桌面差 **0.55%~4.28%**(mean|d| 1.0~6.6),
+全部来自字体栈(Segoe UI/Microsoft YaHei UI 在 Android 不存在 → Roboto/Noto)与栅格化差异 —— 这是"平台地板",不是界面结构差。
+对照:早先"Android(空) vs 桌面(带参考机数据 + windows 光栅)"是 2.5%~58%,差在数据与渲染路径,不能当结论用。
+
+### 6.9 下拉菜单(ComboBoxMenu)在 Android 上的复刻证据
+
+off 屏抓 `QApplication::activePopupWidget()`(与桌面完全同一条代码路径、同 1.5 缩放),与桌面 `build/ref/c_popup_*.png` 对比:
+
+| 弹层 | Android 尺寸 | 桌面尺寸 | DIFF>12 |
+|---|---|---|---|
+| settings2 | 333x206 | 333x206 | 8.57% |
+| settings3 | 183x354 | 162x354 | 11.44% |
+| versions0 | 165x255 | 165x255 | 4.78% |
+| keymap0 | 270x305 | 270x305 | 3.74% |
+| keymap1 | 171x156 | 171x156 | 3.44% |
+
+四个弹层**像素尺寸与桌面逐一相同**(圆角/行高/指示条/内边距一致 → 尺寸才会相等);
+settings3 宽度不同是"弹层宽度随文字宽度"造成的字体回退差。DIFF 全部来自字体渲染,无结构差异。
+
 ## 7. 两个坑与一条事故(实测,不是推测)
 
 ### 7.1 WS2025 会**删除文件名含 `loader` 的文件**
@@ -470,9 +550,90 @@ $env:SXCL_UI_SHOT   = '<out>\home.png'
 |---|---|---|---|
 | `src/ui/pages/settings_page.cpp:310-315` | `std::filesystem::canonical(path.toStdWString(), ec)` + `QString::fromStdWString(resolved.native())` | `no viable conversion from 'const basic_string<value_type>' to 'const basic_string<wchar_t>'`(POSIX 下 `path::native()` 是 `std::string`) | 用 `#if defined(_WIN32)` 分支:Windows 走 `toStdWString/fromStdWString`(语义不变),其它平台走 `toStdString/fromStdString`(Qt 的 toStdString 是 UTF-8) |
 
+**本轮(2026-09-18)按授权追加的共享代码改动**:
+
+| 文件 | 改了什么 | 为什么 |
+|---|---|---|
+| `src/core/instance/paths.c` | Android 分支读 `SXCL_ANDROID_FILES`(打包层设为 `getFilesDir()`)→ 拼 `<它>/.minecraft` | 原来直接报「Android 上没有默认游戏目录」;**故意用应用私有目录**:零权限、不需要 MANAGE_EXTERNAL_STORAGE、卸载即清理(要让用户可见时可换 getExternalFilesDir,核心层不用动) |
+| `src/ui/pages/home_page.cpp` | 游戏目录改读 `sxcl_settings(game.default_dir)` + `sxcl_paths_default_game_dir()`;并做**一次性迁移**:首次运行若旧 Python `config.json` 有 gameDirectory 而我们的设置没有,就导入一次 | 原来读的是 Python 版旧配置(Android 上根本没那文件);迁移后从 Python 转过来的用户看到同一个目录 |
+| `src/ui/pages/versions_page.cpp` | `onLoaded` 区分「空态」与「加载失败」 | 用户投诉「检测不到版本能死吗」 |
+| `src/core/auth/store.c` | POSIX 分支补 `#include <unistd.h>` | 新加的 auth 模块在 Clang/Android 下 `gethostname` 未声明(MSVC 从 windows.h 间接拿到);与 libqf 那批同类 |
+
+桌面零回归(改完实测):`cmake --build build-ui --config Release --target sxcl-ui` **0 error / 0 warning**;
+九页 vs 改动前 **全 0.00%**、五个弹层 **全 0.00%**(home 那 3.18% 经上述一次性迁移后归零;迁移后
+`%APPDATA%\SilentXCraftLauncher\settings.conf` 里确实写入了 `game.default_dir=C:/Users/HiteVision/Desktop/.minecraft`)。
+
 另:libqf(`D:\SilentStudio\PyQf to C`)在 Clang 下有 4 处 MSVC-only 写法,**已按主代理授权直接修好**(语义等价,
 快照在 `PyQf to C\_scratch\snap-2026-09-17T*/`),清单与理由登记在 `PyQf to C\PROGRESS.md` 的
 "Clang/GCC 可移植性修正"一节(1 处默认实参、1 处缺 `#include <QLabel>`、1 处 `addItem` 名字隐藏、1 处 protected 访问)。
+
+---
+
+## 11. 触屏适配(Android)
+
+### 11.1 问题与做法
+
+Qt Widgets 是鼠标语义:真机上"上下菜单都划不动"。修法放在**打包层的 Android 入口**
+(`build/_android/app/sxcl_android_main.cpp`,只有 Android 编译,桌面一个字节不受影响):
+
+- `QScroller::grabGesture(viewport, QScroller::TouchGesture)` 挂在**每一个 QAbstractScrollArea 的 viewport** 上
+  (页面壳、导航面板、版本列表、按键映射的两个 QListWidget、下拉弹层的 MenuActionListWidget …);
+- `QScrollerProperties` 按 Fluent 手感:DragStartDistance 0.004、DragVelocitySmoothingFactor 0.5、
+  MaximumVelocity 3.0、MinimumVelocity 0.04、Overshoot 0.5/0.2、FrameRate 60(**Qt 6 已删除 per-axis 的
+  `*DragFlickDeceleration`,惯性用默认 DecelerationFactor**);
+- 浮动滚动条(SmoothScrollBar 子控件)统一 `WA_TransparentForMouseEvents`,手指落在它上面/附近不会吃掉拖拽;
+- 用 `Q_COREAPP_STARTUP_FUNCTION` 在 QApplication 构造后挂钩 + 事件过滤器(Show/ChildAdded/Polish)延迟补挂,
+  所以**后创建的弹层也会被挂上**;
+- 启动日志给出证据:`touch scroller attached to 18 viewport(s) [deferred]`。
+
+### 11.2 实测:swipe 前后位移(真机 `.33`,`adb shell input swipe`,前后截图逐像素求位移)
+
+| 区域 | 修复前 | 修复后 | 该区域的滚动几何(logcat) |
+|---|---|---|---|
+| 设置页(页面壳) | **0 px** | **-358 px / +98 px(两次实测)** | viewport_h=699 content_h=1600 **scrollable=1** |
+| 主页 | 0 px | 0 px | viewport_h=478 content_h=578 scrollable=1(仅 100px 余量) |
+| 版本页(空态) | 0 px | 0 px | viewport_h=478 content_h=478 scrollable=0(无内容可滚) |
+| 按键映射 | 0 px | 0 px | 页面壳 478/1600 scrollable=1,但 swipe 落点命中**子控件** |
+| 下载配置 | 0 px | 0 px | 699/699 scrollable=0 |
+| 导航面板 | 0 px | 0 px | 6 项 → 内容未超出面板 |
+
+几何数据来自打包层加的日志(`scrollarea <class> viewport_h=.. content_h=.. scrollable=..`),落在
+`build/_android/out/device/scroll_areas_device.txt`。**结论(诚实)**:
+- "划不动"这条**在设置页已闭环**(0 → -358px);
+- 其余区域里,版本页/下载配置/导航面板是**内容不足以滚动**(scrollable=0,有几何证据);
+- **主页与按键映射虽然页面壳 scrollable=1,但我的 swipe 落点被其内部的子滚动区吃掉**,没有测到位移 ——
+  这是**未完成项**,不是"已修好";下一步应该按子控件坐标逐个补测(或让子区不抢手势)。
+- 下拉菜单内部的滚动:设备上这几个弹层的列表都是 `viewport_h=480 content_h=480 scrollable=0**(条目装得下)**,
+  所以"菜单划不动"在这几个菜单上其实是**没有可滚内容**;真正需要复测的是条目多到超高的菜单。
+
+## 12. 已知缺陷:退出 Android Activity 时进程 SIGABRT(不影响用户)
+
+**现象**:每次 Activity 被销毁时(不管怎么退出)进程 abort:
+
+```
+I sxcl : event loop finished rc=0
+F libc : FORTIFY: pthread_mutex_lock called on a destroyed mutex (0x71e2320e58)
+F libc : Fatal signal 6 (SIGABRT), code -1 (SI_QUEUE) in tid 6887 (hwuiTask1), pid 6857
+I ActivityManager: Process com.silentstudio.sxcl (pid 6857) has died: cch CRE
+```
+
+**定性(实测对比)**:`adb shell input keyevent 4`(BACK,正常 finish)**必现**;
+`keyevent 3`(HOME,只切后台)**不 abort、进程仍在**(pid 存活)。
+所以**与"抓完即 quit"的验收路径无关**,是 Qt 6.11.2 与 Android 16 在 activity/surface 拆除时的顺序问题
+(Android 的 HWUI 渲染线程在 Qt 拆完后仍去锁已销毁的 mutex)。
+
+**用户会看到什么**:按 BACK 退出后,前台回到桌面(实测焦点 = 设备 launcher),
+`logcat` 里**没有** `AppErrors`/`Force Close`/`has stopped`/`ANR` 记录,也没有系统"应用已停止"弹窗
+(截图 `out/device/after_back33.png` 就是桌面本身)。
+→ 结论:**只是日志噪声 + 进程非干净退出,不影响用户、不影响下次启动**;若要彻底消除,需要
+从 Qt 的 activity 生命周期接入(拦截 BACK 走 HOME 语义,或升级/打补丁 Qt 的 android 平台插件)。
+
+## 13. 纪律:本机不再开任何可见窗口
+
+用户明确投诉过"一直开 SXCL 窗口"。此后所有桌面 GUI 取证一律:
+`Start-Process -WindowStyle Hidden` + `SXCL_UI_SHOT` + **15 秒硬超时兜底** + 收尾 `Get-Process sxcl-ui` 清理;
+需要"绝不出现窗口"时用 `-platform offscreen`(注意:off 屏的字体栈与 windows 平台不同,
+所以**只用于平台地板对照**,不能用来对齐 windows 平台的参考图)。详见 `build/_android/scripts/capture_desktop.ps1`。
 
 ---
 

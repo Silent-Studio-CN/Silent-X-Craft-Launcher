@@ -206,10 +206,27 @@ int sxcl_paths_default_game_dir(char *out, size_t out_len, char *err, size_t err
         return SXCL_PATHS_ERR_UNSUPPORTED;
     }
 #elif defined(__ANDROID__)
-    /* Android 没有"~/.minecraft"这种东西:游戏目录在应用私有空间或外置存储,
-     * 由调用方(安卓 UI)明确传进来,这里不给默认值,免得猜错地方。 */
-    paths_err(err, err_len, "Android 上没有默认游戏目录,请调用方指定(如应用私有 files/minecraft)");
-    return SXCL_PATHS_ERR_UNSUPPORTED;
+    {
+        /* Android:APPDATA/USERPROFILE 都不存在,默认游戏目录只能落在应用自己的空间里。
+         * 目录由安卓打包层通过环境变量 SXCL_ANDROID_FILES 传进来(Activity 的 getFilesDir(),
+         * 即 /data/user/0/<pkg>/files)——**故意不用共享存储**:
+         *   * 应用私有目录零权限即可读写,而 /sdcard 下的通用路径在 Android 11+ 需要
+         *     MANAGE_EXTERNAL_STORAGE(要用户手动去系统设置里授权,不现实);
+         *   * 卸载即清理,不会在别人机器上留垃圾。
+         * getExternalFilesDir()(Android/data/<pkg>/files)同样免权限,只是卸载也会删;
+         * 需要用户能用文件管理器看到时,打包层可以改成传它,核心层不用动。 */
+        const char *base = env_value("SXCL_ANDROID_FILES");
+        if (base != NULL && base[0] != '\0') {
+            if (!paths_join(out, out_len, base, ".minecraft")) {
+                paths_err(err, err_len, "默认游戏目录路径太长");
+                return SXCL_PATHS_ERR_SPACE;
+            }
+            return SXCL_PATHS_OK;
+        }
+        paths_err(err, err_len,
+                  "Android 上没拿到 SXCL_ANDROID_FILES(打包层入口应设为应用 files 目录)");
+        return SXCL_PATHS_ERR_UNSUPPORTED;
+    }
 #elif defined(__APPLE__)
     {
         char home[SXCL_PATHS_TMP];
