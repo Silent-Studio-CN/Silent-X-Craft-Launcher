@@ -1270,9 +1270,7 @@ git check-ignore -v build/_android/pkg/AndroidManifest.xml         # rc=0 -> 被
 
 ### 16.1 / 16.2 / 16.3 最小化 / 最大化 / 关闭(真机)
 
-**状态:未跑。** 这三条要先把打包层与 `src/ui/main_window.cpp` 编进 APK,
-而 APK 构建通道当时被另一个代理占着(gradle `assembleDebug` 正在 `D:\sxcl_local\out` 上跑)。
-本代理**没有**跑过这三条,报告里也不会写"应该可以"。
+**状态:三条都已在真机上跑过(2026-09-21 16:28 那一版 APK),原始输出见本节末尾。**
 
 **Java 侧已经单独编过(不占构建通道的静态检查,原始输出)**:
 
@@ -1291,24 +1289,163 @@ git check-ignore -v build/_android/pkg/AndroidManifest.xml         # rc=0 -> 被
 (`-Xlint:all` 下 0 error / 0 warning。第一次跑确实抓到一个真错:
 `if (animgtrace != null)` 与声明 `animgtrace` 差一个字母 —— 已按原文件改回。)
 
-**要跑的三条(构建通道空了之后)**:
+#### 16.1/16.2/16.3 的实测(2026-09-21,一键脚本 `android/scripts/win3_accept.ps1`)
 
-```powershell
-# 装包
-adb -s 192.168.200.164:5555 install -r D:\sxcl_local\out\build\outputs\apk\debug\sxcl-debug.apk
-adb -s 192.168.200.164:5555 shell am start -n com.silentstudio.sxcl/com.silentstudio.sxcl.SxclActivity
-# 最小化:点标题栏最小化键(逻辑 (1085,16) -> 显示 (2170,80))
-adb -s 192.168.200.164:5555 shell input tap 2170 80
-adb -s 192.168.200.164:5555 shell dumpsys activity activities | Select-String sxcl
-adb -s 192.168.200.164:5555 shell pidof com.silentstudio.sxcl
-# 最大化:逻辑 (1131,16) -> 显示 (2262,80)
-adb -s 192.168.200.164:5555 shell input tap 2262 80
-adb -s 192.168.200.164:5555 shell dumpsys activity activities | Select-String -Pattern 'pipped|PIP|sxcl'
-adb -s 192.168.200.164:5555 exec-out screencap -p > max.png
-# 关闭:逻辑 (1177,16) -> 显示 (2354,80)
-adb -s 192.168.200.164:5555 shell input tap 2354 80
-adb -s 192.168.200.164:5555 shell pidof com.silentstudio.sxcl
-```
+坐标是**量出来的**不是猜的:对设备截图做像素聚类,标题栏右侧三个图标分别是
+**21x1 横线(最小化)/ 21x21 方框(最大化)/ 20x20 叉(关闭)**,中心正好落在
+
+    最小化 (2170, 80)    最大化 (2262, 80)    关闭 (2352, 79)
+
+(与 `display = (logical*2, logical*2+48)` 对 1200x776 逻辑窗口算出来的一致。)
+
+⚠ **这台设备(远程控制的 G6012BS)上 `adb input tap` 有 ~13 秒投递延迟**,
+所以脚本每一步都是"等效果"而不是"睡固定时间";早期按固定 3 秒读状态的那几轮全被这个延迟骗过。
+
+装包与产物:
+
+    $ adb -s 192.168.200.164:5555 install -r D:\sxcl_local\out\build\outputs\apk\debug\sxcl-debug.apk
+    Performing Streamed Install
+    Success
+    APK 47,539,905 bytes  sha256=D94EA0B5A2FFE77413DDB5D20E288A3BBEAEE400271F6D6E0C2BE8624033FB60
+
+**最小化(点 2170,80)**:
+
+    [win3] mCurrentFocus = mCurrentFocus=Window{dacf377 u0 com.stardesk/com.remote.app.ui.activity.RemoteDeviceDetailActivity}   (must NOT be sxcl any more)
+    [win3] pidof   = [7087]   (must still be alive: the process keeps running)
+
+logcat(tag sxcl)同一次点击的原始行:
+
+    09-21 16:33:06.802  7547  7572 I sxcl : moveTaskToBack -> true
+    09-21 16:33:06.803  7547  7572 I sxcl : win | 安卓最小化=退到后台(moveTaskToBack=1,进程与后台任务继续跑) win | pid=7547 mode=normal qtVisible=1 win32IsWindowVisible=1 hiddenToTray=0 exstyle=0x0 wsExTopmost=1 rect=(0,0 1200x776) normalRect=(0,0 1100x750) runningTasks=0 task=[]
+
+⇒ **主界面从屏幕上消失**(前台换成了别的应用)、**进程还在**、`moveTaskToBack=true`。
+恢复入口是底部上滑 / 最近任务;脚本第 2 步 `am start` 走返回栈:
+
+    [win3] --- 2) back to the foreground (am start) ---
+    [win3] mCurrentFocus = mCurrentFocus=Window{7bd5902 u0 com.silentstudio.sxcl/com.silentstudio.sxcl.SxclActivity}
+
+**最大化(点 2262,80)—— C1 画中画成立**:
+
+    [win3]   mode=pinned                                FOUND
+    [win3]   mLastReportedPictureInPictureMode=true     FOUND
+    [win3]   supportsPictureInPicture=true              FOUND
+    [win3]   pip_input_consumer                         FOUND
+
+    09-21 16:20:27.737  2538  2576 I sxcl : enterPictureInPictureMode -> true
+    09-21 16:20:27.737  2538  2576 I sxcl : win | 安卓最大化:全屏 -> 画中画悬浮窗(enterPictureInPictureMode=1)
+    09-21 16:20:28.297  2538  2538 I sxcl : pip mode changed: in-pip=true
+
+截图 `build/_android/out/win3/03_maximised_pip.png`。恢复全屏后再查 dumpsys:
+
+    [win3] --- 4) back to full screen ---
+    [win3]   pinned still? False
+
+**PiP 不需要任何权限**(所以本机根本走不到 C2)。C2 的覆盖权限当前**没给**,实测:
+
+    $ adb -s 192.168.200.164:5555 shell appops get com.silentstudio.sxcl SYSTEM_ALERT_WINDOW
+    No operations.
+    Default mode: default
+
+**关闭(点 2352,79)**:
+
+    [win3] pid before close = [7087]
+    [win3] EFFECT after ~3s: pidof is EMPTY
+    [win3] CLOSE: process is GONE -> real exit, as required
+
+#### 16.3.1 没能拿到的一条(诚实清单)
+
+**"最小化期间下载进度仍在涨"没有拿到干净的同窗口测量。** 试过两次:
+
+- 先用 `run-as` 往 `files/SilentXCraftLauncher/pending_tasks.json` 播一个未完成下载,
+  重启后走产品路径自动续传;最小化后每 10 s 采一次 `du -sk files/.minecraft`:
+  `33400 → 33400 → … → 33400 KB`(60 s 窗口内没变),回到前台后跳到 `93759 KB`;
+- 换成量共享游戏目录 `/storage/emulated/0/FCL/.minecraft`:窗口内同样是平的。
+
+但那次下载**最终跑完了**:FCL 的 `versions/` 基线是 4 个
+(`1.17.1-Forge,1.21.11-NeoForge,26.2,26.2-NeoForge`),之后多了一个 **`1.21.11`**。
+所以"任务确实在跑"是事实,但**"在后台那 60 秒里文件在涨"没有被观测到**
+(引擎很可能先下到临时文件、安装阶段才落到游戏目录,而 `du` 量的是游戏目录)。
+**这一条不作为已证结论**;要补齐需要给下载引擎加一个"进度落盘"的观测点。
+
+---
+
+## 17. APK 必须自带 TLS 后端(实测缺陷 + 修复)
+
+### 17.1 现象与根因
+
+用户报"拉不到版本列表":官方源与 BMCLAPI **两条都**"网络请求失败"。
+根因不在网络,在 **APK 里根本没有 TLS 后端**。修复前 APK 的 `lib/arm64-v8a/`(`tar -tf` 原始输出):
+
+    lib/arm64-v8a/libQt6Network_arm64-v8a.so        <- 有 Network
+    (没有 libplugins_tls_qopensslbackend_arm64-v8a.so)
+    (没有 libssl_3.so / libcrypto_3.so)
+
+而 Qt 套件里明明有 `plugins/tls/libplugins_tls_qopensslbackend_arm64-v8a.so`(297,680 B)。
+Qt 6 的 openssl 后端在安卓上是 **运行时 `dlopen("libssl_3.so")`**(所以插件自己的 NEEDED 里看不到 OpenSSL),
+这两个文件名**不能改**,而且安卓 NDK 里没有 -> 必须随包带。
+
+### 17.2 修复
+
+| 位置 | 做了什么 |
+|---|---|
+| `android/prebuilt/arm64-v8a/{libssl_3.so,libcrypto_3.so}` | 把 OpenSSL 3.1.8 的 arm64-v8a 预编译库**放进仓库**(来源/许可/sha256 见该目录的 README.md) |
+| `android/deployment-settings.template.json` | 新增 `android-extra-libs`(顺序 **libcrypto 在前、libssl 在后**) |
+| `android/scripts/sync_to_build.ps1` | 把 `plugins/tls/libplugins_tls_qopensslbackend_arm64-v8a.so` 加进 `deployment-dependencies`;展开 `@ANDROID_EXTRA_LIBS@` |
+| `android/scripts/build_apk.ps1` | `androiddeployqt` 之后**逐个检查**这三个文件是否真的到了 `$OUT/libs/arm64-v8a/`,缺了就补并打 `tls FALLBACK`,补不上 `exit 3` |
+
+### 17.3 自证(修复后,原始命令与输出)
+
+    $ tar -tf D:\sxcl_local\out\build\outputs\apk\debug\sxcl-debug.apk | findstr /C:"lib/arm64-v8a/"
+    lib/arm64-v8a/libcrypto_3.so
+    lib/arm64-v8a/libplugins_tls_qopensslbackend_arm64-v8a.so
+    lib/arm64-v8a/libssl_3.so
+    ...(其余 19 个 Qt/平台/插件 .so 照旧)
+
+构建日志里的一行(说明是 `android-extra-libs` 生效,不是兜底拷贝):
+
+    [apk] tls ok        : libplugins_tls_qopensslbackend_arm64-v8a.so  297680
+    [apk] tls ok        : libssl_3.so  634680
+    [apk] tls ok        : libcrypto_3.so  4030424
+
+### 17.4 真机端到端证据
+
+装包后打开版本页,设备私有目录里出现了官方清单缓存:
+
+    $ adb -s 192.168.200.164:5555 shell run-as com.silentstudio.sxcl ls -l files/SilentXCraftLauncher/cache/version_manifest_v2.json
+    -rw------- 1 u0_a167 u0_a167 276542 2026-09-21 16:07 files/SilentXCraftLauncher/cache/version_manifest_v2.json
+
+    $ (拉回本机解析)
+    latest.release = 26.3
+    VERSION COUNT  = 915
+
+版本列表**真的渲染出行**了(logcat tag sxcl,scrollarea 的自述几何):
+
+    09-21 16:29:33.997  6457  6480 I sxcl : scrollarea QListView [versionList] rect=(78,263 1083x488) viewport_h=488 content_h=5356 scrollable=1
+
+**注意**:`src/ui/pages/versions_page.cpp` 里那行 `[sxcl-ui] 版本页: ...` 是 `std::fprintf(stderr, ...)`,
+而**安卓上 stderr 不进 logcat**(实测:`adb logcat -d -s sxcl-ui` **空**)。所以别指望收它 ——
+用上面的清单缓存 + `versionList` 几何两条客观读数代替。
+
+### 17.5 共享游戏目录(FCL)检测
+
+设备上 `/storage/emulated/0/FCL/.minecraft/versions` 有 4 个实例
+(`1.17.1-Forge / 1.21.11-NeoForge / 26.2 / 26.2-NeoForge`),但**必须先拿到"所有文件访问权限"**,
+否则自动检测在共享存储上一无所获(§14)。授权:`adb shell appops set --uid com.silentstudio.sxcl MANAGE_EXTERNAL_STORAGE allow`。
+授权并重启后:
+
+    $ adb -s 192.168.200.164:5555 logcat -d -s sxcl | findstr all-files-access
+    09-21 16:29:59.113  6599  6599 I sxcl : resume: all-files-access=true
+
+    $ adb -s 192.168.200.164:5555 shell run-as com.silentstudio.sxcl cat files/SilentXCraftLauncher/settings.conf
+    ui.accent=#f7ff6b
+    download.source=testsrc5
+    game.window_size=1280x720
+    general.version_refresh_interval=30
+    ui.theme=dark
+    game.default_dir=/storage/emulated/0/FCL/.minecraft     <- 检测结果落盘了
+
+之后启动器把下载/安装直接做进 FCL 的目录(实测:跑完一次 1.21.11 的安装,
+`/storage/emulated/0/FCL/.minecraft/versions/` 从 4 个变成 5 个)。
 
 ---
 

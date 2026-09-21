@@ -41,14 +41,22 @@ function TraceLines([string]$pattern) {
   ((& adb -s $Serial logcat -d -s sxcl 2>&1) | Select-String -Pattern $pattern).Line
 }
 # waits until the app's logcat (tag sxcl) contains $pattern, up to $EffectTimeoutSec
+# NOTE: the result goes into $script:waitOk, NOT into the return value - a function
+# whose output is assigned ("WaitForTrace ...") would swallow every Say() line
+# and the transcript would silently lose the raw evidence. (Found the hard way.)
 function WaitForTrace([string]$pattern, [string]$what) {
+  $script:waitOk = $false
   for ($i = 0; $i -lt ($EffectTimeoutSec / 3); $i++) {
     Start-Sleep -Seconds 3
     $hit = TraceLines $pattern
-    if ($hit) { Say ('EFFECT after ~' + (($i+1)*3) + 's: ' + $what); $hit | ForEach-Object { Write-Output ('  ' + $_) }; return $true }
+    if ($hit) {
+      Say ('EFFECT after ~' + (($i+1)*3) + 's: ' + $what)
+      $hit | ForEach-Object { Say ('  ' + $_) }
+      $script:waitOk = $true
+      return
+    }
   }
   Say ('NO EFFECT within ' + $EffectTimeoutSec + 's: ' + $what)
-  return $false
 }
 function GameDirKB() {
   $o = (& adb -s $Serial shell run-as com.silentstudio.sxcl du -sk files/.minecraft 2>&1) -join ' '
@@ -89,7 +97,7 @@ Say ('screenshot 00_foreground.png ' + (Get-Item (Join-Path $Out '00_foreground.
 Say '--- 1) MINIMISE: tap (2170,80) ---'
 $kb0 = GameDirKB
 AdbRun @('shell','input','tap','2170','80') | Out-Null
-$ok = WaitForTrace '安卓最小化' 'moveTaskToBack'
+WaitForTrace '安卓最小化' 'moveTaskToBack'
 Say ('mCurrentFocus = ' + (Focus -replace '.*mCurrentFocus=','') + '   (must NOT be sxcl any more)')
 $pid1 = (((& adb -s $Serial shell pidof com.silentstudio.sxcl 2>&1) -join '').Trim())
 Say ('pidof   = [' + $pid1 + ']   (must still be alive: the process keeps running)')
@@ -124,7 +132,7 @@ Say ('screenshot 02_restored.png ' + (Get-Item (Join-Path $Out '02_restored.png'
 Say '--- 3) MAXIMISE: tap (2262,80) ---'
 AdbRun @('logcat','-c') | Out-Null
 AdbRun @('shell','input','tap','2262','80') | Out-Null
-$okPip = WaitForTrace '画中画悬浮窗' 'enterPictureInPictureMode'
+WaitForTrace '画中画悬浮窗' 'enterPictureInPictureMode'
 Start-Sleep -Seconds 2
 $state = AdbShell @('dumpsys','activity','activities')
 foreach ($pat in @('mode=pinned','mLastReportedPictureInPictureMode=true','supportsPictureInPicture=true','pip_input_consumer')) {
