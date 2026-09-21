@@ -141,6 +141,17 @@ static int driver_on_line(void *userdata, int is_stderr, const char *line)
     return 0;
 }
 
+/* 进程起来 -> 记下 PID 并转发给调用方(界面要用它显示 / 单独结束游戏进程) */
+static int driver_on_started(void *userdata, int64_t pid)
+{
+    driver_line_ctx *lc = (driver_line_ctx *)userdata;
+    lc->res->pid = pid;
+    if (lc->req->on_started) {
+        return lc->req->on_started(lc->req->userdata, pid);
+    }
+    return 0;
+}
+
 /* ────────────────────────── 选 Java ────────────────────────── */
 
 /** 没找到 Java 时给一句能照着做的人话:要哪个版本、能装哪儿、怎么直接指定。 */
@@ -192,6 +203,7 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
     }
     memset(out, 0, sizeof(*out));
     out->exit_code = -1;
+    out->pid = -1; /* 没起来就是 -1(与 sxcl_process_result.pid 同口径) */
     out->java_is_64bit = -1;
     out->conclusion = SXCL_LOG_CONCLUSION_UNKNOWN;
     sxcl_log_summary_init(&out->log);
@@ -394,6 +406,7 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
         popts.work_dir = req->game_dir;
         popts.timeout_ms = req->timeout_ms;
         popts.on_line = driver_on_line;
+        popts.on_started = driver_on_started;
         popts.userdata = &lc;
         if (sxcl_process_run(&popts, &pr) != 0) {
             char msg[256];
@@ -402,6 +415,9 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
             goto done;
         }
         out->started = 1;
+        if (out->pid == 0) {
+            out->pid = pr.pid; /* on_started 没被调用时的兜底 */
+        }
         out->exit_code = pr.exit_code;
         out->timed_out = pr.timed_out;
         out->killed_by_client = pr.killed_by_client;

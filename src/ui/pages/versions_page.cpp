@@ -30,6 +30,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QFontMetrics>
 #include <QHash>
 #include <QHBoxLayout>
@@ -69,6 +70,8 @@
 
 #include "fluent_theme.h"
 #include "sxcl_icons.h"
+#include "workers/ui_error.h"  // 统一错误出口:完整上下文 + 自动复制剪贴板
+#include "workers/ui_paths.h"  // uiLauncherDataRoot():缓存/配置根必须跨平台(Android 没有 %APPDATA%)
 
 // ── 核心库(纯 C)—— 版本页的取数链全部走这里,界面层不再自己解析清单 ──
 // 以前这一页只能读本地缓存/环境变量里的清单文件,拿不到就退化成"把本地已安装的实例
@@ -81,6 +84,7 @@
 #include "sxcl/json.h"      // sxcl_json_parse_file / sxcl_json_parse
 #include "sxcl/manifest.h"  // sxcl_version_list_build + sxcl_manifest_mirror_url
 #include "sxcl/net.h"       // sxcl_transport_qt_create(Qt 传输后端)
+#include "sxcl/paths.h"     // sxcl_paths_default_game_dir(平台默认游戏目录;不再自己拼 APPDATA)
 
 // 注意:sxcl_ui_core 目前没有源码树 include/ 目录的搜索路径(include/ 只挂在可执行目标
 // sxcl-ui 上),所以这里**够不着** sxcl/instance.h。等主代理把那行 include 目录补进
@@ -478,12 +482,12 @@ private:
 
 // ──────────────────────────────────────────────────────────────── 取数据
 
+// 共享配置(Python 版写的那份,过渡期共用)挂在**启动器数据根**下。
+// 以前这里直接拼 %APPDATA%,APPDATA 为空时返回空串 -> 读不到任何配置(Android 上恒如此);
+// 现在路径由 ui_paths.cpp 的 uiLauncherDataRoot() 按平台给出,读不到只是"文件不存在",
+// 而不是"路径不存在"。
 QString sharedConfigPath() {
-    const QByteArray appData = qgetenv("APPDATA");
-    if (appData.isEmpty())
-        return {};
-    return QString::fromLocal8Bit(appData) +
-           QStringLiteral("/SilentXCraftLauncher/config.json");
+    return uiLauncherDataRoot() + QStringLiteral("/config.json");
 }
 
 QString sharedConfigValue(const QString &section, const QString &key, const QString &def) {
@@ -502,7 +506,13 @@ QString sharedConfigValue(const QString &section, const QString &key, const QStr
 }
 
 // 游戏目录:先看验收/调试入口,再看共享配置(Python 版写的那份,过渡期共用),
-// 最后退回平台默认的 .minecraft(与 Python cfg.gameDirectory 的默认值同义)。
+// 最后退回**核心库的平台默认**(不再自己拼 %APPDATA%)。
+//
+// 为什么最后一跳必须走核心库:安卓上 qgetenv("APPDATA") 恒为空 ——
+// 旧实现会掉到 "~/.minecraft",而安卓的 $HOME 是 "/",那个路径根本不存在,
+// 于是版本页永远扫不到本地实例(同一个缺陷家族:清单缓存 :576 那处也是 %APPDATA% 为空就没兜底)。
+// sxcl_paths_default_game_dir 在 Windows 上给的就是 %APPDATA%/.minecraft(**桌面行为不变**),
+// 安卓上给 <应用私有 files>/.minecraft(与安装/启动用的那一个同源,见 paths.c)。
 QString gameDirectory() {
     const QString env = qEnvironmentVariable("SXCL_UI_GAME_DIR");
     if (!env.isEmpty())
@@ -511,10 +521,11 @@ QString gameDirectory() {
                                           QStringLiteral("gameDirectory"), QString());
     if (!cfg.isEmpty())
         return cfg;
-    const QByteArray appData = qgetenv("APPDATA");
-    if (!appData.isEmpty())
-        return QString::fromLocal8Bit(appData) + QStringLiteral("/.minecraft");
-    return QDir::homePath() + QStringLiteral("/.minecraft");
+    char buf[4096];
+    char err[256];
+    if (sxcl_paths_default_game_dir(buf, sizeof(buf), err, sizeof(err)) == SXCL_PATHS_OK)
+        return QDir::fromNativeSeparators(QString::fromUtf8(buf));
+    return QDir::fromNativeSeparators(QDir::homePath()) + QStringLiteral("/.minecraft");
 }
 
 // ── 本地已安装实例:走核心库 sxcl_instance_scan ──
@@ -572,12 +583,11 @@ QVector<LocalInstance> scanLocalInstances(const QString &gameDir, QString *error
 
 const char *kManifestOfficialUrl = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
+// 清单缓存路径。**保证非空** —— 这正是"设备上拉不到版本列表"的根因之一:
+// 旧实现返回空串时,写缓存与读缓存两处都被 if(!cache.isEmpty()) 静默跳过,
+// 于是远端不通 = 连兜底都没有(桌面有 %APPDATA% 才看不出来)。
 QString manifestCachePath() {
-    const QByteArray appData = qgetenv("APPDATA");
-    if (appData.isEmpty())
-        return {};
-    return QString::fromLocal8Bit(appData) +
-           QStringLiteral("/SilentXCraftLauncher/cache/version_manifest_v2.json");
+    return uiLauncherDataRoot() + QStringLiteral("/cache/version_manifest_v2.json");
 }
 
 // 清单文本:**远端双路**(官方 -> BMCLAPI 镜像),失败才退回本地缓存。
@@ -617,6 +627,21 @@ QByteArray fetchManifestText(QString *error, bool *fromCache) {
         urls[1] = nullptr;
         if (sxcl_manifest_mirror_url(kManifestOfficialUrl, nullptr, mirror, sizeof(mirror)) == 0)
             urls[1] = mirror; // 第二路:官方不通时走镜像
+
+        // 验收/离线复现:钉死清单地址(SXCL_UI_MANIFEST_URL)。
+        // 与上面那个 SXCL_UI_MANIFEST(钉死"文件")是同一族入口,区别只在钉的是"地址":
+        //   SXCL_UI_MANIFEST_URL=<url> -> **只试这一个地址,不换镜像**。
+        // 为什么需要它:"远端不通 + 有缓存 -> 走缓存并警告"这条分支原先没法测 ——
+        // 两台 URL 都是真的,想让它不通就得改机器网络(改 hosts/防火墙,要管理员权限)。
+        // 钉一个连不上的地址(http://127.0.0.1:9/…)就能**确定性地**复现这条分支。
+        // 生产路径不设这个变量,行为与从前完全一致。
+        QByteArray pinnedUrl;
+        const QString pinnedEnv = qEnvironmentVariable("SXCL_UI_MANIFEST_URL");
+        if (!pinnedEnv.isEmpty()) {
+            pinnedUrl = pinnedEnv.toUtf8();
+            urls[0] = pinnedUrl.constData();
+            urls[1] = nullptr; // 钉住之后不再换镜像:要测的就是"两条路都不通"
+        }
         for (int i = 0; i < 2 && urls[i] != nullptr; ++i) {
             text = nullptr;
             len = 0;
@@ -628,6 +653,8 @@ QByteArray fetchManifestText(QString *error, bool *fromCache) {
                 // 顺手写缓存(下次断网可用);写不进去不是错误
                 const QString cache = manifestCachePath();
                 if (!cache.isEmpty()) {
+                    // 目录可能还不存在(全新设备/Android 私有目录)-> 先建再写
+                    QDir().mkpath(QFileInfo(cache).absolutePath());
                     QFile cf(cache);
                     if (cf.open(QIODevice::WriteOnly | QIODevice::Truncate))
                         cf.write(body);
@@ -934,10 +961,18 @@ private:
                       .arg(m_all.size());
         m_manifestNote = QStringLiteral("版本清单加载失败：%1 · %2").arg(reason, localNote);
         m_status->setText(m_manifestNote);
-        InfoBar::push(InfoBar::Type::Error, QStringLiteral("版本清单加载失败"),
-                      QStringLiteral("无法获取版本清单：") + reason + QStringLiteral(
-                          "。可点「刷新」重试；已安装的版本仍然可以启动。"),
-                      this, 6000);
+        // 统一错误出口:InfoBar 里只放短句,**完整上下文(页面/操作/原始原因/路径/版本)
+        // 一并进剪贴板** —— 用户报障时直接粘,不用再问"什么错"。
+        UiErrorContext ctx;
+        ctx.page = QStringLiteral("版本页 / versions");
+        ctx.action = QStringLiteral("获取版本清单");
+        ctx.reason = reason; // 核心库人话(网络/状态码/解析),原样进剪贴板
+        ctx.detail = QStringLiteral("游戏目录:%1 · 清单缓存:%2 · 本地已安装:%3 个")
+                         .arg(QDir::toNativeSeparators(gameDirectory()),
+                              QDir::toNativeSeparators(manifestCachePath()))
+                         .arg(m_instances.size());
+        ctx.title = QStringLiteral("版本清单加载失败");
+        pushUiError(this, ctx, 6000);
         showVersions(m_filtered);
         logState(ok, versions.size(), fromCache, error);
     }

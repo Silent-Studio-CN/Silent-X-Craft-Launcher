@@ -586,25 +586,168 @@ Qt Widgets 是鼠标语义:真机上"上下菜单都划不动"。修法放在**�
   所以**后创建的弹层也会被挂上**;
 - 启动日志给出证据:`touch scroller attached to 18 viewport(s) [deferred]`。
 
-### 11.2 实测:swipe 前后位移(真机 `.33`,`adb shell input swipe`,前后截图逐像素求位移)
+### 11.2 输入坐标系:先标定,否则每一个 input 坐标都是错的(2026-09-21 更正)
 
-| 区域 | 修复前 | 修复后 | 该区域的滚动几何(logcat) |
+设备 1600x2400 / 320dpi,但 **App 的 Qt 窗口不在显示区顶部**:逻辑窗口 1200x777 → 物理 2400x1554,
+差出来的 ~48px 是系统区。于是:
+
+```
+display_x = logical_x * 2                反算:logical_x = display_x / 2
+display_y = logical_y * 2 + 48                  logical_y = (display_y - 48) / 2
+```
+
+两点定标(实测,足以确定仿射映射):
+
+```
+adb -s $D shell input tap 200 200   ->  Qt global(100,76)   (命中页面里的 FluentLabelBase)
+adb -s $D shell input tap  50 176   ->  Qt global( 25,64)   (命中导航汉堡键 NavToolButton)
+```
+
+**这条是血泪**:先前所有按"除以 2"直接换算的 swipe/tap 都**向上偏 24 逻辑像素**,很可能压根没按在目标控件上。
+§11.5 之前的那些 0px 有一部分就是这么来的。坐标一律由 `build/_android/scripts/swipe_case.ps1` 的
+`ToDisplay()` 生成,**不许手算**;脚本还可以直接吃逻辑坐标(`-SwipeLogical`)。
+
+### 11.3 只有"当前可见页"的几何是真的(旧表的 `478/xxx` 是假前提)
+
+页面都在 `QStackedWidget` 里,**隐藏页保留的是构造时 640x480 的布局**,从未在真实窗口尺寸下重排:
+
+```
+scrollarea ScrollArea [SettingsPage] rect=(49,49 638x478) vp=478 content=1981   <- 隐藏页:陈旧几何
+scrollarea ScrollArea [HomePage]     rect=(50,50 1149x725) vp=725 content=725   <- 可见页:真实几何
+```
+
+拿隐藏页的 rect 判"能不能滚"等于自己造一个假前提(旧表里"主页 478/578 还有 100px 余量"就是这么来的)。
+逐路由实测(1200x777,只取 rect 匹配真实窗口的那一条;脚本 `build/_android/scripts/page_geometry.ps1`):
+
+| 路由 | 可见页 | viewport_h | content_h | scrollable |
+|---|---|---|---|---|
+| home | ScrollArea [HomePage] | 725 | 725 | **0** |
+| versions | ScrollArea [VersionsPage] | 725 | 725 | **0** |
+| keymap | ScrollArea [KeymapPage] | 725 | 725 | **0** |
+| multiplayer | ScrollArea [MultiplayerPage] | 725 | 725 | **0** |
+| settings | ScrollArea [SettingsPage] | 725 | **1981** | **1** |
+| download_config | ScrollArea [DownloadConfigPage] | 725 | 725 | **0** |
+| download_progress | ScrollArea [DownloadProgressPage] | 725 | 725 | **0** |
+| launch | ScrollArea [LaunchProgressPage] | 725 | 725 | **0** |
+
+⇒ 常规尺寸下**只有设置页有可滚内容**;其余页面的 0px 是"没有可滚内容"的正确行为,不是滚动链路坏了。
+
+### 11.4 数据必须能自证(三条闸门,缺一条数字就不能用)
+
+1. **对照帧 0px**:任何 tap/swipe 之前先拍两帧(中间没有任何输入),`image_diff.py` 必须给 0 px
+   (有自带动画的页面允许一个很小的比例阈值,并把比例一起报出来)。
+   踩过的坑:第一版只拍一帧,tap 前那帧正好是启动中的画面,差分出"99% 全屏变化",差点当成点击效果。
+2. **无外来 INPUT**:对照窗口内 logcat 若出现 `INPUT ...` 行,判定"别人在动设备",**该轮作废重来**。
+   这台设备实测**确实有人用**(出现过远程桌面 StarDesk 的前台、以及主题色取色对话框 ColorPickerButton+QDialogButtonBox),
+   不是多余;没有这条闸门,别人的操作会被算成我的 swipe 效果。
+3. **尺子已校准**:`build/_android/scripts/selftest_measure_swipe.py` 拿真实截图注入已知位移再量回,
+   必须在 `+0/+11/+37/+137/-64/+260` 全部原样量回,且"两张相同帧"给 0px、"纯色帧"给"不可测量(exit 2)"。
+   这一步真的抓到过 bug:第一版**符号与文档相反**(三种量法里两种给反号),而且大位移被一个过严的
+   "峰值锐度"门槛误杀 —— 那样的数字会整批错。
+
+测量本身:`build/_android/scripts/measure_swipe.py`(三种独立量法:行剖面 ZNCC / 行 MAE / 条带匹配,中位)
+与 `image_diff.py`(变化像素/包围盒/分带);App 自己的 `scroll MOVE <class> [objectName] value=v/max` 与
+`INPUT <type> recv=<class> [objectName] ... viewport= scroller= passthrough=` 是最硬的证据来源
+(滚动条值是**逻辑像素**,物理 = x2;每行都带 `passthrough=` 说明数据取自哪种模式)。
+
+### 11.5 实测:位移数字(同一把尺子,对照帧 + 无外来输入)
+
+| 场景 | 几何(可见页实测) | 位移 | 证据 |
 |---|---|---|---|
-| 设置页(页面壳) | **0 px** | **-358 px / +98 px(两次实测)** | viewport_h=699 content_h=1600 **scrollable=1** |
-| 主页 | 0 px | 0 px | viewport_h=478 content_h=578 scrollable=1(仅 100px 余量) |
-| 版本页(空态) | 0 px | 0 px | viewport_h=478 content_h=478 scrollable=0(无内容可滚) |
-| 按键映射 | 0 px | 0 px | 页面壳 478/1600 scrollable=1,但 swipe 落点命中**子控件** |
-| 下载配置 | 0 px | 0 px | 699/699 scrollable=0 |
-| 导航面板 | 0 px | 0 px | 6 项 → 内容未超出面板 |
+| 主页 swipe(常规 1200x777) | vp=725 content=725 scrollable=0 | **0 px** | 三法一致 0;`NO scroll MOVE`;对照帧 0px |
+| 设置页 swipe(常规) | vp=725 content=1981 max=1256 | **520 逻辑 px = 1040 物理 px** | 51 次 `scroll MOVE`,`min=15 max=535` |
+| 按键映射外壳(压缩窗口 1200x476) | vp=425 content=601 max=176 | **155 逻辑 px = 310 物理 px** | `scroll MOVE ScrollArea [KeymapPage] 21→176` |
+| 按键映射内层列表(压缩窗口) | vp=127 content=127 max=0 | 0(自身无余量) | 内层 0 次,父级外壳滚了 **54 逻辑 px**(正确行为) |
+| 按键映射内外两层(常规) | 外壳 725/725;两列表 189/189、179/179 | **0 px**(都无余量) | 见 §11.3 表 |
+| 超高弹层内部(23 项) | 弹层 `viewport_h=472 content_h=759 scrollable=1` max=287 | **224 逻辑 px = 448 物理 px** | 42 次 `scroll MOVE MenuActionListWidget [comboListWidget] 63→287` |
 
-几何数据来自打包层加的日志(`scrollarea <class> viewport_h=.. content_h=.. scrollable=..`),落在
-`build/_android/out/device/scroll_areas_device.txt`。**结论(诚实)**:
-- "划不动"这条**在设置页已闭环**(0 → -358px);
-- 其余区域里,版本页/下载配置/导航面板是**内容不足以滚动**(scrollable=0,有几何证据);
-- **主页与按键映射虽然页面壳 scrollable=1,但我的 swipe 落点被其内部的子滚动区吃掉**,没有测到位移 ——
-  这是**未完成项**,不是"已修好";下一步应该按子控件坐标逐个补测(或让子区不抢手势)。
-- 下拉菜单内部的滚动:设备上这几个弹层的列表都是 `viewport_h=480 content_h=480 scrollable=0**(条目装得下)**,
-  所以"菜单划不动"在这几个菜单上其实是**没有可滚内容**;真正需要复测的是条目多到超高的菜单。
+说明:压缩窗口那两行来自 `wm size 2400x1000` 的**可逆几何实验**,只用于回答"内容真溢出时能不能滚",
+不代表常规尺寸的行为(常规 1200x777 下这两处都没有可滚内容)。设备状态变更与还原见 §11.8。
+
+**事件链(设置页 swipe,证明机制通了而不是碰巧)**
+
+```
+MousePress recv=SwitchSettingCard -> SettingCardGroup -> QWidget -> QWidget[qt_scrollarea_viewport] -> ScrollArea [SettingsPage]
+MouseMove  recv=QWidget[qt_scrollarea_viewport] local=(550,585) global=(600,635)   viewport=1 scroller=1
+scroll MOVE ScrollArea [SettingsPage] value=15/1256 ... 535/1256
+```
+
+- `scroller=1` ⇒ QScroller **确实挂在那个 viewport 上**;
+- 按压落在卡片(子控件)上仍**照常传播到 viewport**,再被 `SXCLViewportDragFilter` 转成滚动条值 ⇒ **没有被内层子控件吃掉**。
+
+### 11.6 弹层:点选回填 + 内部滚动(Android 实测)
+
+**点选回填(三条断言同一次运行)** —— `build/_android/scripts/popup_roundtrip.ps1`:
+
+```
+popup ASSERT open:          combo#2 currentIndex=2 text=2分钟
+popup ASSERT index changed: combo#2 -> currentIndex=0        <- ① currentIndex 变了
+popup ASSERT text refilled: 30秒                              <- ② 控件文字回填了
+像素:弹层区域 display(2120,484)-(2340,956)  +400ms 22.8% -> +1300ms 96.8% 变回页面 <- ③ 弹层关了
+```
+
+断言日志挂在既有验收通路 `SXCL_UI_POPUP` 上(`build/_android/app/sxcl_android_main.cpp`),不是临时诊断。
+另两轮独立复现索引变化:2→1(BMCLAPI 镜像源→Mojang 官方源)、4→1(全屏→1280x720)。
+
+**弹层内部滚动**:`SXCL_UI_TALLMENU=20` 把"版本下载源"撑到 23 项后逐索引探测(6 个可见下拉的顺序每次启动都不同):
+
+```
+index 0 (23 项): popup=(983,10 211x510)  list viewport_h=472 content_h=759 scrollable=1    <-- 内部可滚
+index 1..5     : list viewport_h == content_h,scrollable=0                              <-- 原有 5 个弹层装得下
+```
+
+在 index 0 上 swipe(display 2177,950 → 2177,450,500ms,两端都在屏幕内),静置 2500ms:
+`MenuActionListWidget [comboListWidget]` 共 42 次 valueChanged,`63,68,74 … 280,285,287`,**位移 224 逻辑 px = 448 物理 px**。
+(这一项以 App 自己的滚动条轨迹为准:同一批帧里弹层后面的设置页自己还在动,像素三法分歧较大,已在报告里注明。)
+
+**已知现象(未修,不在本次范围)**:下拉弹层可能被放到**屏幕外**。实测一个弹层的逻辑矩形 `(1051,677 135x203)`,
+换到屏幕是 y 1402..1808,而屏幕只有 1600 高 —— 有一半在屏幕外。第一轮点选就是踩在这个上(按"弹层中心"点,
+落点在屏幕之外),改成"弹层矩形 ∩ 屏幕"的中心才拿到干净数据。
+
+### 11.7 动画参数复核(桌面与 Android 同一套,实测拟合)
+
+只读取证通路 `SXCL_ANIM_TRACE`(共享入口 `src/ui/main.cpp`,默认不生效;桌面走 stderr、Android 走 logcat tag `sxcl-ui`):
+按 8ms 采样控件真实几何(位置/宽度/透明度/mask),再由 `build/_android/scripts/fit_anim_trace.py`
+对候选缓动曲线做 (时长 D, 采样偏移 t0) 网格搜索并**按残差排名**。
+
+| 动画 | 源码参数 | 桌面 offscreen 拟合 | rms |
+|---|---|---|---|
+| 导航展开/折叠 | `nav.h` 150ms OutQuad,48↔322 | 最优 **OutQuad 152ms**(次优 OutSine 150ms) | 5.2 px |
+| 弹层 drop-down | `fluent_menu.cpp` 250ms OutQuad + setMask | 最优 **OutQuad 250ms**(起点 462 → 终点 533,mask 62→0) | 1.2 px |
+| 弹层 pull-up | 同上(PullUp 分支,mask 高 = maskH-28) | 最优 **OutQuad 252ms**(265 → 10,mask -223→0,高 497) | 4.0 px |
+
+- mask 的轨迹**就是证据**:drop-down 时 `mask=(0,62 …)` 单调收到 `(0,0 …)`,62 正是当帧离终点还剩多少;
+- 按钮 hover/pressed **没有补间**:libqf 只置 `m_hover`/`m_pressed` 后 `update()`(无 QAnimation 对象),
+  视觉由 QSS 状态规则决定(`qf-dark.qss:163` hover / `:167` pressed),桌面与 Android 同为"一次重绘瞬时切换",
+  且 Android 上 hover 根本不触发(无指针设备)。
+
+### 11.8 设备状态变更与还原证据(全局状态的实验必须留这一节)
+
+为回答"内容真溢出时能不能滚",做过一次**可逆**几何实验(`wm size 2400x1000`,脚本 `compressed_geometry.ps1`)。
+之后的规矩:改全局状态前**先问**、**记原值**、`try/finally` 保证还原、还原后**贴原值自证**。
+
+| 项 | 实验期改动 | 原值 | 还原后实测 |
+|---|---|---|---|
+| `wm size` | `2400x1000` | 无 override | `Physical size: 1600x2400`(无 Override 行) |
+| `wm density` | 未动 | 320 | `Physical density: 320` |
+| `accelerometer_rotation` | 设为 0(锁横屏) | 1(自动) | 1 |
+| `user_rotation` | 设为 1 | 0 | 0 |
+| `screen_off_timeout` | 写过同值 | 1800000 | 1800000 |
+| `svc power stayon` | 设 true(实测写 15) | 未记录(教训) | 已置 0(`stayon false` 的值,AOSP 默认) |
+
+还原后 App 窗口几何仍是 `ScrollArea [HomePage] rect=(50,50 1149x725)`(逻辑 1200x777),截图 2400x1600。
+
+### 11.9 旧数据作废声明
+
+本文 2026-09-21 之前的触屏数字请**一律作废重测**,原因有三条(每条都独立成立):
+
+1. **坐标系错**:input 坐标按"除以 2"换算,整体上偏 24 逻辑像素(§11.2);
+2. **几何前提错**:拿隐藏页 640x480 的陈旧几何判"可滚"(§11.3) —— 旧表里"主页 478/578 约 100px 余量"即此;
+3. **尺子有 bug**:三种量法里两种符号相反、大位移被误判"不可测"(§11.4)。
+
+具体到旧表:`设置页 0 → -358 px` 这一条**待重测**(当时很可能确实滚了,但符号与量法都不可信;
+现行同口径数字是 §11.5 的 **520 逻辑 px**);`主页 478/578`、`按键映射壳 478/1600` 两条是**陈旧几何**,
+不是可见页的真实状态。
 
 ## 12. 已知缺陷:退出 Android Activity 时进程 SIGABRT(不影响用户)
 

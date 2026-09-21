@@ -30,6 +30,15 @@ set(SXCL_UI_SOURCES
   pages/multiplayer_page.cpp pages/settings_page.cpp
   # 三个临时页(会话页;不进导航,由 main_window 的会话机制按需创建)
   pages/download_config_page.cpp pages/download_progress_page.cpp pages/launch_page.cpp
+  # 工作线程层(阶段 7:下载->安装->启动 的界面接线)
+  #   ui_paths.*       界面层共用的运行期取值(游戏目录/设置文件/内存/进度追踪)
+  #   install_worker.* 把阻塞的 sxcl_install_run 放工作线程,阶段/进度/速度/取消回填 UI
+  #   launch_worker.*  把阻塞的 sxcl_launch_run 放工作线程,Java/命令行/日志归类/退出码回填 UI
+  workers/ui_paths.cpp        workers/ui_paths.h
+  workers/install_worker.cpp  workers/install_worker.h
+  workers/launch_worker.cpp   workers/launch_worker.h
+  #   ui_error.*       统一的错误出口:完整上下文 + 自动复制剪贴板(同一错误只复制一次)
+  workers/ui_error.cpp        workers/ui_error.h
   # 账户(正版登录)—— Python 版没有这个功能,新增:
   #   account.*     账户快照 + 工作线程任务(登录/续期/注销/正版启动;主线程绝不阻塞)
   #   auth_dialog.* 设备码登录对话框(qf 风格的 MessageBoxBase)
@@ -43,6 +52,9 @@ set(SXCL_UI_SOURCES
   icon_registry.cpp  icon_registry.h
   nav.cpp            nav.h
   main_window.cpp    main_window.h
+  #   tray.*       任务栏托盘图标:「最小化 = 隐藏窗口」后的恢复入口(新增设计,
+  #                Python 版没有这套语义;三个动作只发信号,窗口状态仍由 main_window 独占)
+  tray.cpp           tray.h
 )
 qt_add_library(sxcl_ui_core STATIC ${SXCL_UI_SOURCES})
 target_include_directories(sxcl_ui_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

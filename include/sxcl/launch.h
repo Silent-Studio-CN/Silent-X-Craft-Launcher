@@ -478,14 +478,21 @@ typedef struct sxcl_launch_request {
      *  返回非 0 = 请求终止进程 —— 取消与"看到完成标记就收工"都走这条路(与 process.h 一致)。 */
     int (*on_line)(void *userdata, int is_stderr, const char *line);
     void *userdata;
+    /** 进程**真的起来了**时调用一次,参数是游戏进程的 PID(在 sxcl_launch_run 的同一条线程里)。
+     *  可空。存在的理由:界面要在游戏还在跑的时候就能显示 PID、并且能**单独结束它** ——
+     *  只靠 result.pid 得等到游戏退出才知道,那对"结束游戏"这件事没有用。
+     *  返回非 0 = 立刻终止进程(与 on_line 返回非 0 同义,结果里 killed_by_client = 1)。 */
+    int (*on_started)(void *userdata, int64_t pid);
 } sxcl_launch_request;
 
 /** 一次启动的结果。 */
 typedef struct sxcl_launch_result {
     int exit_code;              /**< 进程退出码;-1 = 没起来 */
+    int64_t pid;                /**< 游戏进程 PID;**没起来 / dry_run 时为 -1**。
+                                 *   进程退出后仍保留(与 sxcl_process_result.pid 同义)。 */
     int started;                /**< 1 = 真的起过进程(dry_run 时为 0) */
     int timed_out;              /**< 1 = 超时被终止 */
-    int killed_by_client;       /**< 1 = on_line 回调请求终止 */
+    int killed_by_client;       /**< 1 = on_line / on_started 回调请求终止 */
     int64_t elapsed_ms;         /**< 从起进程到结束的墙钟毫秒 */
     int java_major;             /**< 选中的 Java 主版本;0 = 未知 */
     int java_is_64bit;          /**< 1/0/-1 */

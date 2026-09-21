@@ -68,6 +68,9 @@
 #include "fluent_theme.h"
 #include "sxcl_icons.h"
 
+#include "workers/ui_error.h"  // 统一错误出口(完整上下文 + 自动复制剪贴板)
+#include "workers/ui_paths.h" // 游戏目录的唯一一份解析(与安装 worker 同口径)
+
 namespace sxcl::ui {
 namespace {
 
@@ -87,35 +90,13 @@ void applyButtonFont(QPushButton *button) {
     button->setFixedHeight(32);
 }
 
-// versions_page.cpp:461-498 同款:过渡期共用 Python 版写的那份用户配置
-QString sharedConfigValue(const QString &section, const QString &key, const QString &def) {
-    const QByteArray appData = qgetenv("APPDATA");
-    if (appData.isEmpty())
-        return def;
-    QFile f(QString::fromLocal8Bit(appData) +
-            QStringLiteral("/SilentXCraftLauncher/config.json"));
-    if (!f.open(QIODevice::ReadOnly))
-        return def;
-    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
-    if (!doc.isObject())
-        return def;
-    const QJsonValue v = doc.object().value(section).toObject().value(key);
-    return v.isString() ? v.toString(def) : def;
-}
-
-QString gameDirectory() {
-    const QString env = qEnvironmentVariable("SXCL_UI_GAME_DIR");
-    if (!env.isEmpty())
-        return env;
-    const QString cfg = sharedConfigValue(QStringLiteral("Game"),
-                                          QStringLiteral("gameDirectory"), QString());
-    if (!cfg.isEmpty())
-        return cfg;
-    const QByteArray appData = qgetenv("APPDATA");
-    if (!appData.isEmpty())
-        return QString::fromLocal8Bit(appData) + QStringLiteral("/.minecraft");
-    return QDir::homePath() + QStringLiteral("/.minecraft");
-}
+// 游戏目录:走界面层共用的那一个解析(workers/ui_paths.h)。
+//
+// 为什么改成共用:本页要判断"版本名是否已存在",而安装 worker 要拿同一个目录去**真装**。
+// 两边各算一遍必然出现"这里说不存在、那边装到别处"这种产品级缺陷。
+// ui_paths 的口径与主页/CLI 一致:SXCL_UI_GAME_DIR > sxcl_settings 的 game.default_dir
+// (含一次 Python 旧配置迁移)> 核心库平台默认。
+QString gameDirectory() { return uiGameDirectory(); }
 
 // ───────────────────────── 可点标题行(section_card.py:46-54 / loader_row.py:132-140)──────
 
@@ -873,9 +854,16 @@ private:
             d.exists() && !d.entryList(QStringList() << QStringLiteral("*.json"), QDir::Files).isEmpty();
         if (hasJson ||
             QFileInfo::exists(dir + QLatin1Char('/') + vn + QStringLiteral(".jar"))) {
-            InfoBar::push(InfoBar::Type::Warning, QStringLiteral("版本已存在"),
-                          QStringLiteral("版本 '%1' 已经安装，请使用不同的版本名称").arg(vn),
-                          this, 5000);
+            // 统一错误出口(带 warning 级别):一样复制完整上下文到剪贴板
+            UiErrorContext ctx;
+            ctx.page = QStringLiteral("下载配置页 / download_config_%1").arg(m_versionId);
+            ctx.action = QStringLiteral("开始下载(实例名 %1)").arg(vn);
+            ctx.reason = QStringLiteral("版本 '%1' 已经安装，请使用不同的版本名称").arg(vn);
+            ctx.detail = QStringLiteral("目标目录已有版本 JSON 或 jar: %1")
+                             .arg(QDir::toNativeSeparators(dir));
+            ctx.title = QStringLiteral("版本已存在");
+            ctx.warning = true;
+            pushUiError(this, ctx, 6000);
             styleNameInput(QStringLiteral("error"));
             return;
         }
@@ -900,8 +888,13 @@ private:
                                       Q_ARG(QString, loaderType),
                                       Q_ARG(QString, loaderVersion)))
             return;
-        InfoBar::push(InfoBar::Type::Error, QStringLiteral("无法开始下载"),
-                      QStringLiteral("主窗口未提供下载进度页接口"), this, 5000);
+        UiErrorContext ctx;
+        ctx.page = QStringLiteral("下载配置页 / download_config_%1").arg(m_versionId);
+        ctx.action = QStringLiteral("开始下载(实例名 %1,加载器 %2)").arg(vn, loaderType);
+        ctx.reason = QStringLiteral("主窗口未提供下载进度页接口(switchToDownloadProgress 调用失败)");
+        ctx.detail = QStringLiteral("游戏目录: %1").arg(QDir::toNativeSeparators(dir));
+        ctx.title = QStringLiteral("无法开始下载");
+        pushUiError(this, ctx, 8000);
     }
 
     QString m_versionId;

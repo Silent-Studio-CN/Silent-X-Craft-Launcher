@@ -197,6 +197,7 @@ int sxcl_process_run(const sxcl_process_opts *opts, sxcl_process_result *out)
     }
     memset(out, 0, sizeof(*out));
     out->exit_code = -1;
+    out->pid = -1;
 
     /* 命令行 = program + 转义后的参数 */
     size_t cap = 512, len = 0;
@@ -263,12 +264,21 @@ int sxcl_process_run(const sxcl_process_opts *opts, sxcl_process_result *out)
     }
     CloseHandle(pi.hThread);
 
+    out->pid = (int64_t)pi.dwProcessId;
+
     const DWORD t0 = GetTickCount();
     char pending[4096];
     size_t pending_len = 0;
     char epending[4096];
     size_t epending_len = 0;
     int killed = 0, timed_out = 0;
+
+    /* 进程真的起来了 -> 先告诉调用方它的 PID(界面要靠这个显示 / 单独结束它)。
+     * 回调返回非 0 表示"立刻终止":与 on_line 返回非 0 同一语义,算 killed_by_client。 */
+    if (opts->on_started && opts->on_started(opts->userdata, out->pid) != 0) {
+        killed = 1;
+        TerminateProcess(pi.hProcess, 1);
+    }
 
     for (;;) {
         if (drain(out_r, 0, pending, &pending_len, opts) || drain(err_r, 1, epending, &epending_len, opts)) {
@@ -314,4 +324,44 @@ int sxcl_process_run(const sxcl_process_opts *opts, sxcl_process_result *out)
     CloseHandle(err_r);
     free(cmdline);
     return 0;
+}
+
+/* ── 单独查询/终止一个 PID(只针对我们自己起的子进程) ── */
+
+int sxcl_process_pid_alive(int64_t pid)
+{
+    if (pid <= 0 || pid > 0x7fffffffLL) {
+        return 0;
+    }
+    /* SYNCHRONIZE 就够判断"退没退出";不要 PROCESS_TERMINATE 那么大的权限,免得被杀软盯上。
+     * 打不开(进程已消失 / 不是我们的)一律算"不在"。 */
+    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (h == NULL) {
+        return 0;
+    }
+    const DWORD w = WaitForSingleObject(h, 0);
+    DWORD code = 0;
+    const BOOL got_code = GetExitCodeProcess(h, &code);
+    CloseHandle(h);
+    if (w == WAIT_TIMEOUT) {
+        return 1; /* 还没退出 */
+    }
+    if (got_code && code == STILL_ACTIVE) {
+        return 1; /* 双保险:句柄可等待但进程仍在跑 */
+    }
+    return 0;
+}
+
+int sxcl_process_kill_pid(int64_t pid)
+{
+    if (pid <= 0 || pid > 0x7fffffffLL) {
+        return -1;
+    }
+    HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (h == NULL) {
+        return -1; /* 已经没了,或不是我们的进程 */
+    }
+    const BOOL ok = TerminateProcess(h, 1);
+    CloseHandle(h);
+    return ok ? 0 : -1;
 }

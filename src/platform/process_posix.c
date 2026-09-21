@@ -67,6 +67,7 @@ int sxcl_process_run(const sxcl_process_opts *opts, sxcl_process_result *out)
     }
     memset(out, 0, sizeof(*out));
     out->exit_code = -1;
+    out->pid = -1;
 
     int op[2] = {-1, -1};
     int ep[2] = {-1, -1};
@@ -79,6 +80,7 @@ int sxcl_process_run(const sxcl_process_opts *opts, sxcl_process_result *out)
         snprintf(out->error, sizeof(out->error), "fork 失败: %s", strerror(errno));
         return -1;
     }
+    out->pid = (int64_t)pid; /* 父子两条路都记下:父进程拿它显示/结束子进程 */
     if (pid == 0) {
         /* 子进程 */
         if (dup2(op[1], STDOUT_FILENO) < 0 || dup2(ep[1], STDERR_FILENO) < 0) {
@@ -125,6 +127,13 @@ int sxcl_process_run(const sxcl_process_opts *opts, sxcl_process_result *out)
     char epending[4096];
     size_t epending_len = 0;
     int killed = 0, timed_out = 0, out_eof = 0, err_eof = 0;
+
+    /* 进程真的起来了 -> 先告诉调用方它的 PID(界面要靠这个显示 / 单独结束它)。
+     * 回调返回非 0 = 立刻终止:与 on_line 返回非 0 同一语义,算 killed_by_client。 */
+    if (opts->on_started && opts->on_started(opts->userdata, out->pid) != 0) {
+        killed = 1;
+        kill(pid, SIGKILL);
+    }
 
     for (;;) {
         struct pollfd fds[2];
@@ -180,4 +189,32 @@ int sxcl_process_run(const sxcl_process_opts *opts, sxcl_process_result *out)
     close(op[0]);
     close(ep[0]);
     return 0;
+}
+
+/* ── 单独查询/终止一个 PID(只针对我们自己起的子进程) ── */
+
+int sxcl_process_pid_alive(int64_t pid)
+{
+    if (pid <= 0) {
+        return 0;
+    }
+    /* kill(pid, 0) 不发送信号,只做权限与存在性检查;waitpid 收掉"僵尸"也算"已经不在"。
+     * 语义与 Windows 侧保持一致:1 = 还在跑,0 = 不在 / 判不了。 */
+    if (kill((pid_t)pid, 0) != 0) {
+        return 0;
+    }
+    int status = 0;
+    const pid_t w = waitpid((pid_t)pid, &status, WNOHANG);
+    if (w == (pid_t)pid) {
+        return 0; /* 已经退出(刚被我们收掉) */
+    }
+    return 1;
+}
+
+int sxcl_process_kill_pid(int64_t pid)
+{
+    if (pid <= 0) {
+        return -1;
+    }
+    return kill((pid_t)pid, SIGKILL) == 0 ? 0 : -1;
 }

@@ -62,6 +62,7 @@
 
 // 账户(正版登录)—— Python 版无此功能,新增;启动接线只用这一个入口(见 launchVersion)
 #include "dialogs/account.h"
+#include "workers/ui_error.h" // 统一错误出口(完整上下文 + 自动复制剪贴板)
 
 #include "main_window.h"
 
@@ -627,35 +628,23 @@ void HomePage::openDirectory() { // home_page.py:297-314
 }
 
 void HomePage::launchVersion(const QString &versionId) { // home_page.py:245-258
-    // Python:if not cfg.javaPath.value -> 警告"请先在设置中选择 Java 运行时";
-    //        否则 v = GameVersion(id=version_id, ...); mw.switch_to_launch(v);
-    //        没有这个钩子才报"启动器未初始化"。
-    // switch_to_launch 的对应物 = MainWindow::switchToLaunch(临时页机制,见 main_window.cpp),
-    // 启动页与下载/安装进度页同批接进来,这里按 Python 的顺序先查 Java 再切页。
-    const QString javaPath = legacyConfigString(QStringLiteral("Game"), QStringLiteral("javaPath"));
-    if (javaPath.isEmpty()) {
-        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("未选择 Java"),
-                      QStringLiteral("请先在设置中选择 Java 运行时"), window(), 4000);
-        return;
-    }
-    // ── 正版账户接线(**本文件唯一一处新增;Python 版没有账户功能**)──
+    // ── 阶段 7:「启动」接线(本文件唯一改动的这一处)──
     //
-    // 有可用的登录账户 → 走**已登录账户启动**(核心的 launch 支持 --account 语义:
-    // sxcl_launch_request 的 player_name/uuid/access_token;判据与 CLI 的
-    //   sxcl-dl launch <版本> <目录> --account
-    // 完全一致,见 tools/sxcl-dl/main.c:831-889)。没有账户 → **保持原来的行为**
-    // (切启动页 / 离线提示),不做任何假装。
-    // 启动是同步阻塞的(要等到游戏退出),所以交给工作线程;结果用 InfoBar 如实汇报。
+    // 改前:这里先查 Java 设置,没有就挡住;有可用正版账户时**直接**调 startAccountLaunch
+    //       并 return —— 用户根本进不了启动页(看不到 Java 探测结果 / 最终命令行 / 日志归类)。
+    // 改后:**一律切到启动页**,真正的启动由启动页执行(LaunchWorker:Java 探测 -> 最终命令行
+    //       -> 真起进程 -> stdout/stderr 归类 -> 退出码)。身份由启动页决定:
+    //       已登录账户可用就用账户身份(与 CLI 的 --account 同一条核心通路,
+    //       见 tools/sxcl-dl/main.c:898-921),否则用离线身份 --offline <名字>。
+    //
+    // 也因此不再需要"先查 Java 设置":核心库的启动层自己会探测并排序候选 Java
+    // (launch.h:250-263),启动页会把**选中的那一个**显示出来;探测不到时给出的也是
+    // 核心库的人话原因(比"未选择 Java"精确得多)。
+    //
+    // dialogs/account.* 的 startAccountLaunch 一行没动,仍是"一次性正版启动"的独立入口;
+    // 这里只是不再用它把用户挡在启动页外。
     const AccountSnapshot account = loadAccountSnapshot();
-    if (accountCanLaunch(account)) {
-        if (startAccountLaunch(m_gameDir, versionId, javaPath, configuredMemoryMb()) != nullptr) {
-            InfoBar::push(InfoBar::Type::Info, QStringLiteral("正在启动"),
-                          QStringLiteral("用已登录的正版账户启动 %1（玩家名 %2）")
-                              .arg(versionId, account.playerName),
-                          window(), 4000);
-            return;
-        }
-    } else if (account.loggedIn) {
+    if (!accountCanLaunch(account) && account.loggedIn) {
         // 登录了但这次用不上:先如实说清原因,再按原来的离线路径走(不静默降级、不假装成功)。
         const QString why =
             (!account.hasMcToken || account.mcExpired)
@@ -663,14 +652,24 @@ void HomePage::launchVersion(const QString &versionId) { // home_page.py:245-258
                 : QStringLiteral("这个账户没有 Java 版档案（没买或没取到），本次按离线身份启动");
         InfoBar::push(InfoBar::Type::Warning, QStringLiteral("本次没有用正版身份"), why, window(),
                       8000);
+    } else if (accountCanLaunch(account)) {
+        InfoBar::push(InfoBar::Type::Info, QStringLiteral("用已登录的正版账户启动"),
+                      QStringLiteral("%1（玩家名 %2，内存 %3 MB）")
+                          .arg(versionId, account.playerName)
+                          .arg(configuredMemoryMb()),
+                      window(), 4000);
     }
 
     if (auto *mw = qobject_cast<MainWindow *>(window())) {
         mw->switchToLaunch(versionId);
         return;
     }
-    InfoBar::push(InfoBar::Type::Error, QStringLiteral("错误"),
-                  QStringLiteral("启动器未初始化"), window(), 3000);
+    UiErrorContext ctx;
+    ctx.page = QStringLiteral("主页 / home");
+    ctx.action = QStringLiteral("启动 %1").arg(versionId);
+    ctx.reason = QStringLiteral("启动器未初始化(window() 不是 MainWindow)");
+    ctx.title = QStringLiteral("无法启动");
+    pushUiError(window(), ctx, 5000);
 }
 
 void HomePage::openMultiplayer() { // home_page.py:138-150

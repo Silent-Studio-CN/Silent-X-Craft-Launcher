@@ -74,6 +74,8 @@
 #include "theme_bridge.h"
 
 // 账户(正版登录)—— Python 版无此功能,新增。实现见 dialogs/account.* 与 dialogs/auth_dialog.*
+#include "workers/ui_error.h"  // 统一错误出口:完整上下文 + 自动复制剪贴板
+
 #include "dialogs/account.h"
 #include "dialogs/auth_dialog.h"
 
@@ -1041,8 +1043,12 @@ private:
         err[0] = '\0';
         if (sxcl_java_runtime_default_root(root, sizeof(root), err, sizeof(err)) !=
             SXCL_JAVA_RUNTIME_OK) {
-            InfoBar::push(InfoBar::Type::Error, QStringLiteral("找不到 Java 安装目录"),
-                          QString::fromUtf8(err), window(), 8000);
+            UiErrorContext ctx;
+            ctx.page = QStringLiteral("设置页 / settings");
+            ctx.action = QStringLiteral("下载 Java %1").arg(component);
+            ctx.reason = QString::fromUtf8(err);
+            ctx.title = QStringLiteral("找不到 Java 安装目录");
+            pushUiError(window(), ctx, 8000);
             return;
         }
         m_cancelRequested.store(false);
@@ -1180,8 +1186,13 @@ private:
         } else {
             m_statusLabel->setText(QStringLiteral("❌ %1").arg(detail.left(80)));
             m_statusLabel->setTextColor(QColor(0xff, 0x4d, 0x4f), QColor(0xff, 0x78, 0x75));
-            InfoBar::push(InfoBar::Type::Error, QStringLiteral("Java 安装失败"),
-                          trName("java.failed", "{name} 下载失败，请检查网络", detail), window(), 10000);
+            UiErrorContext ctx;
+            ctx.page = QStringLiteral("设置页 / settings");
+            ctx.action = QStringLiteral("安装官方 JRE");
+            ctx.reason = detail; // 核心库/下载器给的真实原因(状态码/校验/网络),原样进剪贴板
+            ctx.detail = QStringLiteral("版本状态行:%1").arg(m_statusLabel->text());
+            ctx.title = QStringLiteral("Java 安装失败");
+            pushUiError(window(), ctx, 10000);
         }
     }
 
@@ -1893,8 +1904,12 @@ void SettingsPage::onLanguageChanged(const QString &value) {
     err[0] = '\0';
     const QByteArray code = value.toUtf8();
     if (sxcl_lang_set_default(code.constData(), nullptr, err, sizeof(err)) != SXCL_LANG_OK) {
-        InfoBar::push(InfoBar::Type::Error, QStringLiteral("语言切换失败"),
-                      QString::fromUtf8(err), this, 8000);
+        UiErrorContext ctx;
+        ctx.page = QStringLiteral("设置页 / settings");
+        ctx.action = QStringLiteral("切换语言 -> %1").arg(value);
+        ctx.reason = QString::fromUtf8(err);
+        ctx.title = QStringLiteral("语言切换失败");
+        pushUiError(this, ctx, 8000);
         return;
     }
     applyLanguageTexts();

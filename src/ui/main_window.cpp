@@ -3,16 +3,35 @@
 #include "pages/page_factory.h"
 
 #include <QAbstractButton>
+#include <QApplication>
 #include <QBoxLayout>
+#include <QCloseEvent>
+#include <QDateTime>
+#include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QFileInfo>
+#include <QGuiApplication>
+#include <QHideEvent>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
+#include <QProgressBar>
+#include <QPushButton>
 #include <QResizeEvent>
+#include <QScreen>
 #include <QSet>
+#include <QShowEvent>
 #include <QStringList>
+#include <QThread>
+#include <QTimer>
 #include <QVBoxLayout>
+
+#include <cstdio>
 
 #include "fluent/fluent_controls.h" // Min/Max/CloseButton(qf 三键的 libqf 基类)
 
@@ -33,6 +52,10 @@
 #endif
 
 #include "theme_bridge.h"
+#include "tray.h"             // 任务栏托盘(最小化=隐藏后的恢复入口;新增设计)
+#include "workers/ui_paths.h" // uiSettingsFilePath / uiTrace(与各页同口径)
+
+#include "sxcl/settings.h" // 读写 ui.close_mode(关闭时提示还是直接退)
 
 // 版本号:标题栏显示的文字 = f"{APP_NAME} {APP_VERSION}"(Python src/app/main_window.py:54)。
 // 走相对路径包含 —— include/sxcl/version.h 是版本契约,但 sxcl_ui_core 不链接 sxcl
@@ -140,14 +163,95 @@ protected:
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────────
+// 窗口行为用的小工具(四条语义的规则见 docs/13-窗口行为.md)
+// ─────────────────────────────────────────────────────────────────────────
+
+// 自检脚本每一步之间的默认间隔:够窗口系统把最大化/还原/隐藏做完
+constexpr int kCheckStepDelayMs = 900;
+// 「当前任务/进度」的刷新间隔(小窗口面板与托盘菜单共用同一份取值)
+constexpr int kTaskWatchIntervalMs = 500;
+
+// 会话页下面正在运行的 worker 线程数。
+// **"这个任务还在跑"只认这一个判据**:install_worker.cpp:118 与 launch_worker.cpp:58
+// 都是把 QThread 以 worker 自己为父建出来的,而 worker 挂在页面上 —— 于是"页面子树里
+// isRunning() 的 QThread"就是正在跑的任务,不需要 include workers/*.h、也不依赖它们的类型。
+// (不拿"界面在不在"当判据:窗口藏起来之后界面本来就不可见,那恰恰是要证明任务还在跑的场景。)
+int runningThreadsUnder(QWidget *page) {
+    if (page == nullptr)
+        return 0;
+    int n = 0;
+    const QList<QThread *> threads = page->findChildren<QThread *>();
+    for (QThread *thread : threads) {
+        if (thread != nullptr && thread->isRunning())
+            ++n;
+    }
+    return n;
+}
+
+// 页面自己的进度条(不另建一份计数:用户看到的进度就是它)
+QProgressBar *pageProgressBar(QWidget *page) {
+    return page != nullptr ? page->findChild<QProgressBar *>() : nullptr;
+}
+
+// 未完成任务的状态文件路径。放在**设置文件旁边**:SXCL_UI_SETTINGS 一钉,取证就落在
+// 临时目录里,不污染用户真实配置(与 workers/ui_paths.cpp 的 uiSettingsFilePath() 同口径)。
+QString taskStatePath() {
+    const QFileInfo info(uiSettingsFilePath());
+    const QString dir = info.absolutePath();
+    QDir().mkpath(dir);
+    return dir + QStringLiteral("/pending_tasks.json");
+}
+
+// 用户配置里的"关闭时怎么处理还在跑的任务":ask = 弹窗问,其它一律 = 直接退。
+// **默认直接退**(用户明确要求);设置文件里写 ui.close_mode=ask 才会问。
+// SXCL_UI_CLOSE_MODE 是取证通路(钉条件,不改用户配置)。
+bool closeNeedsConfirm() {
+    const QString pinned = qEnvironmentVariable("SXCL_UI_CLOSE_MODE");
+    if (!pinned.isEmpty())
+        return pinned.compare(QStringLiteral("ask"), Qt::CaseInsensitive) == 0;
+    if (sxcl_settings *st = sxcl_settings_open(uiSettingsFilePath().toUtf8().constData())) {
+        const char *mode = sxcl_settings_get(st, "ui.close_mode", "exit");
+        const bool ask = mode != nullptr && qstrcmp(mode, "ask") == 0;
+        sxcl_settings_free(st);
+        return ask;
+    }
+    return false;
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent) : FluentWindowBase(true, parent) {
     buildUi();
     ThemeBridge::instance().attach(this);
+
+    // 托盘:只有当前会话**真的**有系统托盘才建。没有托盘时不建、也绝不隐藏窗口
+    // (理由见 buildTray:藏了就没有任何入口能把窗口叫回来)。
+    buildTray();
+
+    // 任务/进度低频刷新:小窗口面板那一行与托盘菜单的「当前任务」共用这一份取值。
+    m_taskWatch = new QTimer(this);
+    m_taskWatch->setInterval(kTaskWatchIntervalMs);
+    connect(m_taskWatch, &QTimer::timeout, this, &MainWindow::syncTray);
+    m_taskWatch->start();
+
+    // 「下次启动能恢复」:把上次没跑完的任务读回来(有显示会话时自动续上)
+    loadTaskState(true);
+
+    // 取证通路:脚本化驱动四条窗口行为,每步打一行客观读数(不设这个变量就完全不启用)。
+    // 与 main.cpp 的 SXCL_UI_SHOT / SXCL_ANIM_TRACE 同一类通路 —— 只驱动产品路径,不造假状态。
+    const QString check = qEnvironmentVariable("SXCL_UI_WINCHECK");
+    if (!check.isEmpty())
+        startWindowSelfCheck(check);
 }
 
-MainWindow::~MainWindow() { ThemeBridge::instance().detach(this); }
+MainWindow::~MainWindow() {
+    // 拆卸阶段不再改窗口状态:这时再去 hide()/show() 只会让析构顺序更难说清。
+    m_inShutdown = true;
+    if (m_taskWatch != nullptr)
+        m_taskWatch->stop();
+    ThemeBridge::instance().detach(this);
+}
 
 void MainWindow::buildUi() {
     setObjectName(QStringLiteral("sxclRoot"));
@@ -255,10 +359,31 @@ void MainWindow::buildUi() {
     for (QAbstractButton *b : chromeButtons)
         FluentStyleSheet::apply(b, FluentStyleSheet::FLUENT_WINDOW);
 
-    connect(minBtn, &QAbstractButton::clicked, this, &QWidget::showMinimized);
-    connect(maxBtn, &QAbstractButton::clicked, this,
-            [this] { isMaximized() ? showNormal() : showMaximized(); });
-    connect(closeBtn, &QAbstractButton::clicked, this, &QWidget::close);
+    // ── 三键 = 用户定义的语义(docs/13-窗口行为.md)────────────────────────────
+    // 三个都**不**再直连 QWidget 的默认动作,一律走本类的方法 —— 窗口状态只有一个地方改
+    // (托盘与自检都调同一批方法,不会出现"谁把窗口藏了/谁又把它显示出来"互相覆盖):
+    //   最小化键 -> hideToTray()     隐藏窗口;进程与后台 worker 照跑(不是 showMinimized)
+    //   最大化键 -> toggleMaximize() 最大化 + 申请置顶;再点 = 还原并取消置顶
+    //   关闭键   -> requestClose()   真关闭:先把任务状态落盘再退出
+    // **视觉一个字节没动**:按钮仍是上面那三个 qf 几何的类(46x32 / 图标位置 / 悬停色),
+    // 这里换的只是"点了之后发生什么"。
+    connect(minBtn, &QAbstractButton::clicked, this, &MainWindow::hideToTray);
+    connect(maxBtn, &QAbstractButton::clicked, this, &MainWindow::toggleMaximize);
+    connect(closeBtn, &QAbstractButton::clicked, this, &MainWindow::requestClose);
+
+    // 标题栏自己的三个信号也要接上:双击标题栏(FluentTitleBar::mouseDoubleClickEvent)
+    // 发的就是 maximizeRequested —— 走这条路的"最大化"必须和点按钮完全同语义。
+    // libqf 原来把这三个信号接给 QWidget 的默认槽(那是它自己 FluentWindow 形态的接法),
+    // 我们的窗口不用那个形态,所以显式接一遍。
+    connect(m_titleBar, &FluentTitleBar::minimizeRequested, this, &MainWindow::hideToTray);
+    connect(m_titleBar, &FluentTitleBar::maximizeRequested, this, &MainWindow::toggleMaximize);
+    connect(m_titleBar, &FluentTitleBar::closeRequested, this, &MainWindow::requestClose);
+
+    // ---- 小窗口(「缩成小窗口」)的内容条 ----
+    // 它是**窗口**的子控件,不是内容栈里的页面:小窗口形态下导航面板与内容栈整个藏起来,
+    // 只留标题栏(三键照旧)和这一条(当前任务/进度 + 恢复键)。绝对定位,不进根布局 ——
+    // 根布局是 qf 的 1:1 摆法(导航 + 内容列),不动它一个小数点。
+    buildMiniPanel();
 
     // ---- 六个页面(占位:只证明路由与栈是对的) ----
     for (const NavItem &item : kNavSpec) {
@@ -281,7 +406,13 @@ void MainWindow::layoutTitleBar() {
         return;
     // qf fluent_window.py:344-346 resizeEvent:
     //   self.titleBar.move(46, 0); self.titleBar.resize(self.width() - 46, self.titleBar.height())
-    m_titleBar->setGeometry(kTitleBarLeft, 0, qMax(0, width() - kTitleBarLeft), kTitleBarHeight);
+    //
+    // 小窗口形态是唯一的例外:导航面板整块藏起来了,x<46 那一段没有东西可让位,
+    // 标题栏因此铺满整宽(否则小窗口左边会空出 46px 的洞)。**只有几何变了** ——
+    // 三键的尺寸/图标几何/悬停色仍是 qf 原样(上面 ShellMinimize/Maximize/Close 三个类),
+    // 参考图那套 1:1 像素对齐走的是正常/最大化形态,不受这里影响。
+    const int left = (m_mode == WindowMode::Mini) ? 0 : kTitleBarLeft;
+    m_titleBar->setGeometry(left, 0, qMax(0, width() - left), kTitleBarHeight);
     m_titleBar->raise(); // qf: self.titleBar.raise_()(Qt6 里就是 QWidget::raise)
 }
 
@@ -413,6 +544,14 @@ void MainWindow::addOrUpdateTask(const QString &taskId, const QString &title,
     // Python: self.tasks_page.add_or_update_task(...)(main_window.py:220-223,238-241)。
     // 任务页的登记 API 是 Q_INVOKABLE(tasks_page.cpp:333),用 invokeMethod 调,
     // 免得主窗口为了一个调用把 TasksPage 的私有类型拖进头文件。
+    // **先**记进本窗口的任务登记表:任务状态落盘(见 persistTaskState)靠它,
+    // 和任务页在不在无关 —— 任务页没了不代表这个任务没在跑。
+    TaskRecord record;
+    record.id = taskId;
+    record.title = title;
+    record.status = status;
+    rememberTask(record);
+
     QWidget *tasks = m_pages.value(QStringLiteral("tasks"), nullptr);
     if (!tasks)
         return;
@@ -444,6 +583,16 @@ void MainWindow::switchToDownloadProgress(const QString &versionId, const QStrin
     // 在任务页登记(:220-223)
     addOrUpdateTask(key, QStringLiteral("下载 %1").arg(versionName),
                     QStringLiteral("准备中"));
+    // 恢复信息(版本 id / 版本名 / 加载器)只有这里知道,补进登记表 ——
+    // 退出时落盘靠它,下次启动才"能恢复"(见 loadTaskState / docs/13 §4)。
+    TaskRecord resume;
+    resume.id = key;
+    resume.kind = QStringLiteral("download");
+    resume.versionId = versionId;
+    resume.versionName = versionName;
+    resume.loaderType = loaderType;
+    resume.loaderVersion = loaderVersion;
+    rememberTask(resume);
     showTempPage(page, key);
 }
 
@@ -455,6 +604,12 @@ void MainWindow::switchToLaunch(const QString &versionId) { // :227-243
         registerSessionPage(key, page);
     }
     addOrUpdateTask(key, QStringLiteral("启动 %1").arg(versionId), QStringLiteral("启动中"));
+    TaskRecord resume;
+    resume.id = key;
+    resume.kind = QStringLiteral("launch");
+    resume.versionId = versionId;
+    resume.versionName = versionId;
+    rememberTask(resume);
     showTempPage(page, key);
 }
 
@@ -562,8 +717,12 @@ void MainWindow::changeEvent(QEvent *e) {
 void MainWindow::resizeEvent(QResizeEvent *e) {
     QWidget::resizeEvent(e);
     layoutTitleBar();
+    layoutMiniPanel(); // 小窗口面板贴在标题栏下面,跟着窗口一起变
     // qf navigation_panel.py:722-725:窗口宽度掉到 minimumExpandWidth(1008)以下时,
     // 展开态的导航自动收起(EXPAND 模式只在够宽时成立)。
+    // 小窗口形态下导航面板整个是藏起来的,没有"展开态"要收 —— 提前返回省一次动画。
+    if (m_mode == WindowMode::Mini)
+        return;
     if (m_nav && width() < NavPanel::kMinimumExpandWidth && !m_nav->collapsed())
         m_nav->setCollapsed(true);
 }
