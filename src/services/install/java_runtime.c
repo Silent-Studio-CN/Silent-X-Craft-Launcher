@@ -665,7 +665,7 @@ static size_t list_subdirs(const char *root, char (*out)[SXCL_JAVA_RUNTIME_PATH_
         copy_str(out[found], SXCL_JAVA_RUNTIME_PATH_MAX, child);
         ++found;
     }
-    closedir(d);
+    closedir(dir); /* 句柄名是 dir(上一路留下的 d 是未声明标识符,Android/Clang 下直接报错) */
     return found;
 }
 #endif
