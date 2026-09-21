@@ -451,10 +451,17 @@ QVector<JavaEntry> discoverJavaInstallations() {
         for (size_t i = 0; i < detected.count; ++i) {
             const sxcl_java_installation &d = detected.items[i];
             const QString dpath = normalizeJavaPath(QString::fromUtf8(d.info.path));
+            const QString dhome = normalizeJavaPath(QString::fromUtf8(d.info.home));
             const bool ok = (d.verdict == SXCL_JAVA_RUN_OK);
             bool hit = false;
             for (JavaEntry &entry : items) {
-                if (normalizeJavaPath(entry.path) == dpath) {
+                // 路径对不上时看 JAVA_HOME:联接点/符号链接会让"候选里写的路径"与
+                // "解析后的真实路径"不同(实测 C:\Program Files\Java\latest\jdk-26 ->
+                // D:\ProgramData\JAVA\Jdk26.0.2),只比 path 会漏掉已装好的 JDK。
+                const QString ehome =
+                    normalizeJavaPath(QFileInfo(entry.path).absolutePath());
+                if (dpath == normalizeJavaPath(entry.path) ||
+                    (!dhome.isEmpty() && ehome == dhome + QStringLiteral("/bin"))) {
                     entry.usable = ok;
                     entry.verdictText = QString::fromUtf8(sxcl_java_run_verdict_name(d.verdict));
                     entry.reason = QString::fromUtf8(d.reason);
@@ -464,6 +471,20 @@ QVector<JavaEntry> discoverJavaInstallations() {
                 }
             }
             if (hit || ok)
+                continue;
+            // "不在"是最没信息量的一档(PATH 里每个目录都会产生一条),不进界面;
+            // 真正"检测到了但用不了"的(沙箱拒绝/共享存储 noexec/没有执行位/架构不符/
+            // 不是 Java/跑不起来)才列出来并附原因。
+            if (d.verdict == SXCL_JAVA_RUN_MISSING)
+                continue;
+            bool already = false;
+            for (const JavaEntry &entry : items) {
+                if (normalizeJavaPath(entry.path) == dpath) {
+                    already = true;
+                    break;
+                }
+            }
+            if (already)
                 continue;
             // 检测到但不在"可用清单"里(路径解析不出 release / 用不了):照样列出来
             JavaEntry extra;
@@ -489,12 +510,21 @@ QVector<JavaEntry> discoverJavaInstallations() {
 
     // 取证(安卓真机看 logcat):每个候选一行 —— 路径 / 来源 / 是否**真的执行过** /
     // 结论 / 原因。桌面验收同样看这几行(截图看不出 tooltip)。
-    for (const JavaEntry &entry : items) {
-        std::fprintf(stderr,
-                     "[sxcl-ui] java-discover: %s major=%d usable=%d verdict=%s reason=%s\n",
-                     entry.path.toUtf8().constData(), entry.major, entry.usable ? 1 : 0,
-                     entry.verdictText.toUtf8().constData(),
-                     entry.reason.isEmpty() ? "-" : entry.reason.toUtf8().constData());
+    {
+        static QString loggedKey;
+        QString key;
+        for (const JavaEntry &entry : items)
+            key += entry.path + QLatin1Char('|') + entry.verdictText + QLatin1Char('\n');
+        if (key != loggedKey) { // 同一份候选集只打一次(设置页刷新会连着调好几回)
+            loggedKey = key;
+            for (const JavaEntry &entry : items) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] java-discover: %s major=%d usable=%d verdict=%s reason=%s\n",
+                             entry.path.toUtf8().constData(), entry.major, entry.usable ? 1 : 0,
+                             entry.verdictText.toUtf8().constData(),
+                             entry.reason.isEmpty() ? "-" : entry.reason.toUtf8().constData());
+            }
+        }
     }
 
     QSet<QString> seen;

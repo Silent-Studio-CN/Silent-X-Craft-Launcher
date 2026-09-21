@@ -25,6 +25,7 @@
 #  include <sys/stat.h>
 #endif
 
+#include "sxcl/android.h"
 #include "sxcl/fs.h"
 #include "sxcl/launch.h"
 
@@ -455,14 +456,13 @@ static void test_detect(void)
         }
     }
 
-    /* PATH 里那个不存在的位置:如实报"不在",不是错误 */
+    /* PATH 里那个不存在的位置:**不进列表**(候选表里 PATH 的每一项都会产生一条,
+     * 全收下会把上限撑满,真正存在的反而被截掉 —— 实测踩过)。它仍然能被单独体检出来。 */
     {
-        const sxcl_java_installation *miss = find_install(&all, "pathdir");
-        check(miss != NULL, "detect:PATH 里的候选也在列表里");
-        if (miss != NULL) {
-            check_int(miss->verdict, SXCL_JAVA_RUN_MISSING, "detect:不存在 -> 判定为不在");
-            check_contains(miss->reason, "不存在", "detect:不在的原因");
-        }
+        check(find_install(&all, "pathdir") == NULL, "detect:不存在的候选不进列表");
+        sxcl_android_access access = sxcl_android_probe_path(FIXTURE_ROOT "/pathdir/" JAVA_EXE, 1,
+                                                             NULL, 0);
+        check_int(access, SXCL_ANDROID_MISSING, "detect:那个位置单独体检仍是'不在'");
     }
 
     /* 排序:优先级降序(JAVA_HOME 必须排在扫描根**之前**),同优先级按主版本降序 */

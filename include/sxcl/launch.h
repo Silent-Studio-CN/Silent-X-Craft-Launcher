@@ -241,7 +241,7 @@ typedef struct sxcl_java_installation {
     char reason[192];                 /**< 原始原因(带退出码/errno 原话/路径) */
 } sxcl_java_installation;
 
-#define SXCL_JAVA_MAX_INSTALLS 24
+#define SXCL_JAVA_MAX_INSTALLS 32
 
 typedef struct sxcl_java_installations {
     sxcl_java_installation items[SXCL_JAVA_MAX_INSTALLS];

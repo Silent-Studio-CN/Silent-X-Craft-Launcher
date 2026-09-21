@@ -2104,6 +2104,13 @@ size_t sxcl_java_detect(const sxcl_java_env *env, sxcl_java_os os, int timeout_m
         detail[0] = '\0';
         access = sxcl_android_probe_path(cand->path, 1, detail, sizeof(detail));
         item->verdict = run_verdict_of_access(access);
+        if (item->verdict == SXCL_JAVA_RUN_MISSING) {
+            /* "这个位置没有东西"不进结果:候选表里 PATH 的每一项都会产生一条,
+             * 全收下会把 SXCL_JAVA_MAX_INSTALLS 撑满,真正存在的那些反而被截掉
+             * (实测:24 条 PATH 噪声把 jre-legacy/jdk26 挤出了列表,它们就没被实测)。
+             * 与界面口径一致:界面也只显示"检测到了"的。 */
+            continue;
+        }
         if (item->verdict != SXCL_JAVA_RUN_OK) {
             /* 只读体检就判"用不了":别去起进程(安卓上那会是一个注定失败的 200ms) */
             copy_str(item->info.path, sizeof(item->info.path), cand->path);
