@@ -571,7 +571,9 @@ sxcl_log_conclusion sxcl_log_reason_conclusion(sxcl_log_reason reason);
 /* ══════════════════════ 3c. 崩溃取证(读游戏自己写的文件) ══════════════════════
  *
  * stdout/stderr 只能看到游戏**还活着**时吐出来的那部分;进程一崩,真正的死因在
- * <game>/crash-reports/*.txt 与 <game>/logs/latest.log 里。这两个文件与 stdout
+ * <game>/crash-reports 目录下的 txt 报告与 <game>/logs/latest.log 里。这两个文件与 stdout
+ * (注:这里**不能**写出 "斜杠 + 星号" 那两个字,NDK 的 clang 在 -Werror 下会把块注释里的
+ *  "斜杠星号" 当 -Wcomment 直接判编译失败 —— 我们交叉编译 jre_hosted.c 时真踩过。)
  * 走**同一套**分析(sxcl_log_summary_add),所以原因键不会因为来源不同而分叉。 */
 
 /** 扫游戏目录里的取证文件,逐行喂进 summary(summary 可空 = 只要事实)。

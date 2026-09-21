@@ -137,7 +137,7 @@ public class SxclActivity extends QtActivity {
                     intent.getStringExtra("gamemain"), intent.getStringExtra("gameargs"),
                     intent.getStringExtra("gamecrash"), "onNewIntent");
             Log.i(TAG, "onNewIntent: 起游戏会话 -> " + st);
-            /* 画中画不在这里进:见 GameHost 类头注释(docs/19 §2.2)。游戏窗口就绪后会经通道
+            /* 画中画不在这里进:见 GameHost 类头注释(docs/21 §2.2)。游戏窗口就绪后会经通道
              * 请求 PIP?,那时启动器回前台、在 onResume 里 enterFloating()(复用已有实现)。 */
             Log.i(TAG, "onNewIntent: 画中画等运行器的 PIP? 请求(启动器此刻仍在前台,游戏已开始拉起)");
         } else if ("endgame".equals(action)) {

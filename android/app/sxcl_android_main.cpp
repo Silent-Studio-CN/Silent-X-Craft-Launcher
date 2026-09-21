@@ -622,12 +622,12 @@ void sxclAndroidGameStartNow() {
                g_gameLaunch.jre.isEmpty() ? "(未配置,只验架构)" : g_gameLaunch.jre.toUtf8().constData());
 
     /* ② 画中画**不在这里进**:Android 14+ 里"画中画(pinned)的活动发起新活动"会被判成
-     * 后台启动(BAL_BLOCK,result code=102,真机原文见 docs/19 §2.1),所以顺序必须是
+     * 后台启动(BAL_BLOCK,result code=102,真机原文见 docs/21 §2.1),所以顺序必须是
      * "启动器还在前台时先把游戏起来"。画中画由**游戏**(前台的一侧)在窗口就绪后发起:
      * 它在通道上问 PIP?,主进程回答 need=1(启动器此刻不在画中画里)-> 游戏把启动器拉回
      * 前台 -> 启动器 onResume 里 enterFloating()(**仍然是复用已有实现**)。
      * 这里只留取证:确认会话与启动动作都发出去了。 */
-    SXCL_LOGI("game: 画中画由游戏进程就绪后经通道请求(见 docs/19 §2.2),这里不再自己进画中画");
+    SXCL_LOGI("game: 画中画由游戏进程就绪后经通道请求(见 docs/21 §2.2),这里不再自己进画中画");
     SXCL_LOG_I("startup", "游戏独立进程:已起会话与游戏;画中画等运行器的 PIP? 请求");
 }
 

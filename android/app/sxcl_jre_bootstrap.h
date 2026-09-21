@@ -42,6 +42,11 @@ typedef struct sxcl_jre_launch_opts {
     const char *native_lib_dir;   /* APK 的 nativeLibraryDir(可空) */
     const char *class_path;       /* 游戏 classpath(可空)-> -cp */
     const char *main_class;       /* 主类;NULL/空 = 不跑主类(只做自检) */
+    /* 非空 = 直接用**核心库拼好的整条游戏命令行**(android/app/sxcl_android_game_args.c 的产物):
+     * 这时 class_path/main_class/args/app_args 都不再单独拼 —— 全在 game_argv 里,只拼一遍。 */
+    const char *const *game_argv;
+    /* 非空 = 覆盖 -Djava.library.path(安卓上是应用私有 natives 目录) */
+    const char *java_library_path;
     const char *const *args;      /* JVM 参数(主类之前) */
     int arg_count;
     const char *const *app_args;  /* 主类之后的参数(游戏的 args) */
@@ -78,6 +83,10 @@ int sxcl_jre_was_started(void);
 
 /* JVM 是否已经返回(JLI_Launch 回来了)。 */
 int sxcl_jre_has_returned(void);
+
+/* 等 JLI_Launch 返回(主类正常退出、或 DestroyJavaVM 完成),最多 timeout_ms。
+ * 返回 1 = 已返回(可以放心 flush 收尾);0 = 超时(调用方如实记一行,**不要** _exit 掉 JVM)。 */
+int sxcl_jre_wait_returned(int timeout_ms);
 
 /* 有序收尾里的 JVM 部分:
  *   返回 0 = 这个进程没有活着的 JVM(调用方直接走 flush 路径);

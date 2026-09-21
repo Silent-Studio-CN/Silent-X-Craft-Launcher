@@ -208,7 +208,7 @@ public class GameActivity extends Activity {
      * 所以"启动器先进画中画、再去起游戏"这条路在新系统上是不通的;反过来,前台可见的
      * 游戏活动去拉起启动器是允许的。启动器回到前台后在 onResume 里自己 enterFloating()
      * (复用已有的画中画实现),于是变成:游戏全屏在下、启动器画中画在上。
-     * 真机原文与取舍见 docs/19 §5.1。 */
+     * 真机原文与取舍见 docs/21 §5.1。 */
     private void requestLauncherPip() {
         try {
             Intent it = new Intent(this, SxclActivity.class);

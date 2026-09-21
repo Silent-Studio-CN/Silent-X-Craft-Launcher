@@ -77,7 +77,7 @@ set_target_properties(sxclui PROPERTIES OUTPUT_NAME "sxclui_${ANDROID_ABI}")
 # GameActivity(System.loadLibrary("sxclgame"))用到的那一份。
 # 它**不链接 Qt、也不链接 sxcl_ui_core**:游戏进程只做四件事 —— 起本进程的 JVM、
 # 走本地 socket 与主进程通信、把 stdout/stderr 接成日志、崩溃/结束时留退出记录。
-# 详见 android/app/sxcl_game.c 与 docs/19-安卓游戏独立进程与画中画共存.md。
+# 详见 android/app/sxcl_game.c 与 docs/21-安卓游戏独立进程与画中画共存.md。
 add_library(sxclgame SHARED sxcl_game.c ${SXCL_JRE_BOOTSTRAP_C})
 target_include_directories(sxclgame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${SXCL_SRC_DIR}/include)
 # sxcl = 核心库静态库:环境变量与 JVM 参数的拼法只有它那一份(include/sxcl/jvm.h),

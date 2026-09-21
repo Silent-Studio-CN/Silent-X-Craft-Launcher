@@ -36,9 +36,9 @@ import java.nio.charset.Charset;
  * (`GameLaunchSpec` / 协议 / 事件)+ 游戏进程那侧(sxcl_game.c + sxcl_jre_bootstrap.c +
  * GameActivity),A 侧只要把 §B 换成"对端在另一个应用里"的实现,§C 一行都不用改。
  * **当前不开发独立应用版本**(用户 2026-09-21:"先不开发 B,会莫名增大开发时间"),
- * 所以这里不引入新包/新层,只把缝切在同一个文件里,文档见 docs/19 §3/§7。
+ * 所以这里不引入新包/新层,只把缝切在同一个文件里,文档见 docs/21 §3/§7。
  *
- * 拉起顺序(**被系统规则逼出来的,不是偏好**;真机原文见 docs/19 §2):
+ * 拉起顺序(**被系统规则逼出来的,不是偏好**;真机原文见 docs/21 §2):
  *   ① 启动器还在前台(可见、非 pinned)-> startActivity(GameActivity) —— 允许;
  *   ② 游戏窗口就绪 -> GameActivity 反过来请启动器回前台并进画中画(spec.launcherPip=1);
  *   ③ 启动器回到前台后在 onResume 里 enterFloating()(复用最大化键那条画中画实现)。
@@ -660,7 +660,7 @@ public final class GameHost {
             return status;
 
         /* 关键顺序:启动器**此刻必须在前台且不在画中画里**,这时起游戏才是被允许的
-         * (从 pinned 活动发起新活动会被 BAL_BLOCK,见类头注释与 docs/19 §2.1)。
+         * (从 pinned 活动发起新活动会被 BAL_BLOCK,见类头注释与 docs/21 §2.1)。
          * 如果它现在正在画中画里(上一局游戏退到画中画的状态),先自己回到全屏,
          * 等窗口真的回到前台再起游戏 —— 否则 startActivity 会静默失败(result code=102)。 */
         if (SxclActivity.isInFloating()) {
@@ -722,7 +722,7 @@ public final class GameHost {
 
     /* 把游戏 Activity 拉起来(独立 task,全屏)。
      * Intent extras 就是边界输入的**传输介质**;将来换成"另一个应用 + 显式 component"时,
-     * 这里换成那一种拉起方式即可,spec 与协议都不变(docs/19 §7)。 */
+     * 这里换成那一种拉起方式即可,spec 与协议都不变(docs/21 §7)。 */
     public static synchronized boolean startGameActivity(String why) {
         if (appCtx == null || started || !live)
             return false;
