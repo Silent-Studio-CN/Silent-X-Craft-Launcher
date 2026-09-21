@@ -104,6 +104,7 @@
 | `id` | 原样记进 `jre.json` 的 `indexId`(可追溯) |
 | 落盘位置 | `<配置目录>/runtime/<component>/<version>/<abi>`(即清单里的 `id` 去掉最后那截哈希),多版本并排 |
 | `installed_bytes` | 记进 `jre.json`;**不做判据**(判据只有 `version`) |
+| `shim_dir` | JRE 侧库该放哪儿(jre8 是 `lib/aarch64`,jre17+ 是 `lib`)。与盘上算出来的**逐字比对**,不一致 -> `shim_mismatch` 硬失败(见 §4.1) |
 | `version_file` / `notice[]` / `manifest` / `source` | **不进安装流程**(运行时不需要);形状与 packages 一样,将来做"许可/溯源"页时照同一条链路抓即可 |
 
 ### 2.2 备用:既有 `SXCL/Java_index.json` 的安卓档(保持不动)

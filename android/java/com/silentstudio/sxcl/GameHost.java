@@ -693,12 +693,31 @@ public final class GameHost {
         s.jreHome = jreHome != null ? jreHome : "";
         s.mainClass = mainClass != null ? mainClass : "";
         s.gameArgs = gameArgs != null ? gameArgs : "";
-        try {
-            s.crashMode = Integer.parseInt(crashMode == null ? "" : crashMode.trim());
-        } catch (NumberFormatException ignored) {
-            s.crashMode = 0;
-        }
+        s.crashMode = parseCrashMode(crashMode);
         return requestStart(s, pipState);
+    }
+
+    /** 崩溃注入开关的取值:数字(0-3)或人话字符串(abort/term/kill)。
+     *  真机验收用的是字符串形式(`--es gamecrash abort`),只认数字会让"注入"静默失效 ——
+     *  这一条就是被真机验收抓出来的。 */
+    static int parseCrashMode(String v) {
+        if (v == null)
+            return 0;
+        final String s = v.trim().toLowerCase(java.util.Locale.ROOT);
+        if (s.isEmpty())
+            return 0;
+        if (s.equals("abort") || s.equals("sigabrt"))
+            return 1;
+        if (s.equals("term") || s.equals("sigterm"))
+            return 2;
+        if (s.equals("kill") || s.equals("sigkill"))
+            return 3;
+        try {
+            return Integer.parseInt(s);
+        } catch (NumberFormatException e) {
+            Log.w(TAG, "game-session: 不认识崩溃注入取值 '" + v + "',按 0(关闭)处理");
+            return 0;
+        }
     }
 
     /* 把游戏 Activity 拉起来(独立 task,全屏)。

@@ -1020,19 +1020,35 @@ static void test_real_index_if_any(void)
     if (n < 0) {
         printf("      err=%s\n", err);
     }
-    check_int(n, 3, "真清单里 3 个组件(jre17/jre21/jre25)");
-    if (n == 3) {
+    /* 组件个数**不写死**:那份清单是活的(2026-09 就从 3 个长到 4 个,加了 jre8)。
+     * 该钉的是"我们点名的组件确实在、字段确实对"。 */
+    check(n >= 3, "真清单里至少 3 个组件");
+    if (n >= 3) {
         int i;
+        int saw17 = 0;
+        int saw21 = 0;
+        int saw25 = 0;
         for (i = 0; i < n; ++i) {
-            printf("      %-6s major=%-3d version=%-9s abi=%-10s packages=%u dir=%s\n",
-                   list[i].id, list[i].java_major, list[i].version, list[i].abi,
+            printf("      %-6s major=%-3d version=%-9s abi=%-10s shim=%-12s packages=%u dir=%s\n",
+                   list[i].id, list[i].java_major, list[i].version, list[i].abi, list[i].shim_dir,
                    (unsigned)list[i].file_count, list[i].dir_key);
+            if (strcmp(list[i].id, "jre17") == 0) { saw17 = 1; }
+            if (strcmp(list[i].id, "jre21") == 0) { saw21 = 1; }
+            if (strcmp(list[i].id, "jre25") == 0) { saw25 = 1; }
         }
+        check(saw17 && saw21 && saw25, "jre17 / jre21 / jre25 都在");
         check_int(sxcl_jre_index_pick(list, (size_t)n, "jre17", 0, &picked, err, sizeof(err)),
                   SXCL_JRE_OK, "按 id 挑 jre17");
         check_str(picked.version, "17.0.20", "jre17 的版本");
         check_int((long)picked.file_count, 2, "jre17 两个包(universal + bin-arm64)");
-        check_str(picked.files[0].file, "jre17/universal.tar.xz", "第一个包是 relative url");
+        /* url 两种都合法:相对路径(相对清单)或绝对 URL。清单作者改成哪种都要能吃。 */
+        check(strcmp(picked.files[0].file, "jre17/universal.tar.xz") == 0 ||
+                  strncmp(picked.files[0].file, "https://", 8) == 0 ||
+                  strncmp(picked.files[0].file, "http://", 7) == 0,
+              "第一个包的 url 要么是相对路径、要么是绝对 URL");
+        check(strstr(picked.files[0].file, "jre17/universal.tar.xz") != NULL ||
+                  strstr(picked.files[0].file, "universal.tar.xz") != NULL,
+              "第一个包的名字对得上");
         check_int((long)picked.files[0].size, 31132644, "universal.tar.xz 的字节数");
         check_str(picked.files[0].sha256,
                   "aa11db5ff7f38101b51d367af16e885702cc97ffcdabc5bea76c27360ce9bcaf",
@@ -1040,6 +1056,7 @@ static void test_real_index_if_any(void)
         check_int(sxcl_jre_index_pick(list, (size_t)n, NULL, 21, &picked, err, sizeof(err)),
                   SXCL_JRE_OK, "按 major 挑 21");
         check_str(picked.id, "jre21", "挑出来的是 jre21");
+        check(picked.shim_dir[0] != '\0', "名单里带了 shim_dir(JRE 侧库该放哪儿)");
     }
     free(list);
     free(text);
