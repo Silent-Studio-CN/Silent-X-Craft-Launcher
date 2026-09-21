@@ -1571,7 +1571,9 @@ void SettingsPage::buildContent() {
         QStringLiteral("选择版本清单与资源文件的下载源"), sourceTexts, sourceValues,
         // 默认 **BMCLAPI**(用户指定):Python 版"重置设置"落地的也是 bmclapi;
         // 运行期真读这个键的是 ui_paths.cpp 的 uiDownloadSource()(版本页清单与下载都按它排序)。
-        valueIndex(sourceValues, m_store.text(kKeyDownloadSource, QStringLiteral("bmclapi")), 0),
+        // 用 uiDownloadSource()(清洗过的合法值)而不是原始存储值:历史遗留的 testsrcN
+        // 会被纠成 bmclapi,下拉显示的也就与实际行为一致了。
+        valueIndex(sourceValues, uiDownloadSource(), 0),
         generalGroup);
 
     const QStringList refreshTexts = textList(kRefreshTexts, kRefreshCount); // :261

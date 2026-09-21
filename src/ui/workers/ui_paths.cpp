@@ -235,8 +235,21 @@ QString uiDownloadSource() {
         const QString text = value != nullptr ? QString::fromUtf8(value) : QString();
         sxcl_settings_free(st); // 返回的指针归句柄所有,释放即失效 -> 先拷贝再释放
         const QString normalized = text.trimmed().toLower();
-        if (!normalized.isEmpty())
+        // **只认三个合法值**:auto / mojang / bmclapi。
+        // 为什么要有这道校验:曾经有一个验收夹具会往这个下拉里追加"测试源 N"(值 testsrcN),
+        // 用户真机上的配置文件里就留下了 download.source=testsrc5 —— 夹具删掉之后,
+        // 这个值不再对应任何一项,但**行为**仍会落到"非 mojang = 镜像优先",显示却是下拉的第一项,
+        // 属于"界面和行为对不上"。这里直接把它纠回默认值,并**写回文件**,别让它一直赖在配置里。
+        if (normalized == QLatin1String("auto") || normalized == QLatin1String("mojang") ||
+            normalized == QLatin1String("bmclapi"))
             return normalized;
+        uiTrace(QStringLiteral("settings | download.source=%1 不是合法值,已纠回 bmclapi")
+                    .arg(normalized));
+        if (sxcl_settings *fix = sxcl_settings_open(uiSettingsFilePath().toUtf8().constData())) {
+            sxcl_settings_set(fix, "download.source", "bmclapi");
+            sxcl_settings_save(fix, uiSettingsFilePath().toUtf8().constData());
+            sxcl_settings_free(fix);
+        }
     }
     return QStringLiteral("bmclapi");
 }
