@@ -852,6 +852,173 @@ size_t sxcl_catalog_parse_optifine_html(const char *html, size_t len, const char
     return kept;
 }
 
+/* ── 解析:BMCLAPI 镜像独有的"按 MC 分的列表"JSON ──────────────────
+ * 形态(实测 2026-09-21):
+ *   /forge/minecraft/1.20.1 -> [{_id,__v,build,files[],mcversion,modified,version}, …]
+ *   /neoforge/list/1.20.1   -> [{_id,rawVersion,__v,mcversion,version}, …]
+ *   /neoforge/list/1.21.1   -> 多一个 installerPath
+ * 与 maven 那条路的关键区别:**MC 取 mcversion 字段(权威)**,不用版本串反推 ——
+ * NeoForge 1.20.1 那一代是 47.1.x,反推会得到 "1.47.1"。
+ */
+
+/* "2023-06-12T19:37:00.000Z" -> "2023-06-12";不是这个形状就给空串(不编)。 */
+static void list_json_date(const char *text, char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (text == NULL || strlen(text) < 10) {
+        return;
+    }
+    for (size_t i = 0; i < 10; ++i) {
+        const char c = text[i];
+        if (i == 4 || i == 7) {
+            if (c != '-') {
+                return;
+            }
+        } else if (c < '0' || c > '9') {
+            return;
+        }
+    }
+    copy_range(out, out_len, text, 10);
+}
+
+/* ".../neoforge-21.1.1-installer.jar" -> "neoforge-21.1.1-installer.jar"。 */
+static void list_json_basename(const char *path, char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (path == NULL || *path == '\0') {
+        return;
+    }
+    const char *slash = strrchr(path, '/');
+    copy_cap(out, out_len, (slash != NULL) ? slash + 1 : path);
+}
+
+static size_t parse_list_json(const char *json, size_t len, sxcl_loader_kind kind,
+                              const char *mc, sxcl_catalog_entry *out, size_t out_cap)
+{
+    if (json == NULL || len == 0) {
+        return 0;
+    }
+    char err[128];
+    sxcl_json *doc = sxcl_json_parse(json, len, err, sizeof err);
+    if (doc == NULL) {
+        return 0;
+    }
+    const sxcl_json_value *root = sxcl_json_root(doc);
+    /* 裸数组是实测形态;对象包一层(ex: {"versions": […]})也认,接口换个壳不至于全盲。 */
+    if (root != NULL && sxcl_json_type_of(root) == SXCL_JSON_OBJECT) {
+        static const char *const kWrappers[] = {"versions", "data", "list"};
+        for (size_t w = 0; w < sizeof kWrappers / sizeof kWrappers[0]; ++w) {
+            const sxcl_json_value *inner = sxcl_json_get(root, kWrappers[w]);
+            if (inner != NULL && sxcl_json_type_of(inner) == SXCL_JSON_ARRAY) {
+                root = inner;
+                break;
+            }
+        }
+    }
+    if (root == NULL || sxcl_json_type_of(root) != SXCL_JSON_ARRAY) {
+        sxcl_json_free(doc);
+        return 0;
+    }
+    const size_t total = sxcl_json_size(root);
+    size_t kept = 0;
+    for (size_t i = 0; i < total; ++i) {
+        const sxcl_json_value *item = sxcl_json_at(root, i);
+        if (item == NULL || sxcl_json_type_of(item) != SXCL_JSON_OBJECT) {
+            continue;
+        }
+        const char *version = sxcl_json_get_string(item, "version", "");
+        const char *raw = sxcl_json_get_string(item, "rawVersion", "");
+        const char *mcversion = sxcl_json_get_string(item, "mcversion", "");
+        const int has_version = (version != NULL && version[0] != '\0');
+        const int has_raw = (raw != NULL && raw[0] != '\0');
+        if (!has_version && !has_raw) {
+            continue;
+        }
+        /* 权威 MC:先 mcversion,再退回调用方给的 mc;绝不从版本串反推。 */
+        char item_mc[SXCL_CATALOG_MC_MAX];
+        item_mc[0] = '\0';
+        if (mcversion != NULL && mcversion[0] != '\0') {
+            copy_cap(item_mc, sizeof item_mc, mcversion);
+        } else if (mc != NULL) {
+            copy_cap(item_mc, sizeof item_mc, mc);
+        }
+        if (!mc_accepts(mc, item_mc)) {
+            continue;
+        }
+        /* 加载器自己的版本:**纯字符串处理,一次规则反推都不做**(这条路的全部意义
+         * 就是不信版本串里的"像 MC 的那一段")。源给的 version 本来就是权威裸版本;
+         * 实测 NeoForge 1.20.1 里有 21 条写成 "1.20.1-47.1.85"、rawVersion 还多个
+         * "forge-"( "1.20.1-forge-47.1.85"),所以按已知前缀切掉。 */
+        const char *src_version = has_version ? version : raw;
+        size_t prefix_len = 0;
+        const size_t item_mc_len = strlen(item_mc);
+        if (item_mc_len > 0 && strncmp(src_version, item_mc, item_mc_len) == 0 &&
+            src_version[item_mc_len] == '-') {
+            prefix_len = item_mc_len + 1;
+        }
+        if (ci_match(src_version + prefix_len, "neoforge-")) {
+            prefix_len += 9;
+        } else if (ci_match(src_version + prefix_len, "forge-")) {
+            prefix_len += 6;
+        }
+        char loader[SXCL_CATALOG_LOADER_MAX];
+        loader[0] = '\0';
+        copy_cap(loader, sizeof loader, src_version + prefix_len);
+        if (loader[0] == '\0') {
+            continue;   /* 只剩前缀 = 没有版本号,丢掉 */
+        }
+        sxcl_catalog_entry tmp;
+        entry_clear(&tmp);
+        copy_cap(tmp.mc, sizeof tmp.mc, item_mc);
+        copy_cap(tmp.loader, sizeof tmp.loader, loader);
+        if (kind == SXCL_LOADER_FORGE) {
+            /* Forge 官方那条路的版本串是 "<mc>-<forge>";镜像只给裸 "<forge>",
+             * 这里统一成同一种形态(安装器直链与兼容判定两边都吃这一种)。 */
+            const size_t mc_len = strlen(tmp.mc);
+            if (has_version && mc_len > 0 && strncmp(version, tmp.mc, mc_len) == 0 &&
+                version[mc_len] == '-') {
+                copy_cap(tmp.version, sizeof tmp.version, version);
+            } else if (mc_len > 0) {
+                snprintf(tmp.version, sizeof tmp.version, "%s-%s", tmp.mc, loader);
+            } else {
+                copy_cap(tmp.version, sizeof tmp.version, loader);
+            }
+        } else {
+            /* NeoForge 官方那条路的版本号就是裸版本("21.1.72");镜像里有 21 条写成
+             * "1.20.1-47.1.85"(rawVersion 还是 "1.20.1-forge-47.1.85"),统一成裸版本 ——
+             * 安装器直链就是按裸版本拼的。 */
+            copy_cap(tmp.version, sizeof tmp.version, loader);
+        }
+        if (has_raw) {
+            copy_cap(tmp.display, sizeof tmp.display, raw);
+        } else {
+            copy_cap(tmp.display, sizeof tmp.display, tmp.version);
+        }
+        list_json_basename(sxcl_json_get_string(item, "installerPath", ""), tmp.file, sizeof tmp.file);
+        list_json_date(sxcl_json_get_string(item, "modified", ""), tmp.released, sizeof tmp.released);
+        if ((has_version && is_beta_text(version)) || (has_raw && is_beta_text(raw))) {
+            tmp.is_beta = 1;
+        }
+        if (out != NULL && kept < out_cap) {
+            out[kept++] = tmp;
+        }
+    }
+    sxcl_json_free(doc);
+    return kept;
+}
+
+size_t sxcl_catalog_parse_list_json(const char *json, size_t len, sxcl_loader_kind kind,
+                                    const char *mc, sxcl_catalog_entry *out, size_t out_cap)
+{
+    return parse_list_json(json, len, kind, mc, out, out_cap);
+}
+
 /* ── 解析入口 ── */
 
 size_t sxcl_catalog_parse(sxcl_loader_kind kind, const char *text, size_t len, const char *mc,
@@ -866,9 +1033,21 @@ size_t sxcl_catalog_parse(sxcl_loader_kind kind, const char *text, size_t len, c
     size_t count = 0;
     switch (kind) {
     case SXCL_LOADER_FORGE:
-    case SXCL_LOADER_NEOFORGE:
-        count = sxcl_catalog_parse_maven_xml(text, len, kind, mc, info, out, out_cap);
+    case SXCL_LOADER_NEOFORGE: {
+        /* 同一个加载器有两条路、两种格式:官方是 maven-metadata.xml,BMCLAPI 镜像的
+         * /forge/minecraft、/neoforge/list 是 JSON 数组(每条带权威 mcversion)。
+         * 看第一个非空白字符就知道该用哪个解析器 —— 与下面 OptiFine 分支同一个套路。 */
+        size_t i = 0;
+        while (i < len && chr_is_space((unsigned char)text[i])) {
+            ++i;
+        }
+        if (i < len && (text[i] == '[' || text[i] == '{')) {
+            count = parse_list_json(text, len, kind, mc, out, out_cap);
+        } else {
+            count = sxcl_catalog_parse_maven_xml(text, len, kind, mc, info, out, out_cap);
+        }
         break;
+    }
     case SXCL_LOADER_FABRIC:
         count = sxcl_catalog_parse_fabric_json(text, len, mc, out, out_cap);
         break;
@@ -1052,11 +1231,16 @@ sxcl_catalog_format sxcl_catalog_format_of(sxcl_loader_kind kind, sxcl_catalog_s
     switch (kind) {
     case SXCL_LOADER_FORGE:
     case SXCL_LOADER_NEOFORGE:
-        return SXCL_CATALOG_FMT_MAVEN_XML;
+        /* 镜像走 BMCLAPI 独有的"按 MC 分的列表"JSON(带权威 mcversion);
+         * 官方没有这个接口,还是 maven-metadata.xml。 */
+        return (source == SXCL_CATALOG_SRC_MIRROR) ? SXCL_CATALOG_FMT_LIST_JSON
+                                                   : SXCL_CATALOG_FMT_MAVEN_XML;
     case SXCL_LOADER_FABRIC:
     case SXCL_LOADER_QUILT:
         return SXCL_CATALOG_FMT_META_JSON;
     case SXCL_LOADER_OPTIFINE:
+        /* 镜像的 /optifine/<mc> 是另一种 JSON(带 mcversion + patch/type/filename),
+         * 已有专门解析器;BMCLAPI 没有 /optifine/list/(实测 404),所以这里不改。 */
         return (source == SXCL_CATALOG_SRC_MIRROR) ? SXCL_CATALOG_FMT_OPTIFINE_JSON
                                                    : SXCL_CATALOG_FMT_OPTIFINE_HTML;
     case SXCL_LOADER_VANILLA:
@@ -1079,12 +1263,27 @@ int sxcl_catalog_url(sxcl_loader_kind kind, sxcl_catalog_source source, const ch
     built[0] = '\0';
     switch (kind) {
     case SXCL_LOADER_FORGE:
-        url = mirror ? "https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/maven-metadata.xml"
-                     : "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml";
+        /* 镜像:BMCLAPI 独有的 /forge/minecraft/<mc>(按 MC 分的列表,带权威 mcversion)。
+         * 它那份 maven 元数据是旧的(实测最高只到 1.18),所以**有 mc 就走列表**;
+         * 没有 mc 时只能退回 maven(那是唯一"不带 MC 也能查"的形态)。 */
+        if (mirror && mc_text[0] != '\0') {
+            snprintf(built, sizeof built, "https://bmclapi2.bangbang93.com/forge/minecraft/%s",
+                     mc_text);
+        } else {
+            url = mirror
+                      ? "https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/maven-metadata.xml"
+                      : "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml";
+        }
         break;
     case SXCL_LOADER_NEOFORGE:
-        url = mirror ? "https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml"
-                     : "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml";
+        if (mirror && mc_text[0] != '\0') {
+            snprintf(built, sizeof built, "https://bmclapi2.bangbang93.com/neoforge/list/%s",
+                     mc_text);
+        } else {
+            url = mirror
+                      ? "https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml"
+                      : "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml";
+        }
         break;
     case SXCL_LOADER_FABRIC:
         snprintf(built, sizeof built, mirror

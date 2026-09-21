@@ -21,7 +21,7 @@ param(
 $ErrorActionPreference = 'Continue'
 function Say($m) { Write-Output ('[win3] ' + $m) }
 function Raw($m) { Write-Output ('$ ' + $m) }
-function Adb([string[]]$argv) {
+function AdbRun([string[]]$argv) {
   Raw ('adb -s ' + $Serial + ' ' + ($argv -join ' '))
   $o = & adb -s $Serial @argv 2>&1
   $o | ForEach-Object { Write-Output ('  ' + $_) }
@@ -39,40 +39,40 @@ Say ('apk     = ' + $Apk)
 Say ('outdir  = ' + $Out)
 
 # ---- 0. preconditions -------------------------------------------------------
-Adb @('shell','wm','size')      | Out-Null
-Adb @('shell','wm','density')   | Out-Null
-Adb @('shell','getprop','ro.build.version.release') | Out-Null
-$pip = Adb @('shell','pm','list','features')
+AdbRun @('shell','wm','size')      | Out-Null
+AdbRun @('shell','wm','density')   | Out-Null
+AdbRun @('shell','getprop','ro.build.version.release') | Out-Null
+$pip = AdbRun @('shell','pm','list','features')
 Say ('device advertises picture-in-picture: ' + [bool]($pip | Select-String -Pattern 'picture_in_picture'))
 
 if (-not $SkipInstall) {
   if (-not (Test-Path $Apk)) { Say ('APK not found: ' + $Apk); exit 2 }
   Say ('apk size = ' + (Get-Item $Apk).Length + '  sha256=' + (Get-FileHash $Apk -Algorithm SHA256).Hash)
-  Adb @('install','-r',$Apk) | Out-Null
+  AdbRun @('install','-r',$Apk) | Out-Null
 }
-Adb @('shell','am','force-stop','com.silentstudio.sxcl') | Out-Null
-Adb @('logcat','-c') | Out-Null
-Adb @('shell','am','start','-n','com.silentstudio.sxcl/com.silentstudio.sxcl.SxclActivity') | Out-Null
+AdbRun @('shell','am','force-stop','com.silentstudio.sxcl') | Out-Null
+AdbRun @('logcat','-c') | Out-Null
+AdbRun @('shell','am','start','-n','com.silentstudio.sxcl/com.silentstudio.sxcl.SxclActivity') | Out-Null
 Start-Sleep -Seconds 6
-$focus = Adb @('shell','dumpsys','window')
+$focus = AdbRun @('shell','dumpsys','window')
 Say ('foreground: ' + (($focus | Select-String -Pattern 'mCurrentFocus').Line | Select-Object -First 1))
-Adb @('exec-out','screencap','-p') | Out-Null   # warm-up frame
+AdbRun @('exec-out','screencap','-p') | Out-Null   # warm-up frame
 & adb -s $Serial exec-out screencap -p > (Join-Path $Out '00_foreground.png')
 Say ('screenshot 00_foreground.png ' + (Get-Item (Join-Path $Out '00_foreground.png')).Length)
-$pid0 = (Adb @('shell','pidof','com.silentstudio.sxcl') | Where-Object { $_ -match '^[0-9 ]+$' })
+$pid0 = (AdbRun @('shell','pidof','com.silentstudio.sxcl') | Where-Object { $_ -match '^[0-9 ]+$' })
 Say ('pid after start = ' + $pid0)
 
 # ---- 1. MINIMISE = move task to back ---------------------------------------
 Say '--- 1) MINIMISE (tap 2170 80) ---'
-Adb @('shell','input','tap','2170','80') | Out-Null
+AdbRun @('shell','input','tap','2170','80') | Out-Null
 Start-Sleep -Seconds 3
-$acts = Adb @('shell','dumpsys','activity','activities')
+$acts = AdbRun @('shell','dumpsys','activity','activities')
 $mine = $acts | Select-String -Pattern 'sxcl'
 $mine | ForEach-Object { Log ('  ' + $_) }
 Say ('still focused? ' + (($focus | Select-String -Pattern 'mCurrentFocus').Line | Select-Object -First 1))
-$focus2 = Adb @('shell','dumpsys','window')
+$focus2 = AdbRun @('shell','dumpsys','window')
 Say ('mCurrentFocus now: ' + (($focus2 | Select-String -Pattern 'mCurrentFocus').Line | Select-Object -First 1))
-$pid1 = (Adb @('shell','pidof','com.silentstudio.sxcl') | Where-Object { $_ -match '^[0-9 ]+$' })
+$pid1 = (AdbRun @('shell','pidof','com.silentstudio.sxcl') | Where-Object { $_ -match '^[0-9 ]+$' })
 Say ('pid after minimise = ' + $pid1 + '   (MUST still be alive)')
 & adb -s $Serial exec-out screencap -p > (Join-Path $Out '01_minimised.png')
 Say ('screenshot 01_minimised.png ' + (Get-Item (Join-Path $Out '01_minimised.png')).Length)
@@ -98,22 +98,22 @@ else { Say 'PROGRESS: no change in the private dir - either no task was running,
 
 # ---- 2. return to the foreground ------------------------------------------
 Say '--- 2) back to the foreground (am start) ---'
-Adb @('shell','am','start','-n','com.silentstudio.sxcl/com.silentstudio.sxcl.SxclActivity') | Out-Null
+AdbRun @('shell','am','start','-n','com.silentstudio.sxcl/com.silentstudio.sxcl.SxclActivity') | Out-Null
 Start-Sleep -Seconds 4
-$focus3 = Adb @('shell','dumpsys','window')
+$focus3 = AdbRun @('shell','dumpsys','window')
 Say ('mCurrentFocus: ' + (($focus3 | Select-String -Pattern 'mCurrentFocus').Line | Select-Object -First 1))
 & adb -s $Serial exec-out screencap -p > (Join-Path $Out '02_restored.png')
 Say ('screenshot 02_restored.png ' + (Get-Item (Join-Path $Out '02_restored.png')).Length)
 
 # ---- 3. MAXIMISE = full screen <-> floating window -------------------------
 Say '--- 3) MAXIMISE (tap 2262 80) ---'
-Adb @('shell','input','tap','2262','80') | Out-Null
+AdbRun @('shell','input','tap','2262','80') | Out-Null
 Start-Sleep -Seconds 4
-$acts2 = Adb @('shell','dumpsys','activity','activities')
+$acts2 = AdbRun @('shell','dumpsys','activity','activities')
 $acts2 | Select-String -Pattern 'pipped|PIP|PictureInPicture|sxcl' | ForEach-Object { Log ('  ' + $_) }
 $pipState = ($acts2 | Select-String -Pattern 'pipped=')
 Say ('pipped state: ' + ($pipState -join ' '))
-$ovl = Adb @('shell','appops','get','com.silentstudio.sxcl','SYSTEM_ALERT_WINDOW')
+$ovl = AdbRun @('shell','appops','get','com.silentstudio.sxcl','SYSTEM_ALERT_WINDOW')
 Say ('overlay appop: ' + ($ovl -join ' '))
 & adb -s $Serial exec-out screencap -p > (Join-Path $Out '03_maximised.png')
 Say ('screenshot 03_maximised.png ' + (Get-Item (Join-Path $Out '03_maximised.png')).Length)
@@ -121,14 +121,14 @@ Say ('screenshot 03_maximised.png ' + (Get-Item (Join-Path $Out '03_maximised.pn
 
 # ---- 4. back to full screen ------------------------------------------------
 Say '--- 4) back to full screen (tap 2262 80 again, or system expand) ---'
-Adb @('shell','input','tap','2262','80') | Out-Null
+AdbRun @('shell','input','tap','2262','80') | Out-Null
 Start-Sleep -Seconds 3
 & adb -s $Serial exec-out screencap -p > (Join-Path $Out '04_fullscreen.png')
 Say ('screenshot 04_fullscreen.png ' + (Get-Item (Join-Path $Out '04_fullscreen.png')).Length)
 
 # ---- 5. CLOSE = real exit ---------------------------------------------------
 Say '--- 5) CLOSE (tap 2354 80) ---'
-Adb @('shell','input','tap','2354','80') | Out-Null
+AdbRun @('shell','input','tap','2354','80') | Out-Null
 Start-Sleep -Seconds 4
 $pidEnd = (& adb -s $Serial shell pidof com.silentstudio.sxcl 2>&1) -join ''
 Raw ('pidof com.silentstudio.sxcl  ->  ' + $pidEnd)

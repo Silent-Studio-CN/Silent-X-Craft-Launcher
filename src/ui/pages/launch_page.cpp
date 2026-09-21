@@ -8,6 +8,7 @@
 
 #include <QAbstractButton>
 #include <QDir>
+#include <QFileInfo>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QPainter>
@@ -350,6 +351,19 @@ private:
     void startLaunch() {
         if (m_worker != nullptr || m_finished)
             return;
+
+        // ── 0) 先确认这个版本**真的装好了**:versions/<id>/<id>.json 在不在 ──
+        //
+        // 为什么要有这一道(用户实测踩到):他点了"启动",页面一路跑下去,最后弹出
+        // "读不到版本 JSON … 这个版本可能没装好"。**那不是一个错误,是一个前置条件** ——
+        // 用户真正的诉求是"我想玩这个版本",那就该告诉他"先装它",并给一个能直接点的入口,
+        // 而不是把一个内部错误报告(还带剪贴板复制)甩给他。
+        // 判据与核心库 sxcl_instance_scan 一致:versions/<id>/ 下有 <id>.json 才算装好
+        // (Forge 1.13+/Fabric 的实例没有自己的 jar,按 jar+json 判会全漏)。
+        if (!instanceInstalled()) {
+            showNeedInstall();
+            return;
+        }
 
         LaunchRequest request;
         request.gameDir = uiGameDirectory();
@@ -727,7 +741,46 @@ private:
                        QStringLiteral("PID %1").arg(pid));
     }
 
+    // 这个版本还没装好:页面停在"未安装"态,取消键变成"去下载并安装"。
+    // 不报错、不进剪贴板 —— 这是引导,不是故障。
+    bool instanceInstalled() const {
+        const QString path = QDir(uiGameDirectory())
+                                 .filePath(QStringLiteral("versions/%1/%1.json").arg(m_versionId));
+        return QFileInfo::exists(path);
+    }
+
+    void showNeedInstall() {
+        m_finished = true;
+        m_needInstall = true;
+        m_phaseLabel->setText(QStringLiteral("这个版本还没安装"));
+        m_statusBadge->setText(QStringLiteral("⊘ 未安装"));
+        m_barState = QStringLiteral("failed");
+        applyThemeStyles();
+        m_logView->appendPlainText(
+            QStringLiteral("[info] 找不到 %1 。版本列表只是**可下载清单**,装好之后才能启动。")
+                .arg(QDir::toNativeSeparators(
+                    QDir(uiGameDirectory())
+                        .filePath(QStringLiteral("versions/%1/%1.json").arg(m_versionId)))));
+        callTaskState("setTaskFailed");
+        updateTaskCard(0, QStringLiteral("未安装"), QStringLiteral("先下载安装这个版本"));
+        if (m_cancelButton != nullptr) {
+            m_cancelButton->setText(QStringLiteral("去下载并安装"));
+            m_cancelButton->setEnabled(true);
+        }
+        if (m_backButton != nullptr)
+            m_backButton->setEnabled(true);
+        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("这个版本还没安装"),
+                      QStringLiteral("版本列表是可下载清单。点「去下载并安装」装好它，再回来启动。"),
+                      this, 8000);
+    }
+
     void onCancel() { // :667-671
+        if (m_needInstall) {
+            // "去下载并安装":把版本 id 交给下载配置页(它再让用户挑加载器)
+            if (QMetaObject::invokeMethod(window(), "switchToDownloadConfig", Qt::DirectConnection,
+                                          Q_ARG(QString, m_versionId)))
+                return;
+        }
         bool killed = false;
         if (m_worker != nullptr && !m_finished) {
             // cancel() 内部:置取消位 + 若已拿到 PID 就**直接按 PID 结束**(立刻生效,
@@ -781,6 +834,7 @@ private:
     QString m_identityText;               // 本次用什么身份(显示 + 任务卡明细)
     QString m_lastProblemLine;            // 日志里第一条错误行(失败态兜底)
     bool m_finished = false;              // 终态已定
+    bool m_needInstall = false;           // 停在"未安装"态(取消键改语义为"去下载并安装")
     bool m_accountLaunch = false;         // 走的是"已登录账户"那条路
     bool m_forceDryRun = false;           // SXCL_UI_LAUNCH_DRY_RUN=1(验收:只准备)
     bool m_dryRunOnly = false;            // 本次只准备不起进程(账户路径第一段也属于它)

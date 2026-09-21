@@ -12,6 +12,7 @@
 #include "sxcl/loader_catalog.h"
 
 #include "catalog_fragments.inc"
+#include "catalog_list_fragments.inc"   /* BMCLAPI 的"按 MC 分的列表"JSON(Forge/NeoForge) */
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -249,6 +250,121 @@ static void test_neoforge(void)
     }
 }
 
+/* ── 3.5) BMCLAPI 镜像独有的"按 MC 分的列表"JSON(Forge / NeoForge) ──
+ *
+ * 这两个接口是**镜像独有**的,而且每条都带权威的 mcversion 字段:
+ *   /forge/minecraft/<mc>   -> 132 条 1.20.1(裸版本号 47.x + mcversion)
+ *   /neoforge/list/<mc>     ->  60 条 1.20.1(47.1.x)、248 条 1.21.1(21.1.x)
+ * 以前 NeoForge 走的是 maven-metadata.xml,MC 只能靠规则从版本串反推:
+ * 47.1.5 -> "1.47.1",于是"1.20.1 下没有任何 NeoForge"(实测两路都是 0 条)。
+ */
+
+static void test_list_json(void)
+{
+    sxcl_catalog_doc_info info;
+    sxcl_catalog_entry items[80];
+
+    /* ── Forge:镜像只给裸 "<forge>",这里补成官方那种 "<mc>-<forge>" 形态 ── */
+    size_t count = sxcl_catalog_parse_list_json(k_forge_minecraft_1201,
+                                                strlen(k_forge_minecraft_1201),
+                                                SXCL_LOADER_FORGE, "1.20.1", items, 80);
+    check_size(count, 6, "Forge 列表:夹具 6 条");
+    check_str(items[0].mc, "1.20.1", "  Forge 列表:mc 直接取 mcversion");
+    check_str(items[0].version, "1.20.1-47.0.1", "  Forge 列表:version 补成 <mc>-<forge>");
+    check_str(items[0].loader, "47.0.1", "  Forge 列表:加载器版本");
+    check_str(items[0].display, "1.20.1-47.0.1", "  Forge 列表:没有 rawVersion,display 用 version");
+    check_str(items[0].released, "2023-06-12", "  Forge 列表:modified -> ISO 日期");
+    check_str(items[0].file, "", "  Forge 列表:没有 installerPath");
+    check(find_entry(items, count, "1.20.1-47.0.6") != NULL, "  Forge 列表:47.0.6 在里面");
+
+    count = sxcl_catalog_prepare(SXCL_LOADER_FORGE, k_forge_minecraft_1201,
+                                 strlen(k_forge_minecraft_1201), "1.20.1", &info, items, 80);
+    check_size(count, 6, "Forge 列表 prepare:6 条");
+    check_str(items[0].version, "1.20.1-47.0.6", "  编号最大的排最前");
+    check(items[0].is_latest == 1 && items[0].is_recommended == 1, "  标 latest/recommended");
+    check(items[0].is_beta == 0, "  不是 Beta");
+    check_size(info.matched, 6, "  info.matched 也跟着");
+
+    count = sxcl_catalog_prepare(SXCL_LOADER_FORGE, k_forge_minecraft_1201,
+                                 strlen(k_forge_minecraft_1201), "1.21.1", &info, items, 80);
+    check_size(count, 0, "Forge 列表:按别的 MC 过滤 -> 0 条(mcversion 说了算)");
+
+    /* ── NeoForge 1.20.1:47.1.x 那一代(以前两路都是 0 条)── */
+    count = sxcl_catalog_prepare(SXCL_LOADER_NEOFORGE, k_neoforge_list_1201,
+                                 strlen(k_neoforge_list_1201), "1.20.1", &info, items, 80);
+    check_size(count, 60, "NeoForge 1.20.1:60 条(修复前是 0 条)");
+    check(count > 0 && strncmp(items[0].version, "47.1.", 5) == 0,
+          "  第一条 version 形如 47.1.x");
+    check_str(items[0].version, "47.1.105", "  最新的是 47.1.105");
+    check_str(items[0].loader, "47.1.105", "  加载器版本");
+    check_str(items[0].mc, "1.20.1", "  mc 取 mcversion(不是规则反推的 1.47.1)");
+    check(items[0].is_latest == 1 && items[0].is_recommended == 1, "  标 latest/recommended");
+    check(items[0].is_beta == 0, "  不是 Beta");
+    check_str(items[1].version, "47.1.104", "  第二新的是 47.1.104(排序真的跑了)");
+    check_str(items[2].version, "47.1.103", "  第三新的是 47.1.103");
+
+    /* 每一条都必须是 1.20.1(混进来的都要被 mcversion 挡掉) */
+    size_t wrong_mc = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (strcmp(items[i].mc, "1.20.1") != 0) {
+            ++wrong_mc;
+        }
+    }
+    check_size(wrong_mc, 0, "  过滤后没有别的 MC 的条目");
+
+    /* 源里 21 条写成 "1.20.1-47.1.85"(rawVersion 还是 "1.20.1-forge-47.1.85"):
+     * 统一成裸版本,否则 NeoForge 的安装器直链(按裸版本拼)会 404。 */
+    const sxcl_catalog_entry *prefixed = find_entry(items, count, "47.1.85");
+    check(prefixed != NULL, "  带前缀的 1.20.1-47.1.85 统一成裸 47.1.85");
+    check(prefixed != NULL && strcmp(prefixed->mc, "1.20.1") == 0, "  它的 mc 也是 1.20.1");
+    check(find_entry(items, count, "1.20.1-47.1.85") == NULL, "  不再保留带前缀的形态");
+
+    count = sxcl_catalog_prepare(SXCL_LOADER_NEOFORGE, k_neoforge_list_1201,
+                                 strlen(k_neoforge_list_1201), "1.21.1", &info, items, 80);
+    check_size(count, 0, "NeoForge 1.20.1 的列表按 1.21.1 过滤 -> 0 条");
+
+    /* ── NeoForge 1.21.1:21.1.x 那一套不能被改坏 ── */
+    count = sxcl_catalog_prepare(SXCL_LOADER_NEOFORGE, k_neoforge_list_1211_head,
+                                 strlen(k_neoforge_list_1211_head), "1.21.1", &info, items, 80);
+    check_size(count, 12, "NeoForge 1.21.1:夹具前 12 条全在");
+    check_str(items[0].version, "21.1.20", "  最新的是 21.1.20");
+    check_str(items[0].loader, "21.1.20", "  加载器版本");
+    check_str(items[0].mc, "1.21.1", "  mc 取 mcversion");
+    check_str(items[0].display, "neoforge-21.1.20", "  display 用 rawVersion");
+    check_str(items[0].file, "neoforge-21.1.20-installer.jar",
+              "  installerPath 的文件名填进 file");
+    check(find_entry(items, count, "neoforge-21.1.20") == NULL,
+          "  version 不带 neoforge- 前缀(安装器直链按裸版本拼)");
+    check(items[0].is_beta == 0, "  不是 Beta");
+
+    /* ── 分发:同一个加载器,JSON 走列表解析器、XML 还走 maven ── */
+    count = sxcl_catalog_parse(SXCL_LOADER_NEOFORGE, k_neoforge_list_1201,
+                               strlen(k_neoforge_list_1201), "1.20.1", &info, items, 80);
+    check_size(count, 60, "sxcl_catalog_parse:JSON 列表被认出来(不是 0)");
+    check(sxcl_catalog_parse(SXCL_LOADER_NEOFORGE, k_neo_xml_211, strlen(k_neo_xml_211), "1.21.1",
+                             &info, items, 80) == 3,
+          "sxcl_catalog_parse:maven XML 那条路没变");
+
+    /* ── 壳与坏输入 ── */
+    static const char kWrapped[] =
+        "{\"versions\":[{\"version\":\"1.2.3\",\"mcversion\":\"1.20.1\"}]}";
+    check_size(sxcl_catalog_parse_list_json(kWrapped, sizeof kWrapped - 1, SXCL_LOADER_NEOFORGE,
+                                            "1.20.1", items, 8),
+               1, "对象包一层({\"versions\":[…]})也认");
+    check_size(sxcl_catalog_parse_list_json("[]", 2, SXCL_LOADER_NEOFORGE, "1.20.1", items, 8), 0,
+               "空数组 -> 0 条");
+    static const char kBadJson[] = "[{\"version\":\"1.0\"},]";
+    check_size(sxcl_catalog_parse_list_json(kBadJson, sizeof kBadJson - 1, SXCL_LOADER_NEOFORGE,
+                                            "1.20.1", items, 8),
+               0, "坏 JSON -> 0 条(不崩)");
+
+    /* ── 一个不带 version/mcversion 的条目要被丢掉,别塞一条空的进列表 ── */
+    static const char kNoVersion[] = "[{\"_id\":\"x\",\"mcversion\":\"1.20.1\"}]";
+    check_size(sxcl_catalog_parse_list_json(kNoVersion, sizeof kNoVersion - 1,
+                                            SXCL_LOADER_NEOFORGE, "1.20.1", items, 8),
+               0, "没有 version/rawVersion 的条目被丢掉");
+}
+
 /* ── 4) Fabric / Quilt(meta JSON) ── */
 
 static void test_meta_json(void)
@@ -449,9 +565,18 @@ static void test_urls(void)
     check(sxcl_catalog_url(SXCL_LOADER_FORGE, SXCL_CATALOG_SRC_MIRROR, NULL, url, sizeof url) == SXCL_CATALOG_OK,
           "URL: Forge 镜像");
     check_str(url, "https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/maven-metadata.xml", "  内容");
+    check(sxcl_catalog_url(SXCL_LOADER_FORGE, SXCL_CATALOG_SRC_MIRROR, "1.20.1", url, sizeof url) == SXCL_CATALOG_OK,
+          "URL: Forge 镜像(给了 MC -> 走按 MC 的列表接口)");
+    check_str(url, "https://bmclapi2.bangbang93.com/forge/minecraft/1.20.1", "  内容");
     check(sxcl_catalog_url(SXCL_LOADER_NEOFORGE, SXCL_CATALOG_SRC_OFFICIAL, NULL, url, sizeof url) == SXCL_CATALOG_OK,
           "URL: NeoForge 官方");
     check_str(url, "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml", "  内容");
+    check(sxcl_catalog_url(SXCL_LOADER_NEOFORGE, SXCL_CATALOG_SRC_MIRROR, "1.20.1", url, sizeof url) == SXCL_CATALOG_OK,
+          "URL: NeoForge 镜像(给了 MC -> 走按 MC 的列表接口)");
+    check_str(url, "https://bmclapi2.bangbang93.com/neoforge/list/1.20.1", "  内容");
+    check(sxcl_catalog_url(SXCL_LOADER_NEOFORGE, SXCL_CATALOG_SRC_MIRROR, NULL, url, sizeof url) == SXCL_CATALOG_OK,
+          "URL: NeoForge 镜像没给 MC -> 退回 maven 元数据");
+    check_str(url, "https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml", "  内容");
     check(sxcl_catalog_url(SXCL_LOADER_FABRIC, SXCL_CATALOG_SRC_OFFICIAL, "1.20.1", url, sizeof url) == SXCL_CATALOG_OK,
           "URL: Fabric 官方");
     check_str(url, "https://meta.fabricmc.net/v2/versions/loader/1.20.1", "  内容");
@@ -482,7 +607,10 @@ static void test_urls(void)
     check_str(tiny, "", "  失败时输出被清空");
 
     check(sxcl_catalog_format_of(SXCL_LOADER_FORGE, SXCL_CATALOG_SRC_OFFICIAL) == SXCL_CATALOG_FMT_MAVEN_XML, "格式: Forge=maven XML");
-    check(sxcl_catalog_format_of(SXCL_LOADER_NEOFORGE, SXCL_CATALOG_SRC_MIRROR) == SXCL_CATALOG_FMT_MAVEN_XML, "格式: NeoForge 镜像也是 maven XML");
+    check(sxcl_catalog_format_of(SXCL_LOADER_FORGE, SXCL_CATALOG_SRC_MIRROR) == SXCL_CATALOG_FMT_LIST_JSON, "格式: Forge 镜像=按 MC 的列表 JSON");
+    check(sxcl_catalog_format_of(SXCL_LOADER_NEOFORGE, SXCL_CATALOG_SRC_MIRROR) == SXCL_CATALOG_FMT_LIST_JSON, "格式: NeoForge 镜像=按 MC 的列表 JSON");
+    check(sxcl_catalog_format_of(SXCL_LOADER_FORGE, SXCL_CATALOG_SRC_OFFICIAL) == SXCL_CATALOG_FMT_MAVEN_XML, "格式: Forge 官方=maven XML");
+    check(sxcl_catalog_format_of(SXCL_LOADER_NEOFORGE, SXCL_CATALOG_SRC_OFFICIAL) == SXCL_CATALOG_FMT_MAVEN_XML, "格式: NeoForge 官方=maven XML");
     check(sxcl_catalog_format_of(SXCL_LOADER_FABRIC, SXCL_CATALOG_SRC_OFFICIAL) == SXCL_CATALOG_FMT_META_JSON, "格式: Fabric=meta JSON");
     check(sxcl_catalog_format_of(SXCL_LOADER_OPTIFINE, SXCL_CATALOG_SRC_MIRROR) == SXCL_CATALOG_FMT_OPTIFINE_JSON, "格式: OptiFine 镜像=JSON");
     check(sxcl_catalog_format_of(SXCL_LOADER_OPTIFINE, SXCL_CATALOG_SRC_OFFICIAL) == SXCL_CATALOG_FMT_OPTIFINE_HTML, "格式: OptiFine 官方=网页");
@@ -562,6 +690,7 @@ int main(void)
     test_xml_scanner();
     test_forge();
     test_neoforge();
+    test_list_json();
     test_meta_json();
     test_optifine();
     test_pure_helpers();

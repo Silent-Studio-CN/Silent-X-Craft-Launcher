@@ -283,6 +283,8 @@ QString catalogFormatName(sxcl_catalog_format format) {
         return QStringLiteral("optifine-json");
     case SXCL_CATALOG_FMT_OPTIFINE_HTML:
         return QStringLiteral("optifine-html");
+    case SXCL_CATALOG_FMT_LIST_JSON:
+        return QStringLiteral("list-json");
     case SXCL_CATALOG_FMT_NONE:
     default:
         return QStringLiteral("none");
@@ -381,8 +383,12 @@ QVector<LoaderCatalogAttempt> fetchCatalogAttempts(const QString &kindId, const 
     sxcl_transport *tr = sxcl_transport_qt_create();
     if (tr != nullptr) {
         for (int value : sources) {
-            attempts.append(fetchCatalogSource(tr, kind, kindId, mc,
-                                               static_cast<sxcl_catalog_source>(value)));
+            LoaderCatalogAttempt attempt =
+                fetchCatalogSource(tr, kind, kindId, mc, static_cast<sxcl_catalog_source>(value));
+            const bool ok = attempt.ok;
+            attempts.append(attempt);
+            if (ok)
+                break; // 第一路拿到就停:这就是"先试 A,失败再试 B",不白跑第二条路
         }
         tr->destroy(tr->ctx); // 传输后端有线程亲和性:谁建的谁在这个线程里释放
         return attempts;
@@ -1121,18 +1127,19 @@ private:
         // (重建会把用户已经选中的版本重置成第一条)。
         if (state.hasData && state.mc == m_versionId && !retry)
             return;
+        // 按设置里的顺序算"这一轮还要试哪几路":
+        //   * 顺序里**第一条已经在手里的可用结论**就是答案,它后面的源一律不再试;
+        //   * 没取过的要取(顺序在前面的先试,拿到就停,见 fetchCatalogAttempts);
+        //   * 取过但失败的只有"再点一次"(retry)才重试 —— 失败不会自己无限重试。
         const QVector<int> order = catalogSourceOrder(m_sourceSetting);
         QVector<int> pending;
         for (int source : order) {
             const auto it = m_catalogCache.constFind(catalogCacheKey(kindId, source));
-            if (it == m_catalogCache.constEnd()) {
-                pending.append(source); // 这一路没取过 -> 联网
-                continue;
-            }
-            if (it->ok)
-                continue; // 已经拿到 -> 不重复取
-            if (retry)
-                pending.append(source); // 失败过 + 用户又点开这一行 -> 重试
+            const bool cached = (it != m_catalogCache.constEnd());
+            if (cached && it->ok)
+                break;
+            if (!cached || retry)
+                pending.append(source);
         }
         if (pending.isEmpty()) {
             fillLoaderRow(kindId); // 缓存里已经有结论:直接回填,一个字节都不联网

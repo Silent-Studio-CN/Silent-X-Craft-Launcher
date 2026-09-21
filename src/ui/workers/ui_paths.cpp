@@ -15,6 +15,7 @@
 #include <QStandardPaths>
 
 #include <cstdio>
+#include <cstring>
 
 #include "sxcl/paths.h"
 #include "sxcl/settings.h"
@@ -132,9 +133,63 @@ QString uiGameDirectory() {
         return QDir::fromNativeSeparators(configured);
     }
 
-    // 4) 核心库的平台默认(Windows = %APPDATA%/.minecraft;Android = <files>/.minecraft)
+    // 4) 核心库的平台默认(Windows = %APPDATA%/.minecraft;macOS/Linux = ~/.minecraft)。
+    //    **Android 上没有默认**(核心库返回 UNSUPPORTED,要求调用方自己给),
+    //    所以下面单独走安卓分支。
     if (sxcl_paths_default_game_dir(buf, sizeof(buf), err, sizeof(err)) == SXCL_PATHS_OK)
         return QDir::fromNativeSeparators(QString::fromUtf8(buf));
+
+#if defined(Q_OS_ANDROID)
+    // ★ 安卓:用户机器上**通常已经有一份装好的游戏目录**(FCL / HMCL / Pojav / 共享存储里的
+    //   .minecraft),而我们的私有目录往往是空的。用户实测报过:"不可能,我平板上 100% 有 mc 目录"
+    //   —— 他点"启动 26.2-NeoForge"时报"版本没装好",而那个版本就躺在
+    //   /storage/emulated/0/FCL/.minecraft/versions/26.2-NeoForge 里。
+    //
+    //   规则(顺序说清楚,不猜):
+    //     1. 我们自己的私有 <files>/.minecraft **有版本** -> 用它(那是"本应用"的目录);
+    //     2. 否则扫描候选(sxcl_paths_detect_android:私有/共享存储/FCL/HMCL/Pojav…),
+    //        挑**真的有 versions/ 的**那一个,并**落盘**到 game.default_dir
+    //        —— 落盘是为了稳定:下次不再探测,设置页里也能看到它并能改掉。
+    //     3. 一个都没有 -> 回到私有目录(全新设备,装的时候会创建)。
+    {
+        const QByteArray filesUtf8 = qgetenv("SXCL_ANDROID_FILES");
+        const QString privateDir =
+            filesUtf8.isEmpty()
+                ? QDir::homePath() + QStringLiteral("/.minecraft")
+                : QDir::fromNativeSeparators(QString::fromLocal8Bit(filesUtf8)) +
+                      QStringLiteral("/.minecraft");
+        if (sxcl_paths_count_versions(privateDir.toUtf8().constData()) > 0)
+            return privateDir;
+
+        const QByteArray sharedUtf8 = qgetenv("SXCL_ANDROID_SHARED");
+        sxcl_game_folders folders;
+        std::memset(&folders, 0, sizeof(folders));
+        char derr[SXCL_PATHS_ERROR_MAX];
+        derr[0] = '\0';
+        // 注意签名是 6 个参数:files_dir / shared_root / 结果 / **已配置目录** / err / err_len
+        if (sxcl_paths_detect_android(filesUtf8.isEmpty() ? nullptr : filesUtf8.constData(),
+                                      sharedUtf8.isEmpty() ? nullptr : sharedUtf8.constData(),
+                                      &folders, nullptr, derr, sizeof(derr)) == SXCL_PATHS_OK) {
+            const sxcl_game_folder *best = sxcl_paths_best(&folders);
+            if (best != nullptr && best->versions > 0) {
+                const QString picked = QDir::fromNativeSeparators(QString::fromUtf8(best->path));
+                const QByteArray own = uiSettingsFilePath().toUtf8();
+                if (sxcl_settings *st = sxcl_settings_open(own.constData())) {
+                    sxcl_settings_set(st, "game.default_dir", picked.toUtf8().constData());
+                    sxcl_settings_save(st, own.constData());
+                    sxcl_settings_free(st);
+                }
+                uiTrace(QStringLiteral("gamedir | 采用检测到的游戏目录 %1(%2 个版本,来源 %3);"
+                                       "已写入 game.default_dir")
+                            .arg(picked)
+                            .arg(best->versions)
+                            .arg(QString::fromUtf8(best->source)));
+                return picked;
+            }
+        }
+        return privateDir;
+    }
+#endif
     return QDir::fromNativeSeparators(QDir::homePath()) + QStringLiteral("/.minecraft");
 }
 

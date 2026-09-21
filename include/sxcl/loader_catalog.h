@@ -128,7 +128,26 @@ size_t sxcl_catalog_parse_optifine_json(const char *json, size_t len, const char
 size_t sxcl_catalog_parse_optifine_html(const char *html, size_t len, const char *mc,
                                         sxcl_catalog_entry *out, size_t out_cap);
 
-/** 按加载器挑解析器(OptiFine 会自己看返回体是 JSON 还是网页)。 */
+/** BMCLAPI 镜像独有的"按 MC 分的列表"JSON(实测 2026-09-21):
+ *    https://bmclapi2.bangbang93.com/forge/minecraft/<mc>
+ *    https://bmclapi2.bangbang93.com/neoforge/list/<mc>
+ *    形态:[{ "version":"47.1.5", "rawVersion":"1.20.1-47.1.5", "mcversion":"1.20.1",
+ *            "installerPath":"/maven/…/neoforge-21.1.1-installer.jar" }, …]
+ *    (Forge 那份没有 rawVersion/installerPath,多一个 modified 时间戳。)
+ *  与 maven 那条路的关键区别:**MC 直接取每条的 mcversion(权威字段),不用版本串反推**。
+ *  为什么必须有这一条:NeoForge 1.20.1 那一代的版本号是 47.1.x(从 Forge 47.x 分叉),
+ *  规则反推会得到 "1.47.1",于是"1.20.1 下没有任何 NeoForge"(Python 版也是这个毛病)。
+ *  version 的形态与另一条路对齐,界面/安装器可以共用同一套判断:
+ *    Forge    -> "<mc>-<加载器版本>"(源里已经带这个前缀就原样保留)
+ *    NeoForge -> 裸加载器版本("47.1.5" / "21.1.72";源里带前缀的统一掉,安装器直链按裸版本拼)
+ *  display 优先用 rawVersion;installerPath 的文件名部分填进 file(没有就空);
+ *  Forge 的 modified 时间戳填进 released。
+ *  顶层是裸数组(实测);对象包一层时依次找 versions/data/list 数组。 */
+size_t sxcl_catalog_parse_list_json(const char *json, size_t len, sxcl_loader_kind kind,
+                                    const char *mc, sxcl_catalog_entry *out, size_t out_cap);
+
+/** 按加载器挑解析器(OptiFine 会自己看返回体是 JSON 还是网页;
+ *  Forge/NeoForge 也会看:JSON 数组 = 镜像的列表接口,其余 = maven-metadata.xml)。 */
 size_t sxcl_catalog_parse(sxcl_loader_kind kind, const char *text, size_t len, const char *mc,
                           sxcl_catalog_doc_info *info, sxcl_catalog_entry *out, size_t out_cap);
 
@@ -163,12 +182,21 @@ typedef enum sxcl_catalog_format {
     SXCL_CATALOG_FMT_MAVEN_XML,      /**< maven-metadata.xml */
     SXCL_CATALOG_FMT_META_JSON,      /**< Fabric/Quilt 的 meta JSON 数组 */
     SXCL_CATALOG_FMT_OPTIFINE_JSON,  /**< BMCLAPI 的 OptiFine JSON */
-    SXCL_CATALOG_FMT_OPTIFINE_HTML   /**< optifine.net/downloads 的网页表格 */
+    SXCL_CATALOG_FMT_OPTIFINE_HTML,  /**< optifine.net/downloads 的网页表格 */
+    SXCL_CATALOG_FMT_LIST_JSON       /**< BMCLAPI 镜像独有的"按 MC 分的列表" JSON
+                                      *   (/forge/minecraft/<mc>、/neoforge/list/<mc>)。
+                                      *   新值放最后:前面几个的编号不动。 */
 } sxcl_catalog_format;
 
+/** 这个加载器从这个源拿到的是什么格式(决定用哪个解析器)。
+ *  Forge/NeoForge:镜像是 LIST_JSON(带权威 mcversion),官方仍是 MAVEN_XML。
+ *  OptiFine:镜像是 OPTIFINE_JSON(/optifine/<mc>,它本来就带 mcversion;
+ *  BMCLAPI 没有 /optifine/list/ 这个接口,实测 404),官方是网页。 */
 sxcl_catalog_format sxcl_catalog_format_of(sxcl_loader_kind kind, sxcl_catalog_source source);
 
 /** 拼 URL。mc 为空的加载器(Forge/NeoForge/OptiFine 官方源)不需要它。
+ *  Forge/NeoForge 的镜像在**给了 mc** 时走按 MC 的列表接口(BMCLAPI 的 maven 那份 Forge
+ *  元数据是旧的,实测最高只到 1.18);mc 为空时退回 maven-metadata.xml。
  *  返回 SXCL_CATALOG_OK 并写 out(始终 NUL 结尾);缓冲不够返回 ERR_SPACE。 */
 int sxcl_catalog_url(sxcl_loader_kind kind, sxcl_catalog_source source, const char *mc,
                      char *out, size_t out_len);
