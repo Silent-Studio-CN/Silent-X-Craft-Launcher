@@ -244,6 +244,23 @@ int sxcl_install_http_get_text(void *userdata, const char *url, char **out_text,
 #define SXCL_INSTALL_ERR_IO         (-7)  /**< 其余下载/文件操作失败(依赖库/资源/整理) */
 #define SXCL_INSTALL_ERR_NOMEM      (-8)  /**< 内存不足 */
 #define SXCL_INSTALL_ERR_CANCELLED  (-9)  /**< 用户取消(与普通失败可区分) */
+#define SXCL_INSTALL_ERR_TARGET_EXISTS (-10) /**< 目标版本已经装过了(绝不静默覆盖用户已有的同名版本) */
+
+/* ── "目标已存在"判定:UI(下载配置页的"版本名已存在")与安装引擎的拒装预检**共用**这一份 ── */
+
+/** versions/<实例名>/ 下已经有什么(位标志,可组合)。 */
+#define SXCL_INSTALL_TARGET_NONE 0 /**< 什么都没有:可以装 */
+#define SXCL_INSTALL_TARGET_JSON 1 /**< <实例名>.json 存在**且能解析** = 这个版本真的装过 */
+#define SXCL_INSTALL_TARGET_JAR  2 /**< 同名 jar 在(但没有能解析的 JSON)= 没装完的残骸 */
+
+/** 探测目标版本。只认看得懂的东西:JSON 必须**能解析成对象**才算"装过"
+ *  (空文件/半截 JSON 不算)。参数不合法返回 SXCL_INSTALL_TARGET_NONE。
+ *  引擎在拼 versions/<实例>/… 路径**之前**用它拒装;UI 用它给版本名输入框标红。 */
+int sxcl_install_target_probe(const char *game_dir, const char *instance);
+
+/** 上面那份判定的人话说法(UI 与引擎共用同一句文案,别各写一份)。
+ *  返回 sxcl_install_target_probe 的位组合。 */
+int sxcl_install_target_describe(char *out, size_t cap, const char *game_dir, const char *instance);
 
 /** 返回码的稳定名字(日志用)。 */
 const char *sxcl_install_code_name(int code);   /**< "ok"/"arg"/"manifest"/…/"cancelled"/"unknown" */

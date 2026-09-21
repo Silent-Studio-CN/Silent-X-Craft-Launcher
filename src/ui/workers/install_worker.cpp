@@ -13,6 +13,7 @@
 #include <QDateTime>
 
 #include <cstdio>
+#include <cstdlib> // free(maven-metadata 的文本缓冲)
 #include <cstring>
 #include <utility>
 
@@ -31,6 +32,87 @@
 namespace sxcl::ui {
 namespace {
 
+// ── Fabric 安装器版本:去 maven-metadata.xml 问,不能用 loader 版本 ──
+//
+// 事实(2026-09 实测,两条都拉过真地址):
+//   * net.fabricmc:fabric-installer 的 maven 版本号是**安装器自己的版本**
+//     (maven-metadata.xml 里 <latest>=1.1.2;历史版本 0.2.0.7…0.15.x),**不是** loader 版本;
+//   * 拿 loader 版本 0.16.9 拼出来的
+//       https://maven.fabricmc.net/net/fabricmc/fabric-installer/0.16.9/fabric-installer-0.16.9.jar
+//     实测 HTTP 404 —— 绝大多数选 Fabric 的用户都会撞上。
+// 所以:先取 maven-metadata.xml 解析 <latest>(没有就用 <release>),用解析出来的版本拼 URL。
+// 镜像优先(与"下载源"设置同口径),取不到就退回老写法 —— 但日志里**必须写明这是猜测值**。
+QString versionFromMavenMetadata(const QByteArray &xml) {
+    const auto valueOf = [&xml](const char *tag) -> QString {
+        const QByteArray open = QByteArray("<") + tag + ">";
+        const QByteArray close = QByteArray("</") + tag + ">";
+        const int at = xml.indexOf(open);
+        if (at < 0)
+            return QString();
+        const int from = at + open.size();
+        const int to = xml.indexOf(close, from);
+        if (to < 0)
+            return QString();
+        return QString::fromUtf8(xml.mid(from, to - from)).trimmed();
+    };
+    QString version = valueOf("latest");
+    if (version.isEmpty())
+        version = valueOf("release");
+    return version;
+}
+
+// 只认"数字 + 点"这种形状的版本号(防止把 HTML 错误页里的半截字当版本用)
+bool looksLikeMavenVersion(const QString &version) {
+    if (version.isEmpty() || version.size() > 32 || !version.contains(QLatin1Char('.')))
+        return false;
+    for (const QChar c : version) {
+        if (!c.isDigit() && c != QLatin1Char('.'))
+            return false;
+    }
+    return version.at(0).isDigit();
+}
+
+// 下载源设置里的 maven 镜像根(选 mojang = 不用镜像,与其它下载同一个开关)
+QString mavenMirrorRoot() {
+    if (uiDownloadSource() == QLatin1String("mojang"))
+        return QString();
+    return QStringLiteral("https://bmclapi2.bangbang93.com/maven");
+}
+
+/** 解析 Fabric 安装器版本(镜像 -> 官方),并把"从哪拿到的"写进 *source。
+ *  传 opts 是为了复用同一条传输后端(核心库的 sxcl_install_http_get_text)。 */
+QString resolveFabricInstallerVersion(sxcl_engine_opts *opts, QString *source) {
+    QStringList roots;
+    const QString mirror = mavenMirrorRoot();
+    if (!mirror.isEmpty())
+        roots << mirror;
+    roots << QStringLiteral("https://maven.fabricmc.net");
+
+    for (const QString &root : roots) {
+        const QString url =
+            root + QStringLiteral("/net/fabricmc/fabric-installer/maven-metadata.xml");
+        char *text = nullptr;
+        char err[SXCL_INSTALL_ERROR_MAX];
+        err[0] = '\0';
+        if (sxcl_install_http_get_text(opts, url.toUtf8().constData(), &text, err, sizeof(err)) != 0) {
+            SXCL_LOG_W("install", "取 Fabric 安装器版本清单失败: %s(%s)",
+                       url.toUtf8().constData(), err[0] ? err : "未知原因");
+            continue;
+        }
+        const QString version = versionFromMavenMetadata(QByteArray(text != nullptr ? text : ""));
+        free(text);
+        if (!looksLikeMavenVersion(version)) {
+            SXCL_LOG_W("install", "Fabric 安装器版本清单里没有能用的 latest/release: %s",
+                       url.toUtf8().constData());
+            continue;
+        }
+        if (source != nullptr)
+            *source = url;
+        return version;
+    }
+    return QString();
+}
+
 // ── 加载器安装器的 maven 地址 ──
 //
 // install.h:118-119 明说 installer_url"由加载器版本列表层给,本层不会自己拼 URL"
@@ -40,11 +122,14 @@ namespace {
 // 各家布局(都是它们 maven 仓库里的稳定路径):
 //   Forge     https://maven.minecraftforge.net/net/minecraftforge/forge/<mc>-<fv>/forge-<mc>-<fv>-installer.jar
 //   NeoForge  https://maven.neoforged.net/releases/net/neoforged/neoforge/<fv>/neoforge-<fv>-installer.jar
-//   Fabric    https://maven.fabricmc.net/net/fabricmc/fabric-installer/<fv>/fabric-installer-<fv>.jar
+//   Fabric    https://maven.fabricmc.net/net/fabricmc/fabric-installer/<安装器版本>/fabric-installer-<安装器版本>.jar
+//             **安装器版本 != loader 版本**(见上面 resolveFabricInstallerVersion);解析不到时
+//             才退回用 loader 版本猜(调用方必须把"用了猜测值"写进日志)。
 //   OptiFine  没有稳定的 maven 直链(官方按网页放行),**如实返回空** —— 上层据此报真实原因
 //             ("OptiFine 的安装器地址拿不到"),绝不去猜一个 URL 然后拿 404 冒充网络故障。
 QByteArray installerUrlFor(const QString &loaderType, const QString &mcVersion,
-                           const QString &loaderVersion) {
+                           const QString &loaderVersion,
+                           const QString &fabricInstallerVersion) {
     const QString type = loaderType.trimmed().toLower();
     const QString fv = loaderVersion.trimmed();
     if (fv.isEmpty())
@@ -65,9 +150,12 @@ QByteArray installerUrlFor(const QString &loaderType, const QString &mcVersion,
             .toUtf8();
     }
     if (type == QLatin1String("fabric")) {
+        // 坐标 = **安装器自己的版本**(maven-metadata 的 latest),不是 loader 版本
+        const QString installer =
+            fabricInstallerVersion.trimmed().isEmpty() ? fv : fabricInstallerVersion.trimmed();
         return QStringLiteral("https://maven.fabricmc.net/net/fabricmc/fabric-installer/%1/"
                               "fabric-installer-%1.jar")
-            .arg(fv)
+            .arg(installer)
             .toUtf8();
     }
     return QByteArray(); // optifine / 认不出的:没有直链
@@ -274,8 +362,8 @@ void InstallWorker::run() {
     const QByteArray loaderId = m_request.loaderType.trimmed().toLower().toUtf8();
     const QByteArray loaderVersion = m_request.loaderVersion.toUtf8();
     const QByteArray javaPath = QDir::fromNativeSeparators(m_request.javaPath).toUtf8();
-    const QByteArray installerUrl =
-        installerUrlFor(m_request.loaderType, m_request.versionId, m_request.loaderVersion);
+    // 安装器地址**在传输后端就绪之后**才算:Fabric 要先去 maven-metadata.xml 问安装器版本(联网)。
+    QByteArray installerUrl;
     const QByteArray mavenMirror;
 
     const sxcl_loader_kind loaderKind = sxcl_loader_kind_from_id(loaderId.constData());
@@ -286,22 +374,6 @@ void InstallWorker::run() {
                    m_request.gameDir.toUtf8().constData(), m_request.versionId.toUtf8().constData());
         emit finished(false, false, SXCL_INSTALL_ERR_ARG, false,
                       QStringLiteral("参数不完整:游戏目录与版本号都必须有"), QString());
-        m_running.store(false);
-        return;
-    }
-    if (hasLoader && installerUrl.isEmpty()) {
-        // **如实报**:不去猜一个 URL 然后让用户看到 404;
-        // OptiFine 没有稳定的 maven 直链,这条分支就是它的实话。
-        SXCL_LOG_E("install", "没开始就失败:%s 的安装器地址拿不到(加载器版本='%s')",
-                   QByteArray(sxcl_loader_kind_name(loaderKind)).constData(),
-                   m_request.loaderVersion.toUtf8().constData());
-        emit finished(false, false, SXCL_INSTALL_ERR_LOADER, false,
-                      QStringLiteral("%1 的安装器地址拿不到(界面只认 Forge/NeoForge/Fabric 的 "
-                                     "maven 直链;OptiFine 没有稳定直链,需要先手工备好安装器 jar)")
-                          .arg(QString::fromUtf8(sxcl_loader_kind_name(loaderKind))),
-                      QStringLiteral("阶段:下载加载器安装器 · 已选版本 %1")
-                          .arg(m_request.loaderVersion.isEmpty() ? QStringLiteral("(空)")
-                                                                 : m_request.loaderVersion));
         m_running.store(false);
         return;
     }
@@ -361,6 +433,55 @@ void InstallWorker::run() {
     m_running.store(false);
     return;
 #endif
+
+    // ── 3.5 加载器安装器地址 ──
+    // Fabric 的安装器 maven 版本号 = **安装器自己的版本**(实测 latest=1.1.2),不是 loader 版本
+    // (0.16.x/0.19.x):拿 loader 版本拼 URL 实测 404。先去 maven-metadata.xml 问(镜像优先),
+    // 解析结果在本次安装里只拉一次;问不到才退回老写法,并在日志里写明"用了猜测值"。
+    QString fabricInstaller;
+    if (loaderKind == SXCL_LOADER_FABRIC) {
+        if (m_fabricInstallerVersion.isEmpty()) {
+            QString source;
+            m_fabricInstallerVersion = resolveFabricInstallerVersion(&opts, &source);
+            if (!m_fabricInstallerVersion.isEmpty()) {
+                SXCL_LOG_I("install", "Fabric 安装器版本=%s 来源=%s",
+                           m_fabricInstallerVersion.toUtf8().constData(),
+                           source.toUtf8().constData());
+                emitLog(QStringLiteral("Fabric 安装器版本 %1(来自 %2)")
+                            .arg(m_fabricInstallerVersion, source));
+            } else {
+                SXCL_LOG_W("install",
+                           "Fabric 安装器版本取不到(镜像与官方都不通)—— 退回**猜测值**:"
+                           "拿 loader 版本 %s 当安装器版本(大概率 404)",
+                           m_request.loaderVersion.toUtf8().constData());
+                emitLog(QStringLiteral("⚠ 取不到 Fabric 安装器版本清单,用了**猜测值** %1"
+                                       "(拿 loader 版本当安装器版本,大概率 404)")
+                            .arg(m_request.loaderVersion));
+            }
+        } else {
+            emitLog(QStringLiteral("Fabric 安装器版本 %1(本次安装已解析过,清单不重复拉)")
+                        .arg(m_fabricInstallerVersion));
+        }
+        fabricInstaller = m_fabricInstallerVersion;
+    }
+    installerUrl = installerUrlFor(m_request.loaderType, m_request.versionId,
+                                  m_request.loaderVersion, fabricInstaller);
+    if (hasLoader && installerUrl.isEmpty()) {
+        // **如实报**:不去猜一个 URL 然后让用户看到 404;
+        // OptiFine 没有稳定的 maven 直链,这条分支就是它的实话。
+        SXCL_LOG_E("install", "没开始就失败:%s 的安装器地址拿不到(加载器版本='%s')",
+                   QByteArray(sxcl_loader_kind_name(loaderKind)).constData(),
+                   m_request.loaderVersion.toUtf8().constData());
+        emit finished(false, false, SXCL_INSTALL_ERR_LOADER, false,
+                      QStringLiteral("%1 的安装器地址拿不到(界面只认 Forge/NeoForge/Fabric 的 "
+                                     "maven 直链;OptiFine 没有稳定直链,需要先手工备好安装器 jar)")
+                          .arg(QString::fromUtf8(sxcl_loader_kind_name(loaderKind))),
+                      QStringLiteral("阶段:下载加载器安装器 · 已选版本 %1")
+                          .arg(m_request.loaderVersion.isEmpty() ? QStringLiteral("(空)")
+                                                                 : m_request.loaderVersion));
+        m_running.store(false);
+        return;
+    }
 
     sxcl_install_plan plan;
     memset(&plan, 0, sizeof(plan));

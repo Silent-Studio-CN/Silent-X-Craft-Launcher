@@ -24,7 +24,11 @@ androidCompileSdkVersion=android-@COMPILE_SDK@
 androidNdkVersion=@NDK_VERSION@
 androidPackageName=@PACKAGE_NAME@
 buildDir=build
-legacyPackaging=false
+# extractNativeLibs=true (AGP: android.packaging.jniLibs.useLegacyPackaging=true).
+# nativeLibraryDir must hold REAL .so files, not APK-backed symlinks: the JVM path
+# copies libawt_xawt.so / libjsound.so out of it into the installed JRE and dlopen()s
+# libjli.so from the JRE. Same switch FCL uses (FCL/build.gradle.kts useLegacyPackaging).
+legacyPackaging=true
 qt5AndroidDir=@QT_ANDROID@/./src/android/java
 qtAndroidDir=@QT_ANDROID@/./src/android/java
 qtGradlePluginType=com.android.application

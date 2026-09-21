@@ -21,7 +21,21 @@ if(SXCL_BUILD_TESTS)
   sxcl_warnings(sxcl_install_test)
   add_test(NAME sxcl_install_test COMMAND sxcl_install_test)
 
-  # 版本 JSON 落盘(下载路径与启动路径必须写在同一个地方;见 install.h 的说明)
+    # 事故夹具(三件套):目标已存在必须拒装(绝不覆盖)/ .part 到最终大小时续传起点只认
+  # .part.json 记录的字节数(不是文件大小)/ size=0 无哈希的 loader 库残留不许算"已存在且校验通过"。
+  # 全部在临时目录里跑(仓库不留产物),不联网、不碰任何真实游戏目录。
+  add_executable(sxcl_install_target_test ${CMAKE_SOURCE_DIR}/tests/install_target_test.c)
+  target_link_libraries(sxcl_install_target_test PRIVATE sxcl)
+  sxcl_warnings(sxcl_install_target_test)
+  add_test(NAME sxcl_install_target_test COMMAND sxcl_install_target_test)
+
+  # R3 源级熔断夹具(引擎的源健康表):黑洞源只撞一次 / BMCLAPI 403 不算失败 / 判死的源排最后。
+  # 内存假传输,不联网;夹具目录在临时目录里。
+  add_executable(sxcl_source_health_test ${CMAKE_SOURCE_DIR}/tests/engine_source_health_test.c)
+  target_link_libraries(sxcl_source_health_test PRIVATE sxcl)
+  sxcl_warnings(sxcl_source_health_test)
+  add_test(NAME sxcl_source_health_test COMMAND sxcl_source_health_test)
+# 版本 JSON 落盘(下载路径与启动路径必须写在同一个地方;见 install.h 的说明)
   add_executable(sxcl_version_json_test tests/version_json_test.c)
   target_link_libraries(sxcl_version_json_test PRIVATE sxcl)
   sxcl_warnings(sxcl_version_json_test)

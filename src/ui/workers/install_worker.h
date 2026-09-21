@@ -112,6 +112,8 @@ private:
     int m_lastStage = -1;
     QStringList m_stageIds;
     QStringList m_stageNames;
+    // Fabric 安装器版本(maven-metadata.xml 解析出来的;一次安装只拉一次清单)
+    QString m_fabricInstallerVersion;
 };
 
 } // namespace sxcl::ui

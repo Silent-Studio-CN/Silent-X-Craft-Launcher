@@ -586,6 +586,8 @@ struct Boot {
     QString tallmenu;
     QString passthrough;
     QString animtrace;
+    QString dump;
+    QString shotdelay;
     bool shot = false;
     bool offscreen = false;
 };
@@ -615,6 +617,8 @@ Boot readBootFile(const QString &filesDir) {
         else if (k == QLatin1String("tallmenu"))  b.tallmenu = v;
         else if (k == QLatin1String("passthrough")) b.passthrough = v;
         else if (k == QLatin1String("animgtrace")) b.animtrace = v;
+        else if (k == QLatin1String("dump"))       b.dump = v;
+        else if (k == QLatin1String("shotdelay"))  b.shotdelay = v;
         else if (k == QLatin1String("shot"))      b.shot = (v == QLatin1String("1"));
         else if (k == QLatin1String("offscreen")) b.offscreen = (v == QLatin1String("1"));
     }
@@ -792,6 +796,13 @@ int main(int argc, char **argv) {
         // samples go to logcat under the "sxcl-ui" tag.
         if (!boot.animtrace.isEmpty())
             qputenv("SXCL_ANIM_TRACE", boot.animtrace.toUtf8());
+        // acceptance hooks the shared entry reads from the environment: the widget-tree
+        // dump with text metrics (SXCL_UI_DUMP) and the delay before the grab/quits
+        // (SXCL_UI_SHOT_DELAY). Same boot-file pattern as passthrough/animgtrace above.
+        if (!boot.dump.isEmpty())
+            qputenv("SXCL_UI_DUMP", boot.dump.toUtf8());
+        if (!boot.shotdelay.isEmpty())
+            qputenv("SXCL_UI_SHOT_DELAY", boot.shotdelay.toUtf8());
         if (boot.shot && !boot.route.isEmpty() && !boot.shots.isEmpty()) {
             QDir().mkpath(boot.shots);
             qputenv("SXCL_UI_SHOT",

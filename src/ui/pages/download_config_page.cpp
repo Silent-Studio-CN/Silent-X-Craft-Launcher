@@ -58,6 +58,7 @@
 #include "workers/ui_paths.h" // 游戏目录/下载源/追踪的唯一一份口径(与安装 worker 同口径)
 
 // ── 核心库(纯 C)—— 加载器版本目录的取数/解析全走这里,界面层不自己认格式 ──
+#include "sxcl/install.h"       // sxcl_install_target_probe/describe(与安装引擎同一份"已存在"判定)
 #include "sxcl/loader_catalog.h" // sxcl_catalog_fetch/url/format_of + sxcl_loader_kind
 #include "sxcl/net.h"            // sxcl_transport_qt_create(Qt 传输后端,工作线程里建/释放)
 
@@ -994,20 +995,23 @@ private:
                      FluentTheme::instance().tokenText(QStringLiteral("accent"))));
     }
 
-    // :420-433 目录里有 JSON 就算已存在(Forge 1.13+/Fabric 装的版本没有自己的 jar)
+    // :420-433 "这个名字是不是已经被占了"。
+    // **判定只有一份**:核心库的 sxcl_install_target_probe(install.h)——
+    // 安装引擎在拼路径之前用的是同一个函数,所以"这里说不存在、那边装到别处/覆盖掉"不可能再发生。
+    // 口径:versions/<名>/<名>.json 存在**且能解析** = 真装过;同名 jar 残留 = 没装完的残骸。
+    bool versionNameTaken(const QString &versionName, QString *why = nullptr) const {
+        char text[SXCL_INSTALL_ERROR_MAX];
+        text[0] = '\0';
+        const int flags = sxcl_install_target_describe(text, sizeof(text),
+                                                       gameDirectory().toUtf8().constData(),
+                                                       versionName.toUtf8().constData());
+        if (why != nullptr)
+            *why = QString::fromUtf8(text);
+        return flags != SXCL_INSTALL_TARGET_NONE;
+    }
+
     void checkVersionExists(const QString &versionName) {
-        const QString dir = gameDirectory() + QStringLiteral("/versions/") + versionName;
-        bool hasJson = false;
-        const QDir d(dir);
-        if (d.exists()) {
-            const QStringList names = d.entryList(QStringList() << QStringLiteral("*.json"),
-                                                  QDir::Files);
-            hasJson = !names.isEmpty();
-        }
-        m_nameTaken = hasJson ||
-                      QFileInfo::exists(dir + QLatin1Char('/') + versionName +
-                                        QStringLiteral(".jar"));
-        if (m_nameTaken) {
+        if (versionNameTaken(versionName)) {
             styleNameInput(QStringLiteral("error"));
             m_warning->setVisible(true);
         } else {
@@ -1042,18 +1046,17 @@ private:
             return;
         }
         const QString dir = gameDirectory() + QStringLiteral("/versions/") + vn;
-        const QDir d(dir);
-        const bool hasJson =
-            d.exists() && !d.entryList(QStringList() << QStringLiteral("*.json"), QDir::Files).isEmpty();
-        if (hasJson ||
-            QFileInfo::exists(dir + QLatin1Char('/') + vn + QStringLiteral(".jar"))) {
+        // 与安装引擎同一份判定(核心库 sxcl_install_target_probe):这里说"已存在"就是引擎会拒装
+        // 的那一种;这里说"没有",引擎也不会另判一套。
+        QString why;
+        if (versionNameTaken(vn, &why)) {
             // 统一错误出口(带 warning 级别):一样复制完整上下文到剪贴板
             UiErrorContext ctx;
             ctx.page = QStringLiteral("下载配置页 / download_config_%1").arg(m_versionId);
             ctx.action = QStringLiteral("开始下载(实例名 %1)").arg(vn);
-            ctx.reason = QStringLiteral("版本 '%1' 已经安装，请使用不同的版本名称").arg(vn);
-            ctx.detail = QStringLiteral("目标目录已有版本 JSON 或 jar: %1")
-                             .arg(QDir::toNativeSeparators(dir));
+            ctx.reason = QStringLiteral("版本 '%1' 已经安装,请使用不同的版本名称").arg(vn);
+            ctx.detail = QStringLiteral("%1(目标目录 %2)")
+                             .arg(why, QDir::toNativeSeparators(dir));
             ctx.title = QStringLiteral("版本已存在");
             ctx.warning = true;
             pushUiError(this, ctx, 6000);
@@ -1252,7 +1255,8 @@ private:
     PrimaryPushButton *m_downloadBtn = nullptr;
     QString m_selectedLoader;
     QString m_selectedLoaderVersion;
-    bool m_nameTaken = false;      // :138
+    // (:138 的 m_nameTaken 是只写不读的死状态,已删 —— "有没有被占"由 checkVersionExists
+    //  现算现用,判定在核心库那一份里,界面不再存一份可能过期的副本。)
     bool m_userEditedName = false; // :139
 
     // 加载器取数层(文件上半部分 fetchCatalogAttempts 的调用方)

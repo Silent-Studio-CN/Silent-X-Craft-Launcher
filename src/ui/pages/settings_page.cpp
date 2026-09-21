@@ -135,6 +135,9 @@ const char *const kKeyJavaPath = "game.java_path";        // 新增,默认空
 const char *const kKeyMaxMemory = "game.max_memory_mb";   // 新增,默认 4096
 const char *const kKeyWindowSize = "game.window_size";    // 新增,默认 1280x720
 const char *const kKeyDownloadSource = "download.source"; // 新增,默认 auto
+// 「结束后关闭」(电脑端):安装/下载**成功**之后自动退出启动器。默认**关**。
+// 只有成功才关:失败/取消必须留在界面上(自动退出等于把原因藏掉)。启动游戏那条路不碰它。
+const char *const kKeyCloseAfterInstall = "ui.close_after_install";
 const char *const kKeyMaxConn = "download.max_conn";      // 核(便捷读取默认 1;冲突见报告)
 const char *const kKeyRate = "download.rate";             // 核(字节/秒,默认 0 = 不限速)
 const char *const kKeyVerifySha1 = "download.verify_sha1"; // 新增,默认开
@@ -1345,6 +1348,7 @@ private:
 
     ComboBoxSettingCard *m_refreshIntervalCard = nullptr;
     SwitchSettingCard *m_updateCard = nullptr;
+    SwitchSettingCard *m_closeAfterCard = nullptr; // 「结束后关闭」(电脑端;安卓不建)
     ComboBoxSettingCard *m_themeCard = nullptr;
     ColorSettingCard *m_themeColorCard = nullptr;
     ComboBoxSettingCard *m_languageCard = nullptr;
@@ -1584,6 +1588,17 @@ void SettingsPage::buildContent() {
         valueIndex(refreshValues, QString::number(m_store.number(kKeyRefreshInterval, 120)), 2),
         generalGroup);
 
+    // 「结束后关闭」:**本版新增**(Python 版没有这个设置项),所以排在照抄顺序之后。
+    // 电脑端语义,安卓上不出现在界面上(安卓是系统回收进程,没有"退出启动器"这一说)。
+#if !defined(Q_OS_ANDROID)
+    m_closeAfterCard = new SwitchSettingCard(
+        FluentIcon::qicon(FluentIcon::POWER_BUTTON), QStringLiteral("结束后关闭"),
+        QStringLiteral("安装/下载成功之后自动退出启动器(失败或取消时不退,原因要看得见)"),
+        m_store.flag(kKeyCloseAfterInstall, false), generalGroup);
+    connect(m_closeAfterCard, &SwitchSettingCard::checkedChanged, this,
+            [this](bool checked) { m_store.set(kKeyCloseAfterInstall, checked); });
+#endif
+
     // 入组顺序照抄 Python(:264 先入组 refresh_interval,再 update/theme/theme_color/language/source)
     generalGroup->addSettingCard(m_refreshIntervalCard);
     generalGroup->addSettingCard(m_updateCard);
@@ -1591,6 +1606,9 @@ void SettingsPage::buildContent() {
     generalGroup->addSettingCard(m_themeColorCard);
     generalGroup->addSettingCard(m_languageCard);
     generalGroup->addSettingCard(m_sourceCard);
+#if !defined(Q_OS_ANDROID)
+    generalGroup->addSettingCard(m_closeAfterCard); // 新增项,排在照抄项之后
+#endif
 
     // ── 游戏设置(settings_page.py:272-336)──
     auto *gameGroup = new SettingCardGroup(QString::fromUtf8(kGroupGame), m_view);
@@ -2079,6 +2097,7 @@ void SettingsPage::pickGameDirectory() {
 // settings_page.py:452-492 _reset_settings
 void SettingsPage::resetSettings() {
     m_store.set(kKeyAutoCheckUpdate, true);                     // :453
+    m_store.set(kKeyCloseAfterInstall, false);                  // 本版新增项:重置 = 回到默认(关)
     m_store.set(kKeyTheme, QStringLiteral("auto"));             // :454-455 Theme.AUTO
     m_store.set(kKeyLanguage, QStringLiteral("zh-CN"));         // :456
     m_store.set(kKeyDownloadSource, QStringLiteral("bmclapi")); // :457(注意:Python 重置就是 BMCLAPI)

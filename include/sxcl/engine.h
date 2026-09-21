@@ -33,6 +33,18 @@ typedef enum sxcl_task_state {
     SXCL_TASK_CANCELLED = 4
 } sxcl_task_state;
 
+/** 这个任务**有没有**可以用来判断"目标文件已存在且完好"的凭据(引擎写,调用方只读)。
+ *
+ *  为什么要有这个显式状态:verify.c 的退化分支是"期望尺寸 <= 0 且没有摘要 -> 文件存在就算过",
+ *  而加载器依赖库正是 size=0/无哈希建的 —— 于是磁盘上任何同名残留都会被算成
+ *  "已存在且校验通过",一个字节都不下(实测事故)。引擎据此**不做**那条快路径。 */
+typedef enum sxcl_task_verify_state {
+    SXCL_TASK_VERIFY_UNKNOWN = 0, /**< 还没判过(任务还没被引擎处理) */
+    SXCL_TASK_VERIFY_NONE = 1,    /**< 既没期望大小也没摘要 = **无校验信息**,不许当"已存在" */
+    SXCL_TASK_VERIFY_SIZE = 2,    /**< 只有期望大小(弱校验) */
+    SXCL_TASK_VERIFY_HASH = 3     /**< 有摘要(强校验) */
+} sxcl_task_verify_state;
+
 /** 一个待下载文件。输入字段由调用方填,输出字段由引擎写。 */
 typedef struct sxcl_task {
     /* ── 输入 ── */
@@ -46,6 +58,11 @@ typedef struct sxcl_task {
 
     /* ── 输出(引擎写,调用方只读) ── */
     sxcl_task_state state;
+    sxcl_task_verify_state verify_state; /**< 校验信息状态(见上);NONE = 不走"已存在"快路径 */
+    int skipped_existing;  /**< 1 = 一个字节都没下,命中了"已存在且校验通过"快路径。
+                            *   **统计用这个结构化字段**,不要再去比 error 里的中文文案
+                            *  (改一次文案就会静默把统计打回 0)。 */
+    int64_t resume_from;   /**< 本次续传的起点字节数(显式记录,不是文件大小);全新下载 = 0 */
     int64_t bytes_done;    /**< 已写入字节数(含续传前已有的部分) */
     int64_t total_bytes;   /**< 总字节数(期望大小或 Content-Range 得到) */
     int source_index;      /**< 实际成功的候选索引 */

@@ -102,7 +102,22 @@ $ds = $ds -replace '@DEPLOYMENT_DEPENDENCIES@', ([string]::Join(',', $keep))
 # Order matters: libcrypto BEFORE libssl (androiddeployqt's docs: a library listed
 # before its dependencies fails to load on some devices).
 $prebuilt = (Join-Path $And 'prebuilt\arm64-v8a') -replace '\\','/'
-$ds = $ds -replace '@ANDROID_EXTRA_LIBS@', ($prebuilt + '/libcrypto_3.so,' + $prebuilt + '/libssl_3.so')
+$extraLibs = @(($prebuilt + '/libcrypto_3.so'), ($prebuilt + '/libssl_3.so'))
+# JRE-side libs (libawt_xawt.so / libjsound.so) are NOT in the JRE assets and NOT in
+# the NDK: android/scripts/build_jre_libs.ps1 cross-compiles them from the vendored
+# sources under android/jni/jre-libs/ into the gitignored build tree. They have to end
+# up in the APK's lib/<abi>/ = nativeLibraryDir, because the launcher copies them from
+# there into the installed JRE (FCL RuntimeUtils.patchJava semantics).
+$jreLibDirFs = Join-Path $Repo 'build\_android\jre-libs\arm64-v8a'
+$jreLibDir   = $jreLibDirFs -replace '\\','/'
+foreach ($n in @('libawt_xawt.so', 'libjsound.so')) {
+  if (Test-Path (Join-Path $jreLibDirFs $n)) {
+    $extraLibs += ($jreLibDir + '/' + $n)
+  } else {
+    L ('JRE lib NOT BUILT, not packaged: ' + $n + '  (run android/scripts/build_jre_libs.ps1)')
+  }
+}
+$ds = $ds -replace '@ANDROID_EXTRA_LIBS@', ([string]::Join(',', $extraLibs))
 Set-Content -Path (Join-Path $Pkg 'deployment-settings.json') -Value $ds -Encoding ASCII -NoNewline
 L ('deployment-settings.json written (deps=' + $keep.Count + ')')
 

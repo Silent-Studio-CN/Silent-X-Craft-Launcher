@@ -11,6 +11,7 @@
 
 #include "sxcl/fs.h"
 #include "sxcl/install.h"
+#include "sxcl/json.h"
 #include "sxcl/manifest.h"
 #include "sxcl/natives.h"
 #include "sxcl/net.h"
@@ -69,6 +70,7 @@ const char *sxcl_install_code_name(int code) {
     case SXCL_INSTALL_ERR_IO:            return "io";
     case SXCL_INSTALL_ERR_NOMEM:         return "nomem";
     case SXCL_INSTALL_ERR_CANCELLED:     return "cancelled";
+    case SXCL_INSTALL_ERR_TARGET_EXISTS: return "target_exists";
     default:                             return "unknown";
     }
 }
@@ -82,7 +84,7 @@ int sxcl_install_code_retryable(int code) {
     case SXCL_INSTALL_ERR_IO:
         return 1; /* 网络/镜像抽风一类:重试往往就好了 */
     default:
-        return 0; /* 参数/内存/natives/取消:重试也一样 */
+        return 0; /* 参数/内存/natives/取消/目标已存在:重试也一样 */
     }
 }
 
@@ -238,6 +240,65 @@ static int path_join(char *out, size_t cap, const char *dir, const char *rel) {
     }
     memcpy(out + n, rel, b + 1);
     return 0;
+}
+
+/* ── "目标已存在"判定(UI 与安装引擎共用的**唯一**一份口径)── */
+
+int sxcl_install_target_probe(const char *game_dir, const char *instance) {
+    if (!game_dir || !*game_dir || !instance || !*instance) {
+        return SXCL_INSTALL_TARGET_NONE;
+    }
+    char rel[SXCL_INSTALL_PATH_MAX];
+    char path[SXCL_INSTALL_PATH_MAX];
+    int flags = SXCL_INSTALL_TARGET_NONE;
+
+    /* 1) <实例名>.json 存在**且能解析成对象** = 这个版本真的装过。
+     *    空文件/半截 JSON(上次崩在写盘中间)不算 —— 那不是"装过",是可以重装的残骸。 */
+    set_text(rel, sizeof(rel), "versions/%s/%s.json", instance, instance);
+    if (path_join(path, sizeof(path), game_dir, rel) == 0) {
+        int64_t size = 0;
+        if (sxcl_fs_stat(path, &size, NULL) == 0 && size > 0) {
+            char err[128];
+            err[0] = '\0';
+            sxcl_json *doc = sxcl_json_parse_file(path, err, sizeof(err));
+            if (doc != NULL) {
+                const sxcl_json_value *root = sxcl_json_root(doc);
+                if (root != NULL && sxcl_json_type_of(root) == SXCL_JSON_OBJECT) {
+                    flags |= SXCL_INSTALL_TARGET_JSON;
+                }
+                sxcl_json_free(doc);
+            }
+        }
+    }
+    /* 2) 同名 jar 在、但没有能解析的 JSON = 没装完的残骸(Forge 1.13+/Fabric 装的版本
+     *    本来就没有自己的 jar,所以这一条**单独**看,不能反推"没装过")。 */
+    if ((flags & SXCL_INSTALL_TARGET_JSON) == 0) {
+        set_text(rel, sizeof(rel), "versions/%s/%s.jar", instance, instance);
+        if (path_join(path, sizeof(path), game_dir, rel) == 0) {
+            int64_t size = 0;
+            if (sxcl_fs_stat(path, &size, NULL) == 0 && size > 0) {
+                flags |= SXCL_INSTALL_TARGET_JAR;
+            }
+        }
+    }
+    return flags;
+}
+
+int sxcl_install_target_describe(char *out, size_t cap, const char *game_dir, const char *instance) {
+    const int flags = sxcl_install_target_probe(game_dir, instance);
+    const char *name = (instance && *instance) ? instance : "?";
+    if (flags & SXCL_INSTALL_TARGET_JSON) {
+        set_text(out, cap, "这个版本已经装过了:目标目录里已有 versions/%s/%s.json —— 不覆盖。"
+                           "请换一个版本名,或先删掉那个版本目录再装",
+                 name, name);
+    } else if (flags & SXCL_INSTALL_TARGET_JAR) {
+        set_text(out, cap, "版本目录 versions/%s/ 里已经有 %s.jar(没有可解析的 JSON,像是没装完的残骸)"
+                           " —— 不覆盖。请换一个版本名,或先清理那个目录",
+                 name, name);
+    } else {
+        set_text(out, cap, "目标目录里没有同名版本(可以安装):versions/%s", name);
+    }
+    return flags;
 }
 
 /* ── 把版本 JSON 放到启动层要的位置(见 install.h 的说明) ──
@@ -433,8 +494,9 @@ static void batch_totals(install_run *r, size_t *done, size_t *failed, size_t *s
             ++f;
         } else if (t->state == SXCL_TASK_DONE) {
             ++d;
-            /* engine.c 的快路径把这句话写进 error(见 run_task):用它统计"跳过",判定仍归引擎。 */
-            if (t->error[0] && strcmp(t->error, "已存在且校验通过") == 0) {
+            /* 判定归引擎,统计读**结构化字段** t->skipped_existing(engine.c 的 run_task 写):
+             * 以前是 strcmp(error, "已存在且校验通过") —— 改一次文案就会静默把统计打回 0。 */
+            if (t->skipped_existing) {
                 ++s;
             }
         }
@@ -1375,7 +1437,7 @@ static int default_download(void *userdata, const sxcl_install_download *request
             }
             if (t->state == SXCL_TASK_DONE) {
                 ++stats->files_done;
-                if (t->error[0] && strcmp(t->error, "已存在且校验通过") == 0) {
+                if (t->skipped_existing) { /* 结构化字段,不是比 error 里的中文 */
                     ++stats->files_skipped;
                 }
             } else if (t->state == SXCL_TASK_FAILED || t->state == SXCL_TASK_CANCELLED) {
@@ -1623,6 +1685,17 @@ int sxcl_install_run(const sxcl_install_request *req, sxcl_install_result *out) 
             out->retryable = sxcl_install_code_retryable(out->code);
             return out->code;
         }
+    }
+
+    /* ── 目标已存在预检:**在拼 versions/<实例>/… 路径之前**就拒掉 ──
+     * 绝不静默覆盖用户已有的同名版本(实测事故:自动续装把用户真实在用的 1.21.11 覆盖了)。
+     * 判定与 UI 的"版本名已存在"共用 sxcl_install_target_probe —— 一个口径,两处调用。 */
+    if ((sxcl_install_target_probe(plan->game_dir, run.instance) & SXCL_INSTALL_TARGET_JSON) != 0) {
+        out->code = SXCL_INSTALL_ERR_TARGET_EXISTS;
+        (void)sxcl_install_target_describe(out->error, sizeof(out->error), plan->game_dir,
+                                           run.instance);
+        out->retryable = sxcl_install_code_retryable(out->code); /* = 0:重试也不会变 */
+        return out->code;
     }
 
     char rel[SXCL_INSTALL_PATH_MAX];

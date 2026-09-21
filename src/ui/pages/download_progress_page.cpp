@@ -540,6 +540,10 @@ private:
             m_detailLabel->setText(detail.isEmpty() ? message : detail);
             callTaskState("setTaskDone");
             InfoBar::push(InfoBar::Type::Success, QStringLiteral("安装成功"), message, this, 4000);
+            // 「结束后关闭」(电脑端)的**唯一**判据来源:三条终态里都通知窗口一次,
+            // 关不关、什么时候关由 MainWindow 决定(页面不自己退出进程)。
+            QMetaObject::invokeMethod(window(), "notifyInstallFinished", Qt::DirectConnection,
+                                      Q_ARG(bool, true), Q_ARG(bool, false));
             return;
         }
 
@@ -556,6 +560,10 @@ private:
             callTaskState("setTaskFailed");
             updateTaskCard(m_progressBar->value(), QStringLiteral("已取消"), detail);
             InfoBar::push(InfoBar::Type::Warning, QStringLiteral("已取消"), message, this, 4000);
+            // 「结束后关闭」(电脑端)的**唯一**判据来源:三条终态里都通知窗口一次,
+            // 关不关、什么时候关由 MainWindow 决定(页面不自己退出进程)。
+            QMetaObject::invokeMethod(window(), "notifyInstallFinished", Qt::DirectConnection,
+                                      Q_ARG(bool, false), Q_ARG(bool, true));
             return;
         }
 
@@ -579,6 +587,11 @@ private:
                      retryable ? QStringLiteral(" | 可以重试") : QString()));
         callTaskState("setTaskFailed");
         updateTaskCard(m_progressBar->value(), QStringLiteral("失败"), message);
+            // 「结束后关闭」(电脑端)的**唯一**判据来源:三条终态里都通知窗口一次,
+            // 关不关、什么时候关由 MainWindow 决定(页面不自己退出进程)。
+            QMetaObject::invokeMethod(window(), "notifyInstallFinished", Qt::DirectConnection,
+                                      Q_ARG(bool, false), Q_ARG(bool, false));
+
         // 统一错误出口:完整上下文(页面/操作/核心库原始原因/错误码/阶段/构建)进剪贴板。
         // 这里**不再**自己拼 InfoBar —— 一处实现,别处不再各写一遍(用户明确要求)。
         UiErrorContext ctx;

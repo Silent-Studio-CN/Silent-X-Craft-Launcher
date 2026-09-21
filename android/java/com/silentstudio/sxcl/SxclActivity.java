@@ -430,6 +430,12 @@ public class SxclActivity extends QtActivity {
          * The environment is not settable for an Android app, so they ride the boot file. */
         String passthrough = it != null ? it.getStringExtra("passthrough") : null;
         String animtrace = it != null ? it.getStringExtra("animgtrace") : null;
+        /* acceptance hooks for the widget-tree dump (SXCL_UI_DUMP) and the grab delay
+         * (SXCL_UI_SHOT_DELAY): the shared desktop entry reads both from the
+         * environment, which an Android app cannot be given. They ride the boot file
+         * exactly like passthrough/animgtrace above; unset = off = product behaviour. */
+        String dump = it != null ? it.getStringExtra("dump") : null;
+        String shotdelay = it != null ? it.getStringExtra("shotdelay") : null;
         boolean shot = it != null && it.getBooleanExtra("shot", false);
         boolean offscreen = it != null && it.getBooleanExtra("offscreen", false);
 
@@ -446,6 +452,8 @@ public class SxclActivity extends QtActivity {
         if (tallmenu != null) sb.append("tallmenu=").append(tallmenu).append('\n');
         if (passthrough != null) sb.append("passthrough=").append(passthrough).append('\n');
         if (animtrace != null) sb.append("animgtrace=").append(animtrace).append('\n');
+        if (dump != null) sb.append("dump=").append(dump).append('\n');
+        if (shotdelay != null) sb.append("shotdelay=").append(shotdelay).append('\n');
         writeText(new File(files, "sxcl_boot.txt"), sb.toString());
         Log.i(TAG, "boot: " + sb.toString().replace('\n', ' '));
     }

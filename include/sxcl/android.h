@@ -55,6 +55,47 @@ sxcl_android_access sxcl_android_probe_path_with_mounts(const char *mounts_text,
                                                         int want_exec,
                                                         char *reason, size_t reason_len);
 
+/* ── JRE 侧共享库补齐(参考实现 FCL RuntimeUtils.patchJava 的语义) ── */
+
+/** 打包层必须放进 APK 的 lib/<abi>/(= nativeLibraryDir)的两个 JRE 侧库,固定两条、顺序固定。 */
+#define SXCL_ANDROID_JRE_LIB_COUNT 2
+/* 名字写死是有意的:JVM 是按**文件名**从 <jre>/lib dlopen 它们的,少一个字符都加载不到。 */
+/* 0 = "libawt_xawt.so"(AWT/X11 桩;安卓 arm64 的 JRE 资产里根本没有这个文件),
+ * 1 = "libjsound.so"(OpenJDK javax.sound 核心 + OpenAL 后端;jre17/21/25 资产里也没有)。 */
+const char *sxcl_android_jre_lib_name(int index);
+
+#define SXCL_ANDROID_JRE_PATH_MAX 1024
+
+/* 补齐结果(负数 = 失败,数值稳定可落日志)。 */
+#define SXCL_ANDROID_JRE_OK             0
+#define SXCL_ANDROID_JRE_ERR_ARG        (-1) /**< 参数不合法(空路径 / 太长) */
+#define SXCL_ANDROID_JRE_ERR_NO_LIB_DIR (-2) /**< JRE 里既没有 <java_home>/jre/lib 也没有 <java_home>/lib */
+#define SXCL_ANDROID_JRE_ERR_NO_SOURCE  (-3) /**< nativeLibraryDir 里缺源文件 = APK 打包坏了(硬失败) */
+#define SXCL_ANDROID_JRE_ERR_COPY       (-4) /**< 拷贝/校验失败(磁盘满、权限) */
+
+/** 结果的稳定名字("ok"/"arg"/"no_lib_dir"/"no_source"/"copy")。 */
+const char *sxcl_android_jre_patch_code_name(int code);
+
+/** 把 nativeLibraryDir 里的 libawt_xawt.so / libjsound.so 补进**已装好的** JRE。
+ *
+ *  为什么非做不可:安卓 arm64 的 JRE 资产里没有 libawt_xawt.so,jre17/21/25 连
+ *  libjsound.so 也没有;JVM 启动时按名字从 <jre>/lib dlopen 它们,缺一个就是硬启动失败,
+ *  而且运行时也补不回来(组件清单里没有这两个文件)。FCL 在装完 JRE 后做同一件事:
+ *  RuntimeUtils.patchJava()(FCL/src/main/java/com/tungsten/fcl/util/RuntimeUtils.java:239-249)。
+ *
+ *  @param java_home      已装的 JRE 根(bin/java 的上一级)
+ *  @param native_lib_dir 打包层给的 ApplicationInfo.nativeLibraryDir(真实文件,不是指向 APK 的符号链接)
+ *  @param lib_dir_out    可空;写实际用的库目录(jre8 是 <java_home>/jre/lib,其余是 <java_home>/lib)
+ *  @param lib_dir_len    lib_dir_out 的容量
+ *  @param err            可空;失败时写人话原因
+ *  @return SXCL_ANDROID_JRE_OK 或 SXCL_ANDROID_JRE_ERR_*
+ *
+ *  **两个源文件都必须存在**:我们的 APK 构建在缺任何一个时直接失败(android/scripts/build_apk.ps1),
+ *  所以这里"源不存在"只可能是打包坏了 —— 必须硬失败,不许悄悄跳过(静默跳过 = 上设备才炸)。
+ *  不校验目标是否已存在:重复调用是覆盖,幂等。 */
+int sxcl_android_jre_patch_libs(const char *java_home, const char *native_lib_dir, char *lib_dir_out,
+                                size_t lib_dir_len, char *err, size_t err_len);
+
 /** 本机是不是安卓(编译期常量,给 UI 决定要不要显示"别的启动器的 Java 用不了"这类提示)。 */
 int sxcl_android_is_android(void);
 

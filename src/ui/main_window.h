@@ -84,6 +84,9 @@ public:
     Q_INVOKABLE void goBackFromLaunch();
     // 任务页点任务卡片时的回调(main_window.py:279-283;tasks_page.cpp:419 调的)
     Q_INVOKABLE void navigateToTask(const QString &taskId);
+    // 下载/安装页的三条终态都会调它(见 download_progress_page.cpp):「结束后关闭」由窗口决定,
+    // 页面不自己退出进程。安卓上这个设置不存在(空实现,调用安全)。
+    Q_INVOKABLE void notifyInstallFinished(bool ok, bool cancelled);
 
     NavPanel *navPanel() const { return m_nav; }
     QStackedWidget *pageStack() const { return m_stack; }
@@ -158,12 +161,22 @@ private:
     void buildTray();                    // 托盘(没有托盘就不建,也绝不隐藏窗口)
     void syncTray();                     // 托盘菜单/小窗口面板跟着当前任务与形态走
     int stopBackgroundWork();            // 退出前显式结束还在跑的 worker 线程(返回结束了几条)
+#if !defined(Q_OS_ANDROID)
+    // 退出前**主动取消**正在跑的安装并擦掉"这次新建的实例目录"(电脑端;安卓是系统回收,不做)。
+    QStringList cancelRunningInstallsAtExit();  // 返回被取消的 "<游戏目录>|<实例名>"
+    void removeHalfInstalledDirs(const QStringList &cancelled); // 只删这次取消掉的那些
+#endif
     void finishAndQuit();                // 结束 worker + 落盘 + 真退出(关闭/托盘退出的唯一出口)
     // 某个会话页下面的 worker 线程还在跑吗(不依赖 worker 的具体类型 —— 页面里
     // 正在运行的 QThread 就是"这个任务还在跑"的客观判据)
     bool taskRunning(const QString &pageKey) const;
 
     // ── 任务状态落盘(「默认直接退出,但要先把任务状态落盘,下次启动能恢复」)──
+    //
+    // 落盘 schema = 2(1 -> 2 加 gameDir / instanceName)。**必须记目标目录**:
+    // 实测事故 —— 只记"下了哪个版本"时,恢复会把它装进"这次解析出来的目录",
+    // 用户的真实 FCL/.minecraft 就是这么被写进去的。旧文件(schema 1)照读,
+    // 但没有 gameDir = 不知道当时装哪儿 = 一律不自动恢复(只登记)。
     struct TaskRecord {
         QString id;           // == 会话页键(download_progress_<名> / launch_<id>)
         QString kind;         // "download" / "launch"
@@ -171,14 +184,29 @@ private:
         QString status;       // 最后一次登记的状态文字
         QString versionId;    // 恢复用:版本 id
         QString versionName;  // 恢复用:版本名(下载页的实例名)
+        QString instanceName; // 恢复用:实例名(= versions/<名>/ 那一段);schema 2
         QString loaderType;   // 恢复用:加载器
         QString loaderVersion;
+        QString gameDir;      // 恢复用:当时解析出来的游戏目录;schema 2(空 = 旧记录,不可恢复)
         bool running = false; // 落盘那一刻它是不是真在跑(探针,不是猜)
     };
     void rememberTask(const TaskRecord &record); // 登记/更新(addOrUpdateTask 里调)
     QString taskStateFilePath() const;
     void persistTaskState(bool interrupted);
-    void loadTaskState(bool autoResume); // 读回来;autoResume = 无显示会话时不自动起下载
+    void loadTaskState(bool autoResume); // 读回来:默认**只登记可点击的记录**,不自动起下载
+
+    // ── 「上次未完成」:默认不自动续跑,等用户点任务页那条卡片才恢复 ──
+    // 事故复盘:一唤醒就自动续装 = 在用户没看见、也没同意的情况下往一个"当时解析出来的
+    // 目录"里写文件。现在恢复必须由人点一次(唯一例外:SXCL_UI_RESUME_TASKS=1 验收钉子)。
+    struct PendingResume {
+        TaskRecord record;
+        bool resumable = false; // 目标目录没变 + 有版本信息 = 点了就能真恢复
+        QString blockedReason;  // 不能恢复的人话原因(空 = 能恢复)
+    };
+    void registerPendingResume(const PendingResume &pending); // 任务页登记一条可点击记录
+    bool resumePendingTask(const QString &taskId);            // 用户点了那条记录 -> 真恢复
+    const PendingResume *findPendingResume(const QString &taskId) const;
+    QVector<PendingResume> m_pendingResumes;
 
     // ── 自检脚本 ──
     void runSelfCheckStep();
@@ -228,6 +256,11 @@ private:
     QTimer *m_taskWatch = nullptr;       // 任务/进度变化的低频刷新(小窗口 + 托盘菜单)
 
     QVector<TaskRecord> m_tasks;         // 任务登记表(落盘与"有没有任务在跑"都靠它)
+#if !defined(Q_OS_ANDROID)
+    // 本会话**新建**的实例目录("<游戏目录>|<实例名>"):装之前它不存在,是我们建出来的。
+    // 退出时若这条安装还在跑(被我们取消),就把这个目录擦掉 —— 不留半成品给用户。
+    QStringList m_sessionCreatedInstances;
+#endif
 
     QStringList m_checkSteps;            // SXCL_UI_WINCHECK 脚本
     int m_checkIndex = 0;

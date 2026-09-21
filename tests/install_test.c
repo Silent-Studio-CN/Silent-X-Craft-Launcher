@@ -19,6 +19,11 @@
 #define TMP_ROOT  "build-c/_install_tmp"
 #define INSTANCE  "1.20.1"
 #define LOADER_INSTANCE "1.20.1-forge-47.2.0"
+/* "同一个实例装第二遍"用的另一个名字:目标已存在(versions/<实例>/<实例>.json 在且可解析)时
+ * sxcl_install_run 会拒装(SXCL_INSTALL_ERR_TARGET_EXISTS)——"再来一遍"必须换个实例名。 */
+#define LOADER_KEEP_INSTANCE "1.20.1-forge-47.2.0-keep"
+/* 第三轮(复用**别人**留下的安装器)同样得换个实例名:同一个实例的 json 已经在磁盘上了。 */
+#define LOADER_REUSE_INSTANCE "1.20.1-forge-47.2.0-reuse"
 
 #define CLIENT_REL   "libraries/org/ow2/asm/asm/9.5/asm-9.5.jar"
 #define LIB2_REL     "libraries/org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3.jar"
@@ -392,8 +397,12 @@ static int fake_download(void *userdata, const sxcl_install_download *request,
             snprintf(t->error, sizeof(t->error), "假下载器:按剧本失败");
             ++failed;
         } else if (sxcl_fs_exists(t->dest)) {
-            /* 与引擎快路径等价:文件在且(这个假实现里)大小也对 -> 一个字节都不下 */
+            /* 与引擎快路径等价:文件在且(这个假实现里)大小也对 -> 一个字节都不下。
+             * **必须同时写结构化字段**:install.c 的统计读 t->skipped_existing,
+             * 不再去比 error 里的中文文案(见 engine.h 的 sxcl_task 说明)。 */
             t->state = SXCL_TASK_DONE;
+            t->skipped_existing = 1;
+            t->verify_state = SXCL_TASK_VERIFY_HASH;
             snprintf(t->error, sizeof(t->error), "已存在且校验通过");
             t->bytes_done = t->size > 0 ? t->size : 32;
             ++skipped;
@@ -521,6 +530,12 @@ static const char *kPurgeRel[] = {
     "versions/" LOADER_INSTANCE "/" LOADER_INSTANCE ".json",
     "versions/" LOADER_INSTANCE "/" LOADER_INSTANCE ".jar",
     "versions/" LOADER_INSTANCE "/forge-installer.jar",
+    "versions/" LOADER_KEEP_INSTANCE "/" LOADER_KEEP_INSTANCE ".json",
+    "versions/" LOADER_KEEP_INSTANCE "/" LOADER_KEEP_INSTANCE ".jar",
+    "versions/" LOADER_KEEP_INSTANCE "/forge-installer.jar",
+    "versions/" LOADER_REUSE_INSTANCE "/" LOADER_REUSE_INSTANCE ".json",
+    "versions/" LOADER_REUSE_INSTANCE "/" LOADER_REUSE_INSTANCE ".jar",
+    "versions/" LOADER_REUSE_INSTANCE "/forge-installer.jar",
     INDEX_REL,
     CLIENT_REL,
     LIB2_REL,
@@ -714,8 +729,9 @@ static void test_skip_existing(void) {
     case_dir("skip", game, sizeof(game));
 
     char path[1200];
-    snprintf(path, sizeof(path), "%s/versions/" INSTANCE "/" INSTANCE ".json", game);
-    check(write_file(path, kVersionJson) == 0, "先摆好版本 JSON");
+    /* **不能**先摆版本 JSON:versions/<实例>/<实例>.json 已存在且可解析 = "目标已存在",
+     * 安装会被 sxcl_install_run 的预检直接拒掉(那个用例见 install_target_test.c)。
+     * 这里要证明的是"已经躺在磁盘上的文件不会被重复下载",版本 JSON 由安装自己下。 */
     snprintf(path, sizeof(path), "%s/" INDEX_REL, game);
     check(write_file(path, kAssetIndex) == 0, "先摆好资源索引");
     snprintf(path, sizeof(path), "%s/versions/" INSTANCE "/" INSTANCE ".jar", game);
@@ -735,9 +751,10 @@ static void test_skip_existing(void) {
     const int rc = run_install(&plan, &res);
 
     check_int(rc, SXCL_INSTALL_OK, "返回 0");
-    check_int((long)g_fake.download_requests, 0, "真下载请求数 = 0(已有且校验通过的文件绝不下第二次)");
-    check_int((long)g_fake.skip_reports, 7, "7 个文件全部按跳过处理");
-    check_int((long)res.files_skipped, 7, "结果里记录了跳过数");
+    check_int((long)g_fake.download_requests, 1,
+              "真下载请求数 = 1(只有版本 JSON 要下;其余已有且校验通过的文件绝不下第二次)");
+    check_int((long)g_fake.skip_reports, 6, "6 个已躺在磁盘上的文件全部按跳过处理");
+    check_int((long)res.files_skipped, 6, "结果里记录了跳过数(结构化字段,不是比中文文案)");
     check_int((long)g_fake.download_tasks, 7, "任务照样交给下载器(没绕过引擎快路径)");
     check_int(res.percent, 100, "跳过也要跑到 100%");
 }
@@ -905,8 +922,11 @@ static void test_loader_plan(void) {
           "加载器阶段的人话总结");
 
     char installer_path[1024];
-    snprintf(installer_path, sizeof(installer_path), "%s/versions/" LOADER_INSTANCE "/forge-installer.jar",
-             game);
+    /* 第二轮换一个实例名:第一轮已经把 versions/<LOADER_INSTANCE>/<LOADER_INSTANCE>.json 写下了,
+     * 同名再装 = "目标已存在",引擎会拒(见 install_target_test.c)。这里验的是 keep_installer
+     * 与安装器复用,不是覆盖,所以用一个干净实例名继续。 */
+    snprintf(installer_path, sizeof(installer_path),
+             "%s/versions/" LOADER_KEEP_INSTANCE "/forge-installer.jar", game);
 
     /* 同一个用例再跑一次,这次保留安装器 */
     reset_all();
@@ -914,7 +934,7 @@ static void test_loader_plan(void) {
     base_plan(&keep, game);
     keep.loader = SXCL_LOADER_FORGE;
     keep.loader_version = "47.2.0";
-    keep.instance_name = LOADER_INSTANCE;
+    keep.instance_name = LOADER_KEEP_INSTANCE;
     keep.java_path = "java";
     keep.installer_url = plan.installer_url;
     keep.keep_installer = 1;
@@ -928,7 +948,7 @@ static void test_loader_plan(void) {
     base_plan(&reuse, game);
     reuse.loader = SXCL_LOADER_FORGE;
     reuse.loader_version = "47.2.0";
-    reuse.instance_name = LOADER_INSTANCE;
+    reuse.instance_name = LOADER_REUSE_INSTANCE; /* 又一个新实例名:复用**别人**目录里的安装器 */
     reuse.java_path = "java";
     reuse.installer_jar = installer_path;
     check_int(sxcl_fs_exists(installer_path), 1, "上一轮留下的安装器还在");

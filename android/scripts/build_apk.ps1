@@ -48,6 +48,12 @@ L ('ndk             : ' + (Test-Path ($Ndk + '/build/cmake/android.toolchain.cma
 L ('jdk             : ' + (Test-Path (Join-Path $JdkHome 'bin\javac.exe')))
 L ('libqf source    : ' + (Test-Path (Join-Path $PyQf 'CMakeLists.txt')))
 
+# ---- 0. JRE-side libs (must exist BEFORE the sync step, which lists them in
+#         deployment-settings.json android-extra-libs): libawt_xawt.so / libjsound.so
+#         cross-compiled from the vendored sources under android/jni/jre-libs/. ---
+& (Join-Path $PSScriptRoot 'build_jre_libs.ps1') -Repo $Repo -Ndk $Ndk
+if ($LASTEXITCODE -ne 0) { L 'build_jre_libs FAILED'; exit 1 }
+
 # ---- 1. packaging layer: repository android/ -> build/_android (gitignored) --
 & (Join-Path $PSScriptRoot 'sync_to_build.ps1') -Repo $Repo -QtAndroid $QtAndroid -QtHost $QtHost -Ndk $Ndk -Sdk $Sdk
 if ($LASTEXITCODE -ne 0) { L 'android sync FAILED'; exit 1 }
@@ -153,6 +159,25 @@ foreach ($n in $tlsNeeded) {
   } else {
     L ('tls MISSING   : ' + $n + ' (no source found) -- aborting, https would break silently')
     exit 3
+  }
+}
+
+# JRE-side libs: same "must never silently ship without" rule as TLS above. The JVM
+# dlopen()s both BY NAME from the installed JRE's lib dir, and the launcher copies them
+# out of nativeLibraryDir, so a missing file means no JVM at all.
+foreach ($n in @('libawt_xawt.so', 'libjsound.so')) {
+  $dst = Join-Path $libDir $n
+  if (Test-Path $dst) {
+    L ('jre lib ok    : ' + $n + '  ' + (Get-Item $dst).Length)
+    continue
+  }
+  $srcJre = Join-Path $Repo ('build\_android\jre-libs\arm64-v8a\' + $n)
+  if (Test-Path $srcJre) {
+    Copy-Item $srcJre $dst -Force
+    L ('jre lib FALLBACK: copied from build/_android/jre-libs -> ' + $n)
+  } else {
+    L ('jre lib MISSING   : ' + $n + ' (no source found) -- aborting, the JVM could not dlopen it')
+    exit 4
   }
 }
 

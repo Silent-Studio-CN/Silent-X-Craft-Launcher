@@ -14,6 +14,7 @@
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
 #include <QFileInfo>
@@ -59,8 +60,11 @@
 
 #include "theme_bridge.h"
 #include "tray.h"             // 任务栏托盘(最小化=隐藏后的恢复入口;新增设计)
+#include "workers/install_worker.h" // 退出时主动取消安装(InstallWorker::cancel)要用它的类型
 #include "workers/ui_paths.h" // uiSettingsFilePath / uiTrace(与各页同口径)
 
+#include "sxcl/fs.h"      // sxcl_fs_remove_tree(退出时清掉本次新建的半成品实例目录)
+#include "sxcl/install.h"  // 目标已存在判定(sxcl_install_target_probe/describe,与引擎同一份)
 #include "sxcl/settings.h" // 读写 ui.close_mode(关闭时提示还是直接退)
 
 // 安卓三键(最小化 = 退到后台,最大化 = 全屏 <-> 悬浮窗)的 JNI 出口在打包层的
@@ -232,6 +236,26 @@ bool closeNeedsConfirm() {
         return ask;
     }
     return false;
+}
+
+// 「结束后关闭」(电脑端):安装/下载**成功**之后自动退出启动器。默认**关**。
+// 判据见 notifyInstallFinished:只有成功才关 —— 失败/取消必须留在界面上。
+// 与 closeNeedsConfirm 同一口径:环境变量钉死优先,其次设置文件(ui.close_after_install)。
+bool closeAfterInstallEnabled() {
+#if defined(Q_OS_ANDROID)
+    return false; // 安卓不提供这个设置(系统回收进程,没有"退出启动器"这一说)
+#else
+    const QString pinned = qEnvironmentVariable("SXCL_UI_CLOSE_AFTER_INSTALL");
+    if (!pinned.isEmpty())
+        return pinned != QLatin1String("0");
+    if (sxcl_settings *st = sxcl_settings_open(uiSettingsFilePath().toUtf8().constData())) {
+        const char *value = sxcl_settings_get(st, "ui.close_after_install", "0");
+        const bool on = value != nullptr && qstrcmp(value, "1") == 0;
+        sxcl_settings_free(st);
+        return on;
+    }
+    return false;
+#endif
 }
 
 // ═════════ 安卓:三键的 JNI 出口(**只在 Q_OS_ANDROID 下存在**)═════════
@@ -718,6 +742,19 @@ void MainWindow::switchToDownloadProgress(const QString &versionId, const QStrin
                                           const QString &loaderType,
                                           const QString &loaderVersion) { // :201-225
     const QString key = QStringLiteral("download_progress_") + versionName;
+#if !defined(Q_OS_ANDROID)
+    // 退出时"不留半成品"只认**本次新建**的实例目录:装之前它不存在,才有资格被我们擦掉。
+    // (别人的/已经装过的实例目录一个字节都不碰;它们本来也被 R1 的预检挡在外面。)
+    {
+        const QString instance = versionName.isEmpty() ? versionId : versionName;
+        const QString dir = uiGameDirectory() + QStringLiteral("/versions/") + instance;
+        if (!QFileInfo::exists(dir)) {
+            const QString entry = uiGameDirectory() + QLatin1Char('|') + instance;
+            if (!m_sessionCreatedInstances.contains(entry))
+                m_sessionCreatedInstances.append(entry);
+        }
+    }
+#endif
     QWidget *page = m_pages.value(key, nullptr);
     if (!page) {
         page = createDownloadProgressPage(VersionRef{versionId}, versionName, loaderType,
@@ -734,8 +771,10 @@ void MainWindow::switchToDownloadProgress(const QString &versionId, const QStrin
     resume.kind = QStringLiteral("download");
     resume.versionId = versionId;
     resume.versionName = versionName;
+    resume.instanceName = versionName;
     resume.loaderType = loaderType;
     resume.loaderVersion = loaderVersion;
+    resume.gameDir = uiGameDirectory(); // schema 2:恢复时必须核对"还是不是这个目录"
     rememberTask(resume);
     showTempPage(page, key);
 }
@@ -753,6 +792,8 @@ void MainWindow::switchToLaunch(const QString &versionId) { // :227-243
     resume.kind = QStringLiteral("launch");
     resume.versionId = versionId;
     resume.versionName = versionId;
+    resume.instanceName = versionId;
+    resume.gameDir = uiGameDirectory();
     rememberTask(resume);
     showTempPage(page, key);
 }
@@ -768,8 +809,13 @@ void MainWindow::goBackFromLaunch() { // :275-277
 }
 
 void MainWindow::navigateToTask(const QString &taskId) { // :279-283
-    if (QWidget *page = m_pages.value(taskId, nullptr))
+    if (QWidget *page = m_pages.value(taskId, nullptr)) {
         showTempPage(page, QString());
+        return;
+    }
+    // 页还没建出来 = 这条任务是"上次未完成"里登记的可点击记录:
+    // 用户**点了**才恢复(见 loadTaskState / resumePendingTask)。
+    (void)resumePendingTask(taskId);
 }
 
 QStringList MainWindow::sessionPageKeys() const { return m_pages.keys(); }
@@ -1279,6 +1325,105 @@ void MainWindow::hideEvent(QHideEvent *e) {
     uiTrace(QStringLiteral("win | 窗口已隐藏(进程与后台任务继续) %1").arg(windowStateLine()));
 }
 
+// 「结束后关闭」的落地处(下载/安装页三条终态都调它一次)。
+void MainWindow::notifyInstallFinished(bool ok, bool cancelled) {
+#if !defined(Q_OS_ANDROID)
+    if (m_quitting || m_inShutdown)
+        return;
+    if (!closeAfterInstallEnabled())
+        return;
+    if (cancelled || !ok) {
+        // **失败/取消不关**:用户就是要看"为什么没成功" —— 自动退出等于把原因藏起来。
+        uiTrace(QStringLiteral("win | 结束后关闭:本次 ok=%1 cancelled=%2 -> 不自动退出(原因留在界面上)")
+                    .arg(ok ? 1 : 0)
+                    .arg(cancelled ? 1 : 0));
+        InfoBar::push(InfoBar::Type::Info, QStringLiteral("「结束后关闭」已开启"),
+                      QStringLiteral("这次没成功,先不退出 —— 失败/取消的原因留在界面上"), this,
+                      6000);
+        return;
+    }
+    uiTrace(QStringLiteral("win | 结束后关闭:安装完成 -> 3 秒后自动退出(来得及看一眼结果)"));
+    InfoBar::push(InfoBar::Type::Success, QStringLiteral("安装完成"),
+                  QStringLiteral("「结束后关闭」已开启,3 秒后自动退出"), this, 3000);
+    QTimer::singleShot(3000, this, [this] { finishAndQuit(); });
+#else
+    (void)ok;
+    (void)cancelled;
+#endif
+}
+
+#if !defined(Q_OS_ANDROID)
+// 退出前主动取消正在跑的安装(电脑端)。返回被取消的 "<游戏目录>|<实例名>"。
+//
+// 为什么不能只发 requestInterruption/quit:那两条对"正阻塞在 run() 里的工作对象"没有效果 ——
+// 真正让核心库停下的是 InstallWorker::cancel()(置取消位,核心库在文件边界上收工并清理 .part)。
+// 这里等它真的停下(有上限,绝不把关闭变成卡死),再交给调用方擦半成品目录。
+QStringList MainWindow::cancelRunningInstallsAtExit() {
+    QStringList cancelled;
+    for (auto it = m_pages.constBegin(); it != m_pages.constEnd(); ++it) {
+        if (!it.key().startsWith(QLatin1String("download_progress_")))
+            continue;
+        QWidget *page = it.value();
+        if (page == nullptr)
+            continue;
+        InstallWorker *worker = page->findChild<InstallWorker *>();
+        if (worker == nullptr || !worker->running())
+            continue;
+        const QString instance = it.key().mid(int(qstrlen("download_progress_")));
+        worker->cancel();
+        cancelled << (uiGameDirectory() + QLatin1Char('|') + instance);
+        uiTrace(QStringLiteral("win | 退出:已请求取消安装 %1(核心库在文件边界收工)").arg(instance));
+    }
+    if (!cancelled.isEmpty()) {
+        QElapsedTimer wait;
+        wait.start();
+        bool allStopped = true;
+        for (const QString &entry : cancelled) {
+            const QString instance = entry.section(QLatin1Char('|'), 1);
+            QWidget *page = m_pages.value(QStringLiteral("download_progress_") + instance, nullptr);
+            InstallWorker *worker = page != nullptr ? page->findChild<InstallWorker *>() : nullptr;
+            while (worker != nullptr && worker->running() && wait.elapsed() < 8000) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(10);
+            }
+            if (worker != nullptr && worker->running()) {
+                allStopped = false;
+                uiTrace(QStringLiteral("win | 退出:安装 %1 8 秒内没停下,半成品这次先不删")
+                            .arg(instance));
+            }
+        }
+        uiTrace(QStringLiteral("win | 退出:取消安装 %1 条,%2(%3 ms)")
+                    .arg(cancelled.size())
+                    .arg(allStopped ? QStringLiteral("都已停下") : QStringLiteral("有没停下的"))
+                    .arg(wait.elapsed()));
+    }
+    return cancelled;
+}
+
+// 只删"这次退出时被我们取消掉 **且** 是本会话新建"的实例目录。
+// 两个条件缺一不可:取消掉的说明它没装完(半成品),新建的说明它整份都是我们写的 ——
+// 别人的实例目录、已经装完的实例,这里一个都不碰。
+void MainWindow::removeHalfInstalledDirs(const QStringList &cancelled) {
+    for (const QString &entry : cancelled) {
+        if (!m_sessionCreatedInstances.contains(entry)) {
+            uiTrace(QStringLiteral("win | 退出:实例目录 %1 不是本次新建的,不清理").arg(entry));
+            continue;
+        }
+        const QString gameDir = entry.section(QLatin1Char('|'), 0, 0);
+        const QString instance = entry.section(QLatin1Char('|'), 1);
+        if (gameDir.isEmpty() || instance.isEmpty())
+            continue;
+        const QString dir = gameDir + QStringLiteral("/versions/") + instance;
+        if (!QFileInfo::exists(dir)) {
+            uiTrace(QStringLiteral("win | 退出:实例目录 %1 不在,无需清理").arg(dir));
+            continue;
+        }
+        const int rc = sxcl_fs_remove_tree(dir.toUtf8().constData());
+        uiTrace(QStringLiteral("win | 退出:半成品实例目录已清理 %1(rc=%2)").arg(dir).arg(rc));
+    }
+}
+#endif // !Q_OS_ANDROID
+
 void MainWindow::finishAndQuit() {
     if (m_quitting)
         return; // 关闭键与托盘「退出」可能先后到达,收尾只做一次
@@ -1291,10 +1436,21 @@ void MainWindow::finishAndQuit() {
     //    顺序不能反:先落盘,再停 worker。
     persistTaskState(true);
 
-    // 2) 显式结束后台 worker(不在这里 join:原因见 stopBackgroundWork 的注释)
+#if !defined(Q_OS_ANDROID)
+    // 2) **电脑端:主动取消正在跑的安装**,并记下"这次要擦掉的半成品实例目录"。
+    //    (安卓不适用:系统回收进程,行为不同 —— 那边照旧只发收工请求。)
+    const QStringList cancelledInstalls = cancelRunningInstallsAtExit();
+#endif
+
+    // 3) 显式结束后台 worker(不在这里 join:原因见 stopBackgroundWork 的注释)
     stopBackgroundWork();
 
-    // 3) 托盘先收掉:否则任务栏上会留下一个要等鼠标划过才消失的幽灵图标
+#if !defined(Q_OS_ANDROID)
+    // 3.5) 取消掉的那些安装不留半成品:把本次新建的实例目录擦掉(成功装完的不受影响)。
+    removeHalfInstalledDirs(cancelledInstalls);
+#endif
+
+    // 3.6) 托盘先收掉:否则任务栏上会留下一个要等鼠标划过才消失的幽灵图标
     if (m_tray != nullptr)
         m_tray->hide();
 
@@ -1406,6 +1562,10 @@ void MainWindow::rememberTask(const TaskRecord &record) {
             existing.loaderType = record.loaderType;
         if (!record.loaderVersion.isEmpty())
             existing.loaderVersion = record.loaderVersion;
+        if (!record.instanceName.isEmpty())
+            existing.instanceName = record.instanceName;
+        if (!record.gameDir.isEmpty())
+            existing.gameDir = record.gameDir;
         return;
     }
     m_tasks.append(record);
@@ -1428,6 +1588,11 @@ void MainWindow::persistTaskState(bool interrupted) {
         item[QStringLiteral("versionName")] = record.versionName;
         item[QStringLiteral("loaderType")] = record.loaderType;
         item[QStringLiteral("loaderVersion")] = record.loaderVersion;
+        // schema 2(1 -> 2 新增):**目标目录**与实例名。没有 gameDir 的旧记录恢复时不敢自动装
+        // —— "这次解析出来的目录"和"当时装的那个目录"可能不是一个(实测事故就是这么发生的)。
+        item[QStringLiteral("instanceName")] =
+            record.instanceName.isEmpty() ? record.versionName : record.instanceName;
+        item[QStringLiteral("gameDir")] = record.gameDir;
         tasks.append(item);
     }
 
@@ -1440,7 +1605,8 @@ void MainWindow::persistTaskState(bool interrupted) {
     }
 
     QJsonObject root;
-    root[QStringLiteral("schema")] = 1;
+    // schema 2:每个任务多记 gameDir / instanceName(见 TaskRecord 的说明)。旧版读得懂 1。
+    root[QStringLiteral("schema")] = 2;
     root[QStringLiteral("app")] = QString::fromUtf8(kTitle);
     root[QStringLiteral("interrupted")] = interrupted;
     root[QStringLiteral("closedAt")] = QDateTime::currentDateTime().toString(Qt::ISODate);
@@ -1461,6 +1627,94 @@ void MainWindow::persistTaskState(bool interrupted) {
                 .arg(written));
 }
 
+// 目录比较用的归一形式(大小写/分隔符/结尾斜杠都不该算"换了目录")。
+QString normalizedDir(const QString &raw) {
+    if (raw.isEmpty())
+        return QString();
+    QString s = QDir::cleanPath(QDir::fromNativeSeparators(raw));
+    while (s.size() > 1 && s.endsWith(QLatin1Char('/')))
+        s.chop(1);
+#if defined(Q_OS_WIN)
+    return s.toLower();
+#else
+    return s;
+#endif
+}
+
+const MainWindow::PendingResume *MainWindow::findPendingResume(const QString &taskId) const {
+    for (const PendingResume &pending : m_pendingResumes) {
+        if (pending.record.id == taskId)
+            return &pending;
+    }
+    return nullptr;
+}
+
+// 任务页登记一条**可点击**的"上次未完成"记录:用户点它才恢复(见 resumePendingTask)。
+void MainWindow::registerPendingResume(const PendingResume &pending) {
+    QWidget *tasks = m_pages.value(QStringLiteral("tasks"), nullptr);
+    if (tasks == nullptr) {
+        uiTrace(QStringLiteral("win | 任务页不在,") + pending.record.id +
+                QStringLiteral(" 这条恢复记录没能登记"));
+        return;
+    }
+    const QString name = pending.record.versionName.isEmpty() ? pending.record.versionId
+                                                              : pending.record.versionName;
+    const QString title = QStringLiteral("上次未完成:下载 %1").arg(name);
+    const QString status = pending.resumable
+                               ? QStringLiteral("点这里继续安装")
+                               : QStringLiteral("不能自动恢复:%1").arg(pending.blockedReason);
+    const QString detail = pending.record.gameDir.isEmpty()
+                               ? QStringLiteral("记录里没有目标目录")
+                               : QStringLiteral("目标目录 %1")
+                                     .arg(QDir::toNativeSeparators(pending.record.gameDir));
+    QMetaObject::invokeMethod(tasks, "addOrUpdateTask", Qt::DirectConnection,
+                              Q_ARG(QString, pending.record.id), Q_ARG(QString, title),
+                              Q_ARG(int, 0), Q_ARG(QString, status), Q_ARG(QString, detail));
+    uiTrace(QStringLiteral("win | 恢复记录已登记到任务页:%1(%2)")
+                .arg(pending.record.id,
+                     pending.resumable ? QStringLiteral("可点击恢复") : pending.blockedReason));
+}
+
+// 用户点了那条记录 -> 真的恢复(走产品路径:打开下载进度页,引擎自己按校验续传)。
+bool MainWindow::resumePendingTask(const QString &taskId) {
+    const PendingResume *pending = findPendingResume(taskId);
+    if (pending == nullptr)
+        return false;
+    const TaskRecord record = pending->record;
+    if (!pending->resumable) {
+        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("这条任务恢复不了"),
+                      pending->blockedReason, this, 8000);
+        return true; // 卡片是我们登记的:已经给了人话,不再走页面恢复
+    }
+    // **动手前再看一眼目标**:已经装过的版本绝不覆盖(与安装引擎共用核心库那一份判定)。
+    const QString instance =
+        record.instanceName.isEmpty() ? record.versionName : record.instanceName;
+    char why[SXCL_INSTALL_ERROR_MAX];
+    const int flags = sxcl_install_target_probe(record.gameDir.toUtf8().constData(),
+                                                instance.toUtf8().constData());
+    if ((flags & SXCL_INSTALL_TARGET_JSON) != 0) {
+        sxcl_install_target_describe(why, sizeof(why), record.gameDir.toUtf8().constData(),
+                                     instance.toUtf8().constData());
+        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("没有恢复:目标已经存在"),
+                      QString::fromUtf8(why), this, 12000);
+        uiTrace(QStringLiteral("win | 恢复被拒(目标已存在):%1 | %2").arg(instance,
+                                                                        QString::fromUtf8(why)));
+        return true;
+    }
+    for (int i = 0; i < m_pendingResumes.size(); ++i) {
+        if (m_pendingResumes.at(i).record.id == taskId) {
+            m_pendingResumes.removeAt(i);
+            break;
+        }
+    }
+    uiTrace(QStringLiteral("win | 用户点了恢复:%1(目标目录 %2)")
+                .arg(taskId, QDir::toNativeSeparators(record.gameDir)));
+    switchToDownloadProgress(record.versionId,
+                             record.versionName.isEmpty() ? record.versionId : record.versionName,
+                             record.loaderType, record.loaderVersion);
+    return true;
+}
+
 void MainWindow::loadTaskState(bool autoResume) {
     const QString path = taskStatePath();
     QFile file(path);
@@ -1474,18 +1728,23 @@ void MainWindow::loadTaskState(bool autoResume) {
         uiTrace(QStringLiteral("win | 任务状态文件不是 JSON,按没有处理:%1").arg(path));
         return;
     }
-    const QJsonArray tasks = doc.object().value(QStringLiteral("tasks")).toArray();
+    const QJsonObject root = doc.object();
+    const int schema = root.value(QStringLiteral("schema")).toInt(1); // 旧文件没有 schema -> 1
+    const QJsonArray tasks = root.value(QStringLiteral("tasks")).toArray();
     if (tasks.isEmpty())
         return;
 
-    // **无人值守时不自作主张起网络任务**:offscreen / 无显示平台没人能看见、也没人能取消它。
-    // 真实桌面会话里默认自动续上;SXCL_UI_RESUME_TASKS=0/1 可以钉死这个行为(取证通路)。
+    // **默认不自动续跑**(事故复盘:一唤醒就自己往一个"当时解析出来的目录"里续装,
+    // 把用户真实在用的同名版本覆盖了)。现在只登记一条可点击的记录 + InfoBar 告知,
+    // 用户点了才恢复。SXCL_UI_RESUME_TASKS=1 = 显式打开自动恢复(验收钉子),仅此一处例外。
     const QString pinned = qEnvironmentVariable("SXCL_UI_RESUME_TASKS");
-    const bool headless =
-        QGuiApplication::platformName().compare(QLatin1String("offscreen"), Qt::CaseInsensitive) == 0;
-    const bool resume = !pinned.isEmpty() ? (pinned != QLatin1String("0")) : !headless;
+    const bool autoResumePinned = pinned == QLatin1String("1");
+    const QString currentDir = uiGameDirectory();
+    const QString currentNorm = normalizedDir(currentDir);
 
     int resumed = 0;
+    int registered = 0;
+    int blocked = 0;
     for (const QJsonValue &value : tasks) {
         const QJsonObject item = value.toObject();
         TaskRecord record;
@@ -1495,32 +1754,75 @@ void MainWindow::loadTaskState(bool autoResume) {
         record.status = item.value(QStringLiteral("status")).toString();
         record.versionId = item.value(QStringLiteral("versionId")).toString();
         record.versionName = item.value(QStringLiteral("versionName")).toString();
+        record.instanceName = item.value(QStringLiteral("instanceName")).toString();
         record.loaderType = item.value(QStringLiteral("loaderType")).toString();
         record.loaderVersion = item.value(QStringLiteral("loaderVersion")).toString();
+        record.gameDir = item.value(QStringLiteral("gameDir")).toString(); // schema 2 才有
         if (record.id.isEmpty())
             continue;
         rememberTask(record);
-        if (!resume || !autoResume || record.kind != QLatin1String("download") ||
-            record.versionId.isEmpty())
+
+        PendingResume pending;
+        pending.record = record;
+        if (record.kind != QLatin1String("download") || record.versionId.isEmpty()) {
+            pending.blockedReason = QStringLiteral("这不是一条下载任务,不能接着装");
+        } else if (record.gameDir.isEmpty()) {
+            // schema 1 的旧记录(或旧版本写的):不知道当时装到哪个目录 -> **不自动恢复**
+            pending.blockedReason =
+                QStringLiteral("旧记录里没有目标目录(写入时还没记这个字段),不敢替你选目录");
+        } else if (normalizedDir(record.gameDir) != currentNorm) {
+            pending.blockedReason = QStringLiteral("上次目标目录已变(旧:%1 / 新:%2)")
+                                        .arg(QDir::toNativeSeparators(record.gameDir),
+                                             QDir::toNativeSeparators(currentDir));
+        } else {
+            pending.resumable = true;
+        }
+
+        // 显式钉子开了 + 目录没变 -> 才自动恢复(老行为,给验收用)
+        if (autoResumePinned && autoResume && pending.resumable) {
+            switchToDownloadProgress(
+                record.versionId,
+                record.versionName.isEmpty() ? record.versionId : record.versionName,
+                record.loaderType, record.loaderVersion);
+            ++resumed;
             continue;
-        // **恢复走产品路径**:重新打开下载进度页。安装引擎自己按 SHA-1 复核磁盘上已有的
-        // 文件(已完整的跳过、没下完的续传),不是这里另写一条"续传"捷径。
-        switchToDownloadProgress(
-            record.versionId,
-            record.versionName.isEmpty() ? record.versionId : record.versionName,
-            record.loaderType, record.loaderVersion);
-        ++resumed;
+        }
+        m_pendingResumes.append(pending);
+        registerPendingResume(pending);
+        if (pending.resumable)
+            ++registered;
+        else
+            ++blocked;
     }
 
-    uiTrace(QStringLiteral("win | 上次退出时有 %1 个未完成任务:%2(状态文件 %3)")
+    uiTrace(QStringLiteral("win | 上次退出时有 %1 个未完成任务(schema=%2):%3")
                 .arg(tasks.size())
-                .arg(resumed > 0 ? QStringLiteral("已自动恢复 %1 个").arg(resumed)
-                                 : QStringLiteral("只登记,未自动启动"))
-                .arg(path));
+                .arg(schema)
+                .arg(resumed > 0
+                         ? QStringLiteral("自动恢复 %1 个(SXCL_UI_RESUME_TASKS=1)").arg(resumed)
+                         : QStringLiteral("自动启动 0 个;任务页登记 %1 条可点恢复、%2 条不能恢复")
+                               .arg(registered)
+                               .arg(blocked)));
 
-    // 恢复过一次就删:否则每次开机都会把同一个任务再排一遍
-    if (resumed > 0 && QFile::remove(path))
-        uiTrace(QStringLiteral("win | 任务状态文件已消费(恢复过一次就不再重复恢复)"));
+    if (resumed > 0) {
+        if (QFile::remove(path))
+            uiTrace(QStringLiteral("win | 任务状态文件已消费(恢复过一次就不再重复恢复)"));
+        return;
+    }
+    if (!m_pendingResumes.isEmpty()) {
+        // InfoBar 只说一次(不逐条刷屏);不能恢复的那些把原因写在任务页的卡片上。
+        const int count = m_pendingResumes.size();
+        if (registered > 0) {
+            InfoBar::push(InfoBar::Type::Info, QStringLiteral("上次有 %1 个任务没做完").arg(count),
+                          QStringLiteral("为了不覆盖你可能已经在用的版本,这次没有自动开始。"
+                                         "要接着装,就去「任务」页点那条记录。"),
+                          this, 12000);
+        } else {
+            InfoBar::push(InfoBar::Type::Warning,
+                          QStringLiteral("上次有 %1 个任务没做完,但不能自动恢复").arg(count),
+                          m_pendingResumes.first().blockedReason, this, 12000);
+        }
+    }
 }
 
 // ─────────────── 取证通路:SXCL_UI_WINCHECK 脚本化自检 ───────────────

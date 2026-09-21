@@ -109,6 +109,30 @@ if(SXCL_BUILD_TESTS)
   endif()
   get_filename_component(_sxcl_qt_bin "${_sxcl_qt_core}" DIRECTORY)
 
+  # 事故夹具(界面侧):一唤醒就自动续装 -> 默认只登记可点击的"上次未完成",用户点了才恢复。
+  # 设置文件/游戏目录/待恢复任务文件全钉在临时目录(SXCL_UI_SETTINGS/SXCL_UI_GAME_DIR),
+  # 不碰用户真实配置与游戏目录。SXCL_UI_RESUME_TASKS=1 是唯一的自动恢复钉子(用例里自己设)。
+  add_executable(sxcl_ui_resume_test "${CMAKE_SOURCE_DIR}/tests/ui_resume_test.cpp")
+  target_link_libraries(sxcl_ui_resume_test PRIVATE sxcl_ui_core)
+  sxcl_warnings(sxcl_ui_resume_test)
+  sxcl_deploy_qt(sxcl_ui_resume_test)
+  add_test(NAME sxcl_ui_resume_test COMMAND sxcl_ui_resume_test -platform offscreen)
+  set_tests_properties(sxcl_ui_resume_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sxcl_qt_bin}")
+
+  # Fabric 安装器地址验收(**要联网**):没开 SXCL_ACCEPT_NETWORK=1 时自己跳过,ctest 不受影响。
+  # 手动跑:
+  #   $env:SXCL_ACCEPT_NETWORK=1; .\build-ui\src\ui\Release\sxcl_fabric_installer_test.exe
+  add_executable(sxcl_fabric_installer_test "${CMAKE_SOURCE_DIR}/tests/fabric_installer_test.cpp")
+  target_link_libraries(sxcl_fabric_installer_test PRIVATE sxcl_ui_core)
+  sxcl_warnings(sxcl_fabric_installer_test)
+  sxcl_deploy_qt(sxcl_fabric_installer_test)
+  add_test(NAME sxcl_fabric_installer_test COMMAND sxcl_fabric_installer_test)
+  set_tests_properties(sxcl_fabric_installer_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sxcl_qt_bin}")
+
   add_test(NAME sxcl_ui_smoke_test COMMAND sxcl_ui_smoke_test -platform offscreen)
   set_tests_properties(sxcl_ui_smoke_test PROPERTIES
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
