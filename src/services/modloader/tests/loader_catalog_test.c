@@ -323,6 +323,24 @@ static void test_list_json(void)
                                  strlen(k_neoforge_list_1201), "1.21.1", &info, items, 80);
     check_size(count, 0, "NeoForge 1.20.1 的列表按 1.21.1 过滤 -> 0 条");
 
+    /* ── 47.x 那条地雷:裸版本串反推 MC 时必须认成 1.20.1,不能是 1.47.1 ──
+     *   为什么要有这条断言:加载器兼容判定(sxcl_loader_check_selection)是拿
+     *   sxcl_loader_parse_version 从版本串反推 MC 的,而 NeoForge 1.20.1 那一代从
+     *   Forge 47.x 分叉,版本号就是 47.1.x。推成 1.47.1 会直接判"不兼容"并拦住安装。 */
+    {
+        sxcl_loader_version_info rv;
+        check(sxcl_loader_parse_version("47.1.5", SXCL_LOADER_NEOFORGE, &rv) == SXCL_LOADER_OK,
+              "NeoForge 47.1.5:解析返回 OK");
+        check_str(rv.mc, "1.20.1", "  47.1.5 -> MC 1.20.1(不是 1.47.1)");
+        check_str(rv.loader, "47.1.5", "  加载器版本仍是 47.1.5");
+        check(sxcl_loader_parse_version("21.1.72", SXCL_LOADER_NEOFORGE, &rv) == SXCL_LOADER_OK,
+              "NeoForge 21.1.72:解析返回 OK");
+        check_str(rv.mc, "1.21.1", "  21.1.72 -> MC 1.21.1(通用规则不受影响)");
+        check(sxcl_loader_parse_version("1.20.1-47.4.23", SXCL_LOADER_FORGE, &rv) == SXCL_LOADER_OK,
+              "Forge 1.20.1-47.4.23:解析返回 OK");
+        check_str(rv.mc, "1.20.1", "  带 MC 段的形态照旧");
+    }
+
     /* ── NeoForge 1.21.1:21.1.x 那一套不能被改坏 ── */
     count = sxcl_catalog_prepare(SXCL_LOADER_NEOFORGE, k_neoforge_list_1211_head,
                                  strlen(k_neoforge_list_1211_head), "1.21.1", &info, items, 80);

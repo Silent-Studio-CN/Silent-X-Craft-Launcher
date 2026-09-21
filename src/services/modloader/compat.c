@@ -299,9 +299,17 @@ int sxcl_loader_parse_version(const char *text, sxcl_loader_kind kind, sxcl_load
         if (minor_len == 0 || minor_len > 4 || text[p] != '.') {
             return SXCL_LOADER_OK;
         }
+        /* ★ 特例(实测踩过,不是猜):NeoForge 1.20.1 那一代**从 Forge 47.x 分叉**,
+         *   版本号就是 47.1.x —— 按下面那条 "1.<大>.<次>" 规则会被推成 "1.47.1",
+         *   于是"47.1.5 对应的是 Minecraft 1.47.1"这种判决就出来了(加载器兼容判定直接判 error)。
+         *   47.x 这一个前缀有确定含义:NeoForge for Minecraft 1.20.1。
+         *   其余世代(20.2/20.4/21.0/21.1/26.3…)仍走通用规则。 */
         char mc[32];
-        const int written = snprintf(mc, sizeof(mc), "1.%.*s.%.*s", (int)major_len, text + m0,
-                                     (int)minor_len, text + n0);
+        const int legacy_47 = (major_len == 2 && text[m0] == '4' && text[m0 + 1] == '7');
+        const int written = legacy_47
+                                ? snprintf(mc, sizeof(mc), "1.20.1")
+                                : snprintf(mc, sizeof(mc), "1.%.*s.%.*s", (int)major_len,
+                                           text + m0, (int)minor_len, text + n0);
         if (written <= 0 || (size_t)written >= sizeof(mc)) {
             return SXCL_LOADER_ERR_SPACE;
         }
