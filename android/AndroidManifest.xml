@@ -38,5 +38,29 @@
             </intent-filter>
             <meta-data android:name="android.app.lib_name" android:value="sxclui"/>
         </activity>
+
+        <!-- 游戏进程(= 用户 2026-09-21 拍板的 B 方案:游戏自己一个进程 + 自己一个窗口)。
+             逐条说明为什么是这些属性:
+               * android:process=":game"      游戏与启动器**不同进程**。进程内起的 JVM 崩了、
+                                              被 OOM 杀了,启动器不受影响(反过来也一样)。
+               * exported="false"             只有本应用能拉起它(没有 intent-filter)。
+               * launchMode="singleTask"      同一个游戏只有一个实例(再次启动复用同一个进程)。
+               * resizeableActivity="true"    允许分屏/自由窗口形态(游戏窗口不跟启动器抢)。
+               * configChanges=...            旋转/键盘/尺寸/密度/深色模式变化时**不重建**
+                                              Activity —— 游戏进程重不重建不该由系统说了算。
+               * taskAffinity="...game"       **必须**:singleTask 如果与启动器同一个 task,
+                                              会把启动器从栈上清掉,启动器的画中画也一起没;
+                                              独立 affinity + FLAG_ACTIVITY_NEW_TASK 才是
+                                              "游戏一个 task、启动器一个 task"。
+               * theme=NoActionBar.Fullscreen 游戏窗口不要标题栏/操作栏,整块 surface 归游戏。 -->
+        <activity android:name="com.silentstudio.sxcl.GameActivity"
+            android:label="Silent X Craft Launcher - 游戏"
+            android:process=":game"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:taskAffinity="com.silentstudio.sxcl.game"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|density|uiMode"/>
     </application>
 </manifest>

@@ -20,4 +20,11 @@ if(SXCL_BUILD_TESTS)
   target_link_libraries(sxcl_log_test PRIVATE sxcl)
   sxcl_warnings(sxcl_log_test)
   add_test(NAME sxcl_log_test COMMAND sxcl_log_test)
+
+  # 游戏输出落盘通道(攒批 / 打码 / 开关 / 截断 / shutdown 冲刷):夹具写在构建目录下
+  add_executable(sxcl_log_game_test ${CMAKE_SOURCE_DIR}/tests/log_game_test.c)
+  target_link_libraries(sxcl_log_game_test PRIVATE sxcl)
+  sxcl_warnings(sxcl_log_game_test)
+  add_test(NAME sxcl_log_game_test COMMAND sxcl_log_game_test)
+  set_tests_properties(sxcl_log_game_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endif()

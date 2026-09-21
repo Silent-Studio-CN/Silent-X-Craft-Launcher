@@ -10,8 +10,10 @@
 
 #include "sxcl/launch.h"
 
+#include "sxcl/crash.h"   /* 崩溃取证:退出后读 crash-reports 与 logs/latest.log */
 #include "sxcl/fs.h"
 #include "sxcl/instance.h" /* sxcl_instance_read_json:PCL 式目录名与 id 不一致的版本也能启动 */
+#include "sxcl/log.h"      /* 游戏输出落盘(模块 game;攒批写,见 log.h 第 5 节) */
 #include "sxcl/natives.h"
 #include "sxcl/options.h"
 #include "sxcl/process.h"
@@ -95,6 +97,31 @@ static void join3(char *out, size_t cap, const char *a, const char *b, const cha
     join_path(out, cap, tmp, c);
 }
 
+/** 把原因键的文案填进结果(所有出口都走它,免得某条路径忘了填)。 */
+static void fill_reason(sxcl_launch_result *out)
+{
+    sxcl_log_reason reason = SXCL_REASON_UNKNOWN;
+    if (out == NULL) {
+        return;
+    }
+    reason = (out->log.reason != SXCL_REASON_UNKNOWN) ? out->log.reason : out->reason;
+    out->reason = reason;
+    copy_str(out->reason_key, sizeof(out->reason_key), sxcl_log_reason_key(reason));
+    copy_str(out->reason_name, sizeof(out->reason_name), sxcl_log_reason_name(reason, NULL));
+    copy_str(out->reason_advice, sizeof(out->reason_advice),
+             sxcl_log_reason_advice(reason, NULL));
+}
+
+/** 记一个失败原因,并**点名原因键**(界面据此显示可执行建议,而不是只有一句错误)。 */
+static void set_reason(sxcl_launch_result *out, sxcl_log_reason reason)
+{
+    if (out == NULL) {
+        return;
+    }
+    out->reason = reason;
+    fill_reason(out);
+}
+
 static void set_error(sxcl_launch_result *out, char *err, size_t err_len, const char *text)
 {
     /* 先落到本地缓冲:text 有可能就是 out->error 自己(调用点会把 error 再喂回来),
@@ -110,6 +137,14 @@ static void set_error(sxcl_launch_result *out, char *err, size_t err_len, const 
     }
 }
 
+/** 带原因键的失败出口(set_error + set_reason)。 */
+static void set_error_reason(sxcl_launch_result *out, char *err, size_t err_len, const char *text,
+                             sxcl_log_reason reason)
+{
+    set_error(out, err, err_len, text);
+    set_reason(out, reason);
+}
+
 /* ────────────────────────── 逐行回调 ────────────────────────── */
 
 typedef struct driver_line_ctx {
@@ -120,7 +155,12 @@ typedef struct driver_line_ctx {
 static int driver_on_line(void *userdata, int is_stderr, const char *line)
 {
     driver_line_ctx *lc = (driver_line_ctx *)userdata;
+    /* ① 落盘:每一行游戏输出都进我们自己的日志(模块 game;攒批写,不逐行 flush)。
+     *    这是"用户报障时我们手上得有一份"的唯一保证 —— stdout 在崩溃那一刻就断了。 */
+    sxcl_log_game_line(line);
+    /* ② 归类:类别与原因键都从这一路来(与从前完全一致) */
     (void)sxcl_log_summary_add(&lc->res->log, line);
+    /* ③ 原始行交给调用方(界面/CLI),既有的行为一个字都不改 */
     if (lc->req->on_line) {
         return lc->req->on_line(lc->req->userdata, is_stderr, line);
     }
@@ -157,6 +197,56 @@ static void no_java_message(sxcl_launch_result *out, int required)
                    required, required, root0[0] ? root0 : "(本平台标准位置)", (unsigned)n);
     copy_str(out->conclusion_text, sizeof(out->conclusion_text), out->error);
     out->conclusion = SXCL_LOG_CONCLUSION_JAVA;
+}
+
+
+/** 第 i 个参数**打码后**的文本(与 log_argv 同一份规则:
+ *  敏感开关的下一个参数一律替换成说明文字,不泄漏凭据/身份)。 */
+static const char *argv_masked_text(const char *const *av, size_t index)
+{
+    static const char kMasked[] = "***（已打码：凭据/身份不进日志）";
+    static const char *const kFlags[] = {"--accessToken", "--session", "--uuid", "--username",
+                                         "--xuid",        "--clientId", NULL};
+    size_t k = 0;
+    if (av == NULL || index == 0u) {
+        return (av != NULL && av[index] != NULL) ? av[index] : "";
+    }
+    for (k = 0; kFlags[k] != NULL; ++k) {
+        if (strcmp(av[index - 1u], kFlags[k]) == 0) {
+            return kMasked;
+        }
+    }
+    return av[index];
+}
+
+/** 把将要执行的命令行写进运行日志(**已打码**:凭据与身份都不进日志)。
+ *  为什么两个地方都要:dry-run 是"将要跑什么",真起进程是"实际跑了什么" ——
+ *  用户报障时我们手上必须有后者(界面/CLI 都不需要自己再拼一遍)。 */
+static void log_argv(const sxcl_launch_result *out, const sxcl_launch_args *args)
+{
+    static const char *const kMasked[] = {"--accessToken", "--session", "--uuid", "--username",
+                                          "--xuid",        "--clientId", NULL};
+    const char *const *av = sxcl_launch_argv(args);
+    int mask_next = 0;
+    size_t i = 0;
+    SXCL_LOG_I("launch", "argv: %s", (out != NULL && out->java_path[0] != '\0') ? out->java_path
+                                                                                : "(java 路径未知)");
+    for (i = 0; av != NULL && av[i] != NULL; ++i) {
+        const char *text = av[i];
+        if (mask_next) {
+            text = "***（已打码：凭据/身份不进日志）";
+            mask_next = 0;
+        } else {
+            size_t k = 0;
+            for (k = 0; kMasked[k] != NULL; ++k) {
+                if (strcmp(av[i], kMasked[k]) == 0) {
+                    mask_next = 1;
+                    break;
+                }
+            }
+        }
+        SXCL_LOG_I("launch", "  arg[%llu] %s", (unsigned long long)i, text);
+    }
 }
 
 /* ────────────────────────── 主流程 ────────────────────────── */
@@ -222,7 +312,7 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
         char msg[320];
         (void)snprintf(msg, sizeof(msg), "读不到版本 JSON:%s(%s)。这个版本可能没装好。", versions_dir,
                        read_err[0] ? read_err : errbuf);
-        set_error(out, err, err_len, msg);
+        set_error_reason(out, err, err_len, msg, SXCL_REASON_PATH_NOT_FOUND);
         goto done;
     }
     (void)leaf;
@@ -255,6 +345,7 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
             no_java_message(out, required);
             copy_str(msg, sizeof(msg), out->error);
             set_error(out, err, err_len, msg);
+            set_reason(out, SXCL_REASON_JAVA_NOT_FOUND);
             goto done;
         }
         java = found[order[0]];
@@ -289,14 +380,14 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
                        "打不开 options.txt:%s。渲染后端必须由启动器在启动前写进去,"
                        "写不了就不启动 —— 否则用户会以为设置生效了。",
                        options_path);
-        set_error(out, err, err_len, msg);
+        set_error_reason(out, err, err_len, msg, SXCL_REASON_FILE_PERMISSION);
         goto done;
     }
     if (sxcl_options_set(options, SXCL_LAUNCH_GRAPHICS_KEY, requested) != 0 ||
         sxcl_options_save(options, options_path) != 0) {
         char msg[256];
         (void)snprintf(msg, sizeof(msg), "写不了 options.txt:%s(权限?)。", options_path);
-        set_error(out, err, err_len, msg);
+        set_error_reason(out, err, err_len, msg, SXCL_REASON_FILE_PERMISSION);
         goto done;
     }
     sxcl_options_free(options);
@@ -310,14 +401,14 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
     if (sxcl_fs_mkdirs(natives) != 0) {
         char msg[256];
         (void)snprintf(msg, sizeof(msg), "建不了 natives 目录:%s(游戏会因为缺原生库直接崩)。", natives);
-        set_error(out, err, err_len, msg);
+        set_error_reason(out, err, err_len, msg, SXCL_REASON_NATIVES_EXTRACT_FAILED);
         goto done;
     }
     copy_str(out->natives_dir, sizeof(out->natives_dir), natives);
     if (sxcl_natives_prepare_json(doc, req->game_dir, natives, errbuf, sizeof(errbuf)) != 0) {
         char msg[256];
         (void)snprintf(msg, sizeof(msg), "准备原生库失败:%s", errbuf);
-        set_error(out, err, err_len, msg);
+        set_error_reason(out, err, err_len, msg, SXCL_REASON_NATIVES_EXTRACT_FAILED);
         goto done;
     }
     out->natives_count = sxcl_natives_last_count();
@@ -346,7 +437,7 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
     if (!args) {
         char msg[256];
         (void)snprintf(msg, sizeof(msg), "拼启动参数失败:%s", errbuf);
-        set_error(out, err, err_len, msg);
+        set_error_reason(out, err, err_len, msg, SXCL_REASON_CLASSPATH_BROKEN);
         goto done;
     }
 
@@ -354,26 +445,25 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
         (void)snprintf(out->conclusion_text, sizeof(out->conclusion_text),
                        "只准备不启动:Java 与参数都已就绪,options.txt 已写入 %s。", requested);
         /* dry-run + 有 on_line 回调时,把"将要执行的命令行"逐行报出去。
-         * **必须打码**:accessToken 是真凭据,不能进日志(下一个参数是它时替换成 ***)。 */
+         * **必须打码**:accessToken 是真凭据,用户名/UUID 是身份信息 —— 这两样都不进日志
+         * (下一个参数是它们时替换成 ***)。为什么把 --username/--uuid 也算进来:
+         * 这份命令行会写进我们的日志,而日志是会被"一键导出"发给别人的。 */
+        log_argv(out, args); /* 先落盘(打码),再交给调用方显示 */
         if (req->on_line != NULL) {
             char head[512];
             (void)snprintf(head, sizeof(head), "argv: %s", out->java_path);
             (void)req->on_line(req->userdata, 0, head);
             const char *const *av = sxcl_launch_argv(args);
-            int mask_next = 0;
             for (size_t i = 0; av != NULL && av[i] != NULL; ++i) {
-                const char *text = av[i];
-                if (mask_next) {
-                    text = "***（已打码：accessToken 不进日志）";
-                    mask_next = 0;
-                } else if (strcmp(av[i], "--accessToken") == 0) {
-                    mask_next = 1;
-                }
+                /* 回调拿到的是**同一份已打码**的文本(见 log_argv),
+                 * 所以命令行前端/界面显示出来的也不含明文凭据。 */
                 char line[1024];
-                (void)snprintf(line, sizeof(line), "  arg[%llu] %s", (unsigned long long)i, text);
+                (void)snprintf(line, sizeof(line), "  arg[%llu] %s", (unsigned long long)i,
+                               argv_masked_text(av, i));
                 (void)req->on_line(req->userdata, 0, line);
             }
         }
+        set_reason(out, SXCL_REASON_EXIT_OK); /* 只准备:没崩,给"正常"这条,而不是"未知" */
         rc = 0;
         goto done;
     }
@@ -394,10 +484,11 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
         popts.on_line = driver_on_line;
         popts.on_started = driver_on_started;
         popts.userdata = &lc;
+        log_argv(out, args); /* 实际跑的那一次也要留档(与 dry-run 那份内容一致,都是打码后的) */
         if (sxcl_process_run(&popts, &pr) != 0) {
             char msg[256];
             (void)snprintf(msg, sizeof(msg), "启动进程失败:%s", pr.error);
-            set_error(out, err, err_len, msg);
+            set_error_reason(out, err, err_len, msg, SXCL_REASON_JAVA_BROKEN);
             goto done;
         }
         out->started = 1;
@@ -410,12 +501,46 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
         out->elapsed_ms = pr.elapsed_ms;
     }
 
-    /* ── 7. 结论 ── */
+    /* ── 7. 结论:先把游戏输出的缓冲冲刷干净(stdout 断了之后那几行只能靠它)── */
+    (void)sxcl_log_game_flush();
     sxcl_log_summary_finish(&out->log);
     out->conclusion = out->log.conclusion;
     copy_str(out->conclusion_text, sizeof(out->conclusion_text), out->log.advice);
     /* 缺什么原样带出去(不做补全,只报告) */
     copy_str(out->missing, sizeof(out->missing), out->log.missing);
+
+    /* ── 7b. 崩溃取证:崩了才去读游戏**自己写的**那两份文件 ──
+     * 为什么必须有这一步:进程一崩 stdout 就断了,死因写在
+     *   <game>/crash-reports/*.txt(最近的一份非空报告)与 <game>/logs/latest.log 里。
+     * 读到的每一行都喂进**同一个** summary(与 stdout 同一套规则),读完再出一次结论。
+     * 超时/被用户结束不算崩溃:那种情况读出来的多半是无关的历史报告,反而误导。 */
+    if (out->started && !out->killed_by_client &&
+        (out->exit_code != 0 || out->conclusion == SXCL_LOG_CONCLUSION_CRASH ||
+         out->log.voted_crash)) {
+        char scan_err[SXCL_CRASH_ERROR_MAX];
+        const long long fed = sxcl_launch_scan_artifacts(req->game_dir, &out->log, &out->artifacts,
+                                                         SXCL_CRASH_SCAN_ALL, 0, scan_err,
+                                                         sizeof(scan_err));
+        out->artifacts_scanned = 1;
+        if (fed > 0) {
+            sxcl_log_summary_finish(&out->log); /* 重出结论:证据变多了 */
+            out->conclusion = out->log.conclusion;
+            copy_str(out->conclusion_text, sizeof(out->conclusion_text), out->log.advice);
+            copy_str(out->missing, sizeof(out->missing), out->log.missing);
+        }
+        copy_str(out->crash_report_path, sizeof(out->crash_report_path), out->artifacts.report_path);
+        out->crash_report_lines = out->artifacts.report_lines;
+        out->latest_log_lines = out->artifacts.latest_log_lines;
+        SXCL_LOG_I("crash",
+                   "崩溃取证:报告=%s(%s,%lld 行/共 %d 份) latest.log=%s(%s,%lld 行%s) 喂入 %lld 行",
+                   out->artifacts.report_path[0] ? out->artifacts.report_path : "(没有)",
+                   out->artifacts.report_path[0] ? out->artifacts.report_encoding : "-",
+                   out->artifacts.report_lines, out->artifacts.reports_total,
+                   out->artifacts.latest_log_path[0] ? out->artifacts.latest_log_path : "(没有)",
+                   out->artifacts.latest_log_path[0] ? out->artifacts.latest_log_encoding : "-",
+                   out->artifacts.latest_log_lines,
+                   out->artifacts.latest_log_truncated ? ",只读了尾部" : "", fed);
+    }
 
     if (out->log.voted_vulkan_fallback) {
         copy_str(out->actual_backend, sizeof(out->actual_backend), SXCL_LAUNCH_BACKEND_OPENGL);
@@ -445,6 +570,9 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
                        out->exit_code);
     }
 
+    /* 原因键的文案(短名/建议)最后统一填一次:上面所有分支都可能改过结论 */
+    fill_reason(out);
+
     /* 把"实际生效的后端"记回实例设置:下次进设置页能直接告诉用户上次跑的是什么 */
     if (settings && out->started) {
         if (sxcl_settings_instance_set(settings, instance, SXCL_LAUNCH_LAST_BACKEND_KEY,
@@ -462,5 +590,49 @@ done:
     if (rc != 0 && !(err != NULL && err_len > 0 && err[0] != '\0')) {
         set_error(out, err, err_len, out->error[0] ? out->error : "启动失败");
     }
+    fill_reason(out);
     return rc;
+}
+
+/* ────────────────────────── 崩溃取证入口(第 3c 节)────────────────────────── */
+
+typedef struct artifact_feed {
+    sxcl_log_summary *summary;
+} artifact_feed;
+
+/** 取证行 -> 日志汇总的适配器(回调签名不同:取证回调还带一个"从哪读来的"来源)。
+ *  永远返回 0:不因为某一行而中止取证(规则自己会挑最具体的那条)。 */
+static int artifact_line(void *userdata, int source, const char *line)
+{
+    artifact_feed *feed = (artifact_feed *)userdata;
+    (void)source;
+    if (feed != NULL && feed->summary != NULL) {
+        (void)sxcl_log_summary_add(feed->summary, line);
+    }
+    return 0;
+}
+
+long long sxcl_launch_scan_artifacts(const char *game_dir, sxcl_log_summary *summary,
+                                     sxcl_crash_evidence *facts, unsigned flags, size_t max_bytes,
+                                     char *err, size_t err_len)
+{
+    artifact_feed feed;
+    long long fed = 0;
+    if (err != NULL && err_len > 0u) {
+        err[0] = '\0';
+    }
+    if (game_dir == NULL || *game_dir == '\0') {
+        if (err != NULL && err_len > 0u) {
+            (void)snprintf(err, err_len, "崩溃取证:缺少游戏目录");
+        }
+        return -1;
+    }
+    /* 把每一行喂进**同一个** summary —— 与 stdout 走同一套规则、同一张原因表,
+     * 这样"从哪读到的"不会让结论分叉。 */
+    feed.summary = summary;
+    fed = sxcl_crash_scan(game_dir, flags, max_bytes, artifact_line, &feed, facts, err, err_len);
+    if (summary != NULL && fed > 0) {
+        sxcl_log_summary_finish(summary);
+    }
+    return fed;
 }

@@ -326,6 +326,170 @@ static void test_detect_android(void)
               "安卓诊断:out=NULL 返回 0(不炸)");
 }
 
+/* ══════════════ 5) JRE 侧共享库补齐(FCL RuntimeUtils.patchJava 语义) ══════════════ */
+
+#define JRE_FIX FIXTURE_ROOT "/jre_patch"
+/* nativeLibraryDir 夹具(必须用宏:变量和字符串字面量不能相邻拼接) */
+#define NLIB JRE_FIX "/nativelib"
+
+/* 写一份**内容可预测**的二进制(>64KB 的那条用来验证分块拷贝不是只拷第一块)。 */
+static void put_bytes(const char *path, size_t len, unsigned seed)
+{
+    size_t i = 0;
+    sxcl_fs_mkdirs_for_file(path);
+    FILE *fh = sxcl_fs_fopen(path, "wb");
+    if (fh == NULL) {
+        printf("  [!!] 夹具写不进去: %s\n", path);
+        ++g_fail;
+        return;
+    }
+    for (i = 0; i < len; ++i) {
+        (void)fputc((int)((i * 31u + seed) & 0xFFu), fh);
+    }
+    (void)fclose(fh);
+}
+
+static int same_bytes(const char *a, const char *b)
+{
+    int64_t sa = 0;
+    int64_t sb = 0;
+    if (sxcl_fs_stat(a, &sa, NULL) != 0 || sxcl_fs_stat(b, &sb, NULL) != 0 || sa != sb) {
+        return 0;
+    }
+    FILE *fa = sxcl_fs_fopen(a, "rb");
+    FILE *fb = sxcl_fs_fopen(b, "rb");
+    if (fa == NULL || fb == NULL) {
+        if (fa != NULL) { (void)fclose(fa); }
+        if (fb != NULL) { (void)fclose(fb); }
+        return 0;
+    }
+    int ok = 1;
+    for (;;) {
+        const int ca = fgetc(fa);
+        const int cb = fgetc(fb);
+        if (ca != cb) { ok = 0; break; }
+        if (ca == EOF) { break; }
+    }
+    (void)fclose(fa);
+    (void)fclose(fb);
+    return ok;
+}
+
+static void test_jre_patch(void)
+{
+    char err[256];
+    char lib_dir[SXCL_ANDROID_JRE_PATH_MAX];
+
+    /* 文件名与顺序是契约:JVM 就是按这两个**文件名**从 <jre>/lib dlopen 的 */
+    check_str(sxcl_android_jre_lib_name(0), "libawt_xawt.so", "JRE 库名:0 = libawt_xawt.so");
+    check_str(sxcl_android_jre_lib_name(1), "libjsound.so", "JRE 库名:1 = libjsound.so");
+    check(sxcl_android_jre_lib_name(-1) == NULL, "JRE 库名:负下标给 NULL(不越界)");
+    check(sxcl_android_jre_lib_name(SXCL_ANDROID_JRE_LIB_COUNT) == NULL, "JRE 库名:越界给 NULL");
+    check_str(sxcl_android_jre_patch_code_name(SXCL_ANDROID_JRE_ERR_NO_SOURCE), "no_source",
+              "JRE 结果码名:no_source");
+    check_str(sxcl_android_jre_patch_code_name(SXCL_ANDROID_JRE_OK), "ok", "JRE 结果码名:ok");
+
+    /* 夹具:nativeLibraryDir = APK 的 lib/<abi>/,里面两个真实文件 */
+    put_bytes(NLIB "/libawt_xawt.so", 10, 1);
+    put_bytes(NLIB "/libjsound.so", 150000, 2);
+
+    /* jre17/21/25 布局:<java_home>/lib */
+    (void)sxcl_fs_mkdirs(JRE_FIX "/jre17/lib");
+    put(JRE_FIX "/jre17/bin/java", "");
+    err[0] = '\0';
+    lib_dir[0] = '\0';
+    check_int(sxcl_android_jre_patch_libs(JRE_FIX "/jre17", NLIB, lib_dir, sizeof(lib_dir), err,
+                                          sizeof(err)),
+              SXCL_ANDROID_JRE_OK, "JRE 补齐:jre17 布局成功");
+    check_contains(lib_dir, "jre17/lib", "JRE 补齐:库目录 = <java_home>/lib");
+    check(sxcl_fs_exists(JRE_FIX "/jre17/lib/libawt_xawt.so"), "JRE 补齐:libawt_xawt.so 到位");
+    check(sxcl_fs_exists(JRE_FIX "/jre17/lib/libjsound.so"), "JRE 补齐:libjsound.so 到位");
+    check(same_bytes(NLIB "/libjsound.so", JRE_FIX "/jre17/lib/libjsound.so"),
+          "JRE 补齐:150KB 内容逐字节一致(分块拷贝完整)");
+
+    /* 幂等 + 覆盖:目标里先塞垃圾,必须被整个覆盖成源内容 */
+    put(JRE_FIX "/jre17/lib/libawt_xawt.so", "GARBAGE-GARBAGE-GARBAGE");
+    err[0] = '\0';
+    check_int(sxcl_android_jre_patch_libs(JRE_FIX "/jre17", NLIB, NULL, 0, err, sizeof(err)),
+              SXCL_ANDROID_JRE_OK, "JRE 补齐:重复调用也成功(幂等)");
+    check(same_bytes(NLIB "/libawt_xawt.so", JRE_FIX "/jre17/lib/libawt_xawt.so"),
+          "JRE 补齐:旧的同名文件被整个覆盖(不是追加)");
+
+    /* jre8 布局:<java_home>/jre/lib */
+    (void)sxcl_fs_mkdirs(JRE_FIX "/jre8/jre/lib");
+    err[0] = '\0';
+    check_int(sxcl_android_jre_patch_libs(JRE_FIX "/jre8", NLIB, lib_dir, sizeof(lib_dir), err,
+                                          sizeof(err)),
+              SXCL_ANDROID_JRE_OK, "JRE 补齐:jre8 布局成功");
+    check_contains(lib_dir, "jre8/jre/lib", "JRE 补齐:jre8 用 <java_home>/jre/lib");
+    check(sxcl_fs_exists(JRE_FIX "/jre8/jre/lib/libjsound.so"),
+          "JRE 补齐:jre8 的 libjsound.so 落到 jre/lib");
+
+    /* 两代目录同时在(怪胎/混合布局):优先 jre/lib —— FCL 的 isJDK8 分支就是这么分的 */
+    (void)sxcl_fs_mkdirs(JRE_FIX "/both/jre/lib");
+    (void)sxcl_fs_mkdirs(JRE_FIX "/both/lib");
+    err[0] = '\0';
+    lib_dir[0] = '\0';
+    check_int(sxcl_android_jre_patch_libs(JRE_FIX "/both", NLIB, lib_dir, sizeof(lib_dir), err,
+                                          sizeof(err)),
+              SXCL_ANDROID_JRE_OK, "JRE 补齐:两套目录都在也成功");
+    check_contains(lib_dir, "both/jre/lib", "JRE 补齐:两套都在时优先 jre/lib");
+
+    /* 源缺一个 = APK 打包坏了:硬失败,而且**一个字节都不许拷**(先全量体检再动手) */
+    (void)sxcl_fs_mkdirs(JRE_FIX "/empty_src");
+    (void)sxcl_fs_mkdirs(JRE_FIX "/jre_missing/lib");
+    err[0] = '\0';
+    check_int(sxcl_android_jre_patch_libs(JRE_FIX "/jre_missing", JRE_FIX "/empty_src", NULL, 0, err,
+                                          sizeof(err)),
+              SXCL_ANDROID_JRE_ERR_NO_SOURCE, "JRE 补齐:源不存在 = no_source(硬失败)");
+    check_contains(err, "libawt_xawt.so", "JRE 补齐:人话里点名缺的是哪个文件");
+    check_contains(err, "打包", "JRE 补齐:人话里说清是打包问题,不是运行时问题");
+    check(!sxcl_fs_exists(JRE_FIX "/jre_missing/lib/libjsound.so"),
+          "JRE 补齐:硬失败前不许留下半个拷贝");
+
+    /* 只少了第二个(libjsound.so):同样必须报错,不是"能拷几个算几个" */
+    put_bytes(JRE_FIX "/half_src/libawt_xawt.so", 10, 3);
+    err[0] = '\0';
+    check_int(sxcl_android_jre_patch_libs(JRE_FIX "/jre_missing", JRE_FIX "/half_src", NULL, 0, err,
+                                          sizeof(err)),
+              SXCL_ANDROID_JRE_ERR_NO_SOURCE, "JRE 补齐:少 libjsound.so 也是 no_source");
+    check_contains(err, "libjsound.so", "JRE 补齐:第二次点名的是 libjsound.so");
+
+    /* 没有库目录 = java_home 给错了 */
+    (void)sxcl_fs_mkdirs(JRE_FIX "/not_a_jre");
+    err[0] = '\0';
+    check_int(sxcl_android_jre_patch_libs(JRE_FIX "/not_a_jre", NLIB, NULL, 0, err, sizeof(err)),
+              SXCL_ANDROID_JRE_ERR_NO_LIB_DIR, "JRE 补齐:没有 lib 目录 = no_lib_dir");
+    check_contains(err, "java_home", "JRE 补齐:no_lib_dir 的人话提到 java_home");
+
+    /* 参数与边界:一律返回结果码,不崩 */
+    err[0] = '\0';
+    check_int(sxcl_android_jre_patch_libs(NULL, NLIB, NULL, 0, err, sizeof(err)),
+              SXCL_ANDROID_JRE_ERR_ARG, "JRE 补齐:java_home 空 = arg");
+    check_int(sxcl_android_jre_patch_libs(JRE_FIX "/jre17", "", NULL, 0, err, sizeof(err)),
+              SXCL_ANDROID_JRE_ERR_ARG, "JRE 补齐:native_lib_dir 空 = arg");
+    {
+        char huge[SXCL_ANDROID_JRE_PATH_MAX + 64];
+        (void)memset(huge, 'a', sizeof(huge) - 1);
+        huge[sizeof(huge) - 1] = '\0';
+        err[0] = '\0';
+        check_int(sxcl_android_jre_patch_libs(huge, NLIB, NULL, 0, err, sizeof(err)),
+                  SXCL_ANDROID_JRE_ERR_ARG, "JRE 补齐:路径过长 = arg");
+    }
+    check_int(sxcl_android_jre_patch_libs(JRE_FIX "/jre17", NLIB, NULL, 0, NULL, 0),
+              SXCL_ANDROID_JRE_OK, "JRE 补齐:err 可空(不崩)");
+    {
+        char tiny[4];
+        (void)memset(tiny, 'x', sizeof(tiny) - 1);
+        tiny[sizeof(tiny) - 1] = '\0';
+        check_int(sxcl_android_jre_patch_libs(JRE_FIX "/jre17", NLIB, tiny, sizeof(tiny), NULL, 0),
+                  SXCL_ANDROID_JRE_OK, "JRE 补齐:lib_dir_out 太小仍成功(只是不写)");
+        check(tiny[0] == '\0', "JRE 补齐:lib_dir_out 太小时清空(不截断半条路径)");
+        check(tiny[1] == 'x' && tiny[2] == 'x',
+              "JRE 补齐:lib_dir_out 太小时不越界写(后两个字节原样)");
+    }
+}
+
 int main(void)
 {
     build_fixture();
@@ -338,6 +502,8 @@ int main(void)
     test_roots();
     printf("[android] 4) 安卓自动扫描 + 诊断\n");
     test_detect_android();
+    printf("[android] 5) JRE 侧共享库补齐(patchJava 语义)\n");
+    test_jre_patch();
 
     printf("\n[android] 通过 %d,失败 %d\n", g_pass, g_fail);
     (void)sxcl_dir_remove_tree(FIXTURE_ROOT);

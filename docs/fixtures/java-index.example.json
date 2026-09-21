@@ -1,0 +1,146 @@
+{
+  "_comment": "SXCL/Java_index.json 的模板(既有 schema + 本轮新增的 platforms.android 扩展)。照这个填好、上传到 GitHub index 仓库的 SXCL/Java_index.json 与 SilentCloud 上的同名副本即可。字段含义、上传清单与信任口径见 docs/19-安卓JRE分发与自举.md。",
+  "_notes": [
+    "本文件里的 size/sha256/sha1 全是占位示例(全 0 / 全 a),不能直接用;真值由 tools/jre_pack.py 产出。",
+    "sha256 默认写【字面哈希】(64 位十六进制) —— 这是信任锚。写成 .sha256 侧车文件的 URL 也支持(备用形态),但推荐字面哈希。",
+    "size 必填,单位是字节;size_mb 只是给人看的,不能拿来当 size 用。",
+    "version 是【要不要重装】的唯一判据:盘上 jre.json 里的 version 与它一致就整个跳过,不联网、不算哈希。",
+    "url 用绝对地址(指向 SilentCloud);mirrors 指向另一处落位(GitHub / gh-proxy),下载失败会自动换它。",
+    "extra_files[] 是本轮新增的:同一个 ABI 还要额外解一份时用(我们按 FCL 的目录思路拆成 universal + bin-<abi>)。",
+    "windows / macos / linux 那几档与既有格式完全一样,原样保留即可;安卓这一档是新增的。"
+  ],
+  "schema_version": 1,
+  "description": "JDK 下载索引 — 用于 Silent X Craft Launcher 自动安装 Java",
+  "update_url": "https://raw.githubusercontent.com/Silent-Studio-CN/index/main/SXCL/Java_index.json",
+  "mirror_url": "https://gh-proxy.com/https://raw.githubusercontent.com/Silent-Studio-CN/index/main/SXCL/Java_index.json",
+  "versions": {
+    "8": {
+      "name": "JDK 8",
+      "recommended": false,
+      "platforms": {
+        "android": {
+          "arm64": {
+            "format": "tar.xz",
+            "version": "8u442-b06-sxcl.1",
+            "size": 0,
+            "size_mb": 0.0,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "url": "https://cloud.silentstudio.cn/api/v1/<owner>/JDK/Java/JRE/Android/jre8/universal.tar.xz",
+            "mirrors": [
+              "https://raw.githubusercontent.com/Silent-Studio-CN/index/main/jre/jre8/universal.tar.xz"
+            ],
+            "extra_files": [
+              {
+                "name": "bin-arm64.tar.xz",
+                "size": 0,
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "url": "https://cloud.silentstudio.cn/api/v1/<owner>/JDK/Java/JRE/Android/jre8/bin-arm64.tar.xz",
+                "mirrors": [
+                  "https://raw.githubusercontent.com/Silent-Studio-CN/index/main/jre/jre8/bin-arm64.tar.xz"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "17": {
+      "name": "JDK 17 (LTS)",
+      "recommended": true,
+      "platforms": {
+        "android": {
+          "arm64": {
+            "format": "tar.xz",
+            "version": "17.0.9+11-sxcl.1",
+            "size": 0,
+            "size_mb": 0.0,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "url": "https://cloud.silentstudio.cn/api/v1/<owner>/JDK/Java/JRE/Android/jre17/universal.tar.xz",
+            "mirrors": [
+              "https://raw.githubusercontent.com/Silent-Studio-CN/index/main/jre/jre17/universal.tar.xz"
+            ],
+            "extra_files": [
+              {
+                "name": "bin-arm64.tar.xz",
+                "size": 0,
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "url": "https://cloud.silentstudio.cn/api/v1/<owner>/JDK/Java/JRE/Android/jre17/bin-arm64.tar.xz",
+                "mirrors": [
+                  "https://raw.githubusercontent.com/Silent-Studio-CN/index/main/jre/jre17/bin-arm64.tar.xz"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "21": {
+      "name": "JDK 21 (LTS)",
+      "recommended": true,
+      "platforms": {
+        "android": {
+          "arm64": {
+            "format": "tar.xz",
+            "version": "21.0.8+9-sxcl.1",
+            "size": 0,
+            "size_mb": 0.0,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "url": "https://cloud.silentstudio.cn/api/v1/<owner>/JDK/Java/JRE/Android/jre21/universal.tar.xz",
+            "mirrors": [
+              "https://raw.githubusercontent.com/Silent-Studio-CN/index/main/jre/jre21/universal.tar.xz"
+            ],
+            "extra_files": [
+              {
+                "name": "bin-arm64.tar.xz",
+                "size": 0,
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "url": "https://cloud.silentstudio.cn/api/v1/<owner>/JDK/Java/JRE/Android/jre21/bin-arm64.tar.xz",
+                "mirrors": [
+                  "https://raw.githubusercontent.com/Silent-Studio-CN/index/main/jre/jre21/bin-arm64.tar.xz"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "25": {
+      "name": "JDK 25",
+      "recommended": false,
+      "platforms": {
+        "android": {
+          "arm64": {
+            "format": "tar.xz",
+            "version": "25.0.5+8-sxcl.1",
+            "size": 0,
+            "size_mb": 0.0,
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "url": "https://cloud.silentstudio.cn/api/v1/<owner>/JDK/Java/JRE/Android/jre25/universal.tar.xz",
+            "mirrors": [
+              "https://raw.githubusercontent.com/Silent-Studio-CN/index/main/jre/jre25/universal.tar.xz"
+            ],
+            "extra_files": [
+              {
+                "name": "bin-arm64.tar.xz",
+                "size": 0,
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "url": "https://cloud.silentstudio.cn/api/v1/<owner>/JDK/Java/JRE/Android/jre25/bin-arm64.tar.xz",
+                "mirrors": [
+                  "https://raw.githubusercontent.com/Silent-Studio-CN/index/main/jre/jre25/bin-arm64.tar.xz"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

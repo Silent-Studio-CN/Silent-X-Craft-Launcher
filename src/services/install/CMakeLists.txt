@@ -4,6 +4,11 @@
 
 target_sources(sxcl PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/install.c
+  # 自托管 JRE:远端 index.json + .tar.xz 包 -> 解包 -> 我们自己的 jre.json(见 docs/19)
+  ${CMAKE_CURRENT_SOURCE_DIR}/jre_hosted.c
+  # 进程内起 JVM(dlopen libjli.so + JLI_Launch;安卓上 exec 被 SELinux 挡住,只能这条路)。
+  # 按上面 java_runtime.c 的同一个理由放在本目录:src/services/launch 还没有自己的 CMakeLists。
+  ${CMAKE_CURRENT_SOURCE_DIR}/../launch/jvm.c
   # 官方 Java 运行时(JRE)安装:逻辑上属于 src/services/java/**,为了不依赖"往根 CMakeLists
   # 加一句 add_subdirectory"先放这里(与 modloader 目录里放 keymap* 同一个理由);
   # 等 src/services/java/CMakeLists.txt 建好,把这一行与 java_runtime.c 一起搬过去即可。
@@ -63,4 +68,24 @@ if(SXCL_BUILD_TESTS)
   add_test(NAME sxcl_java_finder_test
            COMMAND sxcl_java_finder_test "$<TARGET_FILE:sxcl_fake_java>")
   set_tests_properties(sxcl_java_finder_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+  # 自托管 JRE 链路:**不联网**(index.json 在用例里现拼 + 内存假传输)。
+  # 夹具是签入仓库的三个真 .tar.xz(tests/fixtures/jre/*),用例自己算 size/sha256 拼 index,
+  # 覆盖:正常安装 / ABI 过滤 / version 判据跳过 / 重装 / schema 与字段校验 / SHA-256 不符 /
+  # 取消 / 进度回调(阶段+百分比+速度+剩余)/ jre.json 内容。
+  add_executable(sxcl_jre_hosted_test ${CMAKE_SOURCE_DIR}/tests/jre_hosted_test.c)
+  target_link_libraries(sxcl_jre_hosted_test PRIVATE sxcl)
+  sxcl_warnings(sxcl_jre_hosted_test)
+  add_test(NAME sxcl_jre_hosted_test COMMAND sxcl_jre_hosted_test)
+  set_tests_properties(sxcl_jre_hosted_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    ENVIRONMENT "SXCL_JRE_FIXTURES=${CMAKE_SOURCE_DIR}/tests/fixtures/jre")
+
+  # 进程内起 JVM:环境变量/argv 的**纯函数**单测(不起进程、不联网)。真 JRE 在盘上时
+  # 额外做一次 dlopen 探针(没有就跳过)。
+  add_executable(sxcl_jvm_test ${CMAKE_SOURCE_DIR}/tests/jvm_test.c)
+  target_link_libraries(sxcl_jvm_test PRIVATE sxcl)
+  sxcl_warnings(sxcl_jvm_test)
+  add_test(NAME sxcl_jvm_test COMMAND sxcl_jvm_test)
+  set_tests_properties(sxcl_jvm_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endif()

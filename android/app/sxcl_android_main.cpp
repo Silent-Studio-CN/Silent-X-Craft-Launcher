@@ -549,6 +549,109 @@ void sxclAndroidTouchSetup() {
 // runs right after QApplication is constructed, i.e. from inside main.cpp's
 // "QApplication app(argc, argv);" line - before the window exists
 Q_COREAPP_STARTUP_FUNCTION(sxclAndroidTouchSetup)
+
+// ═════════ 游戏独立进程(用户 2026-09-21 拍板的 B 方案)═════════════════════════
+// 摆法:**游戏 Activity 声明在 android:process=":game" 里,游戏自己一个窗口;
+//            启动器用画中画保持可见。**
+//
+// 这里的顺序是关键,不能反:
+//   1) 先在**主进程**里把会话建起来(GameHost:本地 socket 先监听、会话目录先建好)
+//      —— 游戏进程出生时监听必须已经在那儿,否则它连不上;
+//   2) 再让启动器进画中画(**复用已有的 enterFloating()**,与最大化键同一条路):
+//      这一步必须发生在启动器还是前台的时候,活动一旦不是前台,
+//      enterPictureInPictureMode() 就不生效;
+//   3) 画中画进去之后,由 SxclActivity.onPictureInPictureModeChanged 回调
+//      -> GameHost.onPipChanged -> 才真的 startActivity(GameActivity, 独立 task)。
+// 画中画 3 次检查都没进去时,GameHost 自己的兜底(8s)也会把游戏起起来,并如实记一行
+// "画中画没生效" —— 绝不静默什么都不发生。
+//
+// 本轮范围:只打通架构(两个进程 / 通道 / 画中画共存 / 结束游戏)。boot 文件里有
+// gamestart= 才跑;JRE 由 --es gamejre 显式给(等用户上传的包),代码里没有写死路径。
+namespace {
+
+constexpr const char *kAndroidSxclActivity = "com/silentstudio/sxcl/SxclActivity";
+
+struct GameLaunchRequest {
+    bool requested = false;
+    QString jre;    /* gamejre=<jre home>;空 = 本轮"只验架构"模式 */
+    QString main;   /* gamemain=<主类> */
+    QString args;   /* gameargs=<JVM 参数,空格分隔> */
+    QString crash;  /* gamecrash=abort|term|kill(验收用的崩溃注入) */
+    int delayMs = 5000;
+    int stopAfterMs = 0; /* gamestop=<ms>:起游戏后主进程发"结束游戏"命令(0 = 不发) */
+};
+
+GameLaunchRequest g_gameLaunch;
+
+/* 主进程发"结束游戏"命令 -> 游戏进程有序收尾(flush + 退出记录)-> 主进程确认它消失。
+ * 与界面上的"结束游戏"按钮将来走的是同一条路(GameHost.endGame -> 通道上的 END)。 */
+void sxclAndroidGameStop(const char *why) {
+    const bool ok = QJniObject::callStaticMethod<jboolean>(kAndroidSxclActivity, "endGameSession",
+                                                           "()Z");
+    SXCL_LOGI("game: 结束游戏命令(%s)endGameSession=%d", why, int(ok));
+    SXCL_LOG_I("startup", "游戏独立进程:结束游戏命令(%s)已发出 endGameSession=%d", why, int(ok));
+    /* 收尾是异步的(游戏进程要 flush + 写退出记录),1.5s 后打一行状态当证据 */
+    QTimer::singleShot(1500, qApp, []() {
+        const QJniObject st = QJniObject::callStaticObjectMethod(kAndroidSxclActivity,
+                                                                "gameSessionState",
+                                                                "()Ljava/lang/String;");
+        SXCL_LOGI("game: 结束后的会话状态 %s",
+                  st.isValid() ? st.toString().toUtf8().constData() : "(null)");
+    });
+}
+
+void sxclAndroidGameStartNow() {
+    const QJniObject jre = QJniObject::fromString(g_gameLaunch.jre);
+    const QJniObject main = QJniObject::fromString(g_gameLaunch.main);
+    const QJniObject args = QJniObject::fromString(g_gameLaunch.args);
+    const QJniObject crash = QJniObject::fromString(g_gameLaunch.crash);
+
+    SXCL_LOGI("game: 起游戏请求 jre=%s main=%s crash=%s(空 jre = 本轮只验架构)",
+              g_gameLaunch.jre.toUtf8().constData(),
+              g_gameLaunch.main.toUtf8().constData(),
+              g_gameLaunch.crash.toUtf8().constData());
+    const QJniObject status = QJniObject::callStaticObjectMethod(
+        kAndroidSxclActivity, "startGameSession",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)"
+        "Ljava/lang/String;",
+        jre.object<jstring>(), main.object<jstring>(), args.object<jstring>(),
+        crash.object<jstring>());
+    const QString line = status.isValid() ? status.toString() : QStringLiteral("(null)");
+    SXCL_LOGI("game: 会话 -> %s", line.toUtf8().constData());
+    SXCL_LOG_I("startup", "游戏独立进程:会话=%s jre=%s", line.toUtf8().constData(),
+               g_gameLaunch.jre.isEmpty() ? "(未配置,只验架构)" : g_gameLaunch.jre.toUtf8().constData());
+
+    /* ② 画中画**不在这里进**:Android 14+ 里"画中画(pinned)的活动发起新活动"会被判成
+     * 后台启动(BAL_BLOCK,result code=102,真机原文见 docs/19 §2.1),所以顺序必须是
+     * "启动器还在前台时先把游戏起来"。画中画由**游戏**(前台的一侧)在窗口就绪后发起:
+     * 它在通道上问 PIP?,主进程回答 need=1(启动器此刻不在画中画里)-> 游戏把启动器拉回
+     * 前台 -> 启动器 onResume 里 enterFloating()(**仍然是复用已有实现**)。
+     * 这里只留取证:确认会话与启动动作都发出去了。 */
+    SXCL_LOGI("game: 画中画由游戏进程就绪后经通道请求(见 docs/19 §2.2),这里不再自己进画中画");
+    SXCL_LOG_I("startup", "游戏独立进程:已起会话与游戏;画中画等运行器的 PIP? 请求");
+}
+
+void sxclAndroidGamePipRetry(int attempt); /* 保留声明:画中画重试现在由 Java 侧负责 */
+
+// runs right after QApplication is constructed (so qApp exists), only when the
+// boot file asked for it: am start ... --es gamestart 1
+void sxclAndroidGameAutostart() {
+    if (!g_gameLaunch.requested)
+        return;
+    const int delay = g_gameLaunch.delayMs > 0 ? g_gameLaunch.delayMs : 5000;
+    SXCL_LOGI("game: 收到 gamestart=%d,将在 %dms 后起游戏(等 Qt 窗口真的可见)",
+              g_gameLaunch.delayMs, delay);
+    QTimer::singleShot(delay, qApp, []() { sxclAndroidGameStartNow(); });
+    if (g_gameLaunch.stopAfterMs > 0) {
+        SXCL_LOGI("game: gamestop=%dms -> 到点由主进程发结束游戏命令", g_gameLaunch.stopAfterMs);
+        QTimer::singleShot(delay + g_gameLaunch.stopAfterMs, qApp,
+                           []() { sxclAndroidGameStop("boot-gamestop"); });
+    }
+}
+
+} // namespace
+
+Q_COREAPP_STARTUP_FUNCTION(sxclAndroidGameAutostart)
 #endif // __ANDROID__
 // ---- the real desktop entry, renamed so we can wrap it ---------------------
 #define main sxcl_ui_desktop_main
@@ -586,6 +689,17 @@ struct Boot {
     QString tallmenu;
     QString passthrough;
     QString animtrace;
+    QString jreprobe;   /* 非空 = 跑进程内 JVM 自举探针(--es jreprobe <jre home>) */
+    QString nativelib;  /* 探针要的 nativeLibraryDir(Java 侧填) */
+    /* 游戏独立进程(--es gamestart 1 ...):本轮只把"两个进程 + 通道 + 画中画共存 +
+     * 结束游戏"打通,JRE 由 gamejre 显式给(等用户上传的包,代码里没有任何写死路径) */
+    QString gamestart;
+    QString gamejre;
+    QString gamemain;
+    QString gameargs;
+    QString gamecrash;
+    QString gamedelay;
+    QString gamestop;   /* >0 = 起游戏后这么多毫秒由主进程发"结束游戏"(验收用) */
     QString dump;
     QString shotdelay;
     bool shot = false;
@@ -617,6 +731,15 @@ Boot readBootFile(const QString &filesDir) {
         else if (k == QLatin1String("tallmenu"))  b.tallmenu = v;
         else if (k == QLatin1String("passthrough")) b.passthrough = v;
         else if (k == QLatin1String("animgtrace")) b.animtrace = v;
+        else if (k == QLatin1String("jreprobe"))  b.jreprobe = v;
+        else if (k == QLatin1String("nativelib")) b.nativelib = v;
+        else if (k == QLatin1String("gamestart")) b.gamestart = v;
+        else if (k == QLatin1String("gamejre"))   b.gamejre = v;
+        else if (k == QLatin1String("gamemain"))  b.gamemain = v;
+        else if (k == QLatin1String("gameargs"))  b.gameargs = v;
+        else if (k == QLatin1String("gamecrash")) b.gamecrash = v;
+        else if (k == QLatin1String("gamedelay")) b.gamedelay = v;
+        else if (k == QLatin1String("gamestop"))  b.gamestop = v;
         else if (k == QLatin1String("dump"))       b.dump = v;
         else if (k == QLatin1String("shotdelay"))  b.shotdelay = v;
         else if (k == QLatin1String("shot"))      b.shot = (v == QLatin1String("1"));
@@ -639,6 +762,12 @@ Boot readBootFile(const QString &filesDir) {
 // so a device can be checked without touching the UI) and in the settings page.
 // ASCII-only source: the Chinese reason strings come from the core library.
 #ifdef __ANDROID__
+// 进程内 JVM 自举探针(我们自己写的;实现见 android/app/sxcl_jre_probe.c):
+//   dlopen("<jre>/lib/libjli.so") -> dlsym("JLI_Launch") -> 调用。
+// 为什么非要进程内:应用域 exec 私有目录里的文件被 SELinux 拒(docs/18 §4.2)。
+extern "C" int sxcl_android_jre_bootstrap_probe(const char *java_home, const char *native_lib_dir,
+                                                const char *report_path);
+
 void sxclAndroidProbeLog(const QString &filesDir) {
     const QByteArray files = filesDir.toUtf8();
     char err[256];
@@ -763,6 +892,49 @@ int main(int argc, char **argv) {
         // evidence: log every Java / game-directory candidate and WHY it was
         // (or was not) accepted -- answers "why does it not detect my Java"
         sxclAndroidProbeLog(filesDir);
+
+        // 进程内 JVM 自举探针:只有显式要求时才跑(am start ... --es jreprobe <jre home>)。
+        // 这是"安卓能不能起 JVM"的最终验证:exec 在应用域被 SELinux 拒,剩下唯一一条路就是
+        // dlopen(libjli.so) + JLI_Launch。探针自带崩溃兜底(信号 -> 日志 + 退出码)。
+        if (!boot.jreprobe.isEmpty()) {
+            const QString probeReport = filesDir + QStringLiteral("/jre_probe.txt");
+            SXCL_LOGI("jre-probe: requested jre=%s nativeLib=%s report=%s",
+                      boot.jreprobe.toUtf8().constData(), boot.nativelib.toUtf8().constData(),
+                      probeReport.toUtf8().constData());
+            const int probeRc = sxcl_android_jre_bootstrap_probe(
+                boot.jreprobe.toUtf8().constData(), boot.nativelib.toUtf8().constData(),
+                probeReport.toUtf8().constData());
+            SXCL_LOGI("jre-probe: returned rc=%d (启动器继续跑 UI)", probeRc);
+        }
+
+#ifdef __ANDROID__
+        // 游戏独立进程(boot 文件里的 gamestart=):只有显式要求才安排,与 jreprobe 同一纪律。
+        // 真正的时间线在 sxclAndroidGameAutostart() 里(qApp 起来之后):
+        // 建会话 -> 启动器进画中画 -> 画中画回调里才拉 GameActivity(独立 task、:game 进程)。
+        if (!boot.gamestart.isEmpty() && boot.gamestart != QLatin1String("0")) {
+            g_gameLaunch.requested = true;
+            g_gameLaunch.jre = boot.gamejre;
+            g_gameLaunch.main = boot.gamemain;
+            g_gameLaunch.args = boot.gameargs;
+            g_gameLaunch.crash = boot.gamecrash;
+            bool okDelay = false;
+            const int delay = boot.gamedelay.toInt(&okDelay);
+            if (okDelay && delay > 0)
+                g_gameLaunch.delayMs = delay;
+            bool okStop = false;
+            const int stopAfter = boot.gamestop.toInt(&okStop);
+            if (okStop && stopAfter > 0)
+                g_gameLaunch.stopAfterMs = stopAfter;
+            SXCL_LOGI("game: gamestart=%s jre=%s nativeLib=%s delay=%dms", 
+                      boot.gamestart.toUtf8().constData(),
+                      boot.gamejre.isEmpty() ? "(未配置,只验架构)" : boot.gamejre.toUtf8().constData(),
+                      boot.nativelib.toUtf8().constData(), g_gameLaunch.delayMs);
+            SXCL_LOG_I("startup", "游戏独立进程:收到 gamestart=%s jre=%s delay=%dms",
+                       boot.gamestart.toUtf8().constData(),
+                       boot.gamejre.isEmpty() ? "(未配置,只验架构)" : boot.gamejre.toUtf8().constData(),
+                       g_gameLaunch.delayMs);
+        }
+#endif
 
         if (!boot.accent.isEmpty())
             qputenv("SXCL_UI_ACCENT", boot.accent.toUtf8());

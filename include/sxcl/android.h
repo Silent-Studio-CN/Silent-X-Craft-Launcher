@@ -85,7 +85,8 @@ const char *sxcl_android_jre_patch_code_name(int code);
  *
  *  @param java_home      已装的 JRE 根(bin/java 的上一级)
  *  @param native_lib_dir 打包层给的 ApplicationInfo.nativeLibraryDir(真实文件,不是指向 APK 的符号链接)
- *  @param lib_dir_out    可空;写实际用的库目录(jre8 是 <java_home>/jre/lib,其余是 <java_home>/lib)
+ *  @param lib_dir_out    可空;写实际用的库目录(jre8 是 <java_home>/jre/lib,其余是 <java_home>/lib)。
+ *                        装不下时只写空串(**不**截断出半条路径),返回码不受影响
  *  @param lib_dir_len    lib_dir_out 的容量
  *  @param err            可空;失败时写人话原因
  *  @return SXCL_ANDROID_JRE_OK 或 SXCL_ANDROID_JRE_ERR_*

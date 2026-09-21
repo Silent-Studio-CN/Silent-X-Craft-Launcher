@@ -8,6 +8,7 @@
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif
 
+#include "sxcl/android.h"   /* sxcl_android_jre_patch_libs:装完 JRE 补 libawt_xawt/libjsound */
 #include "sxcl/java_runtime.h"
 
 #include "sxcl/fs.h"
@@ -495,6 +496,27 @@ static int fetch_text(const sxcl_java_runtime_query *query, const char *url, con
     return SXCL_JAVA_RUNTIME_ERR_NET;
 }
 
+int sxcl_java_runtime_resolve_all_url(const char *explicit_url, const char *env_value, char *out,
+                                      size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return SXCL_JAVA_RUNTIME_ERR_ARG;
+    }
+    out[0] = '\0';
+    const char *chosen = SXCL_JAVA_RUNTIME_MANIFEST_URL;
+    if (explicit_url != NULL && *explicit_url != '\0') {
+        chosen = explicit_url;
+    } else if (env_value != NULL && *env_value != '\0') {
+        chosen = env_value;
+    }
+    const size_t n = strlen(chosen);
+    if (n + 1 > out_len) {
+        return SXCL_JAVA_RUNTIME_ERR_ARG; /* 装不下就报错,绝不截断出半条 URL */
+    }
+    (void)memcpy(out, chosen, n + 1);
+    return SXCL_JAVA_RUNTIME_OK;
+}
+
 sxcl_json *sxcl_java_runtime_fetch_all(const sxcl_java_runtime_query *query, char *err, size_t err_len)
 {
     if (!query) {
@@ -511,8 +533,16 @@ sxcl_json *sxcl_java_runtime_fetch_all(const sxcl_java_runtime_query *query, cha
         }
         return doc;
     }
-    const char *url = (query->all_json_url && *query->all_json_url) ? query->all_json_url
-                                                                    : SXCL_JAVA_RUNTIME_MANIFEST_URL;
+    /* 来源三级:显式入参 > 环境变量 > 编译期默认(见 sxcl_java_runtime_resolve_all_url)。
+     * 我们自己的托管只给 URL 就能换,不用重编 —— 安卓 arm64 的 JRE 只有自有托管这一条路。 */
+    char url_buf[SXCL_JAVA_RUNTIME_URL_MAX];
+    if (sxcl_java_runtime_resolve_all_url(query->all_json_url,
+                                          env_utf8("SXCL_JAVA_RUNTIME_MANIFEST_URL"), url_buf,
+                                          sizeof(url_buf)) != SXCL_JAVA_RUNTIME_OK) {
+        set_text(err, err_len, "JRE 清单来源 URL 太长(显式入参 / SXCL_JAVA_RUNTIME_MANIFEST_URL)");
+        return NULL;
+    }
+    const char *url = url_buf;
     char *text = NULL;
     size_t len = 0;
     if (fetch_text(query, url, NULL, 1, 0, &text, &len, NULL, err, err_len) !=
@@ -1430,6 +1460,27 @@ static int install_internal(const sxcl_java_runtime_request *request, sxcl_java_
                  out->java_path);
         goto cleanup;
     }
+    /* JRE 侧两个共享库(FCL RuntimeUtils.patchJava 语义):只有在打包层通过
+     * SXCL_ANDROID_NATIVE_LIB_DIR 把 nativeLibraryDir 传进来时才做 —— 桌面不设这个变量,
+     * 一个字节都不动。必须放在写标记文件**之前**:补不进去 = JVM 一定起不来,不能让一份
+     * "看起来装好了"的运行时留在盘上。 */
+    {
+        const char *native_lib_dir = env_utf8("SXCL_ANDROID_NATIVE_LIB_DIR");
+        if (native_lib_dir != NULL && *native_lib_dir != '\0') {
+            char patch_err[SXCL_JAVA_RUNTIME_ERROR_MAX];
+            char patch_lib_dir[SXCL_ANDROID_JRE_PATH_MAX];
+            patch_err[0] = '\0';
+            patch_lib_dir[0] = '\0';
+            if (sxcl_android_jre_patch_libs(out->java_home, native_lib_dir, patch_lib_dir,
+                                           sizeof(patch_lib_dir), patch_err,
+                                           sizeof(patch_err)) != SXCL_ANDROID_JRE_OK) {
+                rc = SXCL_JAVA_RUNTIME_ERR_FINISH;
+                snprintf(out->error, sizeof(out->error), "JRE 侧共享库补不进去: %s", patch_err);
+                goto cleanup;
+            }
+        }
+    }
+
     if (write_marker(target, entry.component, platform, entry.version, out->manifest_source,
                      out->marker_path, sizeof(out->marker_path)) != 0) {
         /* 标记文件写不了不算安装失败(不影响使用);Python 也只是 pass */

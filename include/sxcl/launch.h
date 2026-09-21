@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 
+#include "sxcl/crash.h" /* 崩溃取证:退出后读 crash-report/latest.log(sxcl_launch_result 里有它) */
 #include "sxcl/json.h"
 
 #ifdef __cplusplus
@@ -209,15 +210,36 @@ typedef enum sxcl_java_run_verdict {
     SXCL_JAVA_RUN_EXEC_FAILED,    /**< 进程起不来(退出码 127 且无输出)/ 超时 */
     SXCL_JAVA_RUN_NOT_A_JRE,      /**< 能执行,但输出里认不出 Java 版本 */
     SXCL_JAVA_RUN_ARCH_MISMATCH,  /**< 可执行文件的机器码与本机不符 */
+    SXCL_JAVA_RUN_APP_DATA_EXEC_DENIED, /**< 安卓 W^X:文件在应用私有目录里且可读可执行,
+                                         *   但 SELinux 拒 `execute_no_trans`(execve),
+                                         *   起不了进程 —— 只能进程内 dlopen 起 JVM */
     SXCL_JAVA_RUN_COUNT           /**< 枚举计数(不是结论) */
 } sxcl_java_run_verdict;
 
-/** 结论的中文短名("可用"/"不在"/"沙箱拒绝"/"共享存储不能执行"/"没有执行位"/"跑不起来"/"不是 Java"/"架构不符")。 */
+/** 结论的中文短名("可用"/"不在"/"沙箱拒绝"/"共享存储不能执行"/"没有执行位"/"跑不起来"/"不是 Java"/"架构不符"/"私有目录不能执行")。 */
 const char *sxcl_java_run_verdict_name(sxcl_java_run_verdict verdict);
 /** 结论的稳定英文键("ok"/"missing"/"denied"/"noexec"/"not_executable"/"exec_failed"/"not_a_jre"/"arch_mismatch")。 */
 const char *sxcl_java_run_verdict_key(sxcl_java_run_verdict verdict);
 /** 一条人话建议(为什么 + 下一步)。永远返回非空串。 */
 const char *sxcl_java_run_verdict_hint(sxcl_java_run_verdict verdict);
+
+/** "进程起不来 + 一行输出都没有"(退出码 127)时的**失败文案** —— 纯函数,便于单测钉住分支。
+ *
+ *  @param exit_code        子进程退出码(实测是 127)
+ *  @param is_android       平台是不是安卓(1 = 是)
+ *  @param looks_executable 只读体检结论:文件存在、可读、有执行位、且不在 noexec 挂载上(1 = 是)
+ *  @param out/out_len      输出缓冲
+ *  @return 写入的字节数(不含结尾 0);入参不合法返回 -1
+ *
+ *  is_android && looks_executable 时给**安卓专有**那条:文件本身没问题,是 SELinux 的
+ *  W^X 规则拒绝 execve 应用私有目录里的文件(`execute_no_trans`,`permissive=0`)。
+ *  设备实测的审计原文会长这样(进程树里 app= 是我们的包名):
+ *    avc: denied { execute_no_trans } for path="/data/data/com.silentstudio.sxcl/.../bin/java"
+ *         scontext=u:r:untrusted_app:s0:... tcontext=u:object_r:app_data_file:s0:...
+ *         tclass=file permissive=0 app=com.silentstudio.sxcl
+ *  结论:JVM 只能在**进程内** dlopen(libjli.so) + JLI_Launch 起来,不能 fork+exec。 */
+int sxcl_java_exec_failure_text(int exit_code, int is_android, int looks_executable, char *out,
+                                size_t out_len);
 
 /** 一个候选 Java 的实测结果。 */
 typedef struct sxcl_java_installation {
@@ -346,6 +368,96 @@ size_t sxcl_launch_expand(const char *text, const sxcl_launch_ctx *ctx, char *ou
 
 /* ══════════════════════════ 3. 日志归类 ══════════════════════════ */
 
+/* ── 原因键:比"类别"更具体的一层,每个键都对应一条**可执行**的建议 ──
+ *
+ * 为什么要有它(用户反馈与实测):只说"图形栈出问题"用户没法照着做 ——
+ * 是驱动太旧?是选了 Vulkan 但设备不支持?是 Intel 核显的 OpenGL 版本不够?
+ * 所以这里把结论细到"原因键"(稳定英文键,给 UI/统计/工单用),
+ * 文案(短名 + 建议)放在同目录的 reason_lang.inc,中英各一份,与 lang_table.inc 同一套写法。
+ *
+ * 覆盖面参考 PCL(48 项)与 HMCL(约 60 条正则)的经验,文案全部自己写。 */
+typedef enum sxcl_log_reason {
+    SXCL_REASON_UNKNOWN = 0,           /**< "unknown":还没有可判断的线索 */
+    SXCL_REASON_EXIT_OK,               /**< "exit_ok":正常退出 */
+    SXCL_REASON_KILLED_BY_USER,        /**< "killed_by_user":用户/启动器主动结束 */
+    SXCL_REASON_TIMED_OUT,             /**< "timed_out":超时被终止 */
+    /* ── 内存与 JVM ── */
+    SXCL_REASON_OUT_OF_MEMORY,         /**< "out_of_memory":Java 堆耗尽 */
+    SXCL_REASON_OUT_OF_NATIVE_MEMORY,  /**< "out_of_native_memory":本地内存/线程不够 */
+    SXCL_REASON_JVM_32BIT,             /**< "jvm_32bit":32 位 Java 上不了大内存 */
+    SXCL_REASON_HEAP_TOO_LARGE,        /**< "heap_too_large":-Xmx 给大了/写错了 */
+    SXCL_REASON_JVM_FATAL,             /**< "jvm_fatal":hs_err 级别的 JVM 崩溃 */
+    SXCL_REASON_JVM_INTERNAL,          /**< "jvm_internal_error":JVM 内部断言/错误 */
+    SXCL_REASON_STACK_OVERFLOW,        /**< "stack_overflow":递归/栈溢出 */
+    /* ── Java 运行时本身 ── */
+    SXCL_REASON_JAVA_NOT_FOUND,        /**< "java_not_found":没找到可用的 Java */
+    SXCL_REASON_JAVA_BROKEN,           /**< "java_broken":Java 起不来/不完整 */
+    SXCL_REASON_JAVA_VERSION_MISMATCH, /**< "java_version_mismatch":版本不符 */
+    /* ── 图形栈 ── */
+    SXCL_REASON_GRAPHICS_DRIVER,        /**< "graphics_driver":图形驱动(厂商未知) */
+    SXCL_REASON_GRAPHICS_DRIVER_INTEL,  /**< "graphics_driver_intel":Intel 核显 */
+    SXCL_REASON_GRAPHICS_DRIVER_NVIDIA, /**< "graphics_driver_nvidia":NVIDIA */
+    SXCL_REASON_GRAPHICS_DRIVER_AMD,    /**< "graphics_driver_amd":AMD */
+    SXCL_REASON_GRAPHICS_DRIVER_MESA,   /**< "graphics_driver_mesa":Mesa/llvmpipe */
+    SXCL_REASON_GRAPHICS_DRIVER_ADRENO, /**< "graphics_driver_adreno":高通 Adreno */
+    SXCL_REASON_GRAPHICS_DRIVER_MALI,   /**< "graphics_driver_mali":ARM Mali */
+    SXCL_REASON_GRAPHICS_DRIVER_POWERVR,/**< "graphics_driver_powervr":PowerVR */
+    SXCL_REASON_GRAPHICS_DRIVER_SOFTWARE,/**< "graphics_driver_software":软件渲染 */
+    SXCL_REASON_GRAPHICS_DRIVER_OUTDATED,/**< "graphics_driver_outdated":驱动太旧 */
+    SXCL_REASON_OPENGL_TOO_LOW,         /**< "opengl_too_low":OpenGL 版本不够 */
+    SXCL_REASON_GLFW_INIT_FAILED,       /**< "glfw_init_failed":GLFW 初始化失败 */
+    SXCL_REASON_PIXEL_FORMAT_FAILED,    /**< "pixel_format_failed":像素格式/加速不可用 */
+    SXCL_REASON_NO_GL_CONTEXT,          /**< "no_gl_context":拿不到 GL 上下文 */
+    SXCL_REASON_REMOTE_DESKTOP,         /**< "remote_desktop":远程桌面/无 GPU */
+    SXCL_REASON_GPU_DRIVER_CRASH,       /**< "gpu_driver_crash":崩在显卡驱动里 */
+    SXCL_REASON_VULKAN_UNAVAILABLE,     /**< "vulkan_unavailable":设备不支持 Vulkan */
+    SXCL_REASON_VULKAN_FALLBACK,        /**< "vulkan_fallback":回退到了 OpenGL */
+    /* ── 模组与加载器 ── */
+    SXCL_REASON_MOD_DUPLICATE,          /**< "mod_duplicate":同一个模组装了两份 */
+    SXCL_REASON_MOD_RESOLUTION_CONFLICT,/**< "mod_resolution_conflict":依赖解析冲突 */
+    SXCL_REASON_MOD_MISSING_DEPENDENCY, /**< "mod_missing_dependency":缺前置模组 */
+    SXCL_REASON_MOD_VERSION_MISMATCH,   /**< "mod_version_mismatch":模组与游戏版本不符 */
+    SXCL_REASON_MOD_FILE_CORRUPTED,     /**< "mod_file_corrupted":模组文件坏了 */
+    SXCL_REASON_MOD_LOADER_MISSING,     /**< "mod_loader_missing":没装对应的加载器 */
+    SXCL_REASON_MOD_LOADER_VERSION,     /**< "mod_loader_version":加载器版本不匹配 */
+    SXCL_REASON_MIXIN_FAILURE,          /**< "mixin_failure":Mixin 注入失败 */
+    SXCL_REASON_OPTIFINE_CONFLICT,      /**< "optifine_conflict":OptiFine 与其它模组冲突 */
+    SXCL_REASON_SHADER_FAILURE,         /**< "shader_failure":光影包出错 */
+    SXCL_REASON_MOD_CRASH,              /**< "mod_crash":崩在某个模组的代码里 */
+    /* ── 文件与库 ── */
+    SXCL_REASON_MISSING_JAVA_LIBRARY,   /**< "missing_java_library":缺 Java 侧的库/原生库 */
+    SXCL_REASON_MISSING_CLASS,          /**< "missing_class":缺类 */
+    SXCL_REASON_MISSING_ASSET,          /**< "missing_asset":缺资源文件 */
+    SXCL_REASON_NATIVES_EXTRACT_FAILED, /**< "natives_extract_failed":原生库没解出来 */
+    SXCL_REASON_CORRUPT_JAR,            /**< "corrupt_jar":jar/zip 坏了 */
+    SXCL_REASON_CLASSPATH_BROKEN,       /**< "classpath_broken":类路径不对/主类找不到 */
+    SXCL_REASON_FILE_PERMISSION,        /**< "file_permission":权限/占用 */
+    SXCL_REASON_DISK_FULL,              /**< "disk_full":磁盘满 */
+    SXCL_REASON_PATH_NOT_FOUND,         /**< "path_not_found":路径不存在/非 ASCII 路径 */
+    SXCL_REASON_ARCH_MISMATCH,          /**< "arch_mismatch":架构不符 */
+    /* ── 账户与网络 ── */
+    SXCL_REASON_ACCOUNT_INVALID_SESSION,/**< "account_invalid_session":登录态失效 */
+    SXCL_REASON_ACCOUNT_AUTH_FAILED,    /**< "account_auth_failed":验证失败/没有这个游戏 */
+    SXCL_REASON_NETWORK_UNREACHABLE,    /**< "network_unreachable":连不上 */
+    SXCL_REASON_DNS_FAILURE,            /**< "dns_failure":域名解析失败 */
+    SXCL_REASON_SSL_FAILURE,            /**< "ssl_failure":TLS/证书问题 */
+    SXCL_REASON_NET_TIMEOUT,            /**< "net_timeout":网络超时 */
+    SXCL_REASON_SERVER_OFFLINE,         /**< "server_offline":官方服务不可用 */
+    /* ── 平台特有 ── */
+    SXCL_REASON_ANDROID_NOEXEC,         /**< "android_noexec":共享存储不能执行 */
+    SXCL_REASON_ANDROID_SELINUX,        /**< "android_selinux_exec":SELinux 拒绝 exec */
+    /* ── 兜底 ── */
+    SXCL_REASON_CRASH_UNKNOWN,          /**< "crash_unknown":崩了但线索不足 */
+    SXCL_REASON_COUNT                   /**< 枚举计数(不是原因) */
+} sxcl_log_reason;
+
+/** 原因键缓冲长度(含 NUL)。 */
+#define SXCL_LOG_REASON_KEY_MAX 48
+/** 原因短名缓冲长度(含 NUL)。 */
+#define SXCL_LOG_REASON_NAME_MAX 96
+/** 可执行建议缓冲长度(含 NUL;中英都要放得下)。 */
+#define SXCL_LOG_REASON_ADVICE_MAX 512
+
 /** 一行的类别。判定按"越具体越优先"的固定顺序,同一行命中多条时取更具体的那条。 */
 typedef enum sxcl_log_kind {
     SXCL_LOG_UNKNOWN = 0,
@@ -366,6 +478,9 @@ typedef struct sxcl_log_line {
     int severity;            /**< 0 信息 / 1 警告 / 2 错误 */
     int vulkan_fallback;     /**< 1 = 这一行在说 Vulkan 回退 */
     int exit_code;           /**< 抽到的退出码;没提到为 -1 */
+    sxcl_log_reason reason_kind; /**< 这一行指向的原因键(认不出 = SXCL_REASON_UNKNOWN);
+                                  *   注意与下面那个 reason 文本字段区分:一个是"分类",
+                                  *   一个是"原文摘录"(历史字段名,没改是为了不动旧调用点) */
     char java_version[32];   /**< 抽到的 Java 版本串 */
     char gl_version[96];     /**< 抽到的 GL 版本串 */
     char gl_renderer[128];   /**< 抽到的渲染器/GPU 串 */
@@ -405,7 +520,13 @@ typedef struct sxcl_log_summary {
     char missing[160];
     char crash_reason[192];
     sxcl_log_conclusion conclusion;
-    char advice[256];                  /**< 一条人话结论 */
+    char advice[256];                  /**< 一条人话结论(UI 直接显示这一条) */
+    /* ── 原因键(比 conclusion 更具体;见 sxcl_log_reason)── */
+    sxcl_log_reason reason;            /**< 最有把握的原因键 */
+    int reason_score;                  /**< 判定分数(越大越具体;内部用,便于调试) */
+    char reason_key[SXCL_LOG_REASON_KEY_MAX];     /**< 稳定英文键 */
+    char reason_name[SXCL_LOG_REASON_NAME_MAX];   /**< 短名(按当前语言)*/
+    char reason_advice[SXCL_LOG_REASON_ADVICE_MAX]; /**< 可执行建议(按当前语言)*/
 } sxcl_log_summary;
 
 /** 扫描一行。out 允许传 NULL(只要类别)。返回该行的类别。 */
@@ -424,6 +545,42 @@ void sxcl_log_summarize(const char *const *lines, size_t count, sxcl_log_summary
 const char *sxcl_log_kind_name(sxcl_log_kind kind);
 /** 结论文本键("graphics" / "ok" / ...),给 UI 做分支用。 */
 const char *sxcl_log_conclusion_name(sxcl_log_conclusion conclusion);
+
+/* ── 原因键的查表与判定(第 3b 节)── */
+
+/** 原因总数(不含 SXCL_REASON_UNKNOWN?包含 —— 遍历文案完备性用)。 */
+size_t sxcl_log_reason_count(void);
+/** 第 index 个原因(按枚举顺序);越界返回 SXCL_REASON_UNKNOWN。 */
+sxcl_log_reason sxcl_log_reason_at(size_t index);
+/** 稳定英文键("out_of_memory" / "mod_duplicate" …);越界/UNKNOWN 返回 "unknown"。 */
+const char *sxcl_log_reason_key(sxcl_log_reason reason);
+/** 短名(人话;"内存不足(Java 堆耗尽)")。lang 传 "en-us" 得英文,其余得中文。
+ *  用户语言包里有 crash.reason.<键> 时优先用它(见 lang_table 的覆盖规则)。 */
+const char *sxcl_log_reason_name(sxcl_log_reason reason, const char *lang);
+/** 可执行建议(为什么 + 下一步)。lang 同上。**永远返回非空串**。 */
+const char *sxcl_log_reason_advice(sxcl_log_reason reason, const char *lang);
+/** "短名:建议" 合成一句(给 UI/CLI 的行内显示用)。写不下会截断(保证 NUL 结尾)。
+ *  返回写入字节数;参数不合法返回 -1。 */
+int sxcl_log_reason_text(sxcl_log_reason reason, const char *lang, char *out, size_t out_cap);
+/** 单行 -> 原因键(认不出返回 SXCL_REASON_UNKNOWN)。规则表与汇总用的是**同一张**
+ *  (规则见 logscan.c 的 kReasonRules),所以单测可以逐行钉死。 */
+sxcl_log_reason sxcl_log_classify_reason(const char *line);
+/** 原因键属于哪一类结论(给旧代码/UI 分组用)。 */
+sxcl_log_conclusion sxcl_log_reason_conclusion(sxcl_log_reason reason);
+
+/* ══════════════════════ 3c. 崩溃取证(读游戏自己写的文件) ══════════════════════
+ *
+ * stdout/stderr 只能看到游戏**还活着**时吐出来的那部分;进程一崩,真正的死因在
+ * <game>/crash-reports/*.txt 与 <game>/logs/latest.log 里。这两个文件与 stdout
+ * 走**同一套**分析(sxcl_log_summary_add),所以原因键不会因为来源不同而分叉。 */
+
+/** 扫游戏目录里的取证文件,逐行喂进 summary(summary 可空 = 只要事实)。
+ *  facts 可空;返回喂出的行数;-1 = 参数不合法。
+ *  flags 用 SXCL_CRASH_SCAN_*(默认 SXCL_CRASH_SCAN_ALL);max_bytes = 0 用默认。
+ *  "用户点查看详情"与"进程退出后发现是崩溃"都走这里 —— 纯读文件,不起进程。 */
+long long sxcl_launch_scan_artifacts(const char *game_dir, sxcl_log_summary *summary,
+                                     sxcl_crash_evidence *facts, unsigned flags, size_t max_bytes,
+                                     char *err, size_t err_len);
 
 /* ══════════════════════════ 4. 启动驱动(真正起进程) ══════════════════════════ */
 
@@ -499,10 +656,25 @@ typedef struct sxcl_launch_result {
     sxcl_log_conclusion conclusion; /**< 汇总结论 */
     char conclusion_text[256];  /**< 一条人话结论(UI 直接显示这一条) */
     sxcl_log_summary log;       /**< 完整日志汇总:想深入到"缺哪个类/多少行"就用它 */
+    /* ── 原因键与崩溃取证(加了这一层之后:UI 不再只能说"图形栈出问题")── */
+    sxcl_log_reason reason;     /**< 最有把握的原因键(见 sxcl_log_reason) */
+    char reason_key[SXCL_LOG_REASON_KEY_MAX];       /**< "out_of_memory" / "mixin_failure" … */
+    char reason_name[SXCL_LOG_REASON_NAME_MAX];     /**< 短名(按语言)*/
+    char reason_advice[SXCL_LOG_REASON_ADVICE_MAX]; /**< 可执行建议(按语言)*/
+    sxcl_crash_evidence artifacts; /**< 读了哪份报告/latest.log:路径、编码、行数(全是事实)*/
+    int artifacts_scanned;      /**< 1 = 退出后真的扫过游戏目录(崩了才扫) */
+    char crash_report_path[SXCL_CRASH_PATH_MAX]; /**< 便捷副本 = artifacts.report_path */
+    long long crash_report_lines;   /**< 便捷副本 = artifacts.report_lines */
+    long long latest_log_lines;     /**< 便捷副本 = artifacts.latest_log_lines */
 } sxcl_launch_result;
 
 /** 跑一次启动:读版本 JSON -> 选 Java -> 写 options.txt(渲染后端) -> 建 natives -> 拼 argv
- *  -> 起进程 -> 逐行归类 -> 出一条人话结论;发现 Vulkan 回退就把它写回 lastGraphicsApi。
+ *  -> 起进程 -> 逐行归类(游戏输出同时落盘,见 log.h 第 5 节)-> 出一条人话结论。
+ *
+ *  进程退出后如果**是崩溃**(退出码非 0 / 归到崩溃类),会再读一次游戏自己写的
+ *  crash-reports 与 logs/latest.log,喂进同一套分析,把原因键与可执行建议填进结果
+ *  (artifacts 里是"读了哪个文件、什么编码、多少行"这些事实);正常退出不读,
+ *  免得白扫一遍大日志。
  *
  *  返回 0 = 进程真的跑起来了(dry_run 时表示"准备好了");<0 = 没启动,原因在 out->error 与 err。
  *

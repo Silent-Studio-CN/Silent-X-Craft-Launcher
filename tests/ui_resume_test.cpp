@@ -17,7 +17,8 @@
  *
  * 每个用例跑在**独立进程**里(与真实启动器一致:一个进程一个窗口;同一个进程里反复
  * 建/拆 MainWindow 会踩到界面层已有的生命周期问题,那不属于本轮四条根因)。
- * 设置文件、游戏目录、待恢复任务文件全部钉在临时目录:不碰用户真实配置与游戏目录。 */
+ * 设置文件、游戏目录、待恢复任务文件全部钉在**带进程号的临时目录**(_sxcl_ui_resume_fixture_<pid>,
+ * 跑完自己清掉):不碰用户真实配置与游戏目录,也不和并行跑的另一份 ctest 抢同一个路径。 */
 
 #include <QApplication>
 #include <QDir>
@@ -63,7 +64,22 @@ void section(const QString &title) {
     std::fflush(stdout);
 }
 
-QString fixtureRoot() { return QDir::current().absoluteFilePath(QStringLiteral("_sxcl_ui_resume_fixture")); }
+// 夹具根目录**带进程号**:同一棵树里并行跑两份 ctest 时各用各的目录,互不踩
+// (不靠"跑的时候别并发" —— 那种约定迟早会变成假红灯)。跑完由驱动进程清掉自己这一份。
+QString fixtureRoot() {
+    static const QString root = [] {
+        // 子进程(用例进程)用**驱动进程**给的那一份:SXCL_UI_RESUME_ROOT。
+        // (子进程自己按 pid 再算一个的话,父进程清不到它那份,而且 SXCL_UI_SETTINGS 钉的
+        //  路径会和 pending_tasks.json/gameDir 的路径分家 —— 实测踩过。)
+        const QString inherited = qEnvironmentVariable("SXCL_UI_RESUME_ROOT");
+        if (!inherited.isEmpty())
+            return QDir::fromNativeSeparators(inherited);
+        const qint64 pid = QCoreApplication::applicationPid();
+        return QDir::current().absoluteFilePath(
+            QStringLiteral("_sxcl_ui_resume_fixture_%1").arg(pid));
+    }();
+    return root;
+}
 QString settingsFile() { return fixtureRoot() + QStringLiteral("/settings.conf"); }
 QString pendingFile() { return fixtureRoot() + QStringLiteral("/pending_tasks.json"); }
 QString gameDir(const QString &name) { return fixtureRoot() + QStringLiteral("/") + name; }
@@ -367,6 +383,9 @@ int main(int argc, char **argv) {
         QProcess child;
         QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
         env.insert(QStringLiteral("SXCL_UI_RESUME_CASE"), QString::number(n));
+        // 把本次的夹具根目录交给子进程:两边必须用**同一份**(见 fixtureRoot 的注释)
+        env.insert(QStringLiteral("SXCL_UI_RESUME_ROOT"),
+                   QDir::toNativeSeparators(fixtureRoot()));
         child.setProcessEnvironment(env);
         child.setProcessChannelMode(QProcess::ForwardedChannels);
         child.start(QCoreApplication::applicationFilePath(),
@@ -386,6 +405,12 @@ int main(int argc, char **argv) {
         QFile::remove(pendingFile());
         QDir(gameDir(QStringLiteral("game-ok"))).removeRecursively();
         QDir(gameDir(QStringLiteral("game-other"))).removeRecursively();
+    }
+    // 跑完清掉**自己这一份**(带进程号的目录;别人那份按定义不归我们管)
+    if (!qEnvironmentVariableIsSet("SXCL_UI_RESUME_KEEP_FIXTURE")) {
+        const bool removed = QDir(fixtureRoot()).removeRecursively();
+        std::printf("夹具目录已清理: %s(%s)\n", fixtureRoot().toUtf8().constData(),
+                    removed ? "removed" : "nothing to remove");
     }
     std::printf("\n==== 8 个用例,失败的 %d 个 ====\n", failed);
     std::fflush(stdout);

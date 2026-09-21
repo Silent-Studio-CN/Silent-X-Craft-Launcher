@@ -25,35 +25,148 @@ endif()
 # ── Qt 运行时部署:把需要的 DLL 放到 exe 同目录 ──
 # 为什么必须在构建里做(用户反馈"总是提示找不到 Qt*.dll"):靠 PATH 或手工拷贝都不稳,
 # 换机器、换 shell、在别处双击都会失败。这里让构建产物自带运行时。
-#   sxcl_deploy_qt(target)      —— 拷直接依赖的几个 DLL(测试用,轻)
-#   sxcl_deploy_qt_full(target) —— 用 windeployqt 连平台/TLS 插件一起铺开(界面程序用)
+#
+# **加新模块不该再改这个文件**:DLL 清单首选 CMake 3.21+ 的 $<TARGET_RUNTIME_DLLS:target> ——
+# 它按目标的链接接口算出"运行时真正要 import 的 DLL",谁加了新的 Qt 模块(Widgets/Multimedia/
+# MultimediaWidgets/Charts…),它的 DLL 都会自动跟着铺,不需要人维护清单。
+# (实测踩过:老的轻量清单只有 Core/Gui/Network/Svg,漏了 **Widgets** —— 用 QWidget 的测试
+#  目标一直靠"测试环境把 Qt 的 bin 塞进 PATH"才跑起来;现在它的 Qt6Widgets.dll 自己会拷。)
+#
+#   sxcl_deploy_qt(target)      —— 真实依赖的 DLL + 平台插件 + TLS 插件(轻,测试用)
+#   sxcl_deploy_qt_full(target) —— 先 windeployqt(插件全家桶),再补离屏插件,最后跑摆放自检
+#
+# 摆放自检(tools/check_qt_deploy.ps1):构建后断言"该在的文件真的在 exe 同目录/子目录"。
+# "DLL 在、插件不在"(tls/ 缺失 -> HTTPS 全废)这种最难查的情况会当场构建失败并指名道姓。
+# 跳过:$env:SXCL_SKIP_DEPLOY_CHECK=1;整体关掉:-DSXCL_DEPLOY_CHECK=OFF(默认必须开)。
+option(SXCL_DEPLOY_CHECK "构建后跑 Qt 部署摆放自检(缺文件直接构建失败)" ON)
+
+# windeployqt 参数:部署与自检**必须**用同一套,否则自检会去要求"本来就不打算铺"的文件
+# (翻译 / 软件 OpenGL / 系统 D3D 编译器 / 编译器运行时,我们都不带)。
+# 存成空格分隔的字符串(人能直接 -D 改),用之前再拆成参数表。
+set(SXCL_WINDEPLOYQT_FLAGS "--no-translations --no-opengl-sw --no-system-d3d-compiler --no-compiler-runtime"
+    CACHE STRING "windeployqt 参数(部署与自检共用,空格分隔)")
+
 function(sxcl_deploy_qt target)
   if(NOT WIN32)
     return()
   endif()
-  set(_dlls "")
-  foreach(_qt_target Qt6::Core Qt6::Gui Qt6::Network Qt6::Svg)
-    if(TARGET ${_qt_target})
-      list(APPEND _dlls "$<TARGET_FILE:${_qt_target}>")
+
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.21)
+    # 首选:目标真正 import 的运行时 DLL —— 新加的 Qt 模块自动跟随,不用改这里。
+    # 只在目标确实有链接依赖时才发这条命令:TARGET_RUNTIME_DLLS 展开为空会让
+    # cmake -E copy_if_different 因参数不足而报错(那种目标本来也没有 Qt 运行时可铺)。
+    get_target_property(_sxcl_link_libs ${target} LINK_LIBRARIES)
+    if(_sxcl_link_libs)
+      add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_RUNTIME_DLLS:${target}> "$<TARGET_FILE_DIR:${target}>"
+        COMMAND_EXPAND_LISTS
+        COMMENT "Qt 运行时(按 $<TARGET_FILE_NAME:${target}> 的真实依赖自动判定)-> $<TARGET_FILE_DIR:${target}>")
     endif()
-  endforeach()
-  if(_dlls)
-    add_custom_command(TARGET ${target} POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_dlls} "$<TARGET_FILE_DIR:${target}>"
-      COMMENT "Qt 运行时 -> $<TARGET_FILE_DIR:${target}>(同目录,免得找不到 Qt*.dll)")
+  else()
+    # 兜底(CMake < 3.21:没有 TARGET_RUNTIME_DLLS):手写清单。
+    # 这里是**兜底,不是首选** —— 谁加了新的 Qt 模块,这张表不会自动跟进,必须手工补。
+    set(_dlls "")
+    foreach(_qt_target Qt6::Core Qt6::Gui Qt6::Network Qt6::Svg)
+      if(TARGET ${_qt_target})
+        list(APPEND _dlls "$<TARGET_FILE:${_qt_target}>")
+      endif()
+    endforeach()
+    if(_dlls)
+      add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_dlls} "$<TARGET_FILE_DIR:${target}>"
+        COMMENT "Qt 运行时(兜底手写清单:CMake < 3.21 没有 TARGET_RUNTIME_DLLS)-> $<TARGET_FILE_DIR:${target}>")
+    endif()
   endif()
-  # 平台插件也要铺:否则连"找不到 Qt platform plugin"都过不去,更别说离屏跑测试。
-  # 注意 windeployqt 只铺 windows 插件(对 GUI 是对的),离屏(qoffscreen)得我们自己带上 ——
-  # 实测:只铺 DLL 不铺插件时,-platform offscreen 直接报 "Could not find the Qt platform plugin"。
-  set(_qt_plugins "${Qt6_DIR}/../../../plugins/platforms")
-  if(EXISTS "${_qt_plugins}")
+
+  # 插件照旧铺开,一份都不能少(与上面的 DLL 是两回事,别合并):
+  #   platforms/qwindows.dll   —— 起窗的最低要求,没有它连窗口都建不出来
+  #   platforms/qoffscreen.dll —— **windeployqt 不铺**;离屏跑测试/截图要用
+  #                               (踩过:只铺 DLL 不铺插件时,-platform offscreen 直接报
+  #                                "Could not find the Qt platform plugin")
+  #   tls/*.dll                —— HTTPS 的后端,缺了就是
+  #                               "qt.network.ssl: No functional TLS backend was found"(下载全废)
+  set(_qt_plugins "${Qt6_DIR}/../../../plugins")
+  if(EXISTS "${_qt_plugins}/platforms")
     add_custom_command(TARGET ${target} POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/platforms"
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
-              "${_qt_plugins}/qwindows.dll" "${_qt_plugins}/qoffscreen.dll"
+              "${_qt_plugins}/platforms/qwindows.dll" "${_qt_plugins}/platforms/qoffscreen.dll"
               "$<TARGET_FILE_DIR:${target}>/platforms/"
       COMMENT "Qt 平台插件(qwindows+qoffscreen)-> $<TARGET_FILE_DIR:${target}>/platforms")
+  else()
+    message(WARNING "找不到 Qt 平台插件目录:${_qt_plugins}/platforms —— 产物会缺 qwindows/qoffscreen")
   endif()
+  file(GLOB _sxcl_tls_backends CONFIGURE_DEPENDS "${_qt_plugins}/tls/*.dll")
+  if(_sxcl_tls_backends)
+    # 插件文件名区分发布/调试(qschannelbackend.dll / qschannelbackendd.dll),按配置只拷对应的那份,
+    # 别把 debug 插件混进 Release 目录(打包时要按 doc/07 剔除杂物)。
+    set(_sxcl_tls_rel "")
+    set(_sxcl_tls_dbg "")
+    foreach(_tls IN LISTS _sxcl_tls_backends)
+      get_filename_component(_tls_stem "${_tls}" NAME_WE)   # 去掉 .dll
+      set(_tls_is_dbg FALSE)
+      if(_tls_stem MATCHES "d$")
+        # 调试版文件名 = 发布版名 + d(qschannelbackendd.dll)。**不能只判"以 d 结尾"** ——
+        # 发布版自己就以 backend 的 d 结尾(qschannelbackend.dll),会被误判成调试版
+        # (踩过:结果两种都拷,debug 插件混进 Release 目录)。所以要看"去掉尾字母 d 的那个
+        # 文件是否也在":在 -> 本文件是调试版;不在 -> 本文件就是发布版。
+        string(REGEX REPLACE "d$" "" _tls_base_stem "${_tls_stem}")
+        get_filename_component(_tls_dir "${_tls}" DIRECTORY)
+        if(EXISTS "${_tls_dir}/${_tls_base_stem}.dll")
+          set(_tls_is_dbg TRUE)
+        endif()
+      endif()
+      if(_tls_is_dbg)
+        list(APPEND _sxcl_tls_dbg "${_tls}")
+      else()
+        list(APPEND _sxcl_tls_rel "${_tls}")
+      endif()
+    endforeach()
+    if(NOT _sxcl_tls_dbg)
+      set(_sxcl_tls_dbg "${_sxcl_tls_rel}")
+    endif()
+    if(NOT _sxcl_tls_rel)
+      set(_sxcl_tls_rel "${_sxcl_tls_dbg}")
+    endif()
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/tls"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "$<IF:$<CONFIG:Debug>,${_sxcl_tls_dbg},${_sxcl_tls_rel}>"
+              "$<TARGET_FILE_DIR:${target}>/tls/"
+      COMMAND_EXPAND_LISTS
+      COMMENT "Qt TLS 后端(qschannel/qopenssl…)-> $<TARGET_FILE_DIR:${target}>/tls(缺它 HTTPS 全废)")
+  endif()
+endfunction()
+
+# 摆放自检:构建后跑 tools/check_qt_deploy.ps1,断言"该在的文件真的在 exe 同目录/子目录"。
+# 缺任何一个 -> 脚本非零退出 -> 构建失败,并打印**缺的是哪个文件、应该在哪个目录**。
+# 判定依据三路互补:windeployqt --list relative(权威清单)+ exe/同目录 Qt DLL 的 PE 导入表
+# + 插件目录规则(所以 windeployqt 不可用时自检依然有效,不会退化成"什么都不查")。
+# 想跳过:$env:SXCL_SKIP_DEPLOY_CHECK=1(默认必须跑,只有极特殊情况才用)。
+function(sxcl_add_deploy_check target windeployqt_path)
+  if(NOT WIN32 OR NOT SXCL_DEPLOY_CHECK)
+    return()
+  endif()
+  find_program(SXCL_POWERSHELL_EXE NAMES pwsh powershell)
+  if(NOT SXCL_POWERSHELL_EXE)
+    message(WARNING "找不到 PowerShell,${target} 跳过 Qt 部署摆放自检(tools/check_qt_deploy.ps1)")
+    return()
+  endif()
+  # 自检与部署必须用同一套 windeployqt 参数,否则会要求"本来就不打算铺"的文件
+  string(REPLACE ";" " " _sxcl_wdq_str "${SXCL_WINDEPLOYQT_FLAGS}")
+  set(_sxcl_wdq_args "")
+  if(windeployqt_path)
+    list(APPEND _sxcl_wdq_args -Windeployqt "${windeployqt_path}")
+  endif()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND "${SXCL_POWERSHELL_EXE}" -NoProfile -NonInteractive -ExecutionPolicy Bypass
+            -File "${CMAKE_SOURCE_DIR}/tools/check_qt_deploy.ps1"
+            -Exe "$<TARGET_FILE:${target}>"
+            -WindeployqtArgs "${_sxcl_wdq_str}"
+            ${_sxcl_wdq_args}
+    COMMENT "Qt 部署摆放自检:$<TARGET_FILE_NAME:${target}>(缺哪个文件就报哪个;SXCL_SKIP_DEPLOY_CHECK=1 跳过)"
+    VERBATIM)
 endfunction()
 
 function(sxcl_deploy_qt_full target)
@@ -62,15 +175,20 @@ function(sxcl_deploy_qt_full target)
   endif()
   find_program(SXCL_WINDEPLOYQT NAMES windeployqt HINTS "${QT_BIN_DIR}" "${Qt6_DIR}/../../../bin")
   if(SXCL_WINDEPLOYQT)
+    string(REPLACE ";" " " _sxcl_wdq_str "${SXCL_WINDEPLOYQT_FLAGS}")
+    separate_arguments(_sxcl_wdq_list UNIX_COMMAND "${_sxcl_wdq_str}")
     add_custom_command(TARGET ${target} POST_BUILD
-      COMMAND "${SXCL_WINDEPLOYQT}" --no-translations --no-opengl-sw --no-system-d3d-compiler
-              --no-compiler-runtime --dir "$<TARGET_FILE_DIR:${target}>" "$<TARGET_FILE:${target}>"
+      COMMAND "${SXCL_WINDEPLOYQT}" ${_sxcl_wdq_list}
+              --dir "$<TARGET_FILE_DIR:${target}>" "$<TARGET_FILE:${target}>"
       COMMENT "windeployqt -> $<TARGET_FILE_DIR:${target}>(含 platforms/tls 插件)")
   else()
+    message(STATUS "没找到 windeployqt:${target} 退回轻量部署(真实依赖的 DLL + platforms/tls 插件)")
     sxcl_deploy_qt(${target})
   endif()
   # windeployqt 不铺离屏插件,但我们常要离屏起窗(截图/自动化):补上
   sxcl_deploy_qt(${target})
+  # 最后一道:摆放自检。必须排在**所有**部署命令之后,否则会检到半成品。
+  sxcl_add_deploy_check(${target} "${SXCL_WINDEPLOYQT}")
 endfunction()
 
 # 警告口径统一:库与测试用同一套,避免"库干净、测试脏"
@@ -126,6 +244,9 @@ add_subdirectory(src/services/install)
 add_subdirectory(src/core)          # 运行日志(include/sxcl/log.h + src/core/log.c);自己的 CMakeLists
 add_subdirectory(src/core/instance)
 add_subdirectory(src/core/auth)   # 正版登录(微软/Xbox Live);自己的 CMakeLists 追加源文件与测试
+add_subdirectory(src/core/archive) # .xz(LZMA2)解码 + tar 解包:JRE 自托管包是 tar.xz;自己的 CMakeLists
+add_subdirectory(src/core/diag)    # 崩溃取证与日志导出:编码探测/latest.log/crash-report/打包(zip store)
+add_subdirectory(src/services/launch) # 启动层自己的测试(原因键夹具);源文件仍在下面的显式列表里
 sxcl_warnings(sxcl)
 
 # 平台实现二选一(WinHTTP/UTF-16 转换在 win32 侧,POSIX 侧用通用 API)
@@ -233,5 +354,19 @@ if(SXCL_BUILD_TESTS)
 endif()
 
 if(SXCL_BUILD_UI)
+  # libqf(PyQf)那棵树 PYQFTO_MULTIMEDIA 默认 ON:会编出媒体模块,并带出 fluent_demo 目标,
+  # 而 fluent_demo 链 Qt6::Multimedia + Qt6::MultimediaWidgets(背后一整套 FFmpeg 编解码栈:
+  # 体积与再分发许可都得交代),部署时还得给 demo 目录单独铺 multimedia/ 后端插件。
+  # 启动器一个都用不到 —— 在进它的 CMakeLists 之前就关掉(它自己的默认值不动)。
+  # (CMP0077 下普通变量优先于 option(),所以 set 就够:不用改 PyQf 仓库,也不怕缓存里是 ON)
+  set(PYQFTO_MULTIMEDIA OFF)
+  set(PYQFTO_BUILD_DEMO OFF)
+  set(PYQFTO_BUILD_TESTS OFF)   # 它自带的黄金文件测试不该混进我们的 ctest
   add_subdirectory(src/ui)
+  # 兜底断言:哪天有人把 demo/多媒体放回来,这里当场配置失败 ——
+  # 而不是等"干净机器上少了 Qt6Multimedia.dll / multimedia/ 插件"才发现。
+  if(TARGET fluent_demo)
+    message(FATAL_ERROR "fluent_demo 不该被构建(PYQFTO_BUILD_DEMO/PYQFTO_MULTIMEDIA 必须是 OFF):它会链 Qt6::Multimedia,把 ffmpeg 后端与 multimedia/ 插件拖进部署")
+  endif()
+  message(STATUS "libqf:PYQFTO_MULTIMEDIA=OFF / PYQFTO_BUILD_DEMO=OFF(不链 Qt6::Multimedia,不铺 multimedia/ 插件)")
 endif()

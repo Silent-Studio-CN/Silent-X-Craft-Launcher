@@ -38,6 +38,13 @@ public class SxclActivity extends QtActivity {
             Log.e(TAG, "android prepare failed", t);
         }
         super.onCreate(savedInstanceState);
+        /* 游戏会话的主进程一侧(本地 socket 监听 + 退出码/信号回收)。
+         * 只在启动器进程里装;:game 进程走 GameActivity,不碰这里。 */
+        try {
+            GameHost.attach(getApplicationContext());
+        } catch (Throwable t) {
+            Log.e(TAG, "GameHost.attach failed", t);
+        }
         /* evidence line: is shared storage readable? (see the manifest comment) */
         Log.i(TAG, "all-files-access=" + hasAllFilesAccess());
     }
@@ -49,12 +56,170 @@ public class SxclActivity extends QtActivity {
         Log.i(TAG, "resume: all-files-access=" + hasAllFilesAccess());
         Log.i(TAG, "resume: pip-supported=" + isPipSupported() + " in-floating=" + isInFloating()
                 + " overlay-granted=" + hasOverlayPermission());
+        /* 游戏运行器把我们拉回前台了(它在前台才有权发起,见 GameActivity.requestLauncherPip):
+         * 现在启动器是前台/可见的,进画中画这一步在这里做才是有效的。 */
+        if (pendingPipRequest) {
+            pendingPipRequest = false;
+            Log.i(TAG, "resume: 收到运行器的画中画请求 -> enterFloating()");
+            requestFloatingAfterResume(0);
+        }
+    }
+
+    /* 收到运行器请求后进画中画。**复用已有的 enterFloating()**(与最大化键同一条路),
+     * 只是发起时机从"用户点最大化键"变成"游戏窗口就绪后把我们拉回前台"。
+     * 失败时重试两次并如实记日志(绝不静默)。 */
+    private static boolean pendingPipRequest = false;
+
+    private void requestFloatingAfterResume(final int attempt) {
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (isInFloating()) {
+                    Log.i(TAG, "pip request: 已经在画中画里(launchIntoPip 生效)attempt=" + attempt);
+                    return;
+                }
+                final boolean ok = enterFloating();
+                Log.i(TAG, "pip request: enterFloating=" + ok + " attempt=" + attempt);
+                if (!ok && attempt < 2)
+                    requestFloatingAfterResume(attempt + 1);
+                else if (!ok)
+                    Log.w(TAG, "pip request: 三次都没进画中画(如实记录):启动器停在全屏,"
+                            + "游戏进程仍在跑");
+            }
+        }, attempt == 0 ? 200 : 700);
     }
 
     @Override
     public void onPictureInPictureModeChanged(boolean inPip, android.content.res.Configuration cfg) {
         super.onPictureInPictureModeChanged(inPip, cfg);
         Log.i(TAG, "pip mode changed: in-pip=" + inPip);
+        /* 起游戏的**顺序**:先让启动器进画中画(此时它还是前台,enterPictureInPictureMode
+         * 才生效),画中画一进去 -> 这里回调 -> 才真的拉 GameActivity(独立 task,全屏)。
+         * 反过来的话活动已经不是前台了,画中画根本进不去。 */
+        try {
+            GameHost.onPipChanged(inPip);
+        } catch (Throwable t) {
+            Log.e(TAG, "GameHost.onPipChanged failed", t);
+        }
+        /* 画中画是一个很小的窗口:给它一个原生按钮"回到启动器"(点它 = exitFloating),
+         * 免得用户进了画中画之后没有任何出口。 */
+        showFloatingBackButton(inPip);
+    }
+
+    /* ---- 运行中接收命令(am start 一个已存在的实例会走这里) -------------------
+     * 两个动作,与将来界面按钮要走的是**同一条路**:
+     *   --es action gamestart [--es gamejre <jre>] [--es gamemain <class>]
+     *                        [--es gameargs "<args>"] [--es gamecrash abort|term|kill]
+     *        -> GameHost.requestStart(...) + enterFloating()(复用已有的画中画实现)
+     *   --es action endgame   -> GameHost.endGame()(主进程发 END,游戏进程有序收尾)
+     * 验收脚本用它们做"反复起/停游戏",不需要重启 App。 */
+    @Override
+    public void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        final String action = intent != null ? intent.getStringExtra("action") : null;
+        Log.i(TAG, "onNewIntent: action=" + action);
+        /* 游戏运行器(前台的一侧)请求:启动器回前台 + 进画中画。见 GameActivity.requestLauncherPip */
+        if (intent != null && intent.getBooleanExtra("sxclRequestPip", false)) {
+            /* 两种情况都要覆盖:
+             *   A) 启动器已经在前台(最常见:它只是被游戏请求"进画中画")-> 不会有 onResume,
+             *      所以这里就发起;
+             *   B) 启动器在后台被拉回前台 -> 这里发起的那次会失败,onResume 里那次(见下)兜住。 */
+            pendingPipRequest = false;
+            GameHost.noteLauncherPipRequest();
+            Log.i(TAG, "onNewIntent: 运行器请求启动器进画中画 -> 立即发起(失败时 onResume 再兜一次)");
+            requestFloatingAfterResume(0);
+            return;
+        }
+        if (action == null)
+            return;
+        if ("gamestart".equals(action)) {
+            final String st = GameHost.requestStart(intent.getStringExtra("gamejre"),
+                    intent.getStringExtra("gamemain"), intent.getStringExtra("gameargs"),
+                    intent.getStringExtra("gamecrash"), "onNewIntent");
+            Log.i(TAG, "onNewIntent: 起游戏会话 -> " + st);
+            /* 画中画不在这里进:见 GameHost 类头注释(docs/19 §2.2)。游戏窗口就绪后会经通道
+             * 请求 PIP?,那时启动器回前台、在 onResume 里 enterFloating()(复用已有实现)。 */
+            Log.i(TAG, "onNewIntent: 画中画等运行器的 PIP? 请求(启动器此刻仍在前台,游戏已开始拉起)");
+        } else if ("endgame".equals(action)) {
+            final boolean ok = GameHost.endGame();
+            Log.i(TAG, "onNewIntent: 结束游戏命令已发 ok=" + ok + " " + GameHost.stateLine());
+        }
+    }
+
+    /* ---- 画中画里的"回到启动器"按钮 ---------------------------------------
+     * 挂在本 activity 窗口的 decor 上(FrameLayout 的最后一个子 view = 最上层),
+     * 因此压不住 Qt 的 SurfaceView 布局,也不需要任何权限。离开画中画即移除。
+     */
+    private static android.widget.Button floatingBackButton = null;
+
+    private static void showFloatingBackButton(boolean on) {
+        if (instance == null)
+            return;
+        try {
+            final android.view.ViewGroup decor =
+                    (android.view.ViewGroup) instance.getWindow().getDecorView();
+            if (!on) {
+                if (floatingBackButton != null) {
+                    decor.removeView(floatingBackButton);
+                    floatingBackButton = null;
+                    Log.i(TAG, "pip back-button removed");
+                }
+                return;
+            }
+            if (floatingBackButton != null)
+                return;
+            final float d = instance.getResources().getDisplayMetrics().density;
+            android.widget.Button b = new android.widget.Button(instance);
+            b.setText("回到启动器");
+            b.setAllCaps(false);
+            b.setTextSize(14);
+            b.setTextColor(0xFFFFFFFF);
+            android.graphics.drawable.GradientDrawable bg =
+                    new android.graphics.drawable.GradientDrawable();
+            bg.setColor(0xF0202020);
+            bg.setCornerRadius(10 * d);
+            bg.setStroke((int) Math.max(2, 2 * d), 0xFFC044A3);
+            b.setBackground(bg);
+            b.setPadding((int) (14 * d), (int) (4 * d), (int) (14 * d), (int) (4 * d));
+            android.widget.FrameLayout.LayoutParams lp =
+                    new android.widget.FrameLayout.LayoutParams(
+                            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
+            lp.gravity = android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL;
+            lp.topMargin = (int) (6 * d);
+            b.setOnClickListener(new android.view.View.OnClickListener() {
+                @Override
+                public void onClick(android.view.View v) {
+                    Log.i(TAG, "pip back-button tapped -> 回到启动器(游戏进程继续跑)");
+                    exitFloating();
+                }
+            });
+            decor.addView(b, lp);
+            floatingBackButton = b;
+            Log.i(TAG, "pip back-button shown(画中画里的出口;decor children="
+                    + decor.getChildCount() + ")");
+        } catch (Throwable t) {
+            Log.e(TAG, "pip back-button failed", t);
+        }
+    }
+
+    /* ---- 游戏会话的主进程出口(Qt 侧用 QJniObject 调这三个) ---------------- */
+    public static String startGameSession(String jreHome, String mainClass, String gameArgs,
+                                          String crashMode) {
+        final String pip = isInFloating() ? "already-in-pip" : "will-enter-pip";
+        return GameHost.requestStart(jreHome, mainClass, gameArgs, crashMode, pip);
+    }
+
+    public static boolean endGameSession() {
+        return GameHost.endGame();
+    }
+
+    public static String gameSessionState() {
+        return GameHost.stateLine();
+    }
+
+    public static boolean isGameSessionLive() {
+        return GameHost.isSessionLive();
     }
 
     /* ---- shared-storage access -------------------------------------------
@@ -430,6 +595,27 @@ public class SxclActivity extends QtActivity {
          * The environment is not settable for an Android app, so they ride the boot file. */
         String passthrough = it != null ? it.getStringExtra("passthrough") : null;
         String animtrace = it != null ? it.getStringExtra("animgtrace") : null;
+        /* 游戏独立进程(本轮架构)的验收开关:native 入口按 boot 文件驱动时序 ——
+         * 建会话(本地 socket 先监听)-> 启动器进画中画 -> 画中画回调里才拉 GameActivity
+         * (独立 task、android:process=":game")。
+         *   am start ... --es gamestart 1 [--es gamejre <jre home>] [--es gamemain <class>]
+         *               [--es gameargs "<args>"] [--es gamecrash abort|term|kill]
+         *               [--es gamedelay <ms>]
+         * 不写 gamestart 时一行都不会跑(与 jreprobe 同一纪律)。 */
+        String gamestart = it != null ? it.getStringExtra("gamestart") : null;
+        String gamejre = it != null ? it.getStringExtra("gamejre") : null;
+        String gamemain = it != null ? it.getStringExtra("gamemain") : null;
+        String gameargs = it != null ? it.getStringExtra("gameargs") : null;
+        String gamecrash = it != null ? it.getStringExtra("gamecrash") : null;
+        String gamedelay = it != null ? it.getStringExtra("gamedelay") : null;
+        /* 验收开关:起游戏后 N 毫秒由主进程发"结束游戏"命令(走 GameHost.endGame(),
+         * 与将来界面上的"结束游戏"按钮是同一条路)。不写 = 不发。 */
+        String gamestop = it != null ? it.getStringExtra("gamestop") : null;
+        /* 进程内 JVM 自举探针(诊断用,默认关):
+         *   am start ... --es jreprobe /data/data/<pkg>/files/runtime/jre25
+         * nativeLibraryDir 由这里补上(应用自己的 ApplicationInfo,Java 侧拿最省事)。
+         * 探针本身在 android/app/sxcl_jre_probe.c:dlopen(libjli.so) + dlsym(JLI_Launch)。 */
+        String jreprobe = it != null ? it.getStringExtra("jreprobe") : null;
         /* acceptance hooks for the widget-tree dump (SXCL_UI_DUMP) and the grab delay
          * (SXCL_UI_SHOT_DELAY): the shared desktop entry reads both from the
          * environment, which an Android app cannot be given. They ride the boot file
@@ -454,6 +640,20 @@ public class SxclActivity extends QtActivity {
         if (animtrace != null) sb.append("animgtrace=").append(animtrace).append('\n');
         if (dump != null) sb.append("dump=").append(dump).append('\n');
         if (shotdelay != null) sb.append("shotdelay=").append(shotdelay).append('\n');
+        if (jreprobe != null) {
+            sb.append("jreprobe=").append(jreprobe).append('\n');
+            sb.append("nativelib=").append(getApplicationInfo().nativeLibraryDir).append('\n');
+        }
+        if (gamestart != null) {
+            sb.append("gamestart=").append(gamestart).append('\n');
+            sb.append("nativelib=").append(getApplicationInfo().nativeLibraryDir).append('\n');
+        }
+        if (gamejre != null) sb.append("gamejre=").append(gamejre).append('\n');
+        if (gamemain != null) sb.append("gamemain=").append(gamemain).append('\n');
+        if (gameargs != null) sb.append("gameargs=").append(gameargs).append('\n');
+        if (gamecrash != null) sb.append("gamecrash=").append(gamecrash).append('\n');
+        if (gamedelay != null) sb.append("gamedelay=").append(gamedelay).append('\n');
+        if (gamestop != null) sb.append("gamestop=").append(gamestop).append('\n');
         writeText(new File(files, "sxcl_boot.txt"), sb.toString());
         Log.i(TAG, "boot: " + sb.toString().replace('\n', ' '));
     }

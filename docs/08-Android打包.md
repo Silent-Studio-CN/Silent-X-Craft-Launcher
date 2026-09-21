@@ -985,6 +985,15 @@ $ adb -s .33 shell 'run-as com.silentstudio.sxcl sh -c "cp /system/bin/toybox fi
 EXEC_PRIVATE_OK
 ```
 
+> **⚠ 2026-09-21 更正(证据见 `docs/18-安卓起JVM的最小落地.md` §4)**:这条 `EXEC_PRIVATE_OK` 是
+> **`run-as` 假象**。`run-as` 进的是 `runas_app` 域(**允许** exec `app_data_file`),而我们应用
+> 进程自己进的是 `untrusted_app` 域 —— 真机上应用进程一 exec `files/runtime/jre25/bin/java` 就被
+> SELinux 拒绝(原文:`avc: denied { execute_no_trans } ... scontext=u:r:untrusted_app:... 
+> tcontext=u:object_r:app_data_file:... permissive=0 app=com.silentstudio.sxcl`,同时
+> `getenforce` = `Enforcing`)。
+> 结论:**私有目录里可以放可执行文件,但应用自己 exec 不了**;安卓上起 JVM 只能走**进程内
+> `dlopen(libjli.so)` + `JLI_Launch`**(FCL 的做法),不是 fork+exec。
+
 ### 14.2 硬证据二:共享存储是 noexec
 
 ```
@@ -1001,7 +1010,9 @@ $ adb -s .33 shell "cp /system/bin/toybox /data/local/tmp/echo; chmod 755 /data/
 EXEC_TMP_OK                     # 同样一个二进制,放在非 noexec 的地方就能跑
 ```
 
-→ **共享存储上的 Java 一定起不来**;`/data/data/<包名>/files/**` 可以。
+→ **共享存储上的 Java 一定起不来**;`/data/data/<包名>/files/**` 可以**放**,
+但**不能 exec**(2026-09-21 更正:应用域被 SELinux `execute_no_trans` 拒绝,见 §14.1 的更正框
+与 `docs/18-安卓起JVM的最小落地.md` §4)。
 
 ### 14.3 硬证据三:共享存储连读都读不了(权限缺口)
 

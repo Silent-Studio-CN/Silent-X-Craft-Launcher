@@ -12,7 +12,8 @@
  *      -> 续传起点必须是那个 n(不是文件大小,不会拼出 Range: bytes=<final>- 而 416 删片);
  *   ③ size=0 且无哈希的 loader 库残留 -> **不许**被算成"已存在且校验通过"(一个字节都不下的那种)。
  *
- * 夹具全部落在 CWD 下的临时目录 _sxcl_target_fixture 里:不联网、**不碰任何真实游戏目录**。 */
+ * 夹具全部落在 CWD 下的临时目录 _sxcl_target_fixture_<pid> 里(带进程号 = 并行跑也互不踩;
+ * 跑完自己清掉):不联网、**不碰任何真实游戏目录**。 */
 
 #define _CRT_SECURE_NO_WARNINGS 1 /* 夹具用 fopen 造文件,MSVC 会标记弃用 */
 
@@ -27,7 +28,17 @@
 #include "sxcl/net.h"
 #include "sxcl/verify.h"
 
-#define TMP_ROOT "_sxcl_target_fixture"
+/* 夹具根目录 = 这个名字 + **进程号**:同一棵树里并行跑两份 ctest 各用各的,互不踩。
+ * (不靠"跑的时候别并发";跑完在 main 末尾把自己那份删掉。)*/
+#define TMP_ROOT_BASE "_sxcl_target_fixture"
+#if defined(_WIN32)
+#  include <process.h>
+#  define SXCL_TEST_PID() ((long)_getpid())
+#else
+#  include <unistd.h>
+#  define SXCL_TEST_PID() ((long)getpid())
+#endif
+static char g_root[256];
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -99,7 +110,7 @@ static int file_equals(const char *path, const void *want, size_t len) {
 }
 
 static void fixture_dir(const char *name, char *out, size_t cap) {
-    snprintf(out, cap, "%s/%s", TMP_ROOT, name);
+    snprintf(out, cap, "%s/%s", g_root, name);
     if (sxcl_fs_mkdirs(out) != 0) {
         printf("  [!!] 建不出夹具目录: %s\n", out);
     }
@@ -624,9 +635,10 @@ static void test_no_verify_info_not_skipped(void) {
 }
 
 int main(void) {
+    snprintf(g_root, sizeof(g_root), "%s_%ld", TMP_ROOT_BASE, SXCL_TEST_PID());
     printf("SXCL 目标已存在 / 续传起点 / 无校验信息 夹具(临时目录 %s,绝不碰真实游戏目录)\n",
-           TMP_ROOT);
-    (void)sxcl_fs_mkdirs(TMP_ROOT);
+           g_root);
+    (void)sxcl_fs_mkdirs(g_root);
 
     test_target_probe();
     test_target_exists_refuses();
@@ -634,6 +646,7 @@ int main(void) {
     test_file_size_would_be_416();
     test_no_verify_info_not_skipped();
 
+    (void)sxcl_fs_remove_tree(g_root); // 清掉自己这份(带进程号的)夹具目录
     printf("\n夹具结果:通过 %d 项,失败 %d 项\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

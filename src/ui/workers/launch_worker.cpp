@@ -249,8 +249,9 @@ void LaunchWorker::run() {
                online ? "正版(令牌已打码,不落日志)" : "离线(没有 accessToken)",
                prep.requested_backend[0] != '\0' ? prep.requested_backend : "(默认)",
                prep.actual_backend[0] != '\0' ? prep.actual_backend : "(未知)", prep.natives_count);
-    for (int i = 0; i < m_pendingCommand.size(); ++i)
-        SXCL_LOG_I("launch", "argv[%d]=%s", i, m_pendingCommand.at(i).toUtf8().constData());
+    // 命令行**不再在这里落日志**:核心库(driver.c 的 log_argv)在 dry-run 与真正起进程时
+    // 各写一份(同一份打码后的文本),这里再写一遍就重复了 —— 日志里同样的 argv 会有三份。
+    // 界面要显示的那一份仍从 m_pendingCommand 来(内容与日志里的一致)。
 
     if (prepRc != 0) {
         // 准备就没过:真实原因在 prep.error / err 里(核心库的人话)
@@ -310,7 +311,13 @@ void LaunchWorker::run() {
 
     const QString conclusionKey = QString::fromUtf8(sxcl_log_conclusion_name(res.conclusion));
     const QString conclusionText = QString::fromUtf8(res.conclusion_text);
-    const QString detail =
+    // 原因键(核心库 logscan 的第 3b 节):比"结论"更具体,且带一条可执行建议。
+    // 界面把它放进 detail(任务卡/状态栏/错误报告都会显示),用户看到的是
+    // "out_of_memory" 这类稳定键 + 人话建议,而不是笼统的"崩溃"。
+    const QString reasonKey = QString::fromUtf8(res.reason_key[0] != '\0' ? res.reason_key : "unknown");
+    const QString reasonName = QString::fromUtf8(res.reason_name);
+    const QString reasonAdvice = QString::fromUtf8(res.reason_advice);
+    QString detail =
         QStringLiteral("退出码 %1 · 用时 %2 s · 日志 %3 行 · Java %4%5%6")
             .arg(res.exit_code)
             .arg(double(res.elapsed_ms) / 1000.0, 0, 'f', 1)
@@ -318,15 +325,22 @@ void LaunchWorker::run() {
             .arg(QString::fromUtf8(res.java_path))
             .arg(res.timed_out ? QStringLiteral(" · 超时被终止") : QString())
             .arg(res.killed_by_client ? QStringLiteral(" · 按请求终止") : QString());
+    detail += QStringLiteral(" · 原因键 %1").arg(reasonKey);
+    if (res.artifacts_scanned) {
+        // 崩溃取证读了什么:报告路径/行数 + latest.log 行数(全是事实,界面直接给用户看)
+        detail += QStringLiteral(" · 报告 %1 行 · latest.log %2 行")
+                      .arg(res.crash_report_lines)
+                      .arg(res.latest_log_lines);
+    }
 
     if (rc != 0) {
         const QString reason = QString::fromUtf8(res.error).trimmed().isEmpty()
                                    ? QString::fromUtf8(err)
                                    : QString::fromUtf8(res.error);
         const bool cancelled = (res.started == 0 && m_cancel.load());
-        SXCL_LOG_E("launch", "启动失败 rc=%d 退出码=%d 用时=%lldms 已起进程=%d 原因=%s", rc,
-                   res.exit_code, (long long)res.elapsed_ms, res.started,
-                   reason.toUtf8().constData());
+        SXCL_LOG_E("launch", "启动失败 rc=%d 退出码=%d 用时=%lldms 已起进程=%d 原因键=%s 原因=%s",
+                   rc, res.exit_code, (long long)res.elapsed_ms, res.started,
+                   reasonKey.toUtf8().constData(), reason.toUtf8().constData());
         emit finished(false, cancelled, false, res.exit_code, res.timed_out, res.killed_by_client,
                       conclusionKey,
                       reason.isEmpty() ? QStringLiteral("启动失败(核心库没给原因)") : reason,
@@ -359,6 +373,21 @@ void LaunchWorker::run() {
                res.exit_code, double(res.elapsed_ms) / 1000.0, (unsigned long long)res.log.lines,
                conclusionKey.toUtf8().constData(), conclusionText.toUtf8().constData(), ok ? 1 : 0,
                cancelled ? 1 : 0, res.timed_out, res.killed_by_client);
+    // 原因键 + 可执行建议 + 取证事实:一条就够用户/我们定位(与 CLI 的 crash 子命令同一份数据)
+    SXCL_LOG_I("launch", "原因键=%s(%s) 建议=%s", reasonKey.toUtf8().constData(),
+               reasonName.toUtf8().constData(), reasonAdvice.toUtf8().constData());
+    if (res.artifacts_scanned) {
+        SXCL_LOG_I("launch",
+                   "崩溃取证:报告=%s(%s,%lld 行/共 %d 份) latest.log=%s(%s,%lld 行%s)",
+                   res.crash_report_path[0] != '\0' ? res.crash_report_path : "(没有)",
+                   res.crash_report_path[0] != '\0' ? res.artifacts.report_encoding : "-",
+                   res.crash_report_lines, res.artifacts.reports_total,
+                   res.artifacts.latest_log_path[0] != '\0' ? res.artifacts.latest_log_path
+                                                            : "(没有)",
+                   res.artifacts.latest_log_path[0] != '\0' ? res.artifacts.latest_log_encoding
+                                                            : "-",
+                   res.latest_log_lines, res.artifacts.latest_log_truncated ? ",只读了尾部" : "");
+    }
 
     emit finished(ok, cancelled, false, res.exit_code, res.timed_out, res.killed_by_client,
                   conclusionKey, message, detail);

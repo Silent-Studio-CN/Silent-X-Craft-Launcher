@@ -1805,8 +1805,19 @@ int sxcl_java_exec_version(const char *java_exe, int timeout_ms, sxcl_java_info 
     }
     if (cap.len == 0) {
         if (res.exit_code == 127) {
-            copy_str(out->error, sizeof(out->error),
-                     "进程起不来(退出码 127:多半是没有执行位、noexec 挂载或架构不符)");
+            /* 安卓上 exit 127 还有一个**专有**成因:文件可读可执行、挂载也没问题,但 SELinux
+             * 的 W^X 规则拒绝 execve 应用私有目录里的文件(execute_no_trans)。真机实测过
+             * (docs/18 §4.2):这种"看起来什么都对却起不来"的情况要单独成一类,并把审计原文
+             * 带出来,否则用户/我们都会往"没有执行位 / noexec / 架构不符"上查错方向。 */
+            int looks_executable = 0;
+            if (host == SXCL_JAVA_OS_ANDROID) {
+                char detail[192];
+                detail[0] = '\0';
+                looks_executable =
+                    (sxcl_android_probe_path(exe, 1, detail, sizeof(detail)) == SXCL_ANDROID_OK) ? 1 : 0;
+            }
+            (void)sxcl_java_exec_failure_text(res.exit_code, (host == SXCL_JAVA_OS_ANDROID) ? 1 : 0,
+                                              looks_executable, out->error, sizeof(out->error));
         } else {
             (void)snprintf(out->error, sizeof(out->error), "没有输出(退出码 %d)", res.exit_code);
         }
@@ -1969,12 +1980,13 @@ static int java_source_priority(const char *source)
 /* ── 结论文案 ── */
 
 static const char *const kJavaRunNames[] = {
-    "可用", "不在", "沙箱拒绝", "共享存储不能执行", "没有执行位", "跑不起来", "不是 Java", "架构不符",
+    "可用", "不在", "沙箱拒绝", "共享存储不能执行", "没有执行位",
+    "跑不起来", "不是 Java", "架构不符", "私有目录不能执行",
 };
 
 static const char *const kJavaRunKeys[] = {
     "ok", "missing", "denied", "noexec", "not_executable", "exec_failed", "not_a_jre",
-    "arch_mismatch",
+    "arch_mismatch", "app_data_exec_denied",
 };
 
 const char *sxcl_java_run_verdict_name(sxcl_java_run_verdict verdict)
@@ -2020,10 +2032,40 @@ const char *sxcl_java_run_verdict_hint(sxcl_java_run_verdict verdict)
     case SXCL_JAVA_RUN_ARCH_MISMATCH:
         return "这份 Java 的机器码与本机架构不符(例如 arm64 设备上放了 x86 的 java),起不来。"
                "请下载与本机架构匹配的运行时。";
+    case SXCL_JAVA_RUN_APP_DATA_EXEC_DENIED:
+        return "文件本身没问题(可读、有执行位、不在 noexec 上),是安卓的 W^X 规则不让应用执行"
+               "自己私有目录里的文件(SELinux 拒绝 execute_no_trans),所以 fork+exec 起不来。"
+               "这是系统策略,不是 Java 坏了:JVM 只能在进程内 dlopen(libjli.so)+JLI_Launch 起。";
     case SXCL_JAVA_RUN_COUNT:
     default:
         return "未知情况。";
     }
+}
+
+int sxcl_java_exec_failure_text(int exit_code, int is_android, int looks_executable, char *out,
+                                size_t out_len)
+{
+    int n = 0;
+    if (out == NULL || out_len == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    if (is_android && looks_executable) {
+        /* 安卓专有那条:文件本身没问题,是 SELinux 的 W^X 规则拒绝 execve 应用私有目录里的文件。
+         * 文案里保留审计关键字段(avc: denied / execute_no_trans / 结论),但**不塞完整审计行** ——
+         * 目标缓冲只有 128 字节,塞不下会截断成半句话。完整原文在 docs/18 §4.2 与真机 logcat 里。 */
+        n = snprintf(out, out_len,
+                     "退出码 %d:avc: denied { execute_no_trans } —— 不让 exec 应用私有目录,"
+                     "只能进程内 dlopen 起 JVM",
+                     exit_code);
+    } else {
+        n = snprintf(out, out_len,
+                     "进程起不来(退出码 %d:多半是没有执行位、noexec 挂载或架构不符)", exit_code);
+    }
+    if (n < 0) {
+        return -1;
+    }
+    return ((size_t)n >= out_len) ? (int)(out_len - 1) : n;
 }
 
 static sxcl_java_run_verdict run_verdict_of_access(sxcl_android_access access)
@@ -2153,6 +2195,10 @@ size_t sxcl_java_detect(const sxcl_java_env *env, sxcl_java_os os, int timeout_m
                 item->verdict = SXCL_JAVA_RUN_EXEC_FAILED;
                 if (info.error[0] != '\0' && strstr(info.error, "没找到 version") != NULL) {
                     item->verdict = SXCL_JAVA_RUN_NOT_A_JRE;
+                } else if (info.error[0] != '\0' &&
+                           strstr(info.error, "execute_no_trans") != NULL) {
+                    /* 安卓 W^X:文件 OK 但 SELinux 不让 exec —— 单独成一类,别混进"跑不起来" */
+                    item->verdict = SXCL_JAVA_RUN_APP_DATA_EXEC_DENIED;
                 }
                 copy_str(item->info.path, sizeof(item->info.path), cand->path);
                 copy_str(item->info.home, sizeof(item->info.home),

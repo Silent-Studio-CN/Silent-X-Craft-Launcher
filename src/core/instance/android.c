@@ -9,6 +9,7 @@
 #endif
 
 #include "sxcl/android.h"
+#include "sxcl/fs.h" /* sxcl_fs_fopen(UTF-8 路径安全的 fopen)/ is_dir / exists / stat */
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -415,3 +416,166 @@ sxcl_android_access sxcl_android_probe_path(const char *path, int want_exec,
 {
     return sxcl_android_probe_path_with_mounts(NULL, path, want_exec, reason, reason_len);
 }
+
+/* ────────────────── JRE 侧共享库补齐(FCL RuntimeUtils.patchJava 语义) ────────────────── */
+
+/* 顺序 = sxcl_android_jre_lib_name 的下标语义(共 SXCL_ANDROID_JRE_LIB_COUNT 条),别改。 */
+static const char *const kJreLibs[SXCL_ANDROID_JRE_LIB_COUNT] = {
+    "libawt_xawt.so",
+    "libjsound.so",
+};
+
+const char *sxcl_android_jre_lib_name(int index)
+{
+    if (index < 0 || index >= SXCL_ANDROID_JRE_LIB_COUNT) {
+        return NULL;
+    }
+    return kJreLibs[index];
+}
+
+const char *sxcl_android_jre_patch_code_name(int code)
+{
+    switch (code) {
+    case SXCL_ANDROID_JRE_OK:             return "ok";
+    case SXCL_ANDROID_JRE_ERR_ARG:        return "arg";
+    case SXCL_ANDROID_JRE_ERR_NO_LIB_DIR: return "no_lib_dir";
+    case SXCL_ANDROID_JRE_ERR_NO_SOURCE:  return "no_source";
+    case SXCL_ANDROID_JRE_ERR_COPY:       return "copy";
+    default:                              return "unknown";
+    }
+}
+
+/* dir + "/" + leaf;装不下返回 -1(与 java_runtime.c 里那份同语义:各文件自带,不抽内部头)。 */
+static int jre_join(char *out, size_t out_len, const char *dir, const char *leaf)
+{
+    const size_t dlen = strlen(dir);
+    const size_t llen = strlen(leaf);
+    const int need_sep = (dlen > 0 && dir[dlen - 1] == '/') ? 0 : 1;
+    if (dlen + (size_t)need_sep + llen + 1 > out_len) {
+        return -1;
+    }
+    (void)memcpy(out, dir, dlen);
+    size_t n = dlen;
+    if (need_sep) {
+        out[n++] = '/';
+    }
+    (void)memcpy(out + n, leaf, llen + 1);
+    return 0;
+}
+
+/* 整块拷贝(UTF-8 路径必须走 sxcl_fs_fopen:MSVC 的 fopen 按 ANSI 代码页解释路径)。
+ * 返回 0 成功,-1 源打不开,-2 目标写不了 / 读写出错。 */
+static int jre_copy_file(const char *src, const char *dst)
+{
+    FILE *in = sxcl_fs_fopen(src, "rb");
+    if (in == NULL) {
+        return -1;
+    }
+    FILE *out = sxcl_fs_fopen(dst, "wb");
+    if (out == NULL) {
+        (void)fclose(in);
+        return -2;
+    }
+    char buf[64 * 1024];
+    size_t n = 0;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            rc = -2;
+            break;
+        }
+    }
+    if (rc == 0 && ferror(in)) {
+        rc = -1;
+    }
+    if (fclose(out) != 0 && rc == 0) {
+        rc = -2; /* fclose 失败 = 数据可能没落盘,不能报成功 */
+    }
+    (void)fclose(in);
+    return rc;
+}
+
+int sxcl_android_jre_patch_libs(const char *java_home, const char *native_lib_dir, char *lib_dir_out,
+                                size_t lib_dir_len, char *err, size_t err_len)
+{
+    char jre8_dir[SXCL_ANDROID_JRE_PATH_MAX];
+    char plain_dir[SXCL_ANDROID_JRE_PATH_MAX];
+    char lib_dir[SXCL_ANDROID_JRE_PATH_MAX];
+    char src[SXCL_ANDROID_JRE_PATH_MAX];
+    char dst[SXCL_ANDROID_JRE_PATH_MAX];
+    int i = 0;
+
+    if (lib_dir_out != NULL && lib_dir_len > 0) {
+        lib_dir_out[0] = '\0';
+    }
+    if (java_home == NULL || java_home[0] == '\0' || native_lib_dir == NULL ||
+        native_lib_dir[0] == '\0') {
+        android_err(err, err_len, "参数不合法:java_home / native_lib_dir 不能为空");
+        return SXCL_ANDROID_JRE_ERR_ARG;
+    }
+
+    /* jre8 的库在 <java_home>/jre/lib,其余在 <java_home>/lib(FCL:isJDK8 时前缀 "/jre")。
+     * 看哪个目录真的在,而不是去认版本号 —— 我们要的是"文件该放哪",不是"这是哪一代"。 */
+    if (jre_join(jre8_dir, sizeof(jre8_dir), java_home, "jre/lib") != 0 ||
+        jre_join(plain_dir, sizeof(plain_dir), java_home, "lib") != 0) {
+        android_err(err, err_len, "JRE 路径太长:%s", java_home);
+        return SXCL_ANDROID_JRE_ERR_ARG;
+    }
+    if (sxcl_fs_is_dir(jre8_dir)) {
+        (void)memcpy(lib_dir, jre8_dir, strlen(jre8_dir) + 1);
+    } else if (sxcl_fs_is_dir(plain_dir)) {
+        (void)memcpy(lib_dir, plain_dir, strlen(plain_dir) + 1);
+    } else {
+        android_err(err, err_len, "JRE 里既没有 jre/lib 也没有 lib(java_home 给错了?):%s",
+                    java_home);
+        return SXCL_ANDROID_JRE_ERR_NO_LIB_DIR;
+    }
+
+    /* 先体检两个源:缺一个就是 APK 打包坏了(构建在缺的时候直接失败),必须硬失败。
+     * 静默跳过只会把问题推到设备上"JVM 起不来"那一刻,而那时已经看不出是谁的错。 */
+    for (i = 0; i < SXCL_ANDROID_JRE_LIB_COUNT; ++i) {
+        if (jre_join(src, sizeof(src), native_lib_dir, kJreLibs[i]) != 0) {
+            android_err(err, err_len, "路径太长:%s/%s", native_lib_dir, kJreLibs[i]);
+            return SXCL_ANDROID_JRE_ERR_ARG;
+        }
+        if (!sxcl_fs_exists(src)) {
+            android_err(err, err_len, "nativeLibraryDir 里没有 %s(APK 打包坏了,它必须随包发布):%s",
+                        kJreLibs[i], src);
+            return SXCL_ANDROID_JRE_ERR_NO_SOURCE;
+        }
+    }
+
+    for (i = 0; i < SXCL_ANDROID_JRE_LIB_COUNT; ++i) {
+        int64_t src_size = 0;
+        int64_t dst_size = 0;
+        int rc = 0;
+        if (jre_join(src, sizeof(src), native_lib_dir, kJreLibs[i]) != 0 ||
+            jre_join(dst, sizeof(dst), lib_dir, kJreLibs[i]) != 0) {
+            android_err(err, err_len, "路径太长:%s", lib_dir);
+            return SXCL_ANDROID_JRE_ERR_ARG;
+        }
+        rc = jre_copy_file(src, dst);
+        if (rc != 0) {
+            android_err(err, err_len, "拷贝 %s 失败(%s -> %s)", kJreLibs[i],
+                        (rc == -1) ? "源打不开" : "写不进去", dst);
+            return SXCL_ANDROID_JRE_ERR_COPY;
+        }
+        /* 拷完核对长度:截断的 .so 在设备上表现为 dlopen 失败或直接崩,不值得赌。 */
+        if (sxcl_fs_stat(src, &src_size, NULL) != 0 || sxcl_fs_stat(dst, &dst_size, NULL) != 0 ||
+            src_size != dst_size) {
+            android_err(err, err_len, "拷贝后长度不一致:%s(%lld -> %lld)", kJreLibs[i],
+                        (long long)src_size, (long long)dst_size);
+            return SXCL_ANDROID_JRE_ERR_COPY;
+        }
+    }
+
+    if (lib_dir_out != NULL && lib_dir_len > 0) {
+        const size_t n = strlen(lib_dir);
+        if (n + 1 <= lib_dir_len) {
+            (void)memcpy(lib_dir_out, lib_dir, n + 1);
+        }
+    }
+    (void)android_err(err, err_len, "两个 JRE 侧库都在位:%s", lib_dir);
+    return SXCL_ANDROID_JRE_OK;
+}
+

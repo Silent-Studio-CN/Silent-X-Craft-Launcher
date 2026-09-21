@@ -19,7 +19,9 @@
 #include "sxcl/fs.h"
 #include "sxcl/java_runtime.h" /* java 子命令:官方 JRE 运行时预置(一次装齐) */
 #include "sxcl/json.h"
-#include "sxcl/launch.h"
+#include "sxcl/launch.h"     /* 里面有 crash.h:崩溃取证的类型/常量(crash 子命令用) */
+#include "sxcl/log.h"       /* 运行日志落盘 + 游戏输出通道(sxcl_log_game_*) */
+#include "sxcl/logexport.h" /* logs export 子命令:一键导出日志包(store 打包 + 打码) */
 #include "sxcl/install.h" /* 版本 JSON 落盘 sxcl_install_write_version_json;缺它会 C4013 -> C2220 */
 #include "sxcl/limiter.h"
 #include "sxcl/loader.h"
@@ -194,6 +196,14 @@ static int usage(void)
            "      [--dry-run] [--verbose]\n"
            "      └ 读版本 JSON -> 选 Java -> 按实例设置写 options.txt(渲染后端)-> 起进程\n"
            "        -> 每行归类 -> 出一条人话结论(发现 Vulkan 回退会写回 lastGraphicsApi)\n"
+           "  sxcl-dl crash <游戏目录> [--lang en-us] [--no-debug]\n"
+           "      └ 崩溃取证:读 crash-reports 里最近的非空报告 + logs/latest.log(必要时 debug.log),\n"
+           "        自动探测编码(UTF-8/UTF-16/GBK),出**原因键**(out_of_memory / mod_duplicate …)\n"
+           "        与一条可执行建议;与启动层用的是同一个入口,结论不会与界面分叉\n"
+           "  sxcl-dl logs export <游戏目录> <输出.zip> [--log-dir DIR] [--debug]\n"
+           "      [--max-logs N] [--max-reports N] [--max-bytes N]\n"
+           "      └ 一键导出:启动器 sxcl-*.log + 游戏 logs/latest.log + crash-reports/*.txt\n"
+           "        打成 zip(store 不压缩);**导出前先打码**(token/UUID/玩家名/路径用户名 -> ***)\n"
            "  sxcl-dl auth <login|status|refresh|logout|bedrock> [...]\n"
            "      └ 微软(Xbox Live)正版登录:授权码+PKCE+环回 / 设备码兜底 / 免密续期\n"
            "        令牌加密落盘,输出只打前缀,绝不打印明文;详见 docs/09-正版登录.md\n"
@@ -987,6 +997,25 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
                res.timed_out ? "  (超时被终止)" : (res.killed_by_client ? "  (按请求终止)" : ""));
     }
     printf("结论: %s\n", res.conclusion_text);
+    printf("原因键: %s(%s)\n", res.reason_key, res.reason_name);
+    printf("建议: %s\n", res.reason_advice);
+    /* 也写进运行日志:导出的日志包里要能直接看到结论,不必再翻 stdout */
+    SXCL_LOG_I("launch", "原因键=%s(%s) 建议=%s", res.reason_key, res.reason_name,
+               res.reason_advice);
+    if (res.artifacts_scanned) {
+        if (res.crash_report_path[0] != '\0') {
+            printf("崩溃报告: %s(%s,%lld 行)\n", res.crash_report_path,
+                   sxcl_crash_encoding_name(res.artifacts.report_encoding), res.crash_report_lines);
+        } else {
+            printf("崩溃报告: (crash-reports 里没有非空报告)\n");
+        }
+        if (res.artifacts.latest_log_path[0] != '\0') {
+            printf("latest.log: %s(%s,%lld 行%s)\n", res.artifacts.latest_log_path,
+                   sxcl_crash_encoding_name(res.artifacts.latest_log_encoding),
+                   res.latest_log_lines,
+                   res.artifacts.latest_log_truncated ? ",只读了尾部" : "");
+        }
+    }
     if (rc != 0) {
         fprintf(stderr, "启动失败: %s\n", err);
         return 1;
@@ -1978,10 +2007,168 @@ static int cmd_java(int argc, char **argv, const cli_opts *o)
     return usage();
 }
 
+
+/* ── crash 子命令:直接体检游戏目录里的取证文件(界面"查看详情"的命令行版)──
+ *
+ * 与启动层用的是**同一个**入口(sxcl_launch_scan_artifacts),所以命令行看到的
+ * 原因键与界面里显示的一模一样 —— 排查时不会出现"CLI 说 A、界面说 B"。 */
+static int cmd_crash(int argc, char **argv)
+{
+    const char *game_dir = argv[2];
+    const char *lang = NULL;
+    int want_debug = 1;
+    sxcl_log_summary s;
+    sxcl_crash_evidence ev;
+    char err[SXCL_CRASH_ERROR_MAX];
+    long long fed = 0;
+    int i = 0;
+
+    for (i = 3; i < argc; ++i) {
+        const char *a = argv[i];
+        const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
+        if (strcmp(a, "--lang") == 0 && v) {
+            lang = v;
+            ++i;
+        } else if (strcmp(a, "--no-debug") == 0) {
+            want_debug = 0;
+        } else {
+            fprintf(stderr, "未知参数: %s\n", a);
+            return usage();
+        }
+    }
+    err[0] = '\0';
+    sxcl_log_summary_init(&s);
+    memset(&ev, 0, sizeof(ev));
+    fed = sxcl_launch_scan_artifacts(game_dir, &s, &ev,
+                                     want_debug ? SXCL_CRASH_SCAN_ALL : SXCL_CRASH_SCAN_REPORTS |
+                                                                          SXCL_CRASH_SCAN_LATEST,
+                                     0, err, sizeof(err));
+    if (fed < 0) {
+        fprintf(stderr, "崩溃取证失败: %s\n", err);
+        return 1;
+    }
+    printf("游戏目录   : %s\n", game_dir);
+    if (ev.report_path[0] != '\0') {
+        printf("崩溃报告   : %s\n", ev.report_path);
+        printf("             编码 %s(%s)· %lld 行 · crash-reports 里非空报告 %d 份\n",
+               ev.report_encoding, sxcl_crash_encoding_name(ev.report_encoding),
+               ev.report_lines, ev.reports_total);
+        if (ev.report_description[0] != '\0') {
+            printf("             Description: %s\n", ev.report_description);
+        }
+    } else {
+        printf("崩溃报告   : (crash-reports 里没有非空报告)\n");
+    }
+    if (ev.latest_log_path[0] != '\0') {
+        printf("latest.log : %s\n", ev.latest_log_path);
+        printf("             编码 %s(%s)· 共 %lld 行%s · 喂入分析 %lld 行\n",
+               ev.latest_log_encoding, sxcl_crash_encoding_name(ev.latest_log_encoding),
+               ev.latest_log_lines, ev.latest_log_truncated ? "(只读了尾部)" : "",
+               ev.latest_log_fed);
+    } else {
+        printf("latest.log : (没有这个文件)\n");
+    }
+    if (ev.used_debug_log) {
+        printf("debug.log  : %s(编码 %s)· %lld 行 —— latest.log 缺失/为空,退到了它\n",
+               ev.debug_log_path, sxcl_crash_encoding_name(ev.debug_log_encoding),
+               ev.debug_log_lines);
+    }
+    if (ev.used_legacy_log) {
+        printf("client-*.log: %s(编码 %s)· %lld 行 —— 1.7 之前的老版本命名,同样认\n",
+               ev.legacy_log_path, sxcl_crash_encoding_name(ev.legacy_log_encoding),
+               ev.legacy_log_lines);
+    }
+    printf("喂入分析   : %lld 行(与 stdout 同一套规则、同一张原因表)\n", fed);
+    printf("结论       : %s\n", sxcl_log_conclusion_name(s.conclusion));
+    printf("原因键     : %s\n", s.reason_key);
+    printf("原因       : %s\n", sxcl_log_reason_name(s.reason, lang));
+    printf("建议       : %s\n", sxcl_log_reason_advice(s.reason, lang));
+    if (s.crash_reason[0] != '\0') {
+        printf("日志首因   : %s\n", s.crash_reason);
+    }
+    return 0;
+}
+
+/* ── logs 子命令:一键导出日志包(与我们自己的 zip 读侧互逆)── */
+static int cmd_logs(int argc, char **argv)
+{
+    sxcl_logs_export_request req;
+    sxcl_logs_export_result res;
+    char err[SXCL_LOGS_EXPORT_ERROR_MAX];
+    const char *sub = (argc >= 3) ? argv[2] : NULL;
+    int i = 0;
+
+    if (sub == NULL || strcmp(sub, "export") != 0) {
+        return usage();
+    }
+    if (argc < 5) {
+        return usage(); /* logs export <游戏目录> <输出 zip> */
+    }
+    memset(&req, 0, sizeof(req));
+    memset(&res, 0, sizeof(res));
+    err[0] = '\0';
+    req.game_dir = argv[3];
+    req.out_zip = argv[4];
+    for (i = 5; i < argc; ++i) {
+        const char *a = argv[i];
+        const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
+        if (strcmp(a, "--log-dir") == 0 && v) {
+            req.log_dir = v;
+            ++i;
+        } else if (strcmp(a, "--debug") == 0) {
+            req.include_debug_log = 1;
+        } else if (strcmp(a, "--max-logs") == 0 && v) {
+            req.max_launcher_logs = atoi(v);
+            ++i;
+        } else if (strcmp(a, "--max-reports") == 0 && v) {
+            req.max_crash_reports = atoi(v);
+            ++i;
+        } else if (strcmp(a, "--max-bytes") == 0 && v) {
+            req.max_file_bytes = (size_t)strtoull(v, NULL, 10);
+            ++i;
+        } else {
+            fprintf(stderr, "未知参数: %s\n", a);
+            return usage();
+        }
+    }
+    if (sxcl_logs_export(&req, &res, err, sizeof(err)) != 0) {
+        fprintf(stderr, "导出失败: %s\n", err);
+        return 1;
+    }
+    printf("导出完成   : %s\n", res.out_path);
+    printf("打包条目   : %d 个文件 + 说明文件(%d 条);跳过 %d 个;原样 %lld 字节 -> zip %lld 字节\n",
+           res.files, res.entries, res.skipped, res.raw_bytes, res.zip_bytes);
+    printf("说明文件   : %s(包内条目名)\n", res.manifest_path);
+    printf("打码       : token / UUID / 玩家名 / 路径里的用户名 -> ***\n");
+    printf("压缩方式   : store(不压缩,任何解压工具都能打开;仓库只有 zip 读侧)\n");
+    if (res.note[0] != '\0') {
+        printf("注意       : %s\n", res.note);
+    }
+    return 0;
+}
+
+/** 收尾:把游戏输出的缓冲与日志文件冲刷干净(atexit,所有返回路径都覆盖)。 */
+static void cli_log_atexit(void)
+{
+    sxcl_log_shutdown();
+}
+
 int main(int argc, char **argv)
 {
     /* 无缓冲输出:崩溃时不会把最后一段输出留在缓冲区里丢掉(排查跨平台崩溃吃过这个亏) */
     setvbuf(stdout, NULL, _IONBF, 0);
+    /* 命令行也要有 logs/sxcl-*.log:游戏输出落盘、崩溃取证、一键导出都挂在它上面。
+     * 目录口径与界面一致(SXCL_LOG_DIR > <配置目录>/logs);打不开只降级,不影响命令。 */
+    {
+        char log_err[SXCL_LOG_ERROR_MAX];
+        log_err[0] = '\0';
+        if (sxcl_log_init(NULL, log_err, sizeof(log_err)) != SXCL_LOG_OK) {
+            fprintf(stderr, "提示:运行日志文件不可用(%s),日志只走终端\n",
+                    log_err[0] != '\0' ? log_err : "未知原因");
+        } else {
+            (void)atexit(cli_log_atexit);
+        }
+    }
 #if defined(_WIN32)
     rebuild_argv_utf8(&argc, &argv); /* 必须在解析参数之前:否则中文实例名/路径就是乱码 */
 #endif
@@ -2058,6 +2245,15 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "launch") == 0) {
         return cmd_launch(argc, argv, &o);
+    }
+    if (strcmp(argv[1], "crash") == 0) {
+        if (argc < 3) {
+            return usage();
+        }
+        return cmd_crash(argc, argv);
+    }
+    if (strcmp(argv[1], "logs") == 0) {
+        return cmd_logs(argc, argv);
     }
     if (strcmp(argv[1], "auth") == 0) {
         return cmd_auth(argc, argv);

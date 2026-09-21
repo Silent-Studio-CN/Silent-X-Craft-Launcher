@@ -107,10 +107,20 @@ int sxcl_java_runtime_choose(const sxcl_json *all_json, const char *platform, in
 
 /* ── 清单抓取 ── */
 
+/** JRE 组件总清单(all.json)的来源解析,优先级从高到低:
+ *    1) explicit_url(调用方直接给的 URL,含自带托管)
+ *    2) env_value(打包层/运维通过环境变量 SXCL_JAVA_RUNTIME_MANIFEST_URL 给的 URL)
+ *    3) SXCL_JAVA_RUNTIME_MANIFEST_URL(编译期默认,官方 Mojang 清单)
+ *  **不许把来源写死**:换成我们自己的托管只要给 URL,不用重编。
+ *  纯函数(env_value 由调用方读环境后传进来),为的是能用单测钉住优先级。
+ *  返回 SXCL_JAVA_RUNTIME_OK;URL 太长(装不下)返回 ERR_ARG 且 out 为空串。 */
+int sxcl_java_runtime_resolve_all_url(const char *explicit_url, const char *env_value, char *out,
+                                      size_t out_len);
+
 /** 抓清单/组件的请求。 */
 typedef struct sxcl_java_runtime_query {
     const char *all_json_text;   /**< 非空 = 直接用这份 all.json(离线/夹具),不联网 */
-    const char *all_json_url;    /**< 空 = SXCL_JAVA_RUNTIME_MANIFEST_URL */
+    const char *all_json_url;    /**< 空 = 环境变量 SXCL_JAVA_RUNTIME_MANIFEST_URL,再空才用编译期默认 */
     const char *manifest_text;   /**< 非空 = 直接用这份组件清单,不联网 */
     const char *platform;        /**< 空 = 本机 */
     int manifest_relaxed_mirror; /**< 1 = 镜像那份组件清单不校验清单级 sha1(逐文件 sha1 照旧强校验) */

@@ -7,7 +7,9 @@
 #include "page_factory.h"
 
 #include <QAbstractButton>
+#include <QDateTime>
 #include <QDir>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
 #include <QHBoxLayout>
@@ -20,7 +22,11 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <cstring>
 #include <utility>
+
+#include "sxcl/log.h"       // SXCL_LOG_I/E:导出结果进运行日志
+#include "sxcl/logexport.h" // 一键导出日志包(token/uuid/用户名在写盘前就打码)
 
 #include "dialogs/account.h" // loadAccountSnapshot / accountCanLaunch(现成入口,本页不改账户代码)
 #include "workers/launch_worker.h"
@@ -247,7 +253,8 @@ private:
         m_javaLabel->setStyleSheet(QStringLiteral("font-size: 12px;"));
         layout->addWidget(m_javaLabel);
 
-        layout->addWidget(makeSectionTitle(QStringLiteral("最终命令行（accessToken 已打码）"), card));
+        layout->addWidget(makeSectionTitle(
+            QStringLiteral("最终命令行（accessToken / 用户名 / UUID 已打码）"), card));
         m_commandView = makeMonoView(card, 132);
         layout->addWidget(m_commandView);
 
@@ -263,6 +270,12 @@ private:
         applyButtonFont(m_cancelButton);
         connect(m_cancelButton, &QAbstractButton::clicked, this, [this] { onCancel(); });
         btnLayout->addWidget(m_cancelButton);
+        // 「导出日志」:把启动器日志 + 游戏 latest.log + crash-reports 打成一个 zip。
+        // 为什么放在启动页:用户遇到问题时人就在这一页(刚崩完),不该再去翻设置找入口。
+        m_exportButton = new PushButton(QStringLiteral("导出日志"), m_view);
+        applyButtonFont(m_exportButton);
+        connect(m_exportButton, &QAbstractButton::clicked, this, [this] { onExportLogs(); });
+        btnLayout->addWidget(m_exportButton);
         btnLayout->addStretch(1);
         m_backButton = new PrimaryPushButton(QStringLiteral("返回"), m_view); // :593
         applyButtonFont(m_backButton);
@@ -795,6 +808,52 @@ private:
                               : QStringLiteral("等进程下一次输出就停"));
     }
 
+    // 「导出日志」:核心库负责打包与打码,界面只负责问路径、报结果。
+    // **本页不碰令牌**:包里的 token/uuid/玩家名由 sxcl_logs_export 在写盘前换成 ***。
+    void onExportLogs() {
+        const QString gameDir = uiGameDirectory();
+        const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+        const QString baseDir = gameDir.isEmpty() ? QDir::homePath() : gameDir;
+        const QString suggested =
+            QDir(baseDir).filePath(QStringLiteral("sxcl-logs-%1.zip").arg(stamp));
+        const QString path = QFileDialog::getSaveFileName(
+            this, QStringLiteral("导出日志包"), suggested, QStringLiteral("ZIP 压缩包 (*.zip)"));
+        if (path.isEmpty())
+            return; // 用户取消:什么都不做,也不提示
+
+        const QByteArray gameUtf8 = QDir::fromNativeSeparators(gameDir).toUtf8();
+        const QByteArray outUtf8 = QDir::fromNativeSeparators(path).toUtf8();
+        const QByteArray logDirUtf8 = QDir::fromNativeSeparators(uiLauncherDataRoot() +
+                                                                 QStringLiteral("/logs"))
+                                          .toUtf8();
+        sxcl_logs_export_request req;
+        sxcl_logs_export_result res;
+        char err[SXCL_LOGS_EXPORT_ERROR_MAX];
+        std::memset(&req, 0, sizeof(req));
+        std::memset(&res, 0, sizeof(res));
+        err[0] = '\0';
+        req.game_dir = gameUtf8.isEmpty() ? nullptr : gameUtf8.constData();
+        req.log_dir = logDirUtf8.constData();
+        req.out_zip = outUtf8.constData();
+        const int rc = sxcl_logs_export(&req, &res, err, sizeof(err));
+        if (rc == 0) {
+            const QString detail = QStringLiteral("%1 · %2 个文件 · %3 字节")
+                                       .arg(QString::fromUtf8(res.out_path))
+                                       .arg(res.files)
+                                       .arg(res.zip_bytes);
+            SXCL_LOG_I("ui", "日志已导出:%s(文件 %d 个,zip %lld 字节,跳过 %d)",
+                       res.out_path, res.files, res.zip_bytes, res.skipped);
+            m_logView->appendPlainText(QStringLiteral("[info] 日志已导出:%1").arg(detail));
+            InfoBar::push(InfoBar::Type::Success, QStringLiteral("日志已导出"), detail, this, 6000);
+        } else {
+            const QString why =
+                QString::fromUtf8(err[0] != '\0' ? err : "导出失败(核心库没给原因)");
+            SXCL_LOG_E("ui", "日志导出失败:%s", why.toUtf8().constData());
+            m_logView->appendPlainText(QStringLiteral("[error] 日志导出失败:%1").arg(why));
+            InfoBar::push(InfoBar::Type::Error, QStringLiteral("导出失败"), why, this, 8000);
+        }
+    }
+
     void onBack() { autoClose(); } // :673-674
 
     void autoClose() { // :676-679
@@ -820,6 +879,7 @@ private:
     QProgressBar *m_progressBar = nullptr;
     BodyLabel *m_logOutput = nullptr;
     PushButton *m_cancelButton = nullptr;
+    PushButton *m_exportButton = nullptr; // 导出日志包(打码由核心库做)
     PrimaryPushButton *m_backButton = nullptr;
     QVector<PhaseRow> m_phaseWidgets = {};
 

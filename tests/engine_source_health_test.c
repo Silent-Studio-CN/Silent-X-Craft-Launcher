@@ -23,7 +23,16 @@
 #include "sxcl/fs.h"
 #include "sxcl/net.h"
 
-#define TMP_ROOT "_sxcl_source_health_fixture"
+/* 夹具根目录 = 这个名字 + **进程号**(并行跑两份 ctest 各用各的;跑完自己清掉) */
+#define TMP_ROOT_BASE "_sxcl_source_health_fixture"
+#if defined(_WIN32)
+#  include <process.h>
+#  define SXCL_TEST_PID() ((long)_getpid())
+#else
+#  include <unistd.h>
+#  define SXCL_TEST_PID() ((long)getpid())
+#endif
+static char g_root[256];
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -223,7 +232,7 @@ static void init_task(sxcl_task *t, const char *dest, const char *u0, const char
 static void test_blackhole_reorder(void) {
     printf("\n== ① 黑洞源:第二个文件不许再先撞它 ==\n");
     char dir[512];
-    snprintf(dir, sizeof(dir), "%s/blackhole", TMP_ROOT);
+    snprintf(dir, sizeof(dir), "%s/blackhole", g_root);
     (void)sxcl_fs_remove_tree(dir);
     (void)sxcl_fs_mkdirs(dir);
 
@@ -295,7 +304,7 @@ static void test_blackhole_reorder(void) {
 static void test_bmclapi_403_not_counted(void) {
     printf("\n== ② BMCLAPI 的 403 连来 9 次也不判死(PCL 同款口径)==\n");
     char dir[512];
-    snprintf(dir, sizeof(dir), "%s/forbidden", TMP_ROOT);
+    snprintf(dir, sizeof(dir), "%s/forbidden", g_root);
     (void)sxcl_fs_remove_tree(dir);
     (void)sxcl_fs_mkdirs(dir);
 
@@ -325,7 +334,7 @@ static void test_bmclapi_403_not_counted(void) {
 static void test_real_403_gets_demoted(void) {
     printf("\n== ③ 非 BMCLAPI 的 403 源:失败一次就排到干净源之后,并且一直不再回头 ==\n");
     char dir[512];
-    snprintf(dir, sizeof(dir), "%s/demote", TMP_ROOT);
+    snprintf(dir, sizeof(dir), "%s/demote", g_root);
     (void)sxcl_fs_remove_tree(dir);
     (void)sxcl_fs_mkdirs(dir);
 
@@ -353,11 +362,13 @@ static void test_real_403_gets_demoted(void) {
 }
 
 int main(void) {
-    printf("SXCL 源健康表(源级熔断)夹具 —— 临时目录 %s,不联网\n", TMP_ROOT);
-    (void)sxcl_fs_mkdirs(TMP_ROOT);
+    snprintf(g_root, sizeof(g_root), "%s_%ld", TMP_ROOT_BASE, SXCL_TEST_PID());
+    printf("SXCL 源健康表(源级熔断)夹具 —— 临时目录 %s,不联网\n", g_root);
+    (void)sxcl_fs_mkdirs(g_root);
     test_blackhole_reorder();
     test_bmclapi_403_not_counted();
     test_real_403_gets_demoted();
+    (void)sxcl_fs_remove_tree(g_root); // 清掉自己这份(带进程号的)夹具目录
     printf("\n夹具结果:通过 %d 项,失败 %d 项\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

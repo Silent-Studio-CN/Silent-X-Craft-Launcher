@@ -1,0 +1,18 @@
+{
+    "app": "Silent X Craft Launcher",
+    "interrupted": true,
+    "schema": 1,
+    "tasks": [
+        {
+            "id": "download_progress_1.20.1",
+            "instanceName": "1.20.1",
+            "kind": "download",
+            "loaderType": "none",
+            "loaderVersion": "",
+            "status": "下载中",
+            "title": "下载 1.20.1",
+            "versionId": "1.20.1",
+            "versionName": "1.20.1"
+        }
+    ]
+}

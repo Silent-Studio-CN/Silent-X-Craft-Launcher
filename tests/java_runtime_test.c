@@ -909,6 +909,54 @@ static void test_default_root_and_errors(void)
               "目录不存在 = 0 条(不是错误)");
 }
 
+/* ── 清单来源三级(显式 > 环境变量 > 编译期默认):换托管不许重编 ── */
+
+static void test_manifest_source(void)
+{
+    printf("-- all.json 来源解析(显式 > 环境变量 > 默认)\n");
+    char out[SXCL_JAVA_RUNTIME_URL_MAX];
+
+    out[0] = '\0';
+    check_int(sxcl_java_runtime_resolve_all_url("https://cdn.example.com/jre/all.json", NULL, out,
+                                                sizeof(out)),
+              SXCL_JAVA_RUNTIME_OK, "显式 URL 解析成功");
+    check_str(out, "https://cdn.example.com/jre/all.json", "显式 URL 优先");
+
+    out[0] = '\0';
+    check_int(sxcl_java_runtime_resolve_all_url("https://cdn.example.com/a.json",
+                                                "https://env.example.com/b.json", out, sizeof(out)),
+              SXCL_JAVA_RUNTIME_OK, "两者都给也解析得出来");
+    check_str(out, "https://cdn.example.com/a.json", "显式 URL 压过环境变量");
+
+    out[0] = '\0';
+    check_int(sxcl_java_runtime_resolve_all_url(NULL, "https://env.example.com/b.json", out,
+                                                sizeof(out)),
+              SXCL_JAVA_RUNTIME_OK, "只有环境变量也解析得出来");
+    check_str(out, "https://env.example.com/b.json", "环境变量在没给显式 URL 时生效");
+
+    out[0] = '\0';
+    check_int(sxcl_java_runtime_resolve_all_url(NULL, NULL, out, sizeof(out)), SXCL_JAVA_RUNTIME_OK,
+              "都不给 = 用编译期默认");
+    check_str(out, SXCL_JAVA_RUNTIME_MANIFEST_URL, "默认就是那条官方清单");
+    check(strstr(out, "java-runtime") != NULL, "默认 URL 指向 java-runtime");
+
+    out[0] = '\0';
+    check_int(sxcl_java_runtime_resolve_all_url("", "", out, sizeof(out)), SXCL_JAVA_RUNTIME_OK,
+              "空串等于没给");
+    check_str(out, SXCL_JAVA_RUNTIME_MANIFEST_URL, "空串回落到默认");
+
+    {
+        char tiny[8];
+        tiny[0] = 'x';
+        check_int(sxcl_java_runtime_resolve_all_url("https://cdn.example.com/all.json", NULL, tiny,
+                                                    sizeof(tiny)),
+                  SXCL_JAVA_RUNTIME_ERR_ARG, "URL 装不下 = ERR_ARG(不截断)");
+        check(tiny[0] == '\0', "装不下时 out 清成空串");
+    }
+    check_int(sxcl_java_runtime_resolve_all_url(NULL, NULL, NULL, 0), SXCL_JAVA_RUNTIME_ERR_ARG,
+              "out 为空 = ERR_ARG");
+}
+
 int main(void)
 {
     memset(&g_engine_opts, 0, sizeof(g_engine_opts));
@@ -929,6 +977,7 @@ int main(void)
     test_manifest_sha1();
     test_cancel();
     test_default_root_and_errors();
+    test_manifest_source();
 
     printf("java_runtime 测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

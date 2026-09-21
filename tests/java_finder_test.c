@@ -495,6 +495,51 @@ static void test_detect(void)
                   "verdict:noexec 的中文名");
         check_contains(sxcl_java_run_verdict_hint(SXCL_JAVA_RUN_DENIED), "私有目录",
                        "verdict:沙箱拒绝的建议说清原因");
+        /* 安卓 W^X 那一类:键/名稳定,建议里要出现"进程内 dlopen"这条唯一出路 */
+        check_str(sxcl_java_run_verdict_key(SXCL_JAVA_RUN_APP_DATA_EXEC_DENIED),
+                  "app_data_exec_denied", "verdict:私有目录不能执行的英文键");
+        check_str(sxcl_java_run_verdict_name(SXCL_JAVA_RUN_APP_DATA_EXEC_DENIED),
+                  "私有目录不能执行", "verdict:私有目录不能执行的中文名");
+        check_contains(sxcl_java_run_verdict_hint(SXCL_JAVA_RUN_APP_DATA_EXEC_DENIED), "dlopen",
+                       "verdict:这条建议要说清只能进程内 dlopen 起");
+    }
+
+    /* 失败文案的两条分支(纯函数,平台的差异在这里钉死) */
+    {
+        char text[192];
+
+        /* 桌面:还是原来那条通用文案,不许悄悄变成安卓说法 */
+        text[0] = '\0';
+        check(sxcl_java_exec_failure_text(127, 0, 1, text, sizeof(text)) > 0,
+              "exec 文案:桌面分支有输出");
+        check_contains(text, "127", "exec 文案:带退出码");
+        check_contains(text, "noexec", "exec 文案:桌面分支还是通用那条");
+        check(strstr(text, "execute_no_trans") == NULL, "exec 文案:桌面上不提 SELinux");
+
+        /* 安卓 + 文件本身没问题(可读/有 x 位/不在 noexec 上)= SELinux W^X 那条 */
+        text[0] = '\0';
+        check(sxcl_java_exec_failure_text(127, 1, 1, text, sizeof(text)) > 0,
+              "exec 文案:安卓分支有输出");
+        check_contains(text, "execute_no_trans", "exec 文案:安卓分支点名 execute_no_trans");
+        check_contains(text, "avc: denied", "exec 文案:安卓分支带审计原文关键字段");
+        check_contains(text, "dlopen", "exec 文案:安卓分支给出唯一出路(进程内 dlopen)");
+        check(strlen(text) < 128, "exec 文案:安卓分支塞得进 128 字节的错误缓冲");
+
+        /* 安卓但文件本身就有问题(比如没有 x 位):不能赖到 SELinux 头上 */
+        text[0] = '\0';
+        check(sxcl_java_exec_failure_text(127, 1, 0, text, sizeof(text)) > 0,
+              "exec 文案:安卓 + 不可执行也有输出");
+        check_contains(text, "没有执行位", "exec 文案:这种情况还是 没有执行位 那条");
+        check(strstr(text, "execute_no_trans") == NULL,
+              "exec 文案:文件本身有问题时不栽赃 SELinux");
+
+        /* 非 127 的退出码也走通用分支 */
+        text[0] = '\0';
+        check(sxcl_java_exec_failure_text(1, 1, 1, text, sizeof(text)) > 0, "exec 文案:非 127 有输出");
+        check_contains(text, "1", "exec 文案:非 127 也带退出码");
+
+        /* 参数边界 */
+        check_int(sxcl_java_exec_failure_text(127, 1, 1, NULL, 0), -1, "exec 文案:out 为空 = -1");
     }
 
     check_int(sxcl_java_detect(&env, HOST_OS, 8000, NULL), 0, "detect:out=NULL 返回 0(不炸)");

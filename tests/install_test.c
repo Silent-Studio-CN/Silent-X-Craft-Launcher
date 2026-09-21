@@ -16,7 +16,17 @@
 #include "sxcl/manifest.h" /* SXCL_MIRROR_BMCLAPI_BASE / SXCL_ASSET_OBJECTS_BASE(下载源用例要用) */
 #include "sxcl/net.h"
 
-#define TMP_ROOT  "build-c/_install_tmp"
+/* 夹具根目录 = 这个名字 + **进程号**:几个代理会同在一棵树里并行跑 ctest,
+ * 固定路径会互相踩成假红灯(本文件以前就是固定路径)。 */
+#define TMP_ROOT_BASE "build-c/_install_tmp"
+#if defined(_WIN32)
+#  include <process.h>
+#  define SXCL_TEST_PID() ((long)_getpid())
+#else
+#  include <unistd.h>
+#  define SXCL_TEST_PID() ((long)getpid())
+#endif
+static char g_tmp_root[256];
 #define INSTANCE  "1.20.1"
 #define LOADER_INSTANCE "1.20.1-forge-47.2.0"
 /* "同一个实例装第二遍"用的另一个名字:目标已存在(versions/<实例>/<实例>.json 在且可解析)时
@@ -546,7 +556,7 @@ static const char *kPurgeRel[] = {
 
 /** 每个用例一个干净目录:把上次跑留下的文件删掉,免得"跳过"用例被上次的产物污染。 */
 static void case_dir(const char *name, char *out, size_t cap) {
-    snprintf(out, cap, "%s/%s", TMP_ROOT, name);
+    snprintf(out, cap, "%s/%s", g_tmp_root, name);
     if (sxcl_fs_mkdirs(out) != 0) {
         printf("  [!!] 建不出夹具目录: %s\n", out);
     }
@@ -1352,8 +1362,9 @@ static void test_prefer_mirror(void) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0); /* 崩了也要看到已经跑过的用例 */
     ft_create(NULL); /* 让静态表先初始化好(不调用也安全) */
-    if (sxcl_fs_mkdirs(TMP_ROOT) != 0) {
-        printf("建不出临时根目录 %s\n", TMP_ROOT);
+    snprintf(g_tmp_root, sizeof(g_tmp_root), "%s_%ld", TMP_ROOT_BASE, SXCL_TEST_PID());
+    if (sxcl_fs_mkdirs(g_tmp_root) != 0) {
+        printf("建不出临时根目录 %s\n", g_tmp_root);
         return 1;
     }
     test_stage_table();

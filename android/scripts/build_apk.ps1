@@ -72,8 +72,11 @@ Copy-Item (Join-Path $Pkg 'AndroidManifest.xml')       (Join-Path $Stage 'pkg\An
 Copy-Item (Join-Path $Pkg 'deployment-settings.json')  (Join-Path $Stage 'pkg\deployment-settings.json') -Force
 robocopy (Join-Path $Pkg 'java') (Join-Path $Stage 'pkg\java') /E /NFL /NDL /NJH /NJS /NP /PURGE | Out-Null
 robocopy (Join-Path $Pkg 'res')  (Join-Path $Stage 'pkg\res')  /E /NFL /NDL /NJH /NJS /NP | Out-Null
-Copy-Item (Join-Path $Repo 'build\_android\app\CMakeLists.txt')        (Join-Path $Stage 'app\CMakeLists.txt') -Force
-Copy-Item (Join-Path $Repo 'build\_android\app\sxcl_android_main.cpp') (Join-Path $Stage 'app\sxcl_android_main.cpp') -Force
+# EVERY file of the app packaging layer, not just the ones that existed first:
+# sxcl_jre_probe.c (in-process JVM bootstrap probe) was added later and the old
+# explicit Copy-Item pair silently left it behind -> "Cannot find source file" at
+# cmake configure time. robocopy /E (no /PURGE: sxcl/ and pytoc/ live here too).
+robocopy (Join-Path $Repo 'build\_android\app') (Join-Path $Stage 'app') /E /NFL /NDL /NJH /NJS /NP | Out-Null
 
 # ---- stage the two derived trees the CMake project expects ----
 robocopy (Join-Path $Stage 'app\sxcl\include') (Join-Path $Stage 'app\include') /E /NFL /NDL /NJH /NJS /NP | Out-Null
@@ -101,10 +104,15 @@ $cfg = @(
 )
 & $Cmake @cfg
 if ($LASTEXITCODE -ne 0) { L 'cmake configure FAILED'; exit 1 }
-& $Ninja -C $BUILD -j 10 sxclui
+# sxclgame = :game 游戏进程的原生层(自己的 JVM 自举 + 与主进程的本地 socket 通道),
+# 和 sxclui 一起编:两个 .so 缺一个游戏都起不来,不能只编一个就往下走。
+& $Ninja -C $BUILD -j 10 sxclui sxclgame
 if ($LASTEXITCODE -ne 0) { L 'ninja FAILED'; exit 2 }
 $so = (Get-ChildItem $BUILD -Filter 'libsxclui*.so' | Select-Object -First 1).FullName
 L ('app lib         : ' + $so + ' ' + (Get-Item $so).Length)
+$gameSo = (Get-ChildItem $BUILD -Filter 'libsxclgame.so' | Select-Object -First 1).FullName
+if (-not $gameSo) { L 'game lib MISSING: libsxclgame.so 没编出来(AndroidManifest 的 GameActivity 需要它)'; exit 5 }
+L ('game lib        : ' + $gameSo + ' ' + (Get-Item $gameSo).Length)
 
 # ---- 4. package ----
 if (Test-Path $OUT) { Remove-Item $OUT -Recurse -Force }
@@ -165,6 +173,19 @@ foreach ($n in $tlsNeeded) {
 # JRE-side libs: same "must never silently ship without" rule as TLS above. The JVM
 # dlopen()s both BY NAME from the installed JRE's lib dir, and the launcher copies them
 # out of nativeLibraryDir, so a missing file means no JVM at all.
+# :game 进程的原生层:和 TLS / JRE 侧 .so 同一条纪律 —— 缺了就 abort,绝不装作能起游戏。
+# Java 侧是 System.loadLibrary("sxclgame") -> lib/<abi>/libsxclgame.so,少了它 GameActivity
+# 只能报 "native-lib-missing" 然后收尾(正是本轮要避免的静默降级)。
+$gameDst = Join-Path $libDir 'libsxclgame.so'
+if (Test-Path $gameDst) { Remove-Item $gameDst -Force }
+Copy-Item $gameSo $gameDst -Force
+if (Test-Path $gameDst) {
+  L ('game lib ok   : libsxclgame.so  ' + (Get-Item $gameDst).Length + '  (-> APK lib/arm64-v8a)')
+} else {
+  L 'game lib MISSING in the gradle project (libsxclgame.so) -- aborting'
+  exit 5
+}
+
 foreach ($n in @('libawt_xawt.so', 'libjsound.so')) {
   $dst = Join-Path $libDir $n
   if (Test-Path $dst) {

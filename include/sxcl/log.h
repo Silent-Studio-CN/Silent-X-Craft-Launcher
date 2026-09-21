@@ -135,6 +135,11 @@ typedef struct sxcl_log_stats {
     unsigned long long dropped;   /**< 静默降级丢掉的行数(文件不可写/写失败) */
     unsigned int rotations;       /**< 换过几次文件(不含首次打开) */
     unsigned int pruned;          /**< 删掉过几个过期文件 */
+    /* ── 游戏输出通道(下面第 5 节)的计数 ── */
+    unsigned long long game_lines;     /**< 收下的游戏输出行数(= 最终落盘的行数) */
+    unsigned long long game_flushes;   /**< 真正落盘了几次(缓冲批次,不是行数) */
+    unsigned long long game_dropped;   /**< 因为通道关闭/级别过滤没写的行数 */
+    unsigned long long game_truncated; /**< 超长被截断的行数 */
 } sxcl_log_stats;
 void sxcl_log_get_stats(sxcl_log_stats *out);
 
@@ -143,6 +148,52 @@ void sxcl_log_get_stats(sxcl_log_stats *out);
  *  典型:.../auth?code=abc&x=1 -> .../auth?code=***&x=1
  *  返回写入字节数(不含 NUL);参数不合法返回 SXCL_LOG_ERR_ARG。 */
 int sxcl_log_mask_url(const char *url, char *out, size_t out_len);
+
+/** 整行文本打码(只打**凭据**):URL 的敏感查询参数、accessToken/token/password 这类
+ *  键值、以及紧跟在 key 后面的值都换成 ***。
+ *  游戏输出落盘走它 —— 令牌在磁盘上**不存在第二份**,但用户名/UUID 留着(排查要用)。
+ *  返回写入字节数(不含 NUL);out 保证 NUL 结尾(装不下就截断)。
+ *  不命中任何敏感标记时是**逐字节原样拷贝**(热路径,不做多余解析)。 */
+int sxcl_log_mask_secrets(const char *text, char *out, size_t out_len);
+
+/** 整行文本打码(凭据 + **身份**):在 sxcl_log_mask_secrets 的基础上,再把
+ *  UUID(8-4-4-4-12 与 32 位十六进制)与用户名("Setting user: xxx"、username=xxx、
+ *  以及 C:\Users\xxx\ / /home/xxx/ 这类路径里的一段)换成 ***。
+ *  **导出日志包**走它 —— 包是要发给别人/贴到工单里的,身份信息不能带出去。
+ *  返回写入字节数(不含 NUL)。 */
+int sxcl_log_mask_text(const char *text, char *out, size_t out_len);
+
+/* ══════════════════════ 5. 游戏输出落盘(缓冲通道) ══════════════════════
+ *
+ * 游戏进程的 stdout/stderr **每一行**都要进我们自己的日志(崩溃取证的第一手证据),
+ * 但游戏一秒能刷几百行,而 sxcl_log_write 每行都 fflush —— 逐行落盘会把磁盘刷爆。
+ * 所以这条通道**攒批**:先按行格式化(时间戳/级别/模块都在收下的那一刻定好),
+ * 攒够一批(或距上次落盘超过 SXCL_LOG_GAME_FLUSH_MS,在下一行到来时判定)再用
+ * **一次 fwrite + 一次 fflush** 落盘;进程退出前调用方必须 sxcl_log_game_flush()。
+ *
+ * 级别固定 INFO(游戏输出本来就是信息);用 sxcl_log_set_level(WARN) 关掉它的写法
+ * 与其它日志一致。开关:设置文件 log.game=0/1,或环境变量 SXCL_LOG_GAME=0/1;
+ * 默认**开**。模块名固定 "game",所以 grep " game | " 就是全部游戏输出。
+ *
+ * 线程安全:与 sxcl_log_write 同一把锁,多线程可同时喂。
+ * 缓冲区:固定 SXCL_LOG_GAME_BLOCK_LINES 行 × 每行 SXCL_LOG_LINE_MAX 字节(静态,
+ * 不 malloc);收不下的行**立刻落盘**而不是丢弃。 */
+#define SXCL_LOG_GAME_MODULE     "game"  /**< 模块名(日志里 grep 它) */
+#define SXCL_LOG_GAME_FLUSH_MS   300u    /**< 攒批上限:距上次落盘超过这么久就冲刷 */
+#define SXCL_LOG_GAME_LINE_MAX   1024    /**< 单行游戏输出超过这么多字节就截断 */
+#define SXCL_LOG_GAME_BLOCK_LINES 32     /**< 一批最多攒多少行 */
+
+/** 游戏输出通道开没开(默认开;设置/环境变量可以关)。 */
+int sxcl_log_game_enabled(void);
+/** 打开/关闭(0 = 关)。关掉时缓冲里的行会先冲刷,不留半截。 */
+void sxcl_log_game_set_enabled(int on);
+/** 收一行游戏输出(stdout/stderr 都一样):打码 -> 格式化 -> 进缓冲(满了自动落盘)。 */
+void sxcl_log_game_line(const char *line);
+/** 立刻把缓冲里的行落盘。返回落盘的行数(0 = 没有待写的)。
+ *  **进程退出前、导出日志前必须调**;之后还能继续收行(缓冲重新开始攒)。 */
+size_t sxcl_log_game_flush(void);
+/** 现在缓冲里还压着几行(测试/验收用)。 */
+size_t sxcl_log_game_pending(void);
 
 #ifdef __cplusplus
 }

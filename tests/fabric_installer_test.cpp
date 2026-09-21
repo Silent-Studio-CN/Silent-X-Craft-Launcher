@@ -15,7 +15,7 @@
  *   ② 打印实际下载到的安装器 jar 路径与字节数;
  *   ③ 打印退出码/失败原因。
  * 资产级别钉成 none(省掉几百 MB 资源;**加载器安装器那一段是真的跑**)。
- * 目录固定在 CWD 下的 _sxcl_fabric_accept,**绝不碰任何真实游戏目录**。 */
+ * 目录固定在 CWD 下的 _sxcl_fabric_accept_<pid>(带进程号 = 并行跑也互不踩),**绝不碰任何真实游戏目录**。 */
 
 #include <QCoreApplication>
 #include <QDir>
@@ -51,7 +51,9 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    const QString root = QDir::current().absoluteFilePath(QStringLiteral("_sxcl_fabric_accept"));
+    // 夹具目录带**进程号**:并行跑两份验收时各用各的
+    const QString root = QDir::current().absoluteFilePath(
+        QStringLiteral("_sxcl_fabric_accept_%1").arg(QCoreApplication::applicationPid()));
     // 只清"这次真的会装进去的那个目录";root 留着 —— settings.conf 允许外部先摆好
     // (例如把 download.source 钉成 mojang,排查镜像不通时的差异)
     const QString game = root + QStringLiteral("/game");
