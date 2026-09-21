@@ -123,6 +123,7 @@ endif()
 add_subdirectory(src/services/minecraft)
 add_subdirectory(src/services/modloader)
 add_subdirectory(src/services/install)
+add_subdirectory(src/core)          # 运行日志(include/sxcl/log.h + src/core/log.c);自己的 CMakeLists
 add_subdirectory(src/core/instance)
 add_subdirectory(src/core/auth)   # 正版登录(微软/Xbox Live);自己的 CMakeLists 追加源文件与测试
 sxcl_warnings(sxcl)

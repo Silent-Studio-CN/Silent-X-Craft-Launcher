@@ -25,10 +25,88 @@
 #ifdef __ANDROID__
 #include <QJniObject>
 #include <android/log.h>
+#include <cerrno>
+#include <cstring>
+#include <pthread.h>
 #include <sxcl/android.h>
 #include <sxcl/launch.h>
+#include <sxcl/log.h>
 #include <sxcl/paths.h>
+#include <unistd.h>
 #define SXCL_LOGI(...) __android_log_print(ANDROID_LOG_INFO, "sxcl", __VA_ARGS__)
+
+// ---- stderr/stdout -> logcat -------------------------------------------------
+// WHY this exists: **on Android stderr does NOT reach logcat**. Measured: a whole
+// run of fprintf(stderr, "[sxcl-ui] ...") traces produced zero lines in adb
+// logcat, so device triage was stuck with indirect readings (cache byte counts,
+// widget geometry). Everything the shared desktop code writes through stdio is
+// therefore invisible on a phone unless we forward it here.
+//
+// Standard "pipe + reader thread": dup2 the pipe write end onto fd 2 (and 1),
+// then split the stream on newline and hand each complete line to
+// __android_log_write with the same tag the native logs use ("sxcl"), so a
+// single "adb logcat -s sxcl" shows the entire timeline in order.
+//
+// The split-on-newline part is not cosmetic: forwarding arbitrary chunks makes
+// logcat cut one printf into several lines and silently drop what exceeds its
+// per-message limit.
+static int g_logcatPipe[2] = {-1, -1};
+static pthread_t g_logcatThread;
+
+static void *sxclLogcatPump(void *) {
+    char buf[4096];
+    size_t used = 0;
+    for (;;) {
+        if (used >= sizeof(buf) - 1u) {
+            // A single line that does not fit: emit what we have and carry on.
+            buf[used] = '\0';
+            __android_log_write(ANDROID_LOG_INFO, "sxcl", buf);
+            used = 0;
+        }
+        const ssize_t got = read(g_logcatPipe[0], buf + used, sizeof(buf) - used - 1u);
+        if (got < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (got == 0)
+            break; // write end closed (process exiting)
+        used += (size_t)got;
+        buf[used] = '\0';
+        size_t start = 0;
+        for (size_t i = 0; i < used; ++i) {
+            if (buf[i] == '\n') {
+                buf[i] = '\0';
+                if (i > start)
+                    __android_log_write(ANDROID_LOG_INFO, "sxcl", buf + start);
+                start = i + 1;
+            }
+        }
+        if (start > 0) {
+            memmove(buf, buf + start, used - start);
+            used -= start;
+        }
+    }
+    return NULL;
+}
+
+static void sxclRedirectStdioToLogcat() {
+    if (pipe(g_logcatPipe) != 0) {
+        return; // silent degrade: no forwarding, but nothing else changes
+    }
+    if (dup2(g_logcatPipe[1], STDERR_FILENO) < 0 || dup2(g_logcatPipe[1], STDOUT_FILENO) < 0) {
+        return;
+    }
+    close(g_logcatPipe[1]); // fd 1/2 now hold the write end
+    // Redirected stdio defaults to full buffering, which would hold whole lines
+    // back until exit; unbuffered stderr + line-buffered stdout keeps ordering
+    // the same as on the desktop.
+    setvbuf(stderr, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    if (pthread_create(&g_logcatThread, NULL, sxclLogcatPump, NULL) == 0) {
+        pthread_detach(g_logcatThread);
+    }
+}
 #else
 #define SXCL_LOGI(...)                                     \
     do {                                                   \
@@ -618,6 +696,12 @@ void sxclAndroidProbeLog(const QString &) {}
 #endif
 
 int main(int argc, char **argv) {
+#ifdef __ANDROID__
+    // The very first thing on a device: make stdio visible in logcat, so every
+    // fprintf that follows (including the ones in src/ui/main.cpp) is readable
+    // with "adb logcat -s sxcl".
+    sxclRedirectStdioToLogcat();
+#endif
     const QString filesDir = androidContextPath("getFilesDir");
     SXCL_LOGI("android entry, filesDir=%s", filesDir.toUtf8().constData());
 
@@ -643,6 +727,24 @@ int main(int argc, char **argv) {
         // only uses it to LOOK (and to tell the user why a hit is not usable).
         if (!qEnvironmentVariableIsSet("SXCL_ANDROID_SHARED"))
             qputenv("SXCL_ANDROID_SHARED", QByteArray("/storage/emulated/0"));
+
+        // Run log (core include/sxcl/log.h): open it as early as possible, once the
+        // app-private dir is known -> <files>/SilentXCraftLauncher/logs/sxcl-*.log
+        // The module writes logcat itself; the stdio forwarding above only adds the
+        // legacy fprintf lines.
+        {
+            char logErr[SXCL_LOG_ERROR_MAX];
+            logErr[0] = '\0';
+            const int logRc = sxcl_log_init(NULL, logErr, sizeof(logErr));
+            SXCL_LOG_I("startup", "安卓入口:filesDir=%s 日志=%s rc=%d%s%s",
+                       filesDir.toUtf8().constData(), sxcl_log_file_path(), logRc,
+                       logRc != SXCL_LOG_OK ? " " : "", logRc != SXCL_LOG_OK ? logErr : "");
+            SXCL_LOG_I("startup",
+                       "boot: assets=%s route=%s offscreen=%d shot=%d scale=%s 共享存储=%s",
+                       boot.assets.toUtf8().constData(), boot.route.toUtf8().constData(),
+                       int(boot.offscreen), int(boot.shot), boot.scale.toUtf8().constData(),
+                       qgetenv("SXCL_ANDROID_SHARED").constData());
+        }
         // log what the core resolves, so a fresh device can be checked from logcat
         {
             char dirBuf[4096];
@@ -699,6 +801,13 @@ int main(int argc, char **argv) {
 
     const int rc = sxcl_ui_desktop_main(argc, argv);
     SXCL_LOGI("event loop finished rc=%d", rc);
+    {
+        sxcl_log_stats stats;
+        sxcl_log_get_stats(&stats);
+        SXCL_LOG_I("startup", "安卓入口收尾:rc=%d 日志行数=%llu 轮转=%u 丢弃=%llu 文件=%s", rc,
+                   stats.lines, stats.rotations, stats.dropped, sxcl_log_file_path());
+        sxcl_log_shutdown();
+    }
 
     if (!filesDir.isEmpty()) {
         QFile stamp(filesDir + QStringLiteral("/sxcl_last_run.txt"));

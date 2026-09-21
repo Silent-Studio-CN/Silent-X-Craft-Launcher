@@ -6,8 +6,10 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QComboBox>
 #include <QCursor>
 #include <QElapsedTimer>
+#include <QFontMetrics>
 #include <QGuiApplication>
 #include <QLocale>
 #include <QPainter>
@@ -43,17 +45,100 @@
 // 设置文件路径(uiSettingsPath)与取证用的登录对话框。
 #include "dialogs/account.h"
 #include "dialogs/auth_dialog.h"
+#include "workers/ui_paths.h" // uiSettingsFilePath / uiGameDirectory / uiGameDirectoryReason(启动清单)
 #include "sxcl/lang.h"     // 语言表(键 -> 文案;.lang 与 Python 版逐字段兼容)
 #include "sxcl/settings.h" // 启动恢复:ui.theme / ui.accent / ui.language(环境变量优先)
 
 // ComboBox:弹出层取证要用它的 showPopup()
 #include "fluent/fluent_setting_cards.h"
 
+// ── 运行日志(核心库 include/sxcl/log.h)──────────────────────────────────
+// 进程一启动就开:文件 <配置目录>/logs/sxcl-YYYYMMDD-HHMMSS.log + stderr(桌面)/logcat(安卓)。
+// 记什么/不记什么见 docs/17-运行日志.md 的清单 —— 只留下"能用来定位问题"的那些行。
+#include "sxcl/launch.h" // sxcl_java_discover(启动时的 Java 清单;只读文件系统,不执行 java)
+#include "sxcl/log.h"
+#include "sxcl/sysinfo.h"
+#include "sxcl/version.h"
+
+namespace {
+
+// 启动时的 Java 清单:用户报"我明明装了 Java"时,日志里必须有我们**看到过哪些**、
+// 每个的版本/来源/路径。sxcl_java_discover 全程只读 <home>/release(launch.h:113-120),
+// **不执行** java,所以这一步只是扫目录,不会把启动拖慢到需要异步。
+void logStartupJavaList() {
+    QElapsedTimer timer;
+    timer.start();
+    sxcl_java_env_store store;
+    sxcl_java_info found[8];
+    sxcl_java_env_capture(&store);
+    const size_t count = sxcl_java_discover(&store.env, sxcl_java_current_os(), found, 8);
+    SXCL_LOG_I("startup", "Java 检测:%llu 个可用安装(只读扫描,不执行 java;耗时 %lldms)",
+               (unsigned long long)count, static_cast<long long>(timer.elapsed()));
+    for (size_t i = 0; i < count; ++i) {
+        SXCL_LOG_I("startup", "Java[%llu] major=%d version=%s 64bit=%d 来源=%s 路径=%s",
+                   (unsigned long long)i, found[i].major,
+                   found[i].version[0] != '\0' ? found[i].version : "(未知)",
+                   found[i].is_64bit, found[i].source[0] != '\0' ? found[i].source : "(未知)",
+                   found[i].path);
+    }
+    if (count == 0)
+        SXCL_LOG_W("startup", "Java 检测:一个都没扫到 —— 下次启动游戏时会要求先装/指定 Java");
+}
+
+} // namespace
+
 // 取证通路:把控件树按文本打出来(SXCL_UI_DUMP=1)。
 //
 // 为什么需要它:截图只能"看",而验收要求每条结论都给可核对的证据。
 // 这份 dump 给的是**可以逐行读**的事实:账户组/各张卡片的类名与文字、按钮文案、
 // 几何位置与可见性 —— 与 build/ref/TREE_py_*.txt 是同一类产物(只读,不改任何状态)。
+// ── 文字度量(SXCL_UI_DUMP 的每一行都带上它)────────────────────────────────
+//
+// 「文字被挤压」在控件树里是**两个可量的数**:控件自己声明需要多大(sizeHint),
+// 和布局实际给了多大(width/height)。只报"看起来挤了"没有依据,所以每个带文字的
+// 控件都打三组数:
+//
+//   text=<w>x<h>  当前字体下这份文本的**自然**尺寸(单行宽 / 不换行高度)
+//   need=<w>x<h>  控件按该文字 + 自己的内边距算出的首选尺寸(QWidget::sizeHint())
+//   got =<w>x<h>  布局这次真的给了多少(QWidget::width()/height())
+//
+// 判据(两个布尔,直接印在行尾):
+//   CUT-W  文字自然宽装不进"控件宽 - 自身内边距" -> 这一行在屏幕上会被切掉
+//   CUT-H  文字自然高装不进"控件高 - 自身内边距" -> 行高不够(多行/换行文本)
+// 内边距 = need - text(字体换了它不变,所以拿它当常数是安全的)。
+//
+// 依据:docs/05-UI-1to1规格.md §3 的字号表 + §7 的逐页结构;规格里那些数字都是
+// **桌面 1100x750 + 桌面字体**下量出来的,安卓逻辑宽只有 800,同一份固定尺寸就会挤。
+static QString textMetrics(QWidget *widget, const QString &full) {
+    if (full.isEmpty())
+        return QString();
+    const QFontMetrics fm(widget->font());
+    // 换行的标签:形态上要按最长的一行算(单行宽),高度按行数算
+    const QStringList lines = full.split(QLatin1Char('\n'));
+    int textW = 0;
+    for (const QString &line : lines)
+        textW = qMax(textW, fm.horizontalAdvance(line));
+    QWidget *w = widget;
+    const int textH = fm.height() * lines.size();
+    const QSize hint = w->sizeHint();
+    const int padW = qMax(0, hint.width() - textW);
+    const int padH = qMax(0, hint.height() - textH);
+    const bool cutW = w->width() > 0 && textW + padW > w->width();
+    const bool cutH = w->height() > 0 && textH + padH > w->height();
+    QString out = QStringLiteral(" [text=%1x%2 need=%3x%4 got=%5x%6]")
+                      .arg(textW)
+                      .arg(textH)
+                      .arg(hint.width())
+                      .arg(hint.height())
+                      .arg(w->width())
+                      .arg(w->height());
+    if (cutW)
+        out += QStringLiteral(" CUT-W");
+    if (cutH)
+        out += QStringLiteral(" CUT-H");
+    return out;
+}
+
 static void dumpWidgetTree(QWidget *root, int maxDepth) {
     struct Walker {
         static void walk(QWidget *widget, int depth, int maxDepth) {
@@ -65,6 +150,10 @@ static void dumpWidgetTree(QWidget *root, int maxDepth) {
                 text = label->text();
             else if (auto *button = qobject_cast<QAbstractButton *>(widget))
                 text = button->text();
+            else if (auto *combo = qobject_cast<QComboBox *>(widget))
+                text = combo->currentText();
+            // 度量必须在**原样文本**上做(截断只影响打印,不影响需要多宽)
+            const QString metrics = textMetrics(widget, text);
             text.replace(QLatin1Char('\n'), QLatin1Char(' '));
             if (text.size() > 80)
                 text = text.left(80) + QStringLiteral("…");
@@ -77,6 +166,8 @@ static void dumpWidgetTree(QWidget *root, int maxDepth) {
                          widget->isEnabled() ? "" : " disabled");
             if (!text.isEmpty())
                 std::fprintf(stderr, " \"%s\"", text.toUtf8().constData());
+            if (!metrics.isEmpty())
+                std::fprintf(stderr, "%s", metrics.toUtf8().constData());
             std::fprintf(stderr, "\n");
             const QList<QWidget *> children = widget->findChildren<QWidget *>(
                 QString(), Qt::FindDirectChildrenOnly);
@@ -160,6 +251,24 @@ public:
 } // namespace
 
 int main(int argc, char *argv[]) {
+    // ── 运行日志:进程一启动就开 —— "SXCL 启动开始"的每一条都留档 ──
+    // 写不进去(目录/文件打不开)只影响日志本身:核心库静默降级,绝不拦住启动。
+    // 安卓打包层已经先开过一次(它更早,能看到 boot 文件解析),这里是幂等的第二道。
+    char logError[SXCL_LOG_ERROR_MAX];
+    logError[0] = '\0';
+    const int logRc = sxcl_log_init(nullptr, logError, sizeof(logError));
+    SXCL_LOG_I("startup", "===== SXCL 启动 版本=%s 构建=%s %s =====", sxcl_version_string(),
+               __DATE__, __TIME__);
+    SXCL_LOG_I("startup", "平台=%s 内核=%s/%s 内存=%lluMB 逻辑核=%d pid=%llu 命令行参数=%d",
+               QSysInfo::prettyProductName().toUtf8().constData(),
+               QSysInfo::kernelType().toUtf8().constData(),
+               QSysInfo::currentCpuArchitecture().toUtf8().constData(),
+               (unsigned long long)sxcl_sysinfo_total_mb(), sxcl_sysinfo_cpu_logical(),
+               (unsigned long long)QCoreApplication::applicationPid(), argc - 1);
+    SXCL_LOG_I("startup", "日志文件=%s 上限=%llu 字节 保留=%d 份%s%s", sxcl_log_file_path(),
+               (unsigned long long)sxcl_log_max_bytes(), sxcl_log_keep_files(),
+               logRc != SXCL_LOG_OK ? " 打不开:" : "", logRc != SXCL_LOG_OK ? logError : "");
+
     QApplication app(argc, argv);
     // Python main.py:96 —— app.setStyle("Fusion")。不设的话 Windows 默认样式的控件度量
     // 与 Python 端不一致(实测 QListWidget 行高 18 vs 16,列表逐行累积错位)。
@@ -268,9 +377,57 @@ int main(int argc, char *argv[]) {
                  language.isEmpty() ? "(未设置)" : language.toUtf8().constData(),
                  theme.qssFileCount(), theme.themeDir().toUtf8().constData());
 
+    // ── 启动清单进运行日志(见 docs/17-运行日志.md 的"选择性记录"清单)──
+    // 记这几样就够回答"这台机器上启动器看到了什么":设置文件、游戏目录(**含为什么选它**)、
+    // 主题/语言、Java 清单。不记 Qt 内部噪声、不记每秒刷屏的进度。
+    SXCL_LOG_I("startup", "Qt=%s 样式=Fusion 缩放=%s 语言表=%s(%d 条)",
+               qVersion(), qEnvironmentVariable("QT_SCALE_FACTOR", "1").toUtf8().constData(),
+               sxcl_lang_code(sxcl_lang_default()),
+               static_cast<int>(sxcl_lang_count(sxcl_lang_default())));
+    SXCL_LOG_I("startup", "设置文件=%s", sxcl::ui::uiSettingsFilePath().toUtf8().constData());
+    {
+        // uiGameDirectory() 可能触发安卓的自动探测与落盘(与设置页同一条路),顺便拿到依据
+        const QString gameDir = sxcl::ui::uiGameDirectory();
+        SXCL_LOG_I("startup", "游戏目录=%s(选择依据:%s)", gameDir.toUtf8().constData(),
+                   sxcl::ui::uiGameDirectoryReason().toUtf8().constData());
+    }
+    SXCL_LOG_I("startup", "主题=%s(mode=%s) 强调色=%s 语言=%s QSS=%d 个文件",
+               theme.isDark() ? "深色" : "浅色",
+               themeMode.isEmpty() ? "(未设置)" : themeMode.toUtf8().constData(),
+               theme.accent().name().toUtf8().constData(),
+               language.isEmpty() ? "(未设置)" : language.toUtf8().constData(),
+               theme.qssFileCount());
+    logStartupJavaList();
+
     sxcl::ui::ThemeBridge::instance().refreshAll();
 
     sxcl::ui::MainWindow window;
+
+    // ── 取证通路:强制窗口**逻辑**尺寸(SXCL_UI_WINDOW=<宽>x<高>)──────────────
+    // 为什么需要它:桌面 1:1 参考图的口径是 1100x750(内容区 1052x702),而安卓手机给
+    // 全屏窗口的**逻辑**尺寸完全不同 —— 实测 G6012BS(1600x2400 物理 @density 320,
+    // dpr=2.0)就是 800x1200(内容区 752x1152):**宽度少 300px、高度多 450px**。
+    // "文字被挤压"必须在这个尺寸下量,桌面尺寸下量不出来。
+    // 只改窗口大小,其余一切照产品路径走(还是那个 MainWindow、那些页面),不造假状态。
+    // 最小尺寸也要放开:安卓上窗口尺寸由系统给(setMinimumSize 只是建议、平台不执行),
+    // 不放开会停在 900x600 上,量到的就不是手机的真实可用区。
+    const QString windowSpec = qEnvironmentVariable("SXCL_UI_WINDOW");
+    if (!windowSpec.isEmpty()) {
+        const QStringList parts = windowSpec.split(QLatin1Char('x'), Qt::SkipEmptyParts);
+        bool okW = false, okH = false;
+        const int w = parts.size() > 0 ? parts.at(0).toInt(&okW) : 0;
+        const int h = parts.size() > 1 ? parts.at(1).toInt(&okH) : 0;
+        if (okW && okH && w > 0 && h > 0) {
+            window.setMinimumSize(0, 0);
+            window.resize(w, h);
+            std::fprintf(stderr, "[sxcl-ui] 强制窗口尺寸 %dx%d(SXCL_UI_WINDOW)\n", w, h);
+        } else {
+            std::fprintf(stderr,
+                         "[sxcl-ui] SXCL_UI_WINDOW 要写成 <宽>x<高>(收到 \"%s\")\n",
+                         windowSpec.toUtf8().constData());
+        }
+    }
+
     // 验收通路:用 SXCL_UI_ROUTE 指定起始路由(对应 build/ref/py_<route>.png)
     const QString route = qEnvironmentVariable("SXCL_UI_ROUTE");
     if (!route.isEmpty())
@@ -450,5 +607,20 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    return app.exec();
+    SXCL_LOG_I("startup", "界面就绪:进入事件循环(路由=%s)",
+               route.isEmpty() ? "(默认首页)" : route.toUtf8().constData());
+    const int rc = app.exec();
+
+    // 收尾:把"这次运行记了多少"写进日志再关文件 —— 验收要的行数直接看这一行。
+    {
+        sxcl_log_stats stats;
+        sxcl_log_get_stats(&stats);
+        // 统计取自**本行之前**:所以文件里的总行数 = 这个数 + 1(就是这一行本身)。
+        SXCL_LOG_I("startup", "===== SXCL 退出 rc=%d 退出前累计行数=%llu 字节=%llu 轮转=%u 丢弃=%llu "
+                              "文件=%s =====",
+                   rc, stats.lines, stats.bytes, stats.rotations, stats.dropped,
+                   sxcl_log_file_path());
+    }
+    sxcl_log_shutdown();
+    return rc;
 }

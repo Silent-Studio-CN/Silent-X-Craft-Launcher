@@ -17,6 +17,7 @@
 #include "sxcl/auth_store.h"
 #include "sxcl/engine.h"
 #include "sxcl/fs.h"
+#include "sxcl/java_runtime.h" /* java 子命令:官方 JRE 运行时预置(一次装齐) */
 #include "sxcl/json.h"
 #include "sxcl/launch.h"
 #include "sxcl/install.h" /* 版本 JSON 落盘 sxcl_install_write_version_json;缺它会 C4013 -> C2220 */
@@ -195,7 +196,11 @@ static int usage(void)
            "        -> 每行归类 -> 出一条人话结论(发现 Vulkan 回退会写回 lastGraphicsApi)\n"
            "  sxcl-dl auth <login|status|refresh|logout|bedrock> [...]\n"
            "      └ 微软(Xbox Live)正版登录:授权码+PKCE+环回 / 设备码兜底 / 免密续期\n"
-           "        令牌加密落盘,输出只打前缀,绝不打印明文;详见 docs/09-正版登录.md\n");
+           "        令牌加密落盘,输出只打前缀,绝不打印明文;详见 docs/09-正版登录.md\n"
+           "  sxcl-dl java <list|plan|preset> [--root DIR] [--mc 1.20.1]... [--no-newest] [--force]\n"
+           "      └ 官方 JRE 运行时:list = 列清单里有哪些组件;plan = 只报要装什么/多大;\n"
+           "        preset = 一次装齐(Java 8/17/21 + 清单里最新的 25;已装好的跳过,\n"
+           "        装前先算空间,不够直接报错不下载);详见 docs/07-随行运行时与打包.md\n");
     return 2;
 }
 
@@ -1675,6 +1680,304 @@ static int cmd_auth(int argc, char **argv)
     return cmd_auth(1, NULL);
 }
 
+/* ══════════════════════ java:官方 JRE 运行时(预置/一次装齐) ══════════════════════ */
+
+/* 进度:每个组件单独一行,组件内原地刷新(百分比/速度/字节/当前文件)。
+ * 回调可能来自引擎的多个工作线程,所以只 echo 不做重活。 */
+typedef struct java_cli_ctx {
+    int last_index;
+    int printed_header;
+    const char *root;
+} java_cli_ctx;
+
+static void java_cli_progress(void *ud, const sxcl_java_runtime_progress *p)
+{
+    java_cli_ctx *ctx = (java_cli_ctx *)ud;
+    if (ctx == NULL || p == NULL) {
+        return;
+    }
+    if (p->component_index != ctx->last_index) {
+        if (ctx->last_index >= 0) {
+            printf("\n");
+        }
+        ctx->last_index = p->component_index;
+        printf("  [%d/%d] %s v%s\n", p->component_index + 1, p->component_total,
+               p->component ? p->component : "?", p->version ? p->version : "?");
+    }
+    if (p->component_skipped) {
+        printf("        已装好 -> 整个跳过(没联网、没下载)\n");
+        fflush(stdout);
+        return;
+    }
+    printf("\r        %-9s %3d%% | 整体 %3d%% | %7.2f/%7.2f MB | %s          ",
+           p->stage_id ? p->stage_id : "?", p->percent, p->overall_percent,
+           (double)p->bytes_done / (1024.0 * 1024.0), (double)p->bytes_total / (1024.0 * 1024.0),
+           p->current ? p->current : "");
+    fflush(stdout);
+}
+
+static const char *java_human_mb(int64_t bytes, char *buf, size_t buf_len)
+{
+    snprintf(buf, buf_len, "%8.2f MB", (double)bytes / (1024.0 * 1024.0));
+    return buf;
+}
+
+static int cmd_java_list(const cli_opts *o, const char *platform)
+{
+#if defined(SXCL_HAVE_QT_TRANSPORT)
+    sxcl_transport_qt_bootstrap();
+#endif
+    sxcl_java_runtime_query q;
+    memset(&q, 0, sizeof(q));
+    q.platform = platform;
+    q.manifest_relaxed_mirror = 1;
+#if defined(SXCL_HAVE_QT_TRANSPORT)
+    q.transport_factory = make_qt_transport;
+#else
+    fprintf(stderr, "本产物没有传输后端(需要 Qt6::Network),取不了清单\n");
+    return 1;
+#endif
+    sxcl_java_runtime_component list[32];
+    char err[SXCL_JAVA_RUNTIME_ERROR_MAX];
+    err[0] = '\0';
+    const int n = sxcl_java_runtime_list(&q, list, 32, err, sizeof(err));
+    if (n < 0) {
+        fprintf(stderr, "取清单失败: %s\n", err);
+        return 1;
+    }
+    printf("平台 %s:%d 个组件(已排除 minecraft-java-exe 与 gamma-snapshot)\n",
+           sxcl_java_runtime_platform_key(), n);
+    printf("  %-30s %-24s %-6s %s\n", "组件", "版本", "主版本", "清单");
+    for (int i = 0; i < n; ++i) {
+        printf("  %-30s %-24s %-6d %s\n", list[i].component, list[i].version, list[i].major,
+               list[i].manifest_url);
+    }
+    (void)o;
+    return 0;
+}
+
+static int cmd_java_plan(const cli_opts *o, const char *platform, const char *root,
+                         const char *const *mc_versions, size_t mc_count, int include_newest)
+{
+#if defined(SXCL_HAVE_QT_TRANSPORT)
+    sxcl_transport_qt_bootstrap();
+#endif
+    sxcl_java_runtime_plan_request req;
+    memset(&req, 0, sizeof(req));
+    req.platform = platform;
+    req.target_root = root;
+    req.mc_versions = mc_versions;
+    req.mc_version_count = mc_count;
+    req.include_newest = include_newest;
+    req.measure = 1;
+    req.skip_installed = 0;
+#if defined(SXCL_HAVE_QT_TRANSPORT)
+    req.transport_factory = make_qt_transport;
+#else
+    fprintf(stderr, "本产物没有传输后端(需要 Qt6::Network),取不了清单\n");
+    return 1;
+#endif
+    sxcl_java_runtime_plan_item items[SXCL_JAVA_RUNTIME_PRESET_MAX];
+    char err[SXCL_JAVA_RUNTIME_ERROR_MAX];
+    err[0] = '\0';
+    const int n = sxcl_java_runtime_plan(&req, items, SXCL_JAVA_RUNTIME_PRESET_MAX, err, sizeof(err));
+    if (n < 0) {
+        fprintf(stderr, "出计划失败: %s\n", err);
+        return 1;
+    }
+    printf("计划:%d 个组件(平台 %s,根目录 %s)\n", n, sxcl_java_runtime_platform_key(), root);
+    printf("  %-24s %-22s %-5s %10s %7s %-8s %s\n", "组件", "版本", "Java", "大小", "文件", "状态",
+           "落点");
+    int64_t total = 0, need = 0;
+    for (int i = 0; i < n; ++i) {
+        char mb[32];
+        total += items[i].bytes;
+        if (!items[i].installed) {
+            need += items[i].bytes;
+        }
+        printf("  %-24s %-22s %-5d %s %7d %-8s %s\n", items[i].component, items[i].version,
+               items[i].major, java_human_mb(items[i].bytes, mb, sizeof(mb)), (int)items[i].files,
+               items[i].installed ? "已装好" : "待安装", items[i].target_dir);
+    }
+    {
+        char mb1[32], mb2[32];
+        printf("  合计 %s;其中还要下载 %s\n", java_human_mb(total, mb1, sizeof(mb1)),
+               java_human_mb(need, mb2, sizeof(mb2)));
+    }
+    (void)o;
+    return 0;
+}
+
+static int cmd_java_preset(const cli_opts *o, const char *platform, const char *root,
+                           const char *const *mc_versions, size_t mc_count, int include_newest,
+                           int force)
+{
+    java_cli_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.last_index = -1;
+    ctx.root = root;
+
+    sxcl_java_runtime_preset_request req;
+    memset(&req, 0, sizeof(req));
+    req.platform = platform;
+    req.target_root = root;
+    req.mc_versions = mc_versions;
+    req.mc_version_count = mc_count;
+    req.include_newest = include_newest;
+    req.force = force;
+    req.use_mirror = o->prefer_mirror;
+    req.on_progress = java_cli_progress;
+    req.ud = &ctx;
+
+    sxcl_engine_opts opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.workers = o->workers;
+    opts.rate_bps = o->rate;
+    opts.retry_per_source = 2;
+    opts.cache_path = o->cache;
+#if defined(SXCL_HAVE_QT_TRANSPORT)
+    sxcl_transport_qt_bootstrap();
+    opts.transport_factory = make_qt_transport;
+    req.transport_factory = make_qt_transport;
+#else
+    fprintf(stderr, "本产物没有传输后端(需要 Qt6::Network),装不了运行时\n");
+    return 1;
+#endif
+    req.engine_opts = &opts;
+
+    const double t0 = (double)clock() / CLOCKS_PER_SEC;
+    sxcl_java_runtime_preset_result res;
+    const int rc = sxcl_java_runtime_install_preset(&req, &res);
+    const double t1 = (double)clock() / CLOCKS_PER_SEC;
+    if (ctx.last_index >= 0) {
+        printf("\n");
+    }
+
+    printf("\n结果:计划 %d 个 · 新装 %d 个 · 已装跳过 %d 个 · 失败 %d 个\n", (int)res.planned,
+           (int)res.installed, (int)res.skipped, (int)res.failed);
+    {
+        char mb1[32], mb2[32], mb3[32];
+        printf("字节:计划下载 %s · 实下 %s · 落盘占用 %s\n",
+               java_human_mb(res.planned_bytes, mb1, sizeof(mb1)),
+               java_human_mb(res.downloaded_bytes, mb2, sizeof(mb2)),
+               java_human_mb(res.on_disk_bytes, mb3, sizeof(mb3)));
+        if (res.free_before >= 0) {
+            char mb4[32];
+            printf("开下之前磁盘可用 %s(位置 %s)\n", java_human_mb(res.free_before, mb4, sizeof(mb4)),
+                   root);
+        } else {
+            printf("开下之前磁盘可用:拿不到(如实报未知,没有拦)\n");
+        }
+    }
+    printf("  %-24s %-22s %-7s %-9s %10s %10s %8s\n", "组件", "版本", "状态", "文件(下/跳过/失败)",
+           "下载", "落盘", "耗时");
+    for (size_t i = 0; i < res.count; ++i) {
+        const sxcl_java_runtime_item_result *it = &res.items[i];
+        char mb[32];
+        const char *state = it->code != 0 ? "失败" : (it->skipped ? "已装跳过" : "新装");
+        char files[64];
+        snprintf(files, sizeof(files), "%d/%d/%d", (int)it->files_done, (int)it->files_skipped,
+                 (int)it->files_failed);
+        printf("  %-24s %-22s %-7s %-17s %10.2f %s %7.1fs\n", it->component, it->version, state,
+               files, (double)it->bytes_done / (1024.0 * 1024.0),
+               java_human_mb(it->bytes_on_disk, mb, sizeof(mb)), it->seconds);
+        printf("      落点 %s\n", it->java_home);
+        if (it->code != 0 && it->error[0]) {
+            printf("      失败原因 %s\n", it->error);
+        }
+    }
+    printf("总耗时 %.1f 秒\n", t1 - t0);
+    if (rc != SXCL_JAVA_RUNTIME_OK) {
+        fprintf(stderr, "java preset 失败 [%s]: %s\n", sxcl_java_runtime_code_name(rc),
+                res.error[0] ? res.error : "(没有原因)");
+        return 1;
+    }
+    printf("java preset 完成\n");
+    return 0;
+}
+
+/* java <list|plan|preset> [--root DIR] [--mc 版本]... [--no-newest] [--force] */
+static int cmd_java(int argc, char **argv, const cli_opts *o)
+{
+    if (argc < 3) {
+        return usage();
+    }
+    const char *sub = argv[2];
+    const char *platform = NULL;
+    const char *root = NULL;
+    const char *mcs[8];
+    size_t mc_count = 0;
+    int include_newest = 1;
+    int force = 0;
+    /* main() 已经把全局下载参数(workers/rate/source/…)解析进 o 了,这里见到它们
+     * 只跳过 —— 否则 "java preset --workers 8" 会被当成"未知参数"直接用法报错。 */
+    static const char *const kGlobalWithValue[] = { "--rate", "--workers", "--source", "--mirror",
+                                                    "--limit", "--asset-mirror", "--cache" };
+    for (int i = 3; i < argc; ++i) {
+        const char *a = argv[i];
+        const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
+        int consumed = 0;
+        for (size_t gi = 0; gi < sizeof(kGlobalWithValue) / sizeof(kGlobalWithValue[0]); ++gi) {
+            if (strcmp(a, kGlobalWithValue[gi]) == 0 && v != NULL) {
+                ++i;
+                consumed = 1;
+                break;
+            }
+        }
+        if (consumed) {
+            continue;
+        }
+        if (strcmp(a, "--verbose") == 0 || strcmp(a, "--skip-assets") == 0 ||
+            strcmp(a, "--no-cache") == 0) {
+            continue;
+        }
+        if (strcmp(a, "--platform") == 0 && v) {
+            platform = v;
+            ++i;
+        } else if (strcmp(a, "--root") == 0 && v) {
+            root = v;
+            ++i;
+        } else if (strcmp(a, "--mc") == 0 && v) {
+            if (mc_count < sizeof(mcs) / sizeof(mcs[0])) {
+                mcs[mc_count++] = v;
+            }
+            ++i;
+        } else if (strcmp(a, "--no-newest") == 0) {
+            include_newest = 0;
+        } else if (strcmp(a, "--force") == 0) {
+            force = 1;
+        } else {
+            fprintf(stderr, "未知参数: %s\n", a);
+            return usage();
+        }
+    }
+    if (platform == NULL) {
+        platform = sxcl_java_runtime_platform_key();
+    }
+    if (root == NULL) {
+        static char root_buf[SXCL_JAVA_RUNTIME_PATH_MAX];
+        char err[SXCL_JAVA_RUNTIME_ERROR_MAX];
+        err[0] = '\0';
+        if (sxcl_java_runtime_default_root(root_buf, sizeof(root_buf), err, sizeof(err)) !=
+            SXCL_JAVA_RUNTIME_OK) {
+            fprintf(stderr, "拿不到 runtime 根目录: %s(用 --root DIR 指定一个)\n", err);
+            return 1;
+        }
+        root = root_buf;
+        printf("没有给 --root,用默认运行时目录: %s\n", root);
+    }
+    if (strcmp(sub, "list") == 0) {
+        return cmd_java_list(o, platform);
+    }
+    if (strcmp(sub, "plan") == 0) {
+        return cmd_java_plan(o, platform, root, mcs, mc_count, include_newest);
+    }
+    if (strcmp(sub, "preset") == 0) {
+        return cmd_java_preset(o, platform, root, mcs, mc_count, include_newest, force);
+    }
+    return usage();
+}
+
 int main(int argc, char **argv)
 {
     /* 无缓冲输出:崩溃时不会把最后一段输出留在缓冲区里丢掉(排查跨平台崩溃吃过这个亏) */
@@ -1758,6 +2061,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "auth") == 0) {
         return cmd_auth(argc, argv);
+    }
+    if (strcmp(argv[1], "java") == 0) {
+        return cmd_java(argc, argv, &o);
     }
     return usage();
 }

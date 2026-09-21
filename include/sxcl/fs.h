@@ -25,6 +25,12 @@ int sxcl_fs_exists(const char *path);
 /** 是否目录。1 是,0 否。 */
 int sxcl_fs_is_dir(const char *path);
 
+/** path 所在卷的**可用字节数**(预置运行时前先算空间用)。
+ *  path 可以还不存在(逐级向上找最近的已存在祖先,拿它的卷)。
+ *  返回:1 = 拿到(*out_bytes 有效);0 = 拿不到(平台不支持 / 路径无效 / 调用失败)——
+ *  "拿不到"必须当成未知,**不许**当成 0 或当成"空间充足"。 */
+int sxcl_fs_free_space(const char *path, uint64_t *out_bytes);
+
 /** 递归建目录(已存在视为成功)。返回 0 成功。 */
 int sxcl_fs_mkdirs(const char *path);
 

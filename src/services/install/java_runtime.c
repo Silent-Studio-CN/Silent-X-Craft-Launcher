@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>   /* 每个组件的耗时(墙钟) */
 
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -29,6 +30,7 @@
 #else
 #  include <dirent.h>
 #  include <sys/stat.h>   /* chmod(可执行位) */
+#  include <sys/time.h>   /* gettimeofday:每个组件的耗时 */
 #endif
 
 /* 路径统一用 '/' 当分隔符:Windows 侧 fs 层两种都认(platform_win32.c:110-115 把 '/' 归一成 '\\'),
@@ -119,6 +121,7 @@ const char *sxcl_java_runtime_code_name(int code)
     case SXCL_JAVA_RUNTIME_ERR_CANCELLED:   return "cancelled";
     case SXCL_JAVA_RUNTIME_ERR_NOMEM:       return "nomem";
     case SXCL_JAVA_RUNTIME_ERR_IO:          return "io";
+    case SXCL_JAVA_RUNTIME_ERR_DISK:        return "disk";
     default:                                return "unknown";
     }
 }
@@ -419,9 +422,19 @@ static int mirror_url(const char *url, char *out, size_t out_len)
     return -1;
 }
 
-/* 取一段文本(两条候选:官方 + BMCLAPI)。expected_sha1 非空时强校验。 */
+/* 取一段文本(两条候选:官方 + BMCLAPI),并报出**实际用的是哪一条**。
+ *
+ * expected_sha1 非空时强校验;relaxed_mirror 只影响**第二候选(镜像)**:
+ *   BMCLAPI 会把清单里的下载地址改写成它自己的,字节与官方必然不同,官方那份
+ *   manifest.sha1 永远对不上 —— 于是"镜像兜底"这条路对组件清单从来没生效过(实测
+ *   2026-04:官方 delta 清单 sha1=cb4394a2…,BMCLAPI 同一路径 sha1=7a856170…,而逐文件的
+ *   sha1/size 完全相同)。relaxed_mirror=1 时镜像那一条**不带**清单级 sha1 去请求,
+ *   下载下来的每个文件仍然按它自己的 raw.sha1 强校验(引擎做的),并把
+ *   manifest_source="mirror" 记进结果与标记文件,让用户看得见这条运行时的来源。
+ *   代价(如实写下来):镜像若发的是**旧版本**的清单,逐文件 sha1 自洽、拦不住它。 */
 static int fetch_text(const sxcl_java_runtime_query *query, const char *url, const char *expected_sha1,
-                      int use_mirror, char **out_text, size_t *out_len, char *err, size_t err_len)
+                      int use_mirror, int relaxed_mirror, char **out_text, size_t *out_len,
+                      int *out_source, char *err, size_t err_len)
 {
     if (!query || !query->transport_factory) {
         set_text(err, err_len, "没有传输后端(transport_factory 为空)");
@@ -430,8 +443,11 @@ static int fetch_text(const sxcl_java_runtime_query *query, const char *url, con
     char mirror[SXCL_JAVA_RUNTIME_URL_MAX];
     const int has_mirror = use_mirror && mirror_url(url, mirror, sizeof(mirror)) == 0;
     const char *urls[2];
+    const char *shas[2];
     urls[0] = url;
+    shas[0] = (expected_sha1 && *expected_sha1) ? expected_sha1 : NULL;
     urls[1] = has_mirror ? mirror : NULL;
+    shas[1] = (has_mirror && relaxed_mirror) ? NULL : shas[0];
 
     char detail[SXCL_JAVA_RUNTIME_ERROR_MAX];
     detail[0] = '\0';
@@ -443,7 +459,7 @@ static int fetch_text(const sxcl_java_runtime_query *query, const char *url, con
         }
         sxcl_http_opts opts;
         memset(&opts, 0, sizeof(opts));
-        opts.expected_sha1 = (expected_sha1 && *expected_sha1) ? expected_sha1 : NULL;
+        opts.expected_sha1 = shas[i];
         char http_err[SXCL_HTTP_ERROR_MAX];
         http_err[0] = '\0';
         char *text = NULL;
@@ -458,13 +474,16 @@ static int fetch_text(const sxcl_java_runtime_query *query, const char *url, con
             if (out_len) {
                 *out_len = len;
             }
+            if (out_source) {
+                *out_source = i;
+            }
             return SXCL_JAVA_RUNTIME_OK;
         }
         free(text);
         if (detail[0] == '\0') {
             copy_str(detail, sizeof(detail), http_err);
         }
-        /* SHA-1 不符 = 内容不对:镜像透传同一份字节,换条路没意义(报错更诚实) */
+        /* SHA-1 不符 = 内容不对:官方那条没法将就(镜像那条不带 sha,不会走到这里) */
         if (rc == SXCL_HTTP_ERR_SHA1) {
             set_text(err, err_len, http_err[0] ? http_err : "清单 SHA-1 校验失败");
             return SXCL_JAVA_RUNTIME_ERR_MANIFEST;
@@ -496,7 +515,8 @@ sxcl_json *sxcl_java_runtime_fetch_all(const sxcl_java_runtime_query *query, cha
                                                                     : SXCL_JAVA_RUNTIME_MANIFEST_URL;
     char *text = NULL;
     size_t len = 0;
-    if (fetch_text(query, url, NULL, 1, &text, &len, err, err_len) != SXCL_JAVA_RUNTIME_OK) {
+    if (fetch_text(query, url, NULL, 1, 0, &text, &len, NULL, err, err_len) !=
+        SXCL_JAVA_RUNTIME_OK) {
         return NULL;
     }
     sxcl_json *doc = sxcl_json_parse(text, len, err, err_len);
@@ -521,10 +541,16 @@ sxcl_json *sxcl_java_runtime_fetch_manifest(const sxcl_java_runtime_query *query
     }
     char *text = NULL;
     size_t len = 0;
-    /* 清单本身必须过 SHA-1(Python fetch_component_manifest 也传了 manifest.sha1) */
-    if (fetch_text(query, entry->manifest_url, entry->manifest_sha1, 1, &text, &len, err, err_len) !=
+    int source = 0;
+    /* 清单本身必须过 SHA-1(Python fetch_component_manifest 也传了 manifest.sha1);
+     * 镜像那条走 relaxed(query->manifest_relaxed_mirror),理由见 fetch_text 的注释。 */
+    if (fetch_text(query, entry->manifest_url, entry->manifest_sha1, 1,
+                   query->manifest_relaxed_mirror, &text, &len, &source, err, err_len) !=
         SXCL_JAVA_RUNTIME_OK) {
         return NULL;
+    }
+    if (query->manifest_source_out) {
+        *query->manifest_source_out = source;
     }
     sxcl_json *doc = sxcl_json_parse(text, len, err, err_len);
     free(text);
@@ -733,9 +759,20 @@ typedef struct jr_entry {
     int executable;
 } jr_entry;
 
+/* 预置(一次装齐)时,把"第几个组件 / 全部组件合计"带进单组件安装的进度里。
+ * 单组件安装(公开的 sxcl_java_runtime_install)传 NULL。 */
+typedef struct jr_overall {
+    int index;               /**< 0 起 */
+    int total;               /**< 总组件数 */
+    int64_t bytes_base;      /**< 之前组件已确认的字节(含跳过的) */
+    int64_t bytes_total_all; /**< 全部组件合计字节 */
+} jr_overall;
+
 typedef struct jr_state {
     const sxcl_java_runtime_request *request;
     sxcl_java_runtime_result *out;
+    const jr_overall *overall;
+    int component_skipped;
     sxcl_java_runtime_stage stage;
     int percent;
     const char *component;
@@ -777,6 +814,21 @@ static void emit(jr_state *st)
     progress.component = st->component ? st->component : "";
     progress.version = st->version ? st->version : "";
     progress.current = st->current ? st->current : "";
+    progress.component_index = st->overall ? st->overall->index : 0;
+    progress.component_total = st->overall ? st->overall->total : 1;
+    progress.component_skipped = st->component_skipped;
+    if (st->overall) {
+        const int64_t all = st->overall->bytes_total_all;
+        const int64_t done = st->overall->bytes_base + st->bytes_done;
+        progress.overall_bytes_done = done;
+        progress.overall_bytes_total = all;
+        progress.overall_percent = all > 0 ? (int)((done > all ? all : done) * 100 / all)
+                                           : st->percent;
+    } else {
+        progress.overall_bytes_done = st->bytes_done;
+        progress.overall_bytes_total = st->bytes_total;
+        progress.overall_percent = st->percent;
+    }
     /* 文案走语言表(java.* 键,与 Python 的 .lang 同一批键);没初始化 i18n 时就是中文兜底 */
     if (progress.current[0]) {
         snprintf(progress.message, sizeof(progress.message), "%s: %s",
@@ -906,7 +958,8 @@ static int json_escape(const char *text, char *out, size_t out_len)
 
 /* 写 .sxcl_runtime.json(Python 版认这个文件;字段与它逐字一致)。 */
 static int write_marker(const char *target, const char *component, const char *platform,
-                        const char *version, char *out_path, size_t out_path_len)
+                        const char *version, const char *manifest_source, char *out_path,
+                        size_t out_path_len)
 {
     char marker[800];
     if (join_path(marker, sizeof(marker), target, SXCL_JAVA_RUNTIME_MARKER) != 0) {
@@ -926,14 +979,19 @@ static int write_marker(const char *target, const char *component, const char *p
         return -1;
     }
     char body[4096];
+    /* manifest_source 是**新增字段**(老读法不受影响:多一个键而已):镜像那份清单
+     * 不校验清单级 sha1,来源必须留在盘上可追溯。 */
     const int n = snprintf(body, sizeof(body),
                            "{\n"
                            "  \"component\": \"%s\",\n"
                            "  \"platform\": \"%s\",\n"
                            "  \"version\": \"%s\",\n"
+                           "  \"manifest_source\": \"%s\",\n"
                            "  \"java_home\": \"%s\"\n"
                            "}\n",
-                           esc_component, esc_platform, esc_version, esc_home);
+                           esc_component, esc_platform, esc_version,
+                           (manifest_source && *manifest_source) ? manifest_source : "unknown",
+                           esc_home);
     if (n <= 0 || (size_t)n >= sizeof(body)) {
         return -1;
     }
@@ -969,7 +1027,31 @@ static void add_exec_bits(const char *path)
 }
 #endif
 
+/** 路径是不是"装好的运行时"(bin/java + 标记文件都在)。
+ *  为什么要标记文件:只有 bin/java 可能是用户手工放的半个;标记文件是我们装完写的,
+ *  两样都在才算"这份运行时是我们完整装出来的",才敢整个跳过不算哈希。 */
+static int component_ready(const char *target)
+{
+    if (!target || !*target || sxcl_java_runtime_is_installed(target) != 1) {
+        return 0;
+    }
+    char marker[800];
+    if (join_path(marker, sizeof(marker), target, SXCL_JAVA_RUNTIME_MARKER) != 0) {
+        return 0;
+    }
+    return sxcl_fs_exists(marker) == 1 ? 1 : 0;
+}
+
+static int install_internal(const sxcl_java_runtime_request *request, sxcl_java_runtime_result *out,
+                            const jr_overall *overall);
+
 int sxcl_java_runtime_install(const sxcl_java_runtime_request *request, sxcl_java_runtime_result *out)
+{
+    return install_internal(request, out, NULL);
+}
+
+static int install_internal(const sxcl_java_runtime_request *request, sxcl_java_runtime_result *out,
+                            const jr_overall *overall)
 {
     if (!request || !out) {
         return SXCL_JAVA_RUNTIME_ERR_ARG;
@@ -996,18 +1078,22 @@ int sxcl_java_runtime_install(const sxcl_java_runtime_request *request, sxcl_jav
     memset(&st, 0, sizeof(st));
     st.request = request;
     st.out = out;
+    st.overall = overall;
     st.stage = SXCL_JAVA_RUNTIME_STAGE_QUERY;
 
     const char *platform = (request->platform && *request->platform) ? request->platform
                                                                     : sxcl_java_runtime_platform_key();
     copy_str(out->platform, sizeof(out->platform), platform);
 
+    int manifest_source = 0;
     sxcl_java_runtime_query query;
     memset(&query, 0, sizeof(query));
     query.all_json_text = request->all_json_text;
     query.all_json_url = request->all_json_url;
     query.manifest_text = request->manifest_text;
     query.platform = platform;
+    query.manifest_relaxed_mirror = request->manifest_relaxed_mirror;
+    query.manifest_source_out = &manifest_source;
     query.transport_factory = request->transport_factory;
     query.ud = request->ud;
 
@@ -1093,6 +1179,26 @@ int sxcl_java_runtime_install(const sxcl_java_runtime_request *request, sxcl_jav
         }
     }
 
+    /* ── 2.5) 组件级快路径:已装好就整个跳过(不联网、不算哈希、不下一个字节) ──
+     * 判据 = bin/java 在 **且** 我们写的标记文件在(见 component_ready)。
+     * 这是"别每次重下"的第一道闸;第二道闸是下面逐文件的 verify 快路径(文件被改坏时兜底)。 */
+    if (request->skip_if_installed && component_ready(target)) {
+        st.stage = SXCL_JAVA_RUNTIME_STAGE_FINISH;
+        st.component_skipped = 1;
+        st.percent = 100;
+        copy_str(out->java_home, sizeof(out->java_home), target);
+        (void)sxcl_java_runtime_java_path(target, out->java_path, sizeof(out->java_path));
+        (void)join_path(out->marker_path, sizeof(out->marker_path), target,
+                        SXCL_JAVA_RUNTIME_MARKER);
+        out->skipped = 1;
+        copy_str(out->manifest_source, sizeof(out->manifest_source), "installed");
+        emit(&st);
+        out->code = SXCL_JAVA_RUNTIME_OK;
+        out->fail_stage = SXCL_JAVA_RUNTIME_STAGE_END;
+        out->fail_stage_id = sxcl_java_runtime_stage_id(SXCL_JAVA_RUNTIME_STAGE_END);
+        return SXCL_JAVA_RUNTIME_OK;
+    }
+
     /* ── 3) 组件清单(manifest.sha1 强校验)+ 目标目录 + directory 条目 ── */
     st.stage = SXCL_JAVA_RUNTIME_STAGE_MANIFEST;
     st.percent = 10;
@@ -1102,6 +1208,9 @@ int sxcl_java_runtime_install(const sxcl_java_runtime_request *request, sxcl_jav
         snprintf(out->error, sizeof(out->error), "组件清单下载或校验失败: %s", err);
         return fail_stage(&st, SXCL_JAVA_RUNTIME_ERR_MANIFEST, SXCL_JAVA_RUNTIME_STAGE_MANIFEST);
     }
+    copy_str(out->manifest_source, sizeof(out->manifest_source),
+             request->manifest_text ? "provided" : (manifest_source == 1 ? "mirror" : "official"));
+    /* 镜像清单的来源会进 out->manifest_source 与标记文件(取舍见 fetch_text 的注释与 docs/07) */
     const sxcl_json_value *files = sxcl_json_get(sxcl_json_root(manifest), "files");
     const size_t members = files ? sxcl_json_member_count(files) : 0;
     if (members == 0) {
@@ -1321,8 +1430,8 @@ int sxcl_java_runtime_install(const sxcl_java_runtime_request *request, sxcl_jav
                  out->java_path);
         goto cleanup;
     }
-    if (write_marker(target, entry.component, platform, entry.version, out->marker_path,
-                     sizeof(out->marker_path)) != 0) {
+    if (write_marker(target, entry.component, platform, entry.version, out->manifest_source,
+                     out->marker_path, sizeof(out->marker_path)) != 0) {
         /* 标记文件写不了不算安装失败(不影响使用);Python 也只是 pass */
         copy_str(out->marker_path, sizeof(out->marker_path), "");
     }
@@ -1359,4 +1468,506 @@ cleanup:
     out->bytes_done = st.bytes_done;
     out->bytes_total = st.bytes_total;
     return SXCL_JAVA_RUNTIME_OK;
+}
+
+/* ══════════════════════ 预置:一次装齐(见 docs/07「一次装齐」) ══════════════════════ */
+
+/* 墙钟秒(每个组件的耗时用)。Windows 用 GetTickCount64(不受系统时间调整影响);
+ * POSIX 优先 CLOCK_MONOTONIC,拿不到才退回 time()。 */
+static double now_seconds(void)
+{
+#if defined(_WIN32)
+    return (double)GetTickCount64() / 1000.0;
+#else
+    /* 不用 clock_gettime:它要 _POSIX_C_SOURCE(这个文件没定义,Android/glibc 下会隐式声明警告),
+     * 而 gettimeofday 到处都有(<sys/time.h>),精度也够。 */
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) == 0) {
+        return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+    }
+    return (double)time(NULL);
+#endif
+}
+
+/* 主版本排序 + 去重(集合很小,不值得为它引 qsort 的比较函数样板) */
+static void sort_unique_ints(int *values, size_t count)
+{
+    for (size_t i = 1; i < count; ++i) {
+        const int v = values[i];
+        size_t j = i;
+        while (j > 0 && values[j - 1] > v) {
+            values[j] = values[j - 1];
+            --j;
+        }
+        values[j] = v;
+    }
+}
+
+size_t sxcl_java_runtime_needed_majors(const char *const *mc_versions, size_t mc_version_count,
+                                       int newest_major, int include_newest, int *out, size_t cap)
+{
+    if (!out || cap == 0) {
+        return 0;
+    }
+    int pool[16];
+    size_t n = 0;
+    /* 1) 基线:8 / 17 / 21 —— 覆盖 1.16.5 及更早 / 1.18~1.20.4 / 1.20.5+ */
+    pool[n++] = 8;
+    pool[n++] = 17;
+    pool[n++] = 21;
+    /* 2) 用户要玩的版本折算出来的主版本 */
+    for (size_t i = 0; i < mc_version_count && n < sizeof(pool) / sizeof(pool[0]); ++i) {
+        const int major = sxcl_java_runtime_required_major(mc_versions ? mc_versions[i] : NULL);
+        if (major > 0) {
+            pool[n++] = major;
+        }
+    }
+    /* 3) 清单里最新的主版本(当前真实清单 = 25) */
+    if (include_newest && newest_major > 0 && n < sizeof(pool) / sizeof(pool[0])) {
+        pool[n++] = newest_major;
+    }
+    sort_unique_ints(pool, n);
+    size_t written = 0;
+    for (size_t i = 0; i < n && written < cap; ++i) {
+        if (i > 0 && pool[i] == pool[i - 1]) {
+            continue;
+        }
+        out[written++] = pool[i];
+    }
+    return written;
+}
+
+/* ── 递归统计目录实际占用(装完报真实占用的字节数) ── */
+
+#if defined(_WIN32)
+static int64_t dir_bytes_walk(const wchar_t *wide, int depth)
+{
+    if (depth > 24) {
+        return 0; /* 防目录环(清单里没有,盘上可能有) */
+    }
+    wchar_t pattern[MAX_PATH * 2];
+    if (swprintf(pattern, sizeof(pattern) / sizeof(pattern[0]), L"%ls\\*", wide) <= 0) {
+        return 0;
+    }
+    int64_t total = 0;
+    WIN32_FIND_DATAW data;
+    HANDLE h = FindFirstFileW(pattern, &data);
+    if (h == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    do {
+        if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) {
+            continue;
+        }
+        wchar_t child[MAX_PATH * 2];
+        if (swprintf(child, sizeof(child) / sizeof(child[0]), L"%ls\\%ls", wide, data.cFileName) <=
+            0) {
+            continue;
+        }
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            total += dir_bytes_walk(child, depth + 1);
+        } else {
+            LARGE_INTEGER li;
+            li.HighPart = (LONG)data.nFileSizeHigh;
+            li.LowPart = data.nFileSizeLow;
+            total += (int64_t)li.QuadPart;
+        }
+    } while (FindNextFileW(h, &data));
+    FindClose(h);
+    return total;
+}
+
+int64_t sxcl_java_runtime_dir_bytes(const char *dir)
+{
+    if (!dir || !*dir || sxcl_fs_is_dir(dir) != 1) {
+        return 0;
+    }
+    const int need = MultiByteToWideChar(CP_UTF8, 0, dir, -1, NULL, 0);
+    if (need <= 0) {
+        return 0;
+    }
+    wchar_t *wide = (wchar_t *)malloc((size_t)need * sizeof(wchar_t));
+    if (!wide) {
+        return 0;
+    }
+    if (MultiByteToWideChar(CP_UTF8, 0, dir, -1, wide, need) != need) {
+        free(wide);
+        return 0;
+    }
+    const int64_t total = dir_bytes_walk(wide, 0);
+    free(wide);
+    return total;
+}
+#else
+static int64_t dir_bytes_walk(const char *dir, int depth)
+{
+    if (depth > 24) {
+        return 0;
+    }
+    DIR *handle = opendir(dir);
+    if (!handle) {
+        return 0;
+    }
+    int64_t total = 0;
+    struct dirent *entry = NULL;
+    while ((entry = readdir(handle)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        char child[SXCL_JAVA_RUNTIME_PATH_MAX];
+        if (join_path(child, sizeof(child), dir, entry->d_name) != 0) {
+            continue;
+        }
+        struct stat st;
+        if (lstat(child, &st) != 0) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            total += dir_bytes_walk(child, depth + 1);
+        } else if (S_ISREG(st.st_mode)) {
+            total += (int64_t)st.st_size;
+        }
+    }
+    closedir(handle);
+    return total;
+}
+
+int64_t sxcl_java_runtime_dir_bytes(const char *dir)
+{
+    if (!dir || !*dir || sxcl_fs_is_dir(dir) != 1) {
+        return 0;
+    }
+    return dir_bytes_walk(dir, 0);
+}
+#endif
+
+/* 量一个组件装完要下多少字节(只取组件清单,不下载任何组件文件)。 */
+typedef struct jr_measure {
+    int64_t bytes;
+    size_t files;
+} jr_measure;
+
+static int measure_component(const sxcl_java_runtime_query *query,
+                             const sxcl_java_runtime_component *entry, jr_measure *out,
+                             char *err, size_t err_len)
+{
+    memset(out, 0, sizeof(*out));
+    sxcl_json *doc = sxcl_java_runtime_fetch_manifest(query, entry, err, err_len);
+    if (!doc) {
+        return SXCL_JAVA_RUNTIME_ERR_MANIFEST;
+    }
+    const sxcl_json_value *files = sxcl_json_get(sxcl_json_root(doc), "files");
+    const size_t members = files ? sxcl_json_member_count(files) : 0;
+    for (size_t i = 0; i < members; ++i) {
+        const sxcl_json_value *info = sxcl_json_member_value(files, i);
+        const char *rel = sxcl_json_member_key(files, i);
+        if (!rel || strcmp(sxcl_json_get_string(info, "type", ""), "file") != 0) {
+            continue;
+        }
+        const sxcl_json_value *raw = sxcl_json_get(sxcl_json_get(info, "downloads"), "raw");
+        if (!sxcl_json_get_string(raw, "url", "")[0]) {
+            continue;
+        }
+        out->bytes += sxcl_json_get_int64(raw, "size", 0);
+        ++out->files;
+    }
+    sxcl_json_free(doc);
+    return out->files > 0 ? SXCL_JAVA_RUNTIME_OK : SXCL_JAVA_RUNTIME_ERR_MANIFEST;
+}
+
+/* 装到哪(与 install 里那段同一口径;两处必须一致,否则计划与实际落点会分叉) */
+static int plan_target_dir(const char *root, const char *component, const char *platform,
+                           char *out, size_t out_len)
+{
+    char leaf[SXCL_JAVA_RUNTIME_COMPONENT_MAX + SXCL_JAVA_RUNTIME_PLATFORM_MAX + 4];
+    snprintf(leaf, sizeof(leaf), "%s-%s", component, platform);
+    return join_path(out, out_len, root, leaf);
+}
+
+int sxcl_java_runtime_plan(const sxcl_java_runtime_plan_request *request,
+                           sxcl_java_runtime_plan_item *out, size_t cap, char *err, size_t err_len)
+{
+    if (err && err_len) {
+        err[0] = '\0';
+    }
+    if (!request || !out || cap == 0) {
+        set_text(err, err_len, "参数不合法");
+        return SXCL_JAVA_RUNTIME_ERR_ARG;
+    }
+    if (!request->all_json_text && !request->transport_factory) {
+        set_text(err, err_len, "既没有 all_json_text 也没有 transport_factory");
+        return SXCL_JAVA_RUNTIME_ERR_ARG;
+    }
+    const char *platform = (request->platform && *request->platform) ? request->platform
+                                                                    : sxcl_java_runtime_platform_key();
+    char root[SXCL_JAVA_RUNTIME_PATH_MAX];
+    if (request->target_root && *request->target_root) {
+        copy_str(root, sizeof(root), request->target_root);
+    } else if (sxcl_java_runtime_default_root(root, sizeof(root), err, err_len) !=
+               SXCL_JAVA_RUNTIME_OK) {
+        return SXCL_JAVA_RUNTIME_ERR_ARG;
+    }
+
+    sxcl_java_runtime_query query;
+    memset(&query, 0, sizeof(query));
+    query.all_json_text = request->all_json_text;
+    query.all_json_url = request->all_json_url;
+    query.platform = platform;
+    query.manifest_relaxed_mirror = 1; /* 量大小也要能在镜像下工作,理由同 fetch_text */
+    query.transport_factory = request->transport_factory;
+    query.ud = request->ud;
+
+    sxcl_json *all = sxcl_java_runtime_fetch_all(&query, err, err_len);
+    if (!all) {
+        return SXCL_JAVA_RUNTIME_ERR_NET;
+    }
+    sxcl_java_runtime_component candidates[SXCL_JAVA_RUNTIME_COMPONENT_MAX];
+    const size_t n = sxcl_java_runtime_components(all, platform, candidates,
+                                                 SXCL_JAVA_RUNTIME_COMPONENT_MAX);
+    if (n == 0) {
+        sxcl_json_free(all);
+        if (err && err_len) {
+            snprintf(err, err_len, "all.json 里没有平台 %s 的组件", platform);
+        }
+        return SXCL_JAVA_RUNTIME_ERR_MANIFEST;
+    }
+    int newest = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (candidates[i].major > newest) {
+            newest = candidates[i].major;
+        }
+    }
+
+    int majors[16];
+    const size_t major_count = sxcl_java_runtime_needed_majors(
+        request->mc_versions, request->mc_version_count, newest, request->include_newest, majors,
+        sizeof(majors) / sizeof(majors[0]));
+
+    size_t written = 0;
+    for (size_t i = 0; i < major_count && written < cap; ++i) {
+        sxcl_java_runtime_component chosen;
+        memset(&chosen, 0, sizeof(chosen));
+        if (sxcl_java_runtime_choose(all, platform, majors[i], &chosen) != SXCL_JAVA_RUNTIME_OK) {
+            continue;
+        }
+        int dup = 0;
+        for (size_t j = 0; j < written; ++j) {
+            if (strcmp(out[j].component, chosen.component) == 0) {
+                dup = 1; /* 没有 25 的清单里 25 会挑回 delta:同一份只装一次 */
+                break;
+            }
+        }
+        if (dup) {
+            continue;
+        }
+        if (chosen.manifest_url[0] == '\0') {
+            continue; /* 清单里那一条没有 manifest.url:挑不了,跳过(不猜) */
+        }
+        sxcl_java_runtime_plan_item item;
+        memset(&item, 0, sizeof(item));
+        copy_str(item.component, sizeof(item.component), chosen.component);
+        copy_str(item.version, sizeof(item.version), chosen.version);
+        item.major = chosen.major;
+        if (plan_target_dir(root, chosen.component, platform, item.target_dir,
+                            sizeof(item.target_dir)) != 0) {
+            continue;
+        }
+        (void)sxcl_java_runtime_java_path(item.target_dir, item.java_path, sizeof(item.java_path));
+        item.installed = component_ready(item.target_dir);
+        snprintf(item.reason, sizeof(item.reason), "%s",
+                 (majors[i] == newest && majors[i] > 21) ? "官方清单里最新的 Java 版本"
+                                                         : "基线/目标版本需要的 Java 大版本");
+        if (request->measure) {
+            jr_measure m;
+            char merr[SXCL_JAVA_RUNTIME_ERROR_MAX];
+            merr[0] = '\0';
+            if (measure_component(&query, &chosen, &m, merr, sizeof(merr)) == SXCL_JAVA_RUNTIME_OK) {
+                item.bytes = m.bytes;
+                item.files = m.files;
+            }
+            /* 量不出来不算失败:bytes 保持 0,装的时候照样能装(只是没法提前报大小) */
+        }
+        if (request->skip_installed && item.installed) {
+            continue;
+        }
+        out[written++] = item;
+    }
+    sxcl_json_free(all);
+    return (int)written;
+}
+
+int sxcl_java_runtime_install_preset(const sxcl_java_runtime_preset_request *request,
+                                     sxcl_java_runtime_preset_result *out)
+{
+    if (!request || !out) {
+        return SXCL_JAVA_RUNTIME_ERR_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    out->free_before = -1;
+
+    /* ── 1) 出计划(含每个组件的预计大小;已装好的也要进来,结果里要如实报跳过) ── */
+    sxcl_java_runtime_plan_request preq;
+    memset(&preq, 0, sizeof(preq));
+    preq.mc_versions = request->mc_versions;
+    preq.mc_version_count = request->mc_version_count;
+    preq.platform = request->platform;
+    preq.target_root = request->target_root;
+    preq.include_newest = request->include_newest;
+    preq.measure = 1;
+    preq.skip_installed = 0;
+    preq.all_json_text = request->all_json_text;
+    preq.all_json_url = request->all_json_url;
+    preq.transport_factory = request->transport_factory;
+    preq.ud = request->ud;
+
+    sxcl_java_runtime_plan_item items[SXCL_JAVA_RUNTIME_PRESET_MAX];
+    char err[SXCL_JAVA_RUNTIME_ERROR_MAX];
+    err[0] = '\0';
+    const int planned = sxcl_java_runtime_plan(&preq, items, SXCL_JAVA_RUNTIME_PRESET_MAX, err,
+                                               sizeof(err));
+    if (planned < 0) {
+        out->code = planned;
+        snprintf(out->error, sizeof(out->error), "出不了安装计划: %s", err);
+        return planned;
+    }
+    out->planned = (size_t)planned;
+
+    /* ── 2) 报大小 + 查磁盘(**装之前**,一个字节都不下) ── */
+    int64_t total_all = 0;
+    int64_t need_download = 0;
+    for (int i = 0; i < planned; ++i) {
+        total_all += items[i].bytes;
+        if (!items[i].installed) {
+            need_download += items[i].bytes;
+        }
+    }
+    out->planned_bytes = need_download;
+
+    char root[SXCL_JAVA_RUNTIME_PATH_MAX];
+    if (request->target_root && *request->target_root) {
+        copy_str(root, sizeof(root), request->target_root);
+    } else if (sxcl_java_runtime_default_root(root, sizeof(root), err, sizeof(err)) !=
+               SXCL_JAVA_RUNTIME_OK) {
+        out->code = SXCL_JAVA_RUNTIME_ERR_ARG;
+        snprintf(out->error, sizeof(out->error), "拿不到 runtime 根目录: %s", err);
+        return out->code;
+    }
+    uint64_t free_bytes = 0;
+    if (sxcl_fs_free_space(root, &free_bytes) == 1) {
+        out->free_before = (int64_t)free_bytes;
+    }
+    if (out->free_before >= 0) {
+        const int64_t margin = request->min_free_margin_bytes > 0
+                                   ? request->min_free_margin_bytes
+                                   : (int64_t)(64LL << 20);
+        if (need_download > 0 && out->free_before < need_download + margin) {
+            out->code = SXCL_JAVA_RUNTIME_ERR_DISK;
+            snprintf(out->error, sizeof(out->error),
+                     "磁盘空间不够:还要下 %.1f MB(外加 %.1f MB 余量),%s 只剩 %.1f MB。"
+                     "先清理空间再重试(已经装好的运行时不受影响)。",
+                     (double)need_download / (1024.0 * 1024.0),
+                     (double)margin / (1024.0 * 1024.0), root,
+                     (double)out->free_before / (1024.0 * 1024.0));
+            return out->code;
+        }
+    }
+
+    /* ── 3) 逐个组件装(已装好的走快路径;一个失败不拖累其余) ── */
+    int64_t base = 0;
+    int first_error = 0;
+    for (int i = 0; i < planned; ++i) {
+        if (request->is_cancelled && request->is_cancelled(request->ud)) {
+            out->cancelled = 1;
+            if (first_error == 0) {
+                first_error = SXCL_JAVA_RUNTIME_ERR_CANCELLED;
+            }
+            break;
+        }
+        jr_overall overall;
+        memset(&overall, 0, sizeof(overall));
+        overall.index = i;
+        overall.total = planned;
+        overall.bytes_base = base;
+        overall.bytes_total_all = total_all;
+
+        sxcl_java_runtime_request ireq;
+        memset(&ireq, 0, sizeof(ireq));
+        ireq.component = items[i].component;
+        ireq.target_dir = items[i].target_dir;
+        ireq.platform = request->platform;
+        ireq.all_json_text = request->all_json_text;
+        ireq.all_json_url = request->all_json_url;
+        ireq.use_mirror = request->use_mirror;
+        ireq.skip_if_installed = request->force ? 0 : 1;
+        ireq.manifest_relaxed_mirror = 1;
+        ireq.transport_factory = request->transport_factory;
+        ireq.engine_opts = request->engine_opts;
+        ireq.ud = request->ud;
+        ireq.on_progress = request->on_progress;
+        ireq.is_cancelled = request->is_cancelled;
+
+        sxcl_java_runtime_result res;
+        const double t0 = now_seconds();
+        const int rc = install_internal(&ireq, &res, &overall);
+        const double t1 = now_seconds();
+
+        sxcl_java_runtime_item_result *it = &out->items[out->count];
+        memset(it, 0, sizeof(*it));
+        copy_str(it->component, sizeof(it->component), items[i].component);
+        copy_str(it->version, sizeof(it->version), items[i].version);
+        it->major = items[i].major;
+        it->code = rc;
+        it->skipped = res.skipped;
+        it->installed = sxcl_java_runtime_is_installed(
+            res.java_home[0] ? res.java_home : items[i].target_dir);
+        copy_str(it->java_home, sizeof(it->java_home),
+                 res.java_home[0] ? res.java_home : items[i].target_dir);
+        copy_str(it->java_path, sizeof(it->java_path),
+                 res.java_path[0] ? res.java_path : items[i].java_path);
+        it->files_total = res.files_total;
+        it->files_done = res.files_done;
+        it->files_skipped = res.files_skipped;
+        it->files_failed = res.files_failed;
+        it->bytes_total = res.bytes_total;
+        it->bytes_done = res.bytes_done;
+        it->bytes_on_disk = sxcl_java_runtime_dir_bytes(it->java_home);
+        it->seconds = t1 - t0;
+        copy_str(it->error, sizeof(it->error), res.error);
+        ++out->count;
+
+        base += items[i].bytes;
+        out->downloaded_bytes += res.bytes_done;
+        out->on_disk_bytes += it->bytes_on_disk;
+        if (res.skipped) {
+            ++out->skipped;
+        } else if (rc == SXCL_JAVA_RUNTIME_OK) {
+            ++out->installed;
+        } else {
+            ++out->failed;
+            if (first_error == 0) {
+                first_error = rc;
+            }
+        }
+        if (rc == SXCL_JAVA_RUNTIME_ERR_CANCELLED) {
+            out->cancelled = 1;
+            break;
+        }
+    }
+
+    if (first_error == 0) {
+        out->code = SXCL_JAVA_RUNTIME_OK;
+        out->error[0] = '\0';
+        return SXCL_JAVA_RUNTIME_OK;
+    }
+    out->code = first_error;
+    if (out->error[0] == '\0') {
+        for (size_t i = 0; i < out->count; ++i) {
+            if (out->items[i].code != SXCL_JAVA_RUNTIME_OK && out->items[i].error[0]) {
+                snprintf(out->error, sizeof(out->error), "%s: %s", out->items[i].component,
+                         out->items[i].error);
+                break;
+            }
+        }
+    }
+    return out->code;
 }

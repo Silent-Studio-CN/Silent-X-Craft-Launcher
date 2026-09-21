@@ -91,7 +91,8 @@ static char g_payload_java[256];
 static char g_payload_release[256];
 static char g_payload_dll[256];
 static int g_requests = 0;       /* 传输次数(含清单) */
-static int g_payload_reads = 0;  /* 真下到文件的次数 */
+static int g_payload_reads = 0;  /* 真下到文件的次数(含清单夹具命中) */
+static int g_object_reads = 0;   /* **只数组件文件**(URL 带 /objects/):"没重下"的硬证据 */
 static int g_cancel_after = -1;  /* >=0 时:下到第 N 个文件后用户取消 */
 
 /* 引擎配置:单线程。假传输的计数器没有加锁,单线程才没有数据竞争,
@@ -116,7 +117,8 @@ static const char *fixture_lookup(const char *url, size_t *len_out)
         *len_out = strlen(g_all_json);
         return g_all_json;
     }
-    if (strstr(url, "delta.json") || strstr(url, "gamma.json") || strstr(url, "legacy.json")) {
+    if (strstr(url, "delta.json") || strstr(url, "gamma.json") || strstr(url, "legacy.json") ||
+        strstr(url, "epsilon.json")) {
         *len_out = strlen(g_manifest);
         return g_manifest;
     }
@@ -143,6 +145,9 @@ static int fake_request(void *ctx, const sxcl_http_request *req, sxcl_http_respo
         return SXCL_NET_ERR_BAD_ARG;
     }
     ++g_requests;
+    if (strstr(req->url, "/objects/") != NULL) {
+        ++g_object_reads; /* 清单不算:它每次都要取一份(除非夹具直接给) */
+    }
     size_t len = 0;
     const char *data = fixture_lookup(req->url, &len);
     memset(resp, 0, sizeof(*resp));
@@ -254,7 +259,8 @@ static void build_manifest(void)
              (int)strlen(g_payload_release), sha_dll, (int)strlen(g_payload_dll));
 }
 
-/* all.json:本平台三个组件 + 两个必须被排除的 + 另一个平台(测平台选择) */
+/* all.json:本平台四个组件(jre-legacy/gamma/delta/epsilon = Java 8/17/21/25,
+ * 与 2026-04 的真实清单同名同大版本)+ 两个必须被排除的 + 另一个平台(测平台选择) */
 static void build_all_json(void)
 {
     char sha_manifest[48];
@@ -272,6 +278,9 @@ static void build_all_json(void)
              "    \"java-runtime-delta\": [ { \"manifest\": { \"url\":"
              " \"https://piston-meta.mojang.com/v1/delta.json\", \"sha1\": \"%s\", \"size\": %d },"
              " \"version\": { \"name\": \"21.0.5\" } } ],\n"
+             "    \"java-runtime-epsilon\": [ { \"manifest\": { \"url\":"
+             " \"https://piston-meta.mojang.com/v1/epsilon.json\", \"sha1\": \"%s\", \"size\": %d },"
+             " \"version\": { \"name\": \"25.0.1\" } } ],\n"
              "    \"minecraft-java-exe\": [ { \"manifest\": { \"url\":"
              " \"https://piston-meta.mojang.com/v1/exe.json\", \"sha1\": \"%s\", \"size\": 1 },"
              " \"version\": { \"name\": \"1.0\" } } ],\n"
@@ -285,8 +294,13 @@ static void build_all_json(void)
              " \"version\": { \"name\": \"21.0.5\" } } ]\n"
              "  }\n"
              "}\n",
-             sha_manifest, size, sha_manifest, size, sha_manifest, size, sha_manifest, sha_manifest,
-             sha_manifest, size);
+             sha_manifest, size, /* jre-legacy */
+             sha_manifest, size, /* java-runtime-gamma */
+             sha_manifest, size, /* java-runtime-delta */
+             sha_manifest, size, /* java-runtime-epsilon(真实清单里 25 的那一条) */
+             sha_manifest,       /* minecraft-java-exe(必须被排除) */
+             sha_manifest,       /* java-runtime-gamma-snapshot(必须被排除) */
+             sha_manifest, size); /* linux 平台那一条 */
 }
 
 /* ── 进度回调:记录阶段顺序与百分比单调性 ── */
@@ -352,6 +366,38 @@ static void test_platform_and_choose(void)
     check_int(sxcl_java_runtime_required_major(""), 21, "空 -> 21");
     check_int(sxcl_java_runtime_required_major("abc"), 21, "认不出 -> 21");
 
+    /* 没有 25 的清单(模拟老清单):required=25 要退到能拿到的最新,不能挑出 Java 8。
+     * 这份迷你 all.json 就是"2025-12 之前的真实清单"的形状(最高只到 delta 21)。 */
+    {
+        static const char *kOldAll =
+            "{ \"windows-x64\": {"
+            "  \"jre-legacy\": [ { \"manifest\": { \"url\": \"https://piston-meta.mojang.com/v1/legacy.json\","
+            " \"sha1\": \"%s\", \"size\": %d }, \"version\": { \"name\": \"8u202\" } } ],"
+            "  \"java-runtime-gamma\": [ { \"manifest\": { \"url\":"
+            " \"https://piston-meta.mojang.com/v1/gamma.json\", \"sha1\": \"%s\", \"size\": %d },"
+            " \"version\": { \"name\": \"17.0.15\" } } ],"
+            "  \"java-runtime-delta\": [ { \"manifest\": { \"url\":"
+            " \"https://piston-meta.mojang.com/v1/delta.json\", \"sha1\": \"%s\", \"size\": %d },"
+            " \"version\": { \"name\": \"21.0.7\" } } ] } }";
+        char sha_manifest[48];
+        sha1_of(g_manifest, sha_manifest, sizeof(sha_manifest));
+        char old_all[4096];
+        snprintf(old_all, sizeof(old_all), kOldAll, sha_manifest, (int)strlen(g_manifest),
+                 sha_manifest, (int)strlen(g_manifest), sha_manifest, (int)strlen(g_manifest));
+        char parse_err[SXCL_JAVA_RUNTIME_ERROR_MAX];
+        parse_err[0] = '\0';
+        sxcl_json *old_doc = sxcl_json_parse(old_all, strlen(old_all), parse_err, sizeof(parse_err));
+        check(old_doc != NULL, "老清单夹具解析成功");
+        if (old_doc) {
+            sxcl_java_runtime_component fallback;
+            check(sxcl_java_runtime_choose(old_doc, "windows-x64", 25, &fallback) == 0,
+                  "没有 25 时也挑得出(退而求其次)");
+            check_str(fallback.component, "java-runtime-delta",
+                      "退到能拿到的最新(delta),不是 jre-legacy");
+            sxcl_json_free(old_doc);
+        }
+    }
+
     check_int((long)sxcl_java_runtime_preset_count(), 3, "三个组件候选(Python COMPONENT_PREVIEW)");
     check_str(sxcl_java_runtime_preset_at(0)->component, "jre-legacy", "候选 0 = jre-legacy");
     check_str(sxcl_java_runtime_preset_at(2)->component, "java-runtime-delta", "候选 2 = delta");
@@ -364,7 +410,7 @@ static void test_platform_and_choose(void)
 
     sxcl_java_runtime_component list[8];
     const int n = sxcl_java_runtime_list(&q, list, 8, err, sizeof(err));
-    check_int(n, 3, "windows-x64 上枚举出 3 个组件(排除 exe 与 gamma-snapshot)");
+    check_int(n, 4, "windows-x64 上枚举出 4 个组件(排除 exe 与 gamma-snapshot)");
     int found_excluded = 0;
     for (int i = 0; i < (n > 0 ? n : 0); ++i) {
         if (strcmp(list[i].component, "minecraft-java-exe") == 0 ||
@@ -386,8 +432,8 @@ static void test_platform_and_choose(void)
         check(sxcl_java_runtime_choose(doc, "windows-x64", 21, &chosen) == 0, "required=21 挑得出");
         check_str(chosen.component, "java-runtime-delta", "required=21 -> delta");
         check(sxcl_java_runtime_choose(doc, "windows-x64", 25, &chosen) == 0, "required=25 也挑得出");
-        check_str(chosen.component, "java-runtime-delta", "没有 25 的组件 -> 用能拿到的最新的");
-        check_str(chosen.version, "21.0.5", "版本串带上");
+        check_str(chosen.component, "java-runtime-epsilon", "清单里有 25 -> 挑 epsilon(真实清单同名)");
+        check_str(chosen.version, "25.0.1", "版本串带上");
         check_int(sxcl_java_runtime_choose(doc, "mac-os", 17, &chosen),
                   SXCL_JAVA_RUNTIME_ERR_MANIFEST, "没有这个平台 -> ERR_MANIFEST");
         sxcl_json_free(doc);
@@ -635,6 +681,172 @@ static int cancel_probe(void *ud)
     return g_payload_reads >= g_cancel_after ? 1 : 0;
 }
 
+/* ── 预置(一次装齐):策略 / 计划 / 跳过 / 磁盘 ── */
+
+static void test_preset_policy(void)
+{
+    printf("-- 预置策略:要装哪些 Java 大版本\n");
+    int majors[8];
+
+    size_t n = sxcl_java_runtime_needed_majors(NULL, 0, 25, 1, majors, 8);
+    check_int((long)n, 4, "基线 8/17/21 + 清单里的最新 25 = 4 个");
+    check_int(majors[0], 8, "升序:第 0 个是 8");
+    check_int(majors[1], 17, "第 1 个是 17");
+    check_int(majors[2], 21, "第 2 个是 21");
+    check_int(majors[3], 25, "第 3 个是 25(清单里真有)");
+
+    /* 清单里没有比 21 更新的:不硬塞一个不存在的 25 */
+    n = sxcl_java_runtime_needed_majors(NULL, 0, 21, 1, majors, 8);
+    check_int((long)n, 3, "清单最高只到 21 -> 还是 8/17/21 三个");
+    check_int(majors[2], 21, "最后一个就是 21");
+
+    /* include_newest = 0:只要基线 */
+    n = sxcl_java_runtime_needed_majors(NULL, 0, 25, 0, majors, 8);
+    check_int((long)n, 3, "include_newest=0 -> 不纳入 25");
+
+    /* 用户要玩的版本也并进来(去重后不重复计数) */
+    const char *mc[3] = { "1.16.5", "1.20.1", "1.21.4" };
+    n = sxcl_java_runtime_needed_majors(mc, 3, 25, 1, majors, 8);
+    check_int((long)n, 4, "1.16.5/1.20.1/1.21.4 折算出的主版本都在基线里 -> 仍是 4 个");
+    check_int(majors[3], 25, "25 仍然在");
+
+    /* 只玩 1.20.1 也一样带上 8/21:用户要的是"一次装好,以后别再遇到" */
+    const char *one[1] = { "1.20.1" };
+    n = sxcl_java_runtime_needed_majors(one, 1, 25, 1, majors, 8);
+    check_int((long)n, 4, "只玩 1.20.1 也照样装齐 8/17/21/25");
+
+    /* 容量不够时如实截断,不越界 */
+    n = sxcl_java_runtime_needed_majors(NULL, 0, 25, 1, majors, 2);
+    check_int((long)n, 2, "cap=2 -> 只写 2 个");
+    check_int(majors[0], 8, "截断也是从小到大");
+}
+
+static void test_preset_plan_and_install(void)
+{
+    printf("-- 预置:计划(大小/落点/已装)+ 一次装齐 + 跳过 + 磁盘不足\n");
+    const char *root = "build/_jr_preset";
+    (void)sxcl_fs_remove_tree(root);
+    (void)sxcl_fs_mkdirs(root);
+
+    char err[SXCL_JAVA_RUNTIME_ERROR_MAX];
+    err[0] = '\0';
+
+    /* ① 计划:四个组件、带预计大小、都还没装 */
+    sxcl_java_runtime_plan_request preq;
+    memset(&preq, 0, sizeof(preq));
+    preq.platform = "windows-x64";
+    preq.target_root = root;
+    preq.include_newest = 1;
+    preq.measure = 1;
+    preq.skip_installed = 0;
+    preq.all_json_text = g_all_json;
+    preq.transport_factory = fake_factory; /* 量大小要取组件清单 */
+    sxcl_java_runtime_plan_item items[SXCL_JAVA_RUNTIME_PRESET_MAX];
+    memset(items, 0, sizeof(items));
+    const int planned = sxcl_java_runtime_plan(&preq, items, SXCL_JAVA_RUNTIME_PRESET_MAX, err,
+                                               sizeof(err));
+    check_int(planned, 4, "计划 = 4 个组件");
+    if (planned == 4) {
+        check_str(items[0].component, "jre-legacy", "第 0 个 = jre-legacy(Java 8)");
+        check_int(items[0].major, 8, "主版本 8");
+        check_str(items[1].component, "java-runtime-gamma", "第 1 个 = gamma(Java 17)");
+        check_str(items[2].component, "java-runtime-delta", "第 2 个 = delta(Java 21)");
+        check_str(items[3].component, "java-runtime-epsilon", "第 3 个 = epsilon(Java 25)");
+        check(items[0].bytes > 0, "计划里带预计字节数(先报大小)");
+        check_int((long)items[0].files, 3, "计划里带文件数");
+        check_int(items[0].installed, 0, "还没装 -> installed=0");
+        check(strstr(items[0].target_dir, root) != NULL, "落点写在计划里");
+        check(strstr(items[0].target_dir, "jre-legacy-windows-x64") != NULL, "落点 = <root>/<组件>-<平台>");
+    }
+
+    /* ② 一次装齐(夹具 + 内存假传输) */
+    sxcl_java_runtime_preset_request req;
+    memset(&req, 0, sizeof(req));
+    req.platform = "windows-x64";
+    req.target_root = root;
+    req.include_newest = 1;
+    req.all_json_text = g_all_json;
+    req.use_mirror = 1;
+    req.transport_factory = fake_factory;
+    req.engine_opts = &g_engine_opts;
+
+    sxcl_java_runtime_preset_result pr;
+    g_object_reads = 0;
+    g_payload_reads = 0;
+    const int rc = sxcl_java_runtime_install_preset(&req, &pr);
+    check_int(rc, SXCL_JAVA_RUNTIME_OK, "一次装齐成功");
+    check_int((long)pr.planned, 4, "计划 4 个");
+    check_int((long)pr.installed, 4, "真装了 4 个");
+    check_int((long)pr.skipped, 0, "第一次没有跳过");
+    check_int((long)pr.failed, 0, "没有失败");
+    check_int((long)pr.count, 4, "结果里有 4 条明细");
+    check(pr.planned_bytes > 0, "装之前报出了预计下载量");
+    check(pr.downloaded_bytes > 0, "报出实际下载字节");
+    check(pr.on_disk_bytes > 0, "报出落盘实际占用");
+    check(pr.free_before >= 0, "报出开下之前的可用空间(拿不到要如实报 -1)");
+    check_int(g_object_reads, 12, "4 个组件 x 3 个文件 = 12 次对象下载");
+    for (int i = 0; i < (int)pr.count; ++i) {
+        check_int(pr.items[i].code, SXCL_JAVA_RUNTIME_OK, "每一条都是成功");
+        check_int(pr.items[i].installed, 1, "每一条结束时可用的 java 都在盘上");
+        check(pr.items[i].bytes_on_disk > 0, "每一条都报了实际占用");
+        check(pr.items[i].seconds >= 0.0, "每一条都报了耗时");
+        check(sxcl_java_runtime_is_installed(pr.items[i].java_home) == 1,
+              "java_home 里真有 bin/java");
+    }
+    printf("     计划 %.1f MB / 实下 %.1f MB / 落盘 %.1f MB / 可用 %.1f MB\n",
+           (double)pr.planned_bytes / (1024.0 * 1024.0),
+           (double)pr.downloaded_bytes / (1024.0 * 1024.0),
+           (double)pr.on_disk_bytes / (1024.0 * 1024.0),
+           (double)pr.free_before / (1024.0 * 1024.0));
+
+    /* ③ 再来一次:已装好的全部跳过,一个对象都不下(幂等/断点) */
+    g_object_reads = 0;
+    const int rc2 = sxcl_java_runtime_install_preset(&req, &pr);
+    check_int(rc2, SXCL_JAVA_RUNTIME_OK, "第二次也成功");
+    check_int((long)pr.skipped, 4, "4 个组件全部按\"已装好\"跳过");
+    check_int((long)pr.installed, 0, "第二次一个都没真装");
+    check_int((long)pr.planned_bytes, 0, "已装好 -> 需要下载的字节数 = 0");
+    check_int((long)pr.downloaded_bytes, 0, "没下过一个字节");
+    check_int(g_object_reads, 0, "一次对象传输都没发(硬证据)");
+
+    /* ④ force=1:重装(仍然不重复下:引擎的逐文件校验快路径挡住) */
+    req.force = 1;
+    g_object_reads = 0;
+    const int rc3 = sxcl_java_runtime_install_preset(&req, &pr);
+    check_int(rc3, SXCL_JAVA_RUNTIME_OK, "force 重装也成功");
+    check_int((long)pr.skipped, 0, "force 时不算跳过");
+    check_int(g_object_reads, 0, "文件都完好 -> 重装也不重下(逐文件校验快路径)");
+    req.force = 0;
+
+    /* ⑤ 磁盘不足:装之前就报人话错误,一个字节都不下 */
+    const char *tight = "build/_jr_preset_tight";
+    (void)sxcl_fs_remove_tree(tight);
+    (void)sxcl_fs_mkdirs(tight);
+    sxcl_java_runtime_preset_request disk_req = req;
+    disk_req.target_root = tight;
+    disk_req.min_free_margin_bytes = (int64_t)1 << 40; /* 1 TiB 余量:任何机器都不够 */
+    g_object_reads = 0;
+    const int rc4 = sxcl_java_runtime_install_preset(&disk_req, &pr);
+    check_int(rc4, SXCL_JAVA_RUNTIME_ERR_DISK, "磁盘不够 = ERR_DISK(专门一个码)");
+    check_int(pr.code, SXCL_JAVA_RUNTIME_ERR_DISK, "结果码一致");
+    check(strstr(pr.error, "磁盘空间不够") != NULL, "人话原因点明是空间不够");
+    check(pr.free_before >= 0, "报出了真实可用空间");
+    check(pr.planned_bytes > 0, "报出了需要多少");
+    check_int((long)pr.count, 0, "一个组件都没开始装");
+    check_int(g_object_reads, 0, "磁盘不足时没下过任何一个文件");
+    check(sxcl_fs_is_dir("build/_jr_preset_tight/jre-legacy-windows-x64") == 0,
+          "也没有留下半个安装目录");
+    (void)sxcl_fs_remove_tree(tight);
+
+    /* ⑥ 计划里 skip_installed=1:已装好的不再出现在计划里 */
+    preq.skip_installed = 1;
+    memset(items, 0, sizeof(items));
+    const int left = sxcl_java_runtime_plan(&preq, items, SXCL_JAVA_RUNTIME_PRESET_MAX, err,
+                                            sizeof(err));
+    check_int(left, 0, "全装好了 -> 计划为空(界面照这个说\"无需再装\")");
+    (void)sxcl_fs_remove_tree(root);
+}
+
 static void test_default_root_and_errors(void)
 {
     printf("-- runtime 根目录 / 参数校验\n");
@@ -709,6 +921,8 @@ int main(void)
     build_all_json();
 
     test_platform_and_choose();
+    test_preset_policy();
+    test_preset_plan_and_install();
     test_install_ok();
     test_skip_existing();
     test_hash_mismatch();

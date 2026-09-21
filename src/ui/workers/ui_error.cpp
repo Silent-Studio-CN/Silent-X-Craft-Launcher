@@ -15,6 +15,7 @@
 
 // 版本契约:与 main_window.cpp:40 同一条相对路径(不依赖链接 sxcl 也能拿到宏)
 #include "../../include/sxcl/version.h"
+#include "sxcl/log.h" // 错误进运行日志(与报告共用同一份 UiErrorContext)
 #include "ui_paths.h"
 
 #if defined(_MSC_VER)
@@ -113,7 +114,22 @@ QString reportUiError(const UiErrorContext &context) {
             readbackBytes = clipboard->text(QClipboard::Clipboard).size();
     }
 
-    // ── 4. 追踪(SXCL_UI_TRACE=1):报告全文进 stderr,验收可以直接核对 ──
+    // ── 4. 进运行日志(级别 error;**共用上面这一份上下文**,不另写第二份)──
+    // 一行摘要(页面/操作/原因/详情)进默认日志;完整报告(多行)只在 debug 级另记一遍,
+    // 每行都带 "报告 | " 前缀 —— 级联上下文能整段贴出来,又不毁掉"一行一条"的格式。
+    SXCL_LOG_E("error", "页面=%s 操作=%s 原因=%s 详情=%s 已复制=%s 重复=%s", 
+               context.page.isEmpty() ? "-" : context.page.toUtf8().constData(),
+               context.action.isEmpty() ? "-" : context.action.toUtf8().constData(),
+               context.reason.isEmpty() ? "(调用方没有给原因)" : context.reason.toUtf8().constData(),
+               context.detail.isEmpty() ? "-" : context.detail.toUtf8().constData(),
+               copied ? "yes" : "no", firstTime ? "no" : "yes");
+    if (sxcl_log_enabled(SXCL_LOG_DEBUG)) {
+        const QStringList reportRows = report.split(QLatin1Char('\n'));
+        for (const QString &row : reportRows)
+            SXCL_LOG_D("error", "报告 | %s", row.toUtf8().constData());
+    }
+
+    // ── 5. 追踪(SXCL_UI_TRACE=1):报告全文进 stderr,验收可以直接核对 ──
     uiTrace(QStringLiteral("error | page=%1 action=%2 copied=%3 repeat=%4 "
                            "report-bytes=%5 clipboard-readback-bytes=%6")
                 .arg(context.page, context.action,

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "sxcl/launch.h"
+#include "sxcl/log.h"
 #include "sxcl/process.h" // sxcl_process_kill_pid(按 PID 单独结束游戏进程)
 
 #include "ui_paths.h"
@@ -88,6 +89,7 @@ bool LaunchWorker::killRunningProcess() {
         return false;
     const int rc = sxcl_process_kill_pid(pid);
     uiTrace(QStringLiteral("launch | kill pid=%1 rc=%2").arg(pid).arg(rc));
+    SXCL_LOG_W("launch", "按用户请求结束游戏进程 pid=%lld rc=%d", (long long)pid, rc);
     return rc == 0;
 }
 
@@ -111,6 +113,7 @@ int LaunchWorker::cbStarted(void *userdata, int64_t pid) {
 int LaunchWorker::onStarted(int64_t pid) {
     m_pid.store(pid);
     uiTrace(QStringLiteral("launch | pid=%1").arg(pid));
+    SXCL_LOG_I("launch", "游戏进程已启动 pid=%lld", (long long)pid);
     emit processStarted(static_cast<qint64>(pid));
     return m_cancel.load() ? 1 : 0;
 }
@@ -232,11 +235,31 @@ void LaunchWorker::run() {
     for (const QString &line : m_pendingCommand)
         uiTrace(QStringLiteral("launch | argv | %1").arg(line));
 
+    // ── 启动清单进运行日志(默认级别;这几行是"用哪个 Java、跑什么命令"的唯一凭据)──
+    // 命令行是**核心库自己打的、已打码**的那一份(driver.c:358-373:accessToken -> ***),
+    // 本层一个字都没有拼、也不会去拼 —— 日志里不存在令牌明文的第二份。
+    SXCL_LOG_I("launch", "选中 Java:%s(major=%d version=%s%s)游戏目录=%s 版本=%s 内存=%dMB",
+               prep.java_path[0] != '\0' ? prep.java_path : "(核心库没给)", prep.java_major,
+               prep.java_version[0] != '\0' ? prep.java_version : "(未知)",
+               prep.java_is_64bit == 1 ? " 64 位"
+                                       : (prep.java_is_64bit == 0 ? " 32 位" : " 位数未知"),
+               QDir::toNativeSeparators(m_request.gameDir).toUtf8().constData(),
+               m_request.versionName.toUtf8().constData(), m_request.memoryMb);
+    SXCL_LOG_I("launch", "身份:%s;后端=%s->%s natives=%d 个",
+               online ? "正版(令牌已打码,不落日志)" : "离线(没有 accessToken)",
+               prep.requested_backend[0] != '\0' ? prep.requested_backend : "(默认)",
+               prep.actual_backend[0] != '\0' ? prep.actual_backend : "(未知)", prep.natives_count);
+    for (int i = 0; i < m_pendingCommand.size(); ++i)
+        SXCL_LOG_I("launch", "argv[%d]=%s", i, m_pendingCommand.at(i).toUtf8().constData());
+
     if (prepRc != 0) {
         // 准备就没过:真实原因在 prep.error / err 里(核心库的人话)
         const QString reason = QString::fromUtf8(prep.error).trimmed().isEmpty()
                                    ? QString::fromUtf8(err)
                                    : QString::fromUtf8(prep.error);
+        SXCL_LOG_E("launch", "启动准备失败 rc=%d 原因=%s Java=%s 游戏目录=%s", prepRc,
+                   reason.toUtf8().constData(), prep.java_path,
+                   QDir::toNativeSeparators(m_request.gameDir).toUtf8().constData());
         emit finished(false, false, false, -1, 0, 0,
                       QStringLiteral("unknown"),
                       reason.isEmpty() ? QStringLiteral("启动准备失败") : reason,
@@ -301,6 +324,9 @@ void LaunchWorker::run() {
                                    ? QString::fromUtf8(err)
                                    : QString::fromUtf8(res.error);
         const bool cancelled = (res.started == 0 && m_cancel.load());
+        SXCL_LOG_E("launch", "启动失败 rc=%d 退出码=%d 用时=%lldms 已起进程=%d 原因=%s", rc,
+                   res.exit_code, (long long)res.elapsed_ms, res.started,
+                   reason.toUtf8().constData());
         emit finished(false, cancelled, false, res.exit_code, res.timed_out, res.killed_by_client,
                       conclusionKey,
                       reason.isEmpty() ? QStringLiteral("启动失败(核心库没给原因)") : reason,
@@ -326,6 +352,13 @@ void LaunchWorker::run() {
         message = conclusionText.isEmpty()
                       ? QStringLiteral("游戏以退出码 %1 结束").arg(res.exit_code)
                       : QStringLiteral("游戏以退出码 %1 结束:%2").arg(res.exit_code).arg(conclusionText);
+
+    SXCL_LOG_I("launch",
+               "游戏结束:退出码=%d 用时=%.1fs 日志=%llu 行 归类=%s(%s) 成功=%d 取消=%d 超时=%d "
+               "被终止=%d",
+               res.exit_code, double(res.elapsed_ms) / 1000.0, (unsigned long long)res.log.lines,
+               conclusionKey.toUtf8().constData(), conclusionText.toUtf8().constData(), ok ? 1 : 0,
+               cancelled ? 1 : 0, res.timed_out, res.killed_by_client);
 
     emit finished(ok, cancelled, false, res.exit_code, res.timed_out, res.killed_by_client,
                   conclusionKey, message, detail);

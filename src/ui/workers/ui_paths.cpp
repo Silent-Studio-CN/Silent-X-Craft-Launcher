@@ -17,11 +17,18 @@
 #include <cstdio>
 #include <cstring>
 
+#include "sxcl/log.h"
 #include "sxcl/paths.h"
 #include "sxcl/settings.h"
 
 namespace sxcl::ui {
 namespace {
+
+// 游戏目录的"选择依据"槽(给运行日志用,见 uiGameDirectoryReason)。
+QString &gameDirReasonSlot() {
+    static QString reason;
+    return reason;
+}
 
 // platform.py:148-152 default_config_directory() —— Windows = %APPDATA%/SilentXCraftLauncher
 // 旧版(Python)配置。只用来做**一次性迁移**,不做主数据源(home_page.cpp:126-141 同口径)。
@@ -93,11 +100,19 @@ QString uiLauncherDataRoot() {
 }
 
 QString uiGameDirectory() {
+    // 每一条 return 都顺手记下"为什么是它" —— 日志里必须能回答"目录怎么选出来的",
+    // 否则用户报"目录不对"时我们只能猜(Android 上这条尤其值钱)。
+    auto pick = [](const QString &dir, const QString &why) {
+        gameDirReasonSlot() = why;
+        return dir;
+    };
+
     // 1) 验收/取证通路优先。**必须最优先**:抓图与端到端验收都是拿它钉条件的,
     //    被本机用户配置悄悄改掉就没法复现(与 SXCL_UI_THEME 同一口径)。
     const QString pinned = qEnvironmentVariable("SXCL_UI_GAME_DIR");
     if (!pinned.isEmpty())
-        return QDir::fromNativeSeparators(pinned);
+        return pick(QDir::fromNativeSeparators(pinned),
+                    QStringLiteral("环境变量 SXCL_UI_GAME_DIR 钉死(取证通路)"));
 
     char err[256];
     char buf[4096];
@@ -113,6 +128,7 @@ QString uiGameDirectory() {
 
     // 3) 一次性迁移:把我们自己的设置里没有该项时,把 Python 版的 gameDirectory 导进来。
     //    Android 上那个文件不存在 -> 自然跳过,走核心库的 Android 默认。
+    bool fromLegacy = false;
     if (configured.isEmpty()) {
         const QString legacy = legacyConfigString(QStringLiteral("Game"),
                                                  QStringLiteral("gameDirectory"));
@@ -123,21 +139,31 @@ QString uiGameDirectory() {
                 sxcl_settings_free(st);
             }
             configured = legacy;
+            fromLegacy = true; // 日志里要说清"这不是用户在本版里设的",而是从 Python 版迁过来的
         }
     }
 
     if (!configured.isEmpty()) {
         if (sxcl_paths_resolve_game_dir(configured.toUtf8().constData(), buf, sizeof(buf), err,
                                         sizeof(err)) == SXCL_PATHS_OK)
-            return QDir::fromNativeSeparators(QString::fromUtf8(buf));
-        return QDir::fromNativeSeparators(configured);
+            return pick(QDir::fromNativeSeparators(QString::fromUtf8(buf)),
+                        fromLegacy ? QStringLiteral("从 Python 旧配置一次性迁移过来并写入 "
+                                                    "game.default_dir:%1")
+                                         .arg(configured)
+                                   : QStringLiteral("设置 game.default_dir 指向 %1").arg(configured));
+        return pick(QDir::fromNativeSeparators(configured),
+                    fromLegacy ? QStringLiteral("Python 旧配置的 %1(迁移后仍解析失败,按原样用)")
+                                     .arg(configured)
+                               : QStringLiteral("设置 game.default_dir = %1(解析失败,按原样用)")
+                                     .arg(configured));
     }
 
     // 4) 核心库的平台默认(Windows = %APPDATA%/.minecraft;macOS/Linux = ~/.minecraft)。
     //    **Android 上没有默认**(核心库返回 UNSUPPORTED,要求调用方自己给),
     //    所以下面单独走安卓分支。
     if (sxcl_paths_default_game_dir(buf, sizeof(buf), err, sizeof(err)) == SXCL_PATHS_OK)
-        return QDir::fromNativeSeparators(QString::fromUtf8(buf));
+        return pick(QDir::fromNativeSeparators(QString::fromUtf8(buf)),
+                    QStringLiteral("核心库平台默认(没有配置过游戏目录)"));
 
 #if defined(Q_OS_ANDROID)
     // ★ 安卓:用户机器上**通常已经有一份装好的游戏目录**(FCL / HMCL / Pojav / 共享存储里的
@@ -159,7 +185,7 @@ QString uiGameDirectory() {
                 : QDir::fromNativeSeparators(QString::fromLocal8Bit(filesUtf8)) +
                       QStringLiteral("/.minecraft");
         if (sxcl_paths_count_versions(privateDir.toUtf8().constData()) > 0)
-            return privateDir;
+            return pick(privateDir, QStringLiteral("安卓:应用私有目录里真的有版本,优先用它"));
 
         const QByteArray sharedUtf8 = qgetenv("SXCL_ANDROID_SHARED");
         sxcl_game_folders folders;
@@ -184,14 +210,22 @@ QString uiGameDirectory() {
                             .arg(picked)
                             .arg(best->versions)
                             .arg(QString::fromUtf8(best->source)));
-                return picked;
+                return pick(picked,
+                            QStringLiteral("安卓:扫描候选后选中它(%1 个版本,来源 %2),已写入 "
+                                           "game.default_dir")
+                                .arg(best->versions)
+                                .arg(QString::fromUtf8(best->source)));
             }
         }
-        return privateDir;
+        return pick(privateDir, QStringLiteral("安卓:一个候选都没有版本,退回应用私有目录(装的时"
+                                               "候会创建)"));
     }
 #endif
-    return QDir::fromNativeSeparators(QDir::homePath()) + QStringLiteral("/.minecraft");
+    return pick(QDir::fromNativeSeparators(QDir::homePath()) + QStringLiteral("/.minecraft"),
+                QStringLiteral("兜底 ~/.minecraft(核心库默认也拿不到)"));
 }
+
+QString uiGameDirectoryReason() { return gameDirReasonSlot(); }
 
 QString uiJavaPath() {
     // 取证/验收通路:钉死 java(不影响用户设置)
@@ -261,6 +295,20 @@ bool uiTraceEnabled() {
 }
 
 void uiTrace(const QString &line) {
+    // ★ 同一份追踪也进运行日志(debug 级)。为什么要这样:这些行原本只在 SXCL_UI_TRACE=1 时
+    //   打 stderr,而**安卓上 stderr 不进 logcat**(实测),真机排查等于没有。
+    //   模块键直接取行首的 "<mod> | ",与其它日志行同一口径(install/launch/win/task/…)。
+    //   只在 debug 级别下才格式化:info 级别(默认)时这里只是一个 int 比较,不产生开销。
+    if (sxcl_log_enabled(SXCL_LOG_DEBUG)) {
+        const QByteArray bytes = line.toUtf8();
+        const int bar = bytes.indexOf(" | ");
+        if (bar > 0 && bar <= 16) {
+            const QByteArray module = bytes.left(bar);
+            sxcl_log_write(SXCL_LOG_DEBUG, module.constData(), "%s", bytes.constData() + bar + 3);
+        } else {
+            sxcl_log_write(SXCL_LOG_DEBUG, "ui", "%s", bytes.constData());
+        }
+    }
     if (!uiTraceEnabled())
         return;
     // 一次 fwrite 原子写出整行,免得多个工作线程的行互相穿插

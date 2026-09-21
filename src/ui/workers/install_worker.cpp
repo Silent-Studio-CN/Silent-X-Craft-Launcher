@@ -19,6 +19,7 @@
 #include "sxcl/engine.h"
 #include "sxcl/fs.h"
 #include "sxcl/loader.h"
+#include "sxcl/log.h"
 #include "sxcl/settings.h"
 
 #include "ui_paths.h"
@@ -181,6 +182,7 @@ void InstallWorker::onProgress(const sxcl_install_progress *p, bool force) {
 
     const qint64 now = nowMs();
     bool emitIt = force;
+    bool stageChanged = false;
     {
         // 回调可能来自引擎的多个工作线程:节流状态与速度必须上锁(install.h:194-197)。
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -212,6 +214,7 @@ void InstallWorker::onProgress(const sxcl_install_progress *p, bool force) {
         if (int(p->stage_index) != m_lastStage) {
             m_lastStage = int(p->stage_index);
             emitIt = true;
+            stageChanged = true;
         }
         if (now - m_lastEmitMs >= 100)
             emitIt = true;
@@ -220,6 +223,16 @@ void InstallWorker::onProgress(const sxcl_install_progress *p, bool force) {
     }
     if (!emitIt)
         return;
+
+    // 阶段**开始**进运行日志(默认级别就看得见):这是安装时间线的骨架。
+    // 每秒的百分比/速度/剩余**不进**默认日志(那是刷屏);它们仍按原样进界面,
+    // 需要留档时把日志级别开到 debug 即可(uiTrace 那条路会写进同一个文件)。
+    if (stageChanged) {
+        SXCL_LOG_I("install", "阶段开始 %d/%d:%s(%s) 整体 %d%% 文件 %lld/%lld",
+                   update.stageIndex + 1, update.stageTotal, update.stageName.toUtf8().constData(),
+                   update.stageId.toUtf8().constData(), update.percent, update.filesDone,
+                   update.filesTotal);
+    }
 
     // 一条可以逐行读的追踪:阶段(中文+稳定 id)/ 阶段百分比 / 整体百分比 / 速度 / 剩余 /
     // 字节 / 文件数 / 当前文件。这是"进度回调真实日志"的来源,不是另算的。
@@ -269,6 +282,8 @@ void InstallWorker::run() {
     const bool hasLoader = (loaderKind != SXCL_LOADER_VANILLA);
 
     if (gameDir.isEmpty() || versionId.isEmpty()) {
+        SXCL_LOG_E("install", "没开始就失败:游戏目录或版本号为空(目录='%s' 版本='%s')",
+                   m_request.gameDir.toUtf8().constData(), m_request.versionId.toUtf8().constData());
         emit finished(false, false, SXCL_INSTALL_ERR_ARG, false,
                       QStringLiteral("参数不完整:游戏目录与版本号都必须有"), QString());
         m_running.store(false);
@@ -277,6 +292,9 @@ void InstallWorker::run() {
     if (hasLoader && installerUrl.isEmpty()) {
         // **如实报**:不去猜一个 URL 然后让用户看到 404;
         // OptiFine 没有稳定的 maven 直链,这条分支就是它的实话。
+        SXCL_LOG_E("install", "没开始就失败:%s 的安装器地址拿不到(加载器版本='%s')",
+                   QByteArray(sxcl_loader_kind_name(loaderKind)).constData(),
+                   m_request.loaderVersion.toUtf8().constData());
         emit finished(false, false, SXCL_INSTALL_ERR_LOADER, false,
                       QStringLiteral("%1 的安装器地址拿不到(界面只认 Forge/NeoForge/Fabric 的 "
                                      "maven 直链;OptiFine 没有稳定直链,需要先手工备好安装器 jar)")
@@ -288,6 +306,7 @@ void InstallWorker::run() {
         return;
     }
     if (hasLoader && javaPath.isEmpty()) {
+        SXCL_LOG_E("install", "没开始就失败:装加载器要 Java,但一个都没选到");
         emit finished(false, false, SXCL_INSTALL_ERR_ARG, false,
                       QStringLiteral("装加载器要指定 Java(安装器本身是个 Java 程序)"),
                       QStringLiteral("阶段:执行加载器安装"));
@@ -335,6 +354,7 @@ void InstallWorker::run() {
     sxcl_transport_qt_bootstrap();
     opts.transport_factory = [](void *) -> sxcl_transport * { return sxcl_transport_qt_create(); };
 #else
+    SXCL_LOG_E("install", "没开始就失败:本次构建没有链接 Qt Network 传输后端(sxcl_net_qt)");
     emit finished(false, false, SXCL_INSTALL_ERR_IO, false,
                   QStringLiteral("本次构建没有链接 Qt Network 传输后端(sxcl_net_qt),无法下载"),
                   QStringLiteral("需要重新配置 -DSXCL_BUILD_QT_TRANSPORT=ON 后重建界面"));
@@ -362,6 +382,20 @@ void InstallWorker::run() {
     uiTrace(QStringLiteral("install | 下载源=%1 prefer_mirror=%2")
                 .arg(uiDownloadSource())
                 .arg(plan.prefer_mirror));
+    // 安装的"前提"进运行日志:目录/版本/实例/加载器 + 下载参数(默认级别就看得见)。
+    // 失败时这几行就是"当时到底按什么在装"的唯一凭据。
+    SXCL_LOG_I("install", "计划:游戏目录=%s 版本=%s 实例=%s 加载器=%s 资产=%s 安装器=%s",
+               QDir::toNativeSeparators(m_request.gameDir).toUtf8().constData(),
+               m_request.versionId.toUtf8().constData(), instance.toUtf8().constData(),
+               QString::fromUtf8(sxcl_loader_kind_name(loaderKind)).toUtf8().constData(),
+               m_request.assetsLevel.isEmpty() ? "default" : m_request.assetsLevel.toUtf8().constData(),
+               hasLoader ? (installerUrl.isEmpty() ? "(没有直链)" : installerUrl.constData())
+                         : "(不需要)");
+    SXCL_LOG_I("install",
+               "下载源=%s prefer_mirror=%d 引擎:workers=%d rate=%.0fB/s 单文件连接=%d 哈希缓存=%s",
+               uiDownloadSource().toUtf8().constData(), plan.prefer_mirror, opts.workers,
+               opts.rate_bps, opts.max_conn_per_file,
+               cacheFile[0] != '\0' ? cacheFile : "(不用)");
     if (!mavenMirror.isEmpty())
         plan.loader_mirror_maven = mavenMirror.constData();
 
@@ -429,11 +463,21 @@ void InstallWorker::run() {
         detail += QStringLiteral(" · natives %1 个").arg(result.natives_files);
 
     if (ok) {
+        SXCL_LOG_I("install", "安装成功:实例=%s 阶段=%d/%llu 跳过文件=%llu 非致命失败=%llu 字节=%llu",
+                   instance.toUtf8().constData(), result.stages_done,
+                   (unsigned long long)sxcl_install_plan_stage_count(&plan),
+                   (unsigned long long)result.files_skipped,
+                   (unsigned long long)result.files_failed,
+                   (unsigned long long)result.bytes_done);
         emitLog(QStringLiteral("完成:版本 %1 安装成功(%2)").arg(instance, detail));
         emit finished(true, false, rc, false,
                       QStringLiteral("版本「%1」安装完成").arg(instance), detail);
     } else if (cancelled) {
         // **不是成功**:取消是独立终态,界面必须照实显示"已取消"
+        SXCL_LOG_W("install", "安装已取消:实例=%s 阶段=%d/%llu 已完成字节=%llu", 
+                   instance.toUtf8().constData(), result.stages_done,
+                   (unsigned long long)sxcl_install_plan_stage_count(&plan),
+                   (unsigned long long)result.bytes_done);
         emitLog(QStringLiteral("完成:已取消(%1)").arg(detail));
         emit finished(false, true, rc, false,
                       QStringLiteral("已取消:未完成的下载产物(.part)已清理"), detail);
@@ -444,6 +488,15 @@ void InstallWorker::run() {
                                    ? QStringLiteral("核心库没有给出原因(码 %1)")
                                          .arg(QString::fromUtf8(sxcl_install_code_name(rc)))
                                    : QString::fromUtf8(result.error);
+        SXCL_LOG_E("install",
+                   "安装失败:码=%s 失败阶段=%d/%llu(%s) 原因=%s 可重试=%d 跳过=%llu 失败文件=%llu "
+                   "字节=%llu",
+                   sxcl_install_code_name(rc), result.fail_stage_index + 1,
+                   (unsigned long long)sxcl_install_plan_stage_count(&plan),
+                   stageName.toUtf8().constData(), reason.toUtf8().constData(), result.retryable,
+                   (unsigned long long)result.files_skipped,
+                   (unsigned long long)result.files_failed,
+                   (unsigned long long)result.bytes_done);
         emitLog(QStringLiteral("完成:失败 [%1] %2(失败阶段 %3/%4 %5)")
                     .arg(QString::fromUtf8(sxcl_install_code_name(rc)), reason)
                     .arg(result.fail_stage_index + 1)

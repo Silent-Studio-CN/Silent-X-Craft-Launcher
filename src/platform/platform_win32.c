@@ -100,6 +100,73 @@ int sxcl_fs_exists(const char *path)
     return (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0) ? 1 : 0;
 }
 
+int sxcl_fs_free_space(const char *path, uint64_t *out_bytes)
+{
+    if (!path || !*path || !out_bytes) {
+        return 0;
+    }
+    /* 路径可能**还不存在**(装之前就要算空间):逐级向上退,拿第一个问得出来的祖先目录。
+     * 为什么不用根目录了事:相对路径("build/x")根本没有盘符,必须退到当前目录。 */
+    char buf[1024];
+    size_t len = strlen(path);
+    if (len >= sizeof(buf)) {
+        return 0;
+    }
+    memcpy(buf, path, len + 1);
+    while (len > 1 && (buf[len - 1] == '\\' || buf[len - 1] == '/')) {
+        buf[--len] = '\0'; /* 末尾多余的分隔符去掉,免得空段把"砍一段"变成原地踏步 */
+    }
+
+    ULARGE_INTEGER avail;
+    for (;;) {
+        wchar_t *wide = sxcl_win32_utf8_to_wide(buf);
+        if (wide) {
+            avail.QuadPart = 0;
+            const BOOL ok = GetDiskFreeSpaceExW(wide, &avail, NULL, NULL);
+            free(wide);
+            if (ok) {
+                *out_bytes = (uint64_t)avail.QuadPart;
+                return 1;
+            }
+        }
+        /* 已经退到根("C:\\" / "\\" / "/"):再退没有意义,换当前目录兜底 */
+        const size_t n = strlen(buf);
+        if (n == 0 || (n == 1 && (buf[0] == '\\' || buf[0] == '/')) ||
+            (n == 3 && buf[1] == ':')) {
+            break;
+        }
+        char *slash = NULL;
+        for (char *p = buf + n; p > buf; --p) {
+            if (p[-1] == '\\' || p[-1] == '/') {
+                slash = p - 1;
+                break;
+            }
+        }
+        if (!slash) {
+            break; /* 没有分隔符(如 "C:" 或纯相对名):不再瞎猜 */
+        }
+        if (slash - buf == 2 && buf[1] == ':') {
+            buf[3] = '\0'; /* "C:\\foo" -> "C:\\" */
+        } else if (slash == buf) {
+            buf[1] = '\0'; /* "/foo" -> "/" */
+        } else {
+            *slash = '\0';
+        }
+    }
+
+    /* 退无可退:问当前目录所在的卷(不是编一个数;拿不到就如实返回 0 = 未知) */
+    wchar_t cwd[MAX_PATH];
+    const DWORD got = GetCurrentDirectoryW(MAX_PATH, cwd);
+    if (got > 0 && got < MAX_PATH) {
+        avail.QuadPart = 0;
+        if (GetDiskFreeSpaceExW(cwd, &avail, NULL, NULL)) {
+            *out_bytes = (uint64_t)avail.QuadPart;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int sxcl_fs_mkdirs(const char *path)
 {
     if (!path || path[0] == '\0') {

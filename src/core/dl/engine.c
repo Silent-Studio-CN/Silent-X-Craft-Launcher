@@ -12,6 +12,7 @@
 
 #include "sxcl/fs.h"
 #include "sxcl/limiter.h"
+#include "sxcl/log.h"
 #include "sxcl/verify.h"
 
 #include "../internal/platform_lock.h"
@@ -269,6 +270,18 @@ static void report_progress(sxcl_engine *e, sxcl_task *t, progress_clock *pc, in
     e->opts.on_progress(e->opts.userdata, t);
 }
 
+/* 下载的候选路日志。**级别是 debug**:一条候选路失败是一个文件的明细,装机时可能成百上千条,
+ * 默认级别(INFO)只留"控制面"的网络行(见 src/core/instance/http.c 的 http_log_line)。
+ * 排查"镜像挂了/某条路一直 404"时把 SXCL_LOG_LEVEL=debug 打开即可看到候选路下标与打码 URL。 */
+static void engine_log_source(int level, const char *what, int src, const char *url, const char *detail)
+{
+    char masked[SXCL_LOG_URL_MAX + 48];
+    (void)sxcl_log_mask_url((url != NULL && url[0] != '\0') ? url : "(空)", masked, sizeof(masked));
+    sxcl_log_write(level, "net", "候选 #%d %s url=%s%s%s", src + 1, what, masked,
+                   (detail != NULL && detail[0] != '\0') ? " | " : "",
+                   (detail != NULL) ? detail : "");
+}
+
 /** 试一条候选路。返回 0 = 整个文件完成并通过校验;1 = 换下一条路;-1 = 取消/致命。 */
 static int try_source(sxcl_worker *w, sxcl_task *t, const char *part, int src, int64_t *offset_io)
 {
@@ -316,6 +329,9 @@ static int try_source(sxcl_worker *w, sxcl_task *t, const char *part, int src, i
             }
             snprintf(t->error, sizeof(t->error), "连接失败(候选 #%d): %s", src + 1,
                      rc == SXCL_NET_ERR_CONNECT ? "拿不到响应" : "IO 错误");
+            engine_log_source(SXCL_LOG_DEBUG, "连接失败,同一路重试", src, t->urls[src],
+                              rc == SXCL_NET_ERR_CONNECT ? "拿不到响应(DNS/连接/TLS/超时)"
+                                                         : "传输 IO 错误");
             continue; /* 同一路再试一次 */
         }
         if (resp.status == 416 && offset > 0) {
@@ -332,6 +348,7 @@ static int try_source(sxcl_worker *w, sxcl_task *t, const char *part, int src, i
         if (resp.status != 200 && resp.status != 206) {
             tr->close_body(tr->ctx, body);
             snprintf(t->error, sizeof(t->error), "HTTP %d(候选 #%d)", resp.status, src + 1);
+            engine_log_source(SXCL_LOG_DEBUG, "状态码不对,换路", src, t->urls[src], t->error);
             return 1; /* 状态码不对:换路,重试没意义 */
         }
         t->source_index = src;
@@ -423,6 +440,7 @@ static int try_source(sxcl_worker *w, sxcl_task *t, const char *part, int src, i
         if (switch_source) {
             snprintf(t->error, sizeof(t->error), "候选 #%d 太慢(<%dKB/s),换路继续", src + 1,
                      SXCL_MIN_SOURCE_SPEED / 1024);
+            engine_log_source(SXCL_LOG_DEBUG, "太慢,换路续传", src, t->urls[src], t->error);
             free(buf);
             return 1; /* 保留已下部分,换路续传 */
         }
@@ -460,6 +478,7 @@ static int try_source(sxcl_worker *w, sxcl_task *t, const char *part, int src, i
         }
         snprintf(t->error, sizeof(t->error), "校验失败(%s,候选 #%d),重下",
                  sxcl_verify_status_name(st), src + 1);
+        engine_log_source(SXCL_LOG_DEBUG, "校验失败,重下", src, t->urls[src], t->error);
         sxcl_fs_remove(part);
         offset = 0;
         *offset_io = 0;

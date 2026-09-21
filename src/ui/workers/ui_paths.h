@@ -26,6 +26,10 @@ QString uiLauncherDataRoot();
 // > 核心库平台默认(sxcl_paths_default_game_dir)。
 QString uiGameDirectory();
 
+// 上一次 uiGameDirectory() **为什么**选了这个目录(人话,进运行日志与错误报告)。
+// 空串 = 还没调用过 uiGameDirectory()。
+QString uiGameDirectoryReason();
+
 // java 可执行文件:SXCL_UI_JAVA_PATH > sxcl_settings 的 game.java_path(设置页写的就是它)
 // > Python 旧配置的 Game.javaPath。**空串 = 交给核心库自己探测**(那才是正常路径)。
 QString uiJavaPath();

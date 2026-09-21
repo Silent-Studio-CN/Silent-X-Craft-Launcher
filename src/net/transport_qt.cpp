@@ -6,6 +6,8 @@
 
 #include "sxcl/net.h"
 
+#include "sxcl/log.h" // 每个请求一行(debug 级):方法/打码 URL/状态码/字节数/耗时
+
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -195,9 +197,30 @@ int qtRequest(void *ctx, const sxcl_http_request *req, sxcl_http_response *resp,
         // 连响应头都没拿到:DNS/连接/TLS/超时,或用户取消。把 Qt 的错误码打出来便于定位
         qWarning("QT 无响应: %s  error=%d (%s) elapsed=%lldms", req->url, int(reply->error()),
                  qPrintable(reply->errorString()), static_cast<long long>(clock.elapsed()));
+        {   // 运行日志:**warn 级**(连响应都没拿到 = 真故障,不是逐文件明细)
+            char masked[SXCL_LOG_URL_MAX + 48];
+            (void)sxcl_log_mask_url(req->url, masked, sizeof(masked));
+            sxcl_log_write(SXCL_LOG_WARN, "net", "%s %s -> 拿不到响应 error=%d(%s) 耗时=%lldms",
+                           method.constData(), masked, int(reply->error()),
+                           qPrintable(reply->errorString()), (long long)clock.elapsed());
+        }
         reply->abort();
         reply->deleteLater();
         return t->cancelled ? SXCL_NET_ERR_CANCELLED : SXCL_NET_ERR_CONNECT;
+    }
+
+    // ── 运行日志(debug 级):每个请求一行 ──
+    // 这里是**所有 Qt 传输**的总口(下载引擎的每个文件也走它),所以默认级别(INFO)不记,
+    // 只在 SXCL_LOG_LEVEL=debug 时留档:方法 / 打码后的 URL / 状态码 / 字节数 / 耗时 / Range。
+    // 默认级别下"每个文件的逐条下载明细"不落盘,这就是 docs/17 清单里那条"不记"的落地位置。
+    if (sxcl_log_enabled(SXCL_LOG_DEBUG)) {
+        char masked[SXCL_LOG_URL_MAX + 48];
+        (void)sxcl_log_mask_url(req->url, masked, sizeof(masked));
+        const QVariant lengthHeader = reply->header(QNetworkRequest::ContentLengthHeader);
+        const qint64 contentLength = lengthHeader.isValid() ? lengthHeader.toLongLong() : -1;
+        sxcl_log_write(SXCL_LOG_DEBUG, "net", "%s %s -> %d 字节=%lld 耗时=%lldms range=%lld",
+                       method.constData(), masked, status, (long long)contentLength,
+                       (long long)clock.elapsed(), (long long)req->range_start);
     }
 
     if (!qEnvironmentVariableIsEmpty("SXCL_NET_DEBUG")) {

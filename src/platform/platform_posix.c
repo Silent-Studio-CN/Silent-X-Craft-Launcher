@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h> /* sxcl_fs_free_space:可用空间 */
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -57,6 +58,49 @@ int sxcl_fs_exists(const char *path)
     }
     struct stat st;
     return (stat(path, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 0;
+}
+
+int sxcl_fs_free_space(const char *path, uint64_t *out_bytes)
+{
+    if (!path || !*path || !out_bytes) {
+        return 0;
+    }
+    /* 路径可以还不存在(装之前就要算):逐级向上退到第一个 stat 得到的祖先。
+     * Android/Linux/macOS 都能用 statvfs;Android 的 bionic 也有它。 */
+    char buf[1024];
+    size_t len = strlen(path);
+    if (len >= sizeof(buf)) {
+        return 0;
+    }
+    memcpy(buf, path, len + 1);
+    while (len > 1 && buf[len - 1] == '/') {
+        buf[--len] = '\0';
+    }
+    for (;;) {
+        struct stat st;
+        if (stat(buf, &st) == 0) {
+            struct statvfs vfs;
+            if (statvfs(buf, &vfs) == 0) {
+                const uint64_t unit = (uint64_t)(vfs.f_frsize ? vfs.f_frsize : vfs.f_bsize);
+                *out_bytes = (uint64_t)vfs.f_bavail * unit;
+                return 1;
+            }
+            return 0; /* 问不出来就说问不出来(不猜 0,也不猜"够用") */
+        }
+        if (strcmp(buf, "/") == 0 || buf[0] == '\0') {
+            break;
+        }
+        char *slash = strrchr(buf, '/');
+        if (!slash) {
+            break;
+        }
+        if (slash == buf) {
+            buf[1] = '\0';
+        } else {
+            *slash = '\0';
+        }
+    }
+    return 0;
 }
 
 int sxcl_fs_mkdirs(const char *path)
