@@ -185,11 +185,22 @@ SC 上的 .sha256 侧车与包在同一台服务器上,只能证明"传输没坏
 | `release`、`conf/**`、`legal/**`、`lib/**`(除下面那几个)、`modules`(若有) | `bin/java`、`lib/libjli.so`、`lib/<arch>/jli/**`、ABI 专属的其它 `bin/**` 与 native 库 |
 
 解包顺序固定:**universal 先、bin-<abi> 后**(后者覆盖前者的同名文件)。
-客户端解完还会做安卓特有的一步:把 APK 的 `nativeLibraryDir` 里的 `libawt_xawt.so` / `libjsound.so`
-补进 `<jre>/lib`(FCL RuntimeUtils.patchJava 的语义,见 include/sxcl/android.h)。
 
-## 5. 客户端链路(代码位置 + 三道闸)
+客户端解完还会做安卓特有的一步:把 APK 的 `nativeLibraryDir` 里的 `libawt_xawt.so` /
+`libjsound.so` 补进**该 JRE 真正的库目录**(FCL RuntimeUtils.patchJava 的语义)。
+**这个目录不能想当然**(2026-09 修正过一版错的口径):
 
+| 形态 | 库目录 | 判据 |
+|---|---|---|
+| ① Termux / JRE 镜像布局(含 jre8) | `<home>/lib/<OS_ARCH>`(如 `lib/aarch64`) | 先从 `<home>/release` 读 `OS_ARCH`;它就是 JVM 的 `sun.boot.library.path` |
+| ② 真 JDK8 | `<home>/jre/lib[/<OS_ARCH>]` | `<home>/jre` **与** `<home>/bin/javac` **同时存在**才算(FCL isJDK8()) |
+| ③ jre17+ 常规 | `<home>/lib` | 没有 `lib/<arch>` 时的常规布局 |
+| 兜底 | `<home>/jre/lib` | ②③ 都不成立时 |
+
+两处**必须一致**:自托管清单 `sxcl.jre.index/1` 里每个组件有 `shim_dir`(jre8 是 `lib/aarch64`,
+jre17+ 是 `lib`);客户端算出来的与它**逐字比对**,不一致就**硬报错** `shim_mismatch`,
+绝不"挑一个用" —— 挑错就是把 .so 放进 JVM 不看的目录,设备上表现为**拷了但不生效**
+(一堆 AWT/声音的 dlopen 失败,极难查)。规则与理由见 include/sxcl/android.h。
 | 步骤 | 代码 |
 |---|---|
 | 来源解析(显式 > 环境变量 > 设置) | `sxcl_jre_resolve_index_url()`(include/sxcl/jre_hosted.h) |

@@ -41,7 +41,7 @@
 `packages/openjdk-11` → `[]`,`packages/openjdk-17` → 有(最近一次提交带日期)。
 也就是说:不是"下架了",是这个包名**从未存在**。
 
-### 1.3 Java 8(MC 1.13~1.16 需要):**没有**,候选在这里
+### 1.3 Java 8(MC 1.13~1.16 需要):**没有**,候选在这里 —— 候选已在 §1.4 落地(走上游 Pojav 那条线)
 
 | 候选 | 是什么 | 许可/可查性 | 备注 |
 |---|---|---|---|
@@ -51,6 +51,22 @@
 
 **红线**:Java 17 跑不了需要 8 的 MC(1.13~1.16 会在类版本/模块系统上直接炸),所以这一格在补上之前
 **必须**标成"缺",不能凑。
+
+### 1.4 Java 8 来源**已落地**(上游优先,全链可核;2026-09-21)
+
+| 环节 | 事实 |
+|---|---|
+| 上游产物 | **PojavLauncherTeam/PojavLauncher** release "gladiolus"(published 2025-01-17)的 PojavLauncher.apk |
+| URL | https://github.com/PojavLauncherTeam/PojavLauncher/releases/download/gladiolus/PojavLauncher.apk |
+| sha256 | cc8479e1600e3a094d2184bbb88b19809ce41a0f8f7882aefd4527c9d032fc56(154,187,535 B,本机实测) |
+| APK 内路径 | assets/components/jre/{version,universal.tar.xz,bin-arm64.tar.xz}(zip CRC32:be97d601 / 3f97dee7 / 2b0af580) |
+| 二进制自述(release 文件) | JAVA_VERSION="1.8.0_442"、OS_NAME="Linux"、OS_ARCH="aarch64"、SOURCE=".:git:1a6e3a5ea32d+" |
+| 构建方 / 对应源码 | PojavLauncherTeam;对应源码仓库 https://github.com/AngelAuraMC/openjdk-multiarch-jdk8u,构建提交见上面的 SOURCE |
+| 为什么不是 FCL 那份 | FCL 的 README 自己写明"运行时由 FCL-Team 自建并随版本发布"(源码同为 AngelAuraMC/openjdk-multiarch-jdk8u);两份 release 版本串都是 1.8.0_442,但打包不同(实测 FCL universal 9,540,292 B / 上游那份 9,539,484 B)→ **上游优先**,FCL 那份留作交叉核对 |
+
+复核方式(本机跑过):只按 **HTTP Range** 从 APK 拿 ZIP 中央目录 → 定向取出那三个条目 → 逐条比对 zip CRC32/size,
+再解开核对 release / lib/aarch64/** / bin/java 的 PT_INTERP=/system/bin/linker64(Android/bionic;iOS 会是 Mach-O)。
+**没有**把 iOS 那份 jre8-*-ios.tar.xz 当安卓用。
 
 ## 2. 目录布局(b):Termux 的包 vs 我们要的切分
 
@@ -108,6 +124,19 @@ deb 里的路径是 **`./data/data/com.termux/files/usr/lib/jvm/java-17-openjdk/
   自己的 RUNPATH **没有** `$ORIGIN`,只能靠 `LD_LIBRARY_PATH`,而我们会把它指到 `<jre>/lib`。
 * `libc++_shared.so` **不需要**(§3.4)。这是"要不要跟着 Termux 一起带 `libc++` 包"的答案:不用。
 
+### 2.4 Java 8 的布局差异(别拿 17+ 的布局套)
+
+| | JDK 17/21/25(Termux) | **JRE 8(上游 Pojav)** |
+|---|---|---|
+| 架构库位置 | lib/*.so、lib/server/libjvm.so | **lib/aarch64/****(含 **lib/aarch64/jli/libjli.so**、lib/aarch64/server/libjvm.so) |
+| 许可文件 | legal/java.base/{LICENSE,ASSEMBLY_EXCEPTION,ADDITIONAL_LICENSE_INFO} + 239 个模块条目 | **没有 legal/**:顶层 LICENSE(GPLv2 全文,19,274 B)、ASSEMBLY_EXCEPTION(1,522 B)、THIRD_PARTY_README(158,248 B) |
+| 运行时根 | = JDK home(bin/java 直接在根下) | = JRE home(bin/java 在根下,lib/aarch64 才是库目录) |
+| 切分结果(实测) | universal 267~277 文件 / bin-arm64 70~72 文件 | **universal 73 文件(29,220,167 B)/ bin-arm64 43 文件(16,997,048 B)** |
+| 我们的 shim 目标目录 | <home>/lib | **<home>/lib/aarch64**(打包器写进 index.json/version 的 shim_dir,见 3.6) |
+
+切分规则本身**不变**(还是按内容:ELF / *.jsa / lib/<arch>/ / release),所以 lib/aarch64/** 自然全进 bin-arm64,
+顶层那三份许可进 universal —— **不需要**为 Java 8 另写一套规则。
+
 ## 3. `$PREFIX` 硬编码(实测,这是 Termux 包最大的坑)
 
 ### 3.1 RUNPATH 原文(从产物里读出来的,不是猜的)
@@ -164,6 +193,25 @@ deb 里的路径是 **`./data/data/com.termux/files/usr/lib/jvm/java-17-openjdk/
   但"把树挪到 `files/runtime/jre17` 后真的跑起来"这一条**没有实测**,要在 docs/18 §7.1 的
   应用域 dlopen 探针里补(那一步本来就要做)。
 
+### 3.6 shim_dir 与 launcher 的 jre8 分支(**必须对齐,这是本轮的硬发现**)
+
+* 我们的包在 index.json / version 里记 shim_dir:17/21/25 = lib,**jre8 = lib/aarch64**。
+* 而 sxcl_android_jre_patch_libs() 现在对 jre8 只做一件事:<home>/jre/lib 存在就用它,否则用 <home>/lib
+  —— **对上游这份 JRE-8 镜像,shim 会被放到 <home>/lib,而 JVM 的 boot 库目录是 <home>/lib/aarch64**
+  (JDK8 的 sun.boot.library.path),也就是"拷贝成功了但不生效"。
+* 参考实现(FCL)的真实规则(逐行读出来的,不是猜):
+
+      // FCLauncher.getJavaLibDir:libDir = "/lib";若 <home>/lib/<OS_ARCH> 存在 -> "/lib/" + arch
+      // FCLauncher.isJDK8: new File(javaPath,"jre").exists() && new File(javaPath,"bin/javac").exists()
+      // RuntimeUtils.patchJava: libFolder = getJavaLibDir(...); if (isJDK8(...)) libFolder = "/jre" + libFolder;
+
+  也就是说:FCL 对**自带的那份 jre8(没有 jre/、没有 javac)根本不加 /jre**,用的就是 /lib/aarch64;
+  只有"真 JDK8(有 jre/ + bin/javac)"才用 /jre/lib/<arch>。
+* **建议改法**(3 行左右):jre8 分支别再看"有没有 jre/lib" —— 先读 release 的 OS_ARCH,优先 <home>/lib/<arch>
+  (存在即用);<home>/jre 与 <home>/bin/javac 都在时才走 <home>/jre/lib/<arch>;并把结果与 index.json 的
+  shim_dir 对一下,不一致就硬报错(不打哑谜)。**本轮没有改 C 代码**(那个模块正在被别人改),
+  所以这条是"待办 + 精确改法",不是"已完成"。
+
 ## 4. 两个 shim 谁优先(c)
 
 主包 `openjdk-17` 的 `lib/` 一共 43 项,逐个点名后的事实:
@@ -210,6 +258,23 @@ deb 里的路径是 **`./data/data/com.termux/files/usr/lib/jvm/java-17-openjdk/
   (已自测:同一份夹具连跑两次,两个 tar.xz 的 sha256 完全一致)。
 * 自检:打包后重读两个归档,逐文件复算 sha256 与 manifest 比;不一致 → 退出码 5。
 * 退出码:2=用法/输入错;3=NOTICE 不全;4=动态库闭包缺;5=自检不过。**任何一个都意味着"这份产物不能发"**。
+
+### 5.1 Java 8 的入口与来源参数(同一套切分 / 同一套 schema)
+
+    pwsh -File D:\SilentStudio\_termux_jre\pack_jre8.ps1        # 上游 APK 内 JRE8 -> out\jre8    # 等价手工:
+    python android/scripts/pack_jre_from_termux.py --input <解开的 jre8 树> --component jre8 --accept-shim-dir
+      --url-base https://raw.githubusercontent.com/Silent-Studio-CN/index/main/SXCL/jre
+      --url-mirror-base https://gh-proxy.com/https://raw.githubusercontent.com/Silent-Studio-CN/index/main/SXCL/jre
+      --source-name "..." --source-url "..." --source-sha256 "..." --fetched-at 2026-09-21
+      --source-built-by "..." --source-upstream-source "..." --source-note "..."
+
+* --source-* 是给"非 Termux 来源"用的(社区/上游产物):**不给就以退出码 3 拒绝发布**(NOTICE/SOURCE_OFFER
+  里不许留占位符);Termux 那条线继续用 --build-sh。
+* --retarget-urls:**不重新打包**,只按新的 --url-base/--url-mirror-base 重写 index.json 里所有条目的
+  url/url_mirror,并重生成两个清单(仓库名/路径以后变了,一条命令改完)。
+* --accept-shim-dir:显式接受"包里的 shim_dir 与 launcher 现有规则不一致"(写进 index/version,不静默)。
+* UPLOAD.txt 现在是 **TAB 分隔**并带 NEW/CHG/SAME 状态(路径里可能有空格;空格分隔会把 "Public Domain.txt"
+  这类名字拆错 —— 这个坑真踩到过);同目录还生成 GIT_UPLOAD.txt(Git 托管操作清单)。
 
 ## 6. `index.json` 的 schema(`sxcl.jre.index/1`)
 
@@ -265,6 +330,18 @@ deb 里的路径是 **`./data/data/com.termux/files/usr/lib/jvm/java-17-openjdk/
   `java_runtime.c` 去直接吃这份 index.json(那要先把"下 tar.xz → 解包 → 逐文件校验"接上,
   仓库里的 `sxz/xz` + `tar` 解码器已经就位,见 `include/sxcl/xz.h`、`include/sxcl/tar.h`);
   这一步是**下一步**的活,不在本轮。
+
+### 6.1 托管相关的新字段(2026-09-21 起)
+
+* 顶层 host:{kind:"github-raw", repo:"Silent-Studio-CN/index", branch:"main", dir:"SXCL/jre",
+  url_base, url_mirror:{name:"gh-proxy", base}, layout, note}。
+* 每个条目(packages / version_file / notice)**都有** path(仓库内相对路径,如 jre17/universal.tar.xz)、
+  url(主:raw.githubusercontent.com)、url_mirror(备:gh-proxy 前缀),外加 size/sha256/sha1。
+  客户端只要 path + host.url_base 就能拼地址,主备前缀都在清单里。
+* upstream_artifact:社区/上游来源时写清 {name,url,sha256,fetched_at,built_by,corresponding_source,notes}
+  (Termux 那些组件是 null,它们的来源在 source.packages + source.build_script 里)。
+* index.json 现在约 **911,950 B**(4 个组件、1143 个文件条目的逐文件 size/sha256/sha1)—— 启动取一次;
+  这是"逐文件强校验"的代价,要瘦身只能少存字段,不能少存哈希。
 
 ## 7. NOTICE / 许可随包方案(为什么放"包旁")
 
@@ -323,22 +400,61 @@ deb 里的路径是 **`./data/data/com.termux/files/usr/lib/jvm/java-17-openjdk/
 (完整 sha256/sha1 在 `index.json` 的 `packages`/`manifest.files`/`notice` 里,逐文件都有)。
 不要只传 tar.xz 而漏掉 `NOTICE/` 和 `index.json`:前者是许可义务,后者是客户端判断"要不要重装"的依据。
 
-### 8.1 本次真产出的三个组件(ABI `arm64-v8a`,index.json `generated=2026-09-21T12:25:01Z`)
+### 8.1 本次真产出的四个组件(ABI arm64-v8a,index.json generated=2026-09-21T12:55:23Z)
 
-| 组件 | Java | universal.tar.xz | bin-arm64.tar.xz | version | 文件数(解开后) | index `id` |
-|---|---|---|---|---|---|---|
-| `jre17` | 17.0.20 | 31,132,644 B / sha256 `aa11db5ff7f38101…` | 4,630,460 B / `cd6a527c2373c7a4…` | 429 B | 339(158,165,753 B) | `jre17/17.0.20/arm64-v8a/9f87f8de24c52431` |
-| `jre21` | 21.0.12 | 33,087,332 B / `167b4c3e69acb632…` | 5,902,036 B / `f3d487bb83a1d970…` | 429 B | 339(182,371,510 B) | `jre21/21.0.12/arm64-v8a/360013a3aa4469e5` |
-| `jre25` | 25.0.4 | 38,491,816 B / `2c72818d43c883e2…` | 6,417,916 B / `1c64a3b473d61ac5…` | 427 B | 349(187,976,134 B) | `jre25/25.0.4/arm64-v8a/d17e0c15bdc705da` |
+| 组件 | Java | universal.tar.xz | bin-arm64.tar.xz | version | 文件数(解开后) | shim_dir | index id |
+|---|---|---|---|---|---|---|---|
+| jre8 | **1.8.0_442** | 9,508,080 B / b76f060f649006dd… | 4,350,504 B / 8e18cc2c15423e8f… | 479 B | 116(46,217,215 B) | **lib/aarch64** | jre8/1.8.0_442/arm64-v8a/1eb12d318dcc508f |
+| jre17 | 17.0.20 | 31,132,644 B / aa11db5ff7f38101… | 4,630,460 B / cd6a527c2373c7a4… | 470 B | 339(158,165,753 B) | lib | jre17/17.0.20/arm64-v8a/9f87f8de24c52431 |
+| jre21 | 21.0.12 | 33,087,332 B / 167b4c3e69acb632… | 5,902,036 B / f3d487bb83a1d970… | 470 B | 339(182,371,510 B) | lib | jre21/21.0.12/arm64-v8a/360013a3aa4469e5 |
+| jre25 | 25.0.4 | 38,491,816 B / 2c72818d43c883e2… | 6,417,916 B / 1c64a3b473d61ac5… | 468 B | 349(187,976,134 B) | lib | jre25/25.0.4/arm64-v8a/d17e0c15bdc705da |
 
-* `NOTICE/` 每个组件 287~298 个文件 / 约 2.5 MB(JDK 自带 `legal/` 的全量副本 + 10 个来源包的许可原文 + `termux-licenses` 的通用文本)。
-* 额外搬进 `<jre>/lib` 的依赖库:`jre17`/`jre21` = 7 个(`libandroid-shmem.so`、`libandroid-spawn.so`、`libasound.so`、`libiconv.so`、`libjpeg.so.8`、`liblcms2.so`、`libz.so.1`);`jre25` = 6 个(它的 ELF 不 NEEDED `libandroid-spawn.so`)—— 闭包是**逐组件算**出来的,不是照抄别的组件。
-* 上传总量 ≈ **121.3 MiB**;逐文件清单 `UPLOAD.txt`,全量 sha256/sha1 在 `index.json`。
-* 独立校验(和打包脚本不是同一段代码):`python android/scripts/verify_jre_index.py --out <out>` ——
-  `index.json` → 每个包的 size/sha256/sha1 → 解开两个 tar 逐文件复算 → 与 `manifest.files` 一条条对
-  → `NOTICE`/`version` 逐文件对 → `UPLOAD.txt` 每行复算。退出码 0=全对,1=有对不上,2=缺文件。
-  **本次实跑:exit 0,三个组件 + UPLOAD.txt 共 2790 个校验点全部一致。** 它也正是抓出
-  "version 第一行与 index 记的 first_line 不符"的那个脚本(修法:把 id 挪到 version 的第一行,见 §9)。
+* 依赖库搬运(逐组件算闭包,不是照抄):jre17/jre21 各 7 个(libandroid-shmem.so、libandroid-spawn.so、
+  libasound.so、libiconv.so、libjpeg.so.8、liblcms2.so、libz.so.1);jre25 6 个(不 NEEDED libandroid-spawn.so);
+  **jre8 0 个** —— 上游那份 JRE 8 自带 freetype/jpeg/lcms 等,闭包实测已闭合。
+* NOTICE/:jre8 6 个文件(顶层 LICENSE/ASSEMBLY_EXCEPTION/THIRD_PARTY_README 的副本 + 三份自述);
+  17/21/25 各 287~298 个文件(legal/ 全量副本 + 10 个来源包的许可原文 + termux-licenses 通用文本)。
+* 上传总量 ≈ **135.6 MiB / 896 个文件**;逐文件清单 UPLOAD.txt,全量 sha256/sha1 在 index.json。
+* 独立校验(android/scripts/verify_jre_index.py,与打包器不是同一段代码):**exit 0,2930 个校验点全部一致**
+  (index.json → 每个包的 size/sha256/sha1 → 解开两个 tar 逐文件复算 → 与 manifest.files 一条条对 →
+  NOTICE/version 逐文件对 → UPLOAD.txt 每行复算)。它也正是抓出"version 第一行与 index 不符"、
+  "带空格路径被拆错"这两个问题的脚本。
+
+## 8.2 托管与 Git(2026-09-21 已推上去)
+
+**落位**:仓库 Silent-Studio-CN/index,子目录 SXCL/jre/,分支 main;仓库根下的相对路径 == index.json 里的 path。
+
+    主:https://raw.githubusercontent.com/Silent-Studio-CN/index/main/SXCL/jre/jre17/universal.tar.xz
+    备:https://gh-proxy.com/https://raw.githubusercontent.com/Silent-Studio-CN/index/main/SXCL/jre/jre17/universal.tar.xz
+    清单:https://raw.githubusercontent.com/Silent-Studio-CN/index/main/SXCL/jre/index.json
+
+**本次推送**:git push 成功(fast-forward,没有 force/rebase/squash),commit =
+**3397c292e17a8944089cca7647450cc7967de289**("加安卓 arm64 JRE 分发包(jre8/jre17/jre21/jre25)+ 清单(来源与许可见 NOTICE)")。
+相对上一条(SXCL/jre 之前已被推过,commit c4e7058)本次是 **12 个文件变更**:M index.json、M UPLOAD.txt、
+A jre8/{universal,bin-arm64}.tar.xz + version + NOTICE/**、A GIT_UPLOAD.txt;**SXCL/jre/ 之外一个文件都没动**
+(推送脚本里有闸:status 出现 SXCL/jre/ 之外的改动就拒绝提交并退出 3)。推完 SXCL/jre = **896 个文件 / 135.6 MiB**。
+
+**推后实测(走备用前缀 gh-proxy)**:index.json、jre17/version、jre8/version、jre17/universal.tar.xz(31,132,644 B)、
+jre8/bin-arm64.tar.xz 五个文件的**远端字节与本机 sha256 完全一致** —— 说明仓库里存的是原始字节
+(Git for Windows 的 core.autocrlf=true 没有改坏内容,二进制不被规范化),清单里的哈希可以直接用。
+
+**给用户的手推命令**(以后凭据变了就用这套;本机 gh CLI 已登录,git 走 gh auth git-credential):
+
+    git clone https://github.com/Silent-Studio-CN/index.git D:	mp\index
+    # 把 out\ 的内容拷到 <clone>\SXCL\jre\;然后:
+    cd D:	mp\index
+    git add SXCL/jre
+    git -c user.name='SXCL Pack' -c user.email='sxcl-pack@users.noreply.github.com' commit -m "加安卓 arm64 JRE 分发包(jre8/jre17/jre21/jre25)+ 清单(来源与许可见 NOTICE)"
+    git push origin main
+
+**容量实话**:
+* GitHub 单文件上限 **100 MiB**(>50 MiB 会警告);我们最大的 jre25/universal.tar.xz 36.7 MiB、jre17 29.7 MiB
+  → **不需要 Git LFS**。
+* **jsDelivr 不能当镜像**:它给 GitHub 端点的单文件上限是 **20 MiB**(官方 FAQ/社区口径;**这条不是本机实测**——
+  我抓的 jsdelivr documentation 页面里没有这句),而 universal.tar.xz 是 29.7~36.7 MiB,超限;
+  只有 bin-arm64.tar.xz(4.4~6.4 MiB)在限内。国内备用就用 gh-proxy 前缀。
+* **仓库会随 JRE 更新持续变大**:每加一个大版本 +30~45 MiB,每换一版还多一份历史 blob。这就是"独立 SXCL/jre/
+  子目录 + 增量只传 NEW/CHG"的理由,也是要写进文档的实话。
 
 ## 9. 跑过 / 没跑(如实)
 
@@ -364,6 +480,12 @@ deb 里的路径是 **`./data/data/com.termux/files/usr/lib/jvm/java-17-openjdk/
 * **没有**做 Java 8 的任何构建/打包(§1.3 只给候选与红线);
 * **没有**改 `java_runtime.c` 去消费这份 index.json(下一步);
 * **没有**从 FCL 资产里产出任何发布物(FCL 的 jre8/jre25 只被读来做对照与取证)。
+* **Java 8**:从 PojavLauncher 官方 APK 里按 HTTP Range 定向取出(只取中央目录 + 三个条目;154 MB 整包也落盘做了
+  sha256 校核),实测 1.8.0_442 / aarch64 / Android,打成 jre8(universal 9,508,080 B + bin-arm64 4,350,504 B),
+  独立校验通过。
+* **Git 推送**:跑了(见 §8.2),commit 3397c29…;推后 raw/gh-proxy 取回 5 个文件逐字节比对一致。
+* **没跑**:launcher 侧 sxcl_android_jre_patch_libs() 的 jre8 分支**没有改**(§3.6 只给了精确改法),
+  所以"jre8 的 shim 真能生效"目前是**未验证**状态;真机/dlopen 探针仍未跑。
 
 ## 10. 下一步
 

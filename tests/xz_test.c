@@ -445,6 +445,11 @@ static void test_negative(void)
     rc = decode_fixture("jre-tiny-crc64.xz", digest, sizeof(digest), &bytes, 0, 1000, err,
                         sizeof(err));
     check_int(rc, SXCL_XZ_ERR_LIMIT, "out_limit 必须拦住 multiblock/repeat 之外的大输出");
+
+    /* 边界:0 字节的输入(空文件)——必须报 data,不许崩、不许当成"空流"成功 */
+    rc = decode_fixture("empty.xz", digest, sizeof(digest), &bytes, 0, 0, err, sizeof(err));
+    check_int(rc, SXCL_XZ_ERR_DATA, "0 字节输入必须报 data");
+    check_int((long)bytes, 0, "0 字节输入解出 0 字节");
 }
 
 static void test_dict_limit(void)

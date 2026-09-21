@@ -647,6 +647,7 @@ static int jre_parse_sxcl_index(const sxcl_json_value *root, sxcl_jre_component 
         copy_str(c->version, sizeof(c->version), version);
         copy_str(c->abi, sizeof(c->abi), abi);
         copy_str(c->index_id, sizeof(c->index_id), id);
+        copy_str(c->shim_dir, sizeof(c->shim_dir), sxcl_json_get_string(node, "shim_dir", ""));
         c->installed_bytes = sxcl_json_get_int64(node, "installed_bytes", 0);
         /* 落盘相对路径:<component>/<version>/<abi>(与远端 jre17/ 这个前缀对齐,
          * 多版本可以并排躺着)。清单里没有 abi 就退回 <component>/<version>。 */
@@ -2078,9 +2079,9 @@ int sxcl_jre_install(const sxcl_jre_request *request, sxcl_jre_result *out)
             char patch_lib_dir[SXCL_ANDROID_JRE_PATH_MAX];
             patch_err[0] = '\0';
             patch_lib_dir[0] = '\0';
-            if (sxcl_android_jre_patch_libs(out->java_home, native_lib_dir, patch_lib_dir,
-                                           sizeof(patch_lib_dir), patch_err,
-                                           sizeof(patch_err)) != SXCL_ANDROID_JRE_OK) {
+            if (sxcl_android_jre_patch_libs_ex(out->java_home, native_lib_dir, comp.shim_dir,
+                                               patch_lib_dir, sizeof(patch_lib_dir), patch_err,
+                                               sizeof(patch_err)) != SXCL_ANDROID_JRE_OK) {
                 set_textf(out->error, sizeof(out->error), "JRE 侧共享库补不进去: %s", patch_err);
                 return fail_stage(&st, SXCL_JRE_ERR_FINISH, SXCL_JRE_STAGE_FINISH);
             }

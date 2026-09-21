@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "sxcl/android.h" /* sxcl_android_jre_shim_dir / _patch_libs_ex(JRE 侧库放哪儿) */
 #include "sxcl/fs.h"
 #include "sxcl/hash.h"
 #include "sxcl/jre_hosted.h"
@@ -1044,6 +1045,263 @@ static void test_real_index_if_any(void)
     free(text);
 }
 
+/* ── 安卓 JRE 侧库该放哪儿(FCL getJavaLibDir 的规则;三种布局 + shim_dir 不一致)──
+ *
+ *  这条覆盖的是"拷了但不生效"那个坑:Termux 的 JRE 镜像是 bin/ + lib/aarch64/,**没有 jre/ 子目录**,
+ *  按老写法会把 libawt_xawt.so/libjsound.so 放进 <home>/lib,而 JVM 从 <home>/lib/aarch64 找。
+ *  规则与理由见 include/sxcl/android.h。 */
+
+static void write_text_file(const char *path, const char *text)
+{
+    FILE *fp;
+    (void)sxcl_fs_mkdirs_for_file(path);
+    fp = sxcl_fs_fopen(path, "wb");
+    if (fp != NULL) {
+        (void)fwrite(text, 1, strlen(text), fp);
+        (void)fclose(fp);
+    }
+}
+
+static void make_fake_lib(const char *path)
+{
+    write_text_file(path, "\x7f" "ELF-FAKE-SHIM");
+}
+
+static void test_shim_dir_layouts(void)
+{
+    /* 三种布局的根(都建在 _jre_tmp/shim 下) */
+    static const char *const kJreImage = "_jre_tmp/shim/jreimg";   /* ①Termux JRE 镜像:lib/aarch64 */
+    static const char *const kJdk8 = "_jre_tmp/shim/jdk8";         /* ②真 JDK8:jre/ + bin/javac */
+    static const char *const kJre17 = "_jre_tmp/shim/jre17";       /* ③jre17+ :lib/ */
+    char rel[SXCL_ANDROID_JRE_PATH_MAX];
+    char err[256];
+    char native_dir[SXCL_ANDROID_JRE_PATH_MAX];
+    char lib_dir[SXCL_ANDROID_JRE_PATH_MAX];
+    char probe[SXCL_ANDROID_JRE_PATH_MAX];
+    char label[256];
+    int rc;
+
+    printf("== 安卓 JRE 侧库目录:三种布局 + 与清单 shim_dir 的一致性\n");
+    (void)sxcl_fs_remove_tree("_jre_tmp/shim");
+
+    /* ①JRE 镜像布局:bin/java + lib/aarch64/ + release(OS_ARCH="aarch64"),**没有 jre/** */
+    write_text_file("_jre_tmp/shim/jreimg/bin/java", "#!stub\n");
+    write_text_file("_jre_tmp/shim/jreimg/lib/aarch64/keep", "x");
+    write_text_file("_jre_tmp/shim/jreimg/release",
+                    "JAVA_VERSION=\"17.0.20\"\nOS_ARCH=\"aarch64\"\n");
+    err[0] = '\0';
+    rel[0] = '\0';
+    check_int(sxcl_android_jre_shim_dir(kJreImage, rel, sizeof(rel), err, sizeof(err)),
+              SXCL_ANDROID_JRE_OK, "① 算库目录");
+    check_str(rel, "lib/aarch64", "① JRE 镜像布局 -> lib/aarch64(**不是** lib)");
+
+    /* 真拷一次:nativeLibraryDir 里那两个库必须落到 <home>/lib/aarch64/,**不许**落到 <home>/lib/ */
+    snprintf(native_dir, sizeof(native_dir), "%s/nativelibs", g_tmp);
+    (void)sxcl_fs_remove_tree(native_dir);
+    (void)sxcl_fs_mkdirs(native_dir);
+    snprintf(probe, sizeof(probe), "%s/%s", native_dir, sxcl_android_jre_lib_name(0));
+    make_fake_lib(probe);
+    snprintf(probe, sizeof(probe), "%s/%s", native_dir, sxcl_android_jre_lib_name(1));
+    make_fake_lib(probe);
+    err[0] = '\0';
+    lib_dir[0] = '\0';
+    rc = sxcl_android_jre_patch_libs_ex(kJreImage, native_dir, "lib/aarch64", lib_dir,
+                                        sizeof(lib_dir), err, sizeof(err));
+    check_int(rc, SXCL_ANDROID_JRE_OK, "① 补齐成功");
+    snprintf(label, sizeof(label), "① 落到 %s", lib_dir);
+    check(strstr(lib_dir, "lib") != NULL && (strstr(lib_dir, "aarch64") != NULL),
+          "① lib_dir 报的是 .../lib/aarch64");
+    {
+        char a[SXCL_ANDROID_JRE_PATH_MAX];
+        char b[SXCL_ANDROID_JRE_PATH_MAX];
+        snprintf(a, sizeof(a), "%s/lib/aarch64/%s", kJreImage, sxcl_android_jre_lib_name(0));
+        snprintf(b, sizeof(b), "%s/lib/aarch64/%s", kJreImage, sxcl_android_jre_lib_name(1));
+        check(sxcl_fs_exists(a), "① libawt_xawt.so 在 lib/aarch64/");
+        check(sxcl_fs_exists(b), "① libjsound.so 在 lib/aarch64/");
+        snprintf(a, sizeof(a), "%s/lib/%s", kJreImage, sxcl_android_jre_lib_name(0));
+        check(!sxcl_fs_exists(a), "① 没有放进 <home>/lib(那正是「拷了但不生效」)");
+    }
+
+    /* 清单说的 shim_dir 与盘上不一致 -> 硬失败(不许挑一个用) */
+    err[0] = '\0';
+    rc = sxcl_android_jre_patch_libs_ex(kJreImage, native_dir, "lib", lib_dir, sizeof(lib_dir), err,
+                                        sizeof(err));
+    check_int(rc, SXCL_ANDROID_JRE_ERR_SHIM_MISMATCH, "① 清单说 lib、盘上是 lib/aarch64 -> 硬失败");
+    check(strstr(err, "lib/aarch64") != NULL && strstr(err, "两处不一致") != NULL,
+          "① 错误信息把两处都点出来");
+    check_str(sxcl_android_jre_patch_code_name(SXCL_ANDROID_JRE_ERR_SHIM_MISMATCH), "shim_mismatch",
+              "① 返回码名字");
+
+    /* ②真 JDK8:jre/ 与 bin/javac 同时存在 -> jre/lib/aarch64 */
+    write_text_file("_jre_tmp/shim/jdk8/bin/java", "#!stub\n");
+    write_text_file("_jre_tmp/shim/jdk8/bin/javac", "#!stub\n");
+    write_text_file("_jre_tmp/shim/jdk8/jre/lib/aarch64/keep", "x");
+    write_text_file("_jre_tmp/shim/jdk8/release", "OS_ARCH=\"aarch64\"\n");
+    err[0] = '\0';
+    rel[0] = '\0';
+    check_int(sxcl_android_jre_shim_dir(kJdk8, rel, sizeof(rel), err, sizeof(err)),
+              SXCL_ANDROID_JRE_OK, "② 算库目录");
+    check_str(rel, "jre/lib/aarch64", "② 真 JDK8(jre/ + bin/javac)-> jre/lib/aarch64");
+
+    /* ②b: 只有 jre/ 没有 bin/javac(不是"真 JDK8")-> 不该走 jre 前缀 */
+    write_text_file("_jre_tmp/shim/jre17/jre/lib/keep", "x");
+    write_text_file("_jre_tmp/shim/jre17/lib/keep", "x");
+    write_text_file("_jre_tmp/shim/jre17/release", "OS_ARCH=\"aarch64\"\n");
+    err[0] = '\0';
+    rel[0] = '\0';
+    check_int(sxcl_android_jre_shim_dir("_jre_tmp/shim/jre17", rel, sizeof(rel), err, sizeof(err)),
+              SXCL_ANDROID_JRE_OK, "②b 算库目录");
+    check_str(rel, "lib", "②b 有 jre/ 但没 bin/javac -> 仍然用 lib(不是真 JDK8)");
+
+    /* ③jre17+ 的常规布局:lib/(没有 lib/aarch64)-> lib */
+    write_text_file("_jre_tmp/shim/jre21/bin/java", "#!stub\n");
+    write_text_file("_jre_tmp/shim/jre21/lib/keep", "x");
+    write_text_file("_jre_tmp/shim/jre21/lib/server/keep", "x");
+    write_text_file("_jre_tmp/shim/jre21/release", "OS_ARCH=\"aarch64\"\n");
+    err[0] = '\0';
+    rel[0] = '\0';
+    check_int(sxcl_android_jre_shim_dir("_jre_tmp/shim/jre21", rel, sizeof(rel), err, sizeof(err)),
+              SXCL_ANDROID_JRE_OK, "③ 算库目录");
+    check_str(rel, "lib", "③ jre17+ 的 lib/ 布局 -> lib");
+
+    /* release 里没有 OS_ARCH 时:退回 lib(不许崩、不许报找不到) */
+    write_text_file("_jre_tmp/shim/noarch/bin/java", "#!stub\n");
+    write_text_file("_jre_tmp/shim/noarch/lib/keep", "x");
+    write_text_file("_jre_tmp/shim/noarch/release", "JAVA_VERSION=\"17.0.20\"\n");
+    err[0] = '\0';
+    rel[0] = '\0';
+    check_int(sxcl_android_jre_shim_dir("_jre_tmp/shim/noarch", rel, sizeof(rel), err, sizeof(err)),
+              SXCL_ANDROID_JRE_OK, "无 OS_ARCH 时也算得出来");
+    check_str(rel, "lib", "无 OS_ARCH -> lib");
+
+    /* 一个库目录都没有 -> no_lib_dir(人话要能看懂) */
+    write_text_file("_jre_tmp/shim/emptyjre/bin/java", "#!stub\n");
+    err[0] = '\0';
+    check_int(sxcl_android_jre_shim_dir("_jre_tmp/shim/emptyjre", rel, sizeof(rel), err,
+                                        sizeof(err)),
+              SXCL_ANDROID_JRE_ERR_NO_LIB_DIR, "空的 JRE -> no_lib_dir");
+    check(strstr(err, "库目录") != NULL, "错误信息点到库目录");
+    check_int(sxcl_android_jre_shim_dir(NULL, rel, sizeof(rel), err, sizeof(err)),
+              SXCL_ANDROID_JRE_ERR_ARG, "java_home 为空 -> arg");
+
+    (void)sxcl_fs_remove_tree("_jre_tmp/shim");
+}
+
+/* ── 边界:截断的包 / 0 字节的文件 / 超长路径 —— 最容易越界的那几条 ── */
+
+static void test_boundary_packages(void)
+{
+    static blob blobs[1];
+    char *index = NULL;
+    sxcl_jre_request req;
+    sxcl_jre_result res;
+    char *bad = NULL;
+    size_t bad_len = 0;
+    char err[256];
+    sxcl_jre_component *list = (sxcl_jre_component *)calloc(4, sizeof(sxcl_jre_component));
+    int n;
+    int rc;
+
+    printf("== 边界:截断的包 / 0 字节的文件 / 超长路径\n");
+    if (list == NULL) {
+        check(0, "分配组件表");
+        return;
+    }
+
+    /* (1) 包是**截断**的 .tar.xz:sha256/size 都按截断后的字节算(所以下载校验会过),
+     *     炸的必须是**解包**那一步 —— 而且只报错,不许崩、不许留半棵树。 */
+    {
+        size_t whole = 0;
+        unsigned char *all = read_file("universal.tar.xz", &whole);
+        check(all != NULL && whole > 100, "读到 universal.tar.xz");
+        if (all != NULL) {
+            bad = (char *)malloc(100);
+            check(bad != NULL, "分配截断缓冲");
+            if (bad != NULL) {
+                memcpy(bad, all, 100);
+                bad_len = 100;
+            }
+            free(all);
+        }
+    }
+    if (bad != NULL) {
+        char sha[65];
+        (void)sxcl_hash_digest(SXCL_HASH_SHA256, bad, bad_len, sha, sizeof(sha));
+        index = (char *)malloc(4096);
+        snprintf(index, 4096,
+                 "{\"schema\":1,\"components\":[{\"id\":\"jre17\",\"javaMajor\":17,"
+                 "\"version\":\"17.0.20\",\"files\":[{\"file\":\"pkg/universal.tar.xz\","
+                 "\"size\":%lu,\"sha256\":\"%s\"}]}]}",
+                 (unsigned long)bad_len, sha);
+        memset(blobs, 0, sizeof(blobs));
+        blobs[0].name = "pkg/universal.tar.xz";
+        blobs[0].data = (const unsigned char *)bad;
+        blobs[0].len = bad_len;
+        g_blobs = blobs;
+        g_blob_count = 1;
+        tmp_reset("truncpkg");
+        memset(&req, 0, sizeof(req));
+        req.java_major = 17;
+        req.abi = "arm64";
+        req.index_text = index;
+        req.target_dir = g_tmp;
+        req.transport_factory = fake_transport;
+        memset(&res, 0, sizeof(res));
+        rc = sxcl_jre_install(&req, &res);
+        check_int(rc, SXCL_JRE_ERR_EXTRACT, "截断的包必须报 extract");
+        check(res.error[0] != '\0', "有人话错误");
+        check(!sxcl_fs_exists(res.marker_path), "截断的包不许写 jre.json");
+        check(!exists_in("bin/java"), "截断的包不许留下能用的树");
+        free(index);
+        free(bad);
+    }
+
+    /* (2) 0 字节的包:index 解析阶段就该拒(缺 size / size 不是正数) */
+    {
+        char zero_index[512];
+        int64_t zsize = 0;
+        (void)sxcl_fs_stat("../../../../tests/fixtures/jre/empty.bin", &zsize, NULL);
+        snprintf(zero_index, sizeof(zero_index),
+                 "{\"schema\":1,\"components\":[{\"id\":\"jre17\",\"javaMajor\":17,"
+                 "\"version\":\"17.0.20\",\"files\":[{\"file\":\"pkg/empty.bin\","
+                 "\"size\":0,\"sha256\":\"%s\"}]}]}",
+                 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        n = sxcl_jre_index_parse(zero_index, strlen(zero_index), list, 4, err, sizeof(err));
+        check_int(n, SXCL_JRE_ERR_INDEX, "size=0 的包必须被拒");
+        check(strstr(err, "size") != NULL, "错误信息点到 size");
+    }
+
+    /* (3) 超长相对路径(> 上限)—— 不许溢出,要报 index 错 */
+    {
+        char huge[2048];
+        size_t k;
+        char huge_index[4096];
+        for (k = 0; k < sizeof(huge) - 1; ++k) {
+            huge[k] = 'a';
+        }
+        huge[sizeof(huge) - 1] = '\0';
+        snprintf(huge_index, sizeof(huge_index),
+                 "{\"schema\":1,\"components\":[{\"id\":\"jre17\",\"javaMajor\":17,"
+                 "\"version\":\"17.0.20\",\"files\":[{\"file\":\"%s.bin\","
+                 "\"size\":10,\"sha256\":\"%s\"}]}]}",
+                 huge, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        n = sxcl_jre_index_parse(huge_index, strlen(huge_index), list, 4, err, sizeof(err));
+        check_int(n, SXCL_JRE_ERR_INDEX, "超长路径必须被拒");
+        check(strstr(err, "太长") != NULL, "错误信息点到「太长」");
+    }
+
+    /* (4) ".." 的路径也要拒(不许写到清单目录之外) */
+    {
+        static const char kDotDot[] =
+            "{\"schema\":1,\"components\":[{\"id\":\"jre17\",\"javaMajor\":17,"
+            "\"version\":\"17.0.20\",\"files\":[{\"file\":\"../escape.tar.xz\","
+            "\"size\":10,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}]}";
+        n = sxcl_jre_index_parse(kDotDot, strlen(kDotDot), list, 4, err, sizeof(err));
+        check_int(n, SXCL_JRE_ERR_INDEX, "带 .. 的路径必须被拒");
+    }
+    free(list);
+}
+
 /* ── sha256 的三种形态(最终口径,见 docs/19 §3) ── */
 
 static char *build_index_forms(int form, const char *sha256_value, size_t *len_out)
@@ -1337,6 +1595,8 @@ int main(void)
     test_cancel();
     test_sxcl_index_schema();
     test_real_index_if_any();
+    test_shim_dir_layouts();
+    test_boundary_packages();
     test_hash_forms();
     test_source_and_url();
     test_provided_index_no_network();

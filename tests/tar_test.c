@@ -457,6 +457,72 @@ static void test_negative(void)
     check(sxcl_tar_open(&opts, err, sizeof(err)) == NULL, "dest_dir 没给 -> NULL");
 }
 
+/* ── 边界夹具:坏校验和 / 空归档 / 超长路径(最容易越界的那几条) ── */
+
+static void test_boundaries(void)
+{
+    size_t len = 0;
+    unsigned char *raw;
+    sxcl_tar_opts opts;
+    sxcl_tar *tar;
+    char err[256];
+
+    printf("== 边界:坏头校验和 / 空归档 / 超长路径\n");
+    memset(&opts, 0, sizeof(opts));
+
+    /* 头校验和字段被改过:必须报 data,而且要**在写任何文件之前**就报 */
+    raw = read_file("badchecksum.tar", &len);
+    check(raw != NULL, "读到 badchecksum.tar");
+    if (raw != NULL) {
+        tmp_reset("badsum");
+        opts.dest_dir = g_tmp;
+        tar = sxcl_tar_open(&opts, err, sizeof(err));
+        if (tar != NULL) {
+            check_int(sxcl_tar_feed(tar, raw, len), SXCL_TAR_ERR_DATA, "坏校验和必须报 data");
+            (void)sxcl_tar_finish(tar, err, sizeof(err));
+            check(strstr(err, "校验和") != NULL, "错误信息点到校验和");
+            sxcl_tar_close(tar);
+        }
+        check(!sxcl_fs_exists("_tar_tmp/lib/libjli.so"), "坏归档一个文件都没落盘");
+        free(raw);
+    }
+
+    /* 0 字节的归档:截断,不是崩溃 */
+    {
+        static const unsigned char kNothing[1] = {0};
+        tmp_reset("empty");
+        opts.dest_dir = g_tmp;
+        tar = sxcl_tar_open(&opts, err, sizeof(err));
+        if (tar != NULL) {
+            check_int(sxcl_tar_feed(tar, kNothing, 0), SXCL_TAR_OK, "喂 0 字节不算错");
+            check_int(sxcl_tar_finish(tar, err, sizeof(err)), SXCL_TAR_OK,
+                      "0 字节归档 = 空归档(没有条目也没有结束标记,按宽容口径收)");
+            check_int((long)sxcl_tar_bytes_out(tar), 0, "解出来 0 字节");
+            sxcl_tar_close(tar);
+        }
+    }
+    raw = read_file("empty.tar", &len);
+    check(raw != NULL && len == 0, "empty.tar 是 0 字节");
+    free(raw);
+
+    /* 超长路径(pax 给的 1500+ 字符):必须拒(ERR_UNSAFE),不许溢出/写到别处 */
+    raw = read_file("longname.tar", &len);
+    check(raw != NULL, "读到 longname.tar");
+    if (raw != NULL) {
+        tmp_reset("longname");
+        opts.dest_dir = g_tmp;
+        tar = sxcl_tar_open(&opts, err, sizeof(err));
+        if (tar != NULL) {
+            check_int(sxcl_tar_feed(tar, raw, len), SXCL_TAR_ERR_UNSAFE, "超长路径必须拒");
+            (void)sxcl_tar_finish(tar, err, sizeof(err));
+            check(strstr(err, "太长") != NULL, "错误信息点到「太长」");
+            sxcl_tar_close(tar);
+        }
+        check(!sxcl_fs_exists("_tar_tmp/deep"), "超长路径没落盘");
+        free(raw);
+    }
+}
+
 static void test_via_xz(void)
 {
     char archive[1200];
@@ -524,6 +590,7 @@ int main(void)
     test_links();
     test_pax_and_gnu();
     test_negative();
+    test_boundaries();
     test_via_xz();
     test_names();
     (void)sxcl_fs_remove_tree("_tar_tmp");

@@ -425,7 +425,13 @@ static void test_jre_patch(void)
     check(sxcl_fs_exists(JRE_FIX "/jre8/jre/lib/libjsound.so"),
           "JRE 补齐:jre8 的 libjsound.so 落到 jre/lib");
 
-    /* 两代目录同时在(怪胎/混合布局):优先 jre/lib —— FCL 的 isJDK8 分支就是这么分的 */
+    /* 两代目录同时在(怪胎/混合布局):**不是真 JDK8**(没有 <home>/bin/javac),
+     * 所以按 FCL getJavaLibDir 的顺序落到 <home>/lib。
+     * 规则(见 include/sxcl/android.h 与 docs/19):
+     *   ①<home>/lib/<OS_ARCH> ②<jre/ 与 bin/javac 同时存在>才走 <home>/jre/lib[/<arch>]
+     *   ③<home>/lib ④<home>/jre/lib
+     * 2026-09 修正:老实现无条件"jre/lib 优先",而 Termux 那份 JRE 镜像是 lib/aarch64 布局
+     * (没有 jre/ 子目录),两处混在一起会把 .so 放进 JVM 不看的目录 —— 拷了但不生效。 */
     (void)sxcl_fs_mkdirs(JRE_FIX "/both/jre/lib");
     (void)sxcl_fs_mkdirs(JRE_FIX "/both/lib");
     err[0] = '\0';
@@ -433,7 +439,38 @@ static void test_jre_patch(void)
     check_int(sxcl_android_jre_patch_libs(JRE_FIX "/both", NLIB, lib_dir, sizeof(lib_dir), err,
                                           sizeof(err)),
               SXCL_ANDROID_JRE_OK, "JRE 补齐:两套目录都在也成功");
-    check_contains(lib_dir, "both/jre/lib", "JRE 补齐:两套都在时优先 jre/lib");
+    check_contains(lib_dir, "both/lib", "JRE 补齐:两套都在但不是真 JDK8 -> 用 <java_home>/lib");
+
+    /* 真 JDK8(jre/ 与 bin/javac 同时存在)-> 才走 jre/lib */
+    (void)sxcl_fs_mkdirs(JRE_FIX "/jdk8/jre/lib");
+    (void)sxcl_fs_mkdirs(JRE_FIX "/jdk8/bin");
+    put_bytes(JRE_FIX "/jdk8/bin/javac", 8, 3);
+    err[0] = '\0';
+    lib_dir[0] = '\0';
+    check_int(sxcl_android_jre_patch_libs(JRE_FIX "/jdk8", NLIB, lib_dir, sizeof(lib_dir), err,
+                                          sizeof(err)),
+              SXCL_ANDROID_JRE_OK, "JRE 补齐:真 JDK8 布局成功");
+    check_contains(lib_dir, "jdk8/jre/lib", "JRE 补齐:真 JDK8(jre/ + bin/javac)用 jre/lib");
+
+    /* Termux JRE 镜像布局:lib/<OS_ARCH>(jre8 也是这个形状)—— .so 必须落到 lib/aarch64,
+     * **不许**落到 lib/(JVM 的 sun.boot.library.path 指的就是 lib/<OS_ARCH>)。 */
+    (void)sxcl_fs_mkdirs(JRE_FIX "/jreimg/lib/aarch64");
+    {   /* release 里写真的 OS_ARCH(与 Termux 那份 JRE 镜像逐字同形状) */
+        (void)sxcl_fs_mkdirs_for_file(JRE_FIX "/jreimg/release");
+        FILE *rf = sxcl_fs_fopen(JRE_FIX "/jreimg/release", "wb");
+        if (rf != NULL) {
+            (void)fputs("JAVA_VERSION=\"17.0.20\"\nOS_ARCH=\"aarch64\"\n", rf);
+            (void)fclose(rf);
+        }
+    }
+    err[0] = '\0';
+    lib_dir[0] = '\0';
+    check_int(sxcl_android_jre_patch_libs(JRE_FIX "/jreimg", NLIB, lib_dir, sizeof(lib_dir), err,
+                                          sizeof(err)),
+              SXCL_ANDROID_JRE_OK, "JRE 补齐:JRE 镜像布局成功");
+    check_contains(lib_dir, "jreimg/lib/aarch64", "JRE 补齐:镜像布局用 lib/aarch64");
+    check(!sxcl_fs_exists(JRE_FIX "/jreimg/lib/libjsound.so"),
+          "JRE 补齐:镜像布局下**没有**放进 lib/(拷了但不生效的老坑)");
 
     /* 源缺一个 = APK 打包坏了:硬失败,而且**一个字节都不许拷**(先全量体检再动手) */
     (void)sxcl_fs_mkdirs(JRE_FIX "/empty_src");

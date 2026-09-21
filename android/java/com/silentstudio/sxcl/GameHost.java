@@ -496,8 +496,21 @@ public final class GameHost {
         Log.i(TAG, "game-session: 通道已断开(EOF)");
         if (exitSource.isEmpty())
             readExitFile();
-        final boolean alive = isAlive(gamePid);
+        boolean alive = isAlive(gamePid);
         if (exitCode == Integer.MIN_VALUE && exitSignal == 0) {
+            /* 没有退出记录时,"还活着还是死了"只能看 /proc/<pid>;被 SIGKILL 的进程在进程表里
+             * 可能还会残留一小会儿(回收是异步的),所以给它 2s 再下结论 —— 结论写错方向
+             * 比慢 2 秒糟得多。 */
+            if (alive && gamePid > 0) {
+                for (int i = 0; i < 10 && alive; ++i) {
+                    try {
+                        Thread.sleep(200);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                    alive = isAlive(gamePid);
+                }
+            }
             if (!alive) {
                 exitReason = "channel-closed(pid 已消失)";
                 exitSource = "proc-poll";
@@ -612,6 +625,13 @@ public final class GameHost {
         started = false;
         pipRequested = false;
 
+        /* 上一个会话可能停在"监听着但没有游戏进程连上来"(例如它那次启动被系统 BAL_BLOCK 掉)。
+         * 这种会话必须能释放,否则后面的"启动游戏"永远只会得到 already-running。 */
+        if (live && !connected && "listening".equals(state)) {
+            evidence("上一个会话停在 listening(没有运行器连上)-> 释放它,按这次请求重新开始");
+            live = false;
+            closeChannel();
+        }
         final String status = openChannel(s, new Listener() {
             @Override
             public void onLog(String line) {
@@ -639,10 +659,21 @@ public final class GameHost {
         if (status.startsWith("ERR:"))
             return status;
 
-        /* 关键顺序:启动器**此刻还在前台**(可见、非 pinned),这时起游戏才是被允许的
-         * (先进画中画再起会被 BAL_BLOCK,见类头注释与 docs/19 §2)。 */
-        if (!startGameActivity("request"))
+        /* 关键顺序:启动器**此刻必须在前台且不在画中画里**,这时起游戏才是被允许的
+         * (从 pinned 活动发起新活动会被 BAL_BLOCK,见类头注释与 docs/19 §2.1)。
+         * 如果它现在正在画中画里(上一局游戏退到画中画的状态),先自己回到全屏,
+         * 等窗口真的回到前台再起游戏 —— 否则 startActivity 会静默失败(result code=102)。 */
+        if (SxclActivity.isInFloating()) {
+            Log.i(TAG, "game-session: 启动器当前在画中画里 -> 先回全屏再起游戏"
+                    + "(pinned 活动发起新活动会被系统判成后台启动)");
+            SxclActivity.exitFloating();
+            main.postDelayed(new Runnable() {
+                @Override
+                public void run() { startGameActivity("after-leaving-pip"); }
+            }, 1800);
+        } else if (!startGameActivity("request")) {
             return "ERR:start-activity-failed";
+        }
         main.postDelayed(new Runnable() {
             @Override
             public void run() {

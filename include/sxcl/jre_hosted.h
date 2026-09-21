@@ -198,6 +198,10 @@ typedef struct sxcl_jre_component {
     char index_id[160];            /**< 清单里的 id,如 "jre17/17.0.20/arm64-v8a/9f87f8de24c52431" */
     char dir_key[256];             /**< 落盘相对路径(<component>/<version>/<abi>);空 = 用 id */
     int64_t installed_bytes;       /**< 清单里报的解开后字节数(只用于展示/核对,不做判据) */
+    /** 清单说的"JRE 侧库该放哪儿"(相对 java_home,如 "lib/aarch64" / "lib")。
+     *  非空时会与 sxcl_android_jre_shim_dir() 在盘上算出来的**逐字比对**,不一致硬失败
+     *  (见 include/sxcl/android.h 的规则与理由)。 */
+    char shim_dir[64];
 } sxcl_jre_component;
 
 /** 解析 index.json(纯函数,不联网)。返回组件条数;失败返回负错误码并写人话 err。 */

@@ -441,6 +441,7 @@ const char *sxcl_android_jre_patch_code_name(int code)
     case SXCL_ANDROID_JRE_ERR_NO_LIB_DIR: return "no_lib_dir";
     case SXCL_ANDROID_JRE_ERR_NO_SOURCE:  return "no_source";
     case SXCL_ANDROID_JRE_ERR_COPY:       return "copy";
+    case SXCL_ANDROID_JRE_ERR_SHIM_MISMATCH: return "shim_mismatch";
     default:                              return "unknown";
     }
 }
@@ -495,15 +496,165 @@ static int jre_copy_file(const char *src, const char *dst)
     return rc;
 }
 
-int sxcl_android_jre_patch_libs(const char *java_home, const char *native_lib_dir, char *lib_dir_out,
-                                size_t lib_dir_len, char *err, size_t err_len)
+/** 从 <java_home>/release 里读一行 KEY="VALUE"(只读;没有返回 -1)。 */
+static int android_release_value(const char *java_home, const char *key, char *out, size_t out_len)
 {
-    char jre8_dir[SXCL_ANDROID_JRE_PATH_MAX];
-    char plain_dir[SXCL_ANDROID_JRE_PATH_MAX];
+    char path[SXCL_ANDROID_JRE_PATH_MAX];
+    char line[512];
+    const size_t key_len = strlen(key);
+    FILE *fp;
+    if (jre_join(path, sizeof(path), java_home, "release") != 0) {
+        return -1;
+    }
+    fp = sxcl_fs_fopen(path, "rb");
+    if (fp == NULL) {
+        return -1;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        size_t n = strlen(line);
+        const char *v;
+        size_t vn;
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) {
+            line[--n] = '\0';
+        }
+        if (strncmp(line, key, key_len) != 0 || line[key_len] != '=') {
+            continue;
+        }
+        v = line + key_len + 1;
+        if (*v == '"') {
+            ++v;
+        }
+        vn = strlen(v);
+        if (vn > 0 && v[vn - 1] == '"') {
+            --vn;
+        }
+        if (vn >= out_len) {
+            vn = out_len - 1;
+        }
+        memcpy(out, v, vn);
+        out[vn] = '\0';
+        (void)fclose(fp);
+        return 0;
+    }
+    (void)fclose(fp);
+    return -1;
+}
+
+/** <java_home>/<rel> 是不是目录(rel 是相对路径;纯读盘)。 */
+static int android_rel_is_dir(const char *java_home, const char *rel)
+{
+    char full[SXCL_ANDROID_JRE_PATH_MAX];
+    if (jre_join(full, sizeof(full), java_home, rel) != 0) {
+        return 0;
+    }
+    return sxcl_fs_is_dir(full);
+}
+
+/** <java_home>/<rel> 是不是存在的文件。 */
+static int android_rel_exists(const char *java_home, const char *rel)
+{
+    char full[SXCL_ANDROID_JRE_PATH_MAX];
+    if (jre_join(full, sizeof(full), java_home, rel) != 0) {
+        return 0;
+    }
+    return sxcl_fs_exists(full);
+}
+
+int sxcl_android_jre_shim_dir(const char *java_home, char *out, size_t out_len, char *err,
+                              size_t err_len)
+{
+    char rel[SXCL_ANDROID_JRE_PATH_MAX];
+    char arch[64];
+    char full[SXCL_ANDROID_JRE_PATH_MAX];
+
+    if (out != NULL && out_len > 0) {
+        out[0] = '\0';
+    }
+    if (java_home == NULL || java_home[0] == '\0' || out == NULL || out_len == 0) {
+        android_err(err, err_len, "参数不合法:java_home / out 不能为空");
+        return SXCL_ANDROID_JRE_ERR_ARG;
+    }
+
+    /* 路径本身就装不下 -> 参数错(而不是"找不到库目录"):这两件事的处置完全不同,
+     * 报错必须分得开(实测:超长 java_home 被报成 no_lib_dir,运维会去查目录结构,查错方向)。 */
+    if (jre_join(full, sizeof(full), java_home, "lib") != 0) {
+        android_err(err, err_len, "JRE 路径太长:%s", java_home);
+        return SXCL_ANDROID_JRE_ERR_ARG;
+    }
+
+    arch[0] = '\0';
+    (void)android_release_value(java_home, "OS_ARCH", arch, sizeof(arch));
+
+    /* 规则见头文件:①<home>/lib/<OS_ARCH> ②真 JDK8 的 <home>/jre/lib[/<OS_ARCH>] ③<home>/lib
+     * ④<home>/jre/lib。①优先是因为 Termux 那份 JRE 镜像布局就是 lib/aarch64(jre8 也是),
+     * 而 JVM 的 sun.boot.library.path 指的就是它。
+     * 注意:绝对路径一律用 full 缓冲**从相对路径拼**,绝不要拿一个缓冲同时当 leaf 与 out ——
+     * jre_join 的 out 与 leaf 是同一个缓冲区时会把内容自己覆盖掉(实测过)。 */
+    rel[0] = '\0';
+    if (arch[0] != '\0') {
+        snprintf(full, sizeof(full), "lib/%s", arch);
+        if (android_rel_is_dir(java_home, full)) {
+            snprintf(rel, sizeof(rel), "lib/%s", arch);
+        }
+    }
+    if (rel[0] == '\0') {
+        /* release 里没有 OS_ARCH 时的兜底:只认**众所周知的架构名**(不猜、不乱扫),
+         * 顺序固定。Termux 那份有 OS_ARCH,走的是上面那条。 */
+        static const char *const kArchs[] = {"aarch64", "arm64", "arm", "x86_64", "x64",
+                                             "i686", "x86"};
+        size_t a;
+        for (a = 0; a < sizeof(kArchs) / sizeof(kArchs[0]) && rel[0] == '\0'; ++a) {
+            snprintf(full, sizeof(full), "lib/%s", kArchs[a]);
+            if (android_rel_is_dir(java_home, full)) {
+                snprintf(rel, sizeof(rel), "lib/%s", kArchs[a]);
+            }
+        }
+    }
+    if (rel[0] == '\0') {
+        const int has_jre = android_rel_is_dir(java_home, "jre");
+        const int has_javac = android_rel_exists(java_home, "bin/javac");
+        if (has_jre && has_javac) { /* FCL 的 isJDK8():jre/ 与 bin/javac 同时存在 */
+            if (arch[0] != '\0') {
+                snprintf(full, sizeof(full), "jre/lib/%s", arch);
+                if (android_rel_is_dir(java_home, full)) {
+                    snprintf(rel, sizeof(rel), "jre/lib/%s", arch);
+                }
+            }
+            if (rel[0] == '\0' && android_rel_is_dir(java_home, "jre/lib")) {
+                snprintf(rel, sizeof(rel), "jre/lib");
+            }
+        }
+    }
+    if (rel[0] == '\0' && android_rel_is_dir(java_home, "lib")) {
+        snprintf(rel, sizeof(rel), "lib");
+    }
+    if (rel[0] == '\0' && android_rel_is_dir(java_home, "jre/lib")) {
+        snprintf(rel, sizeof(rel), "jre/lib");
+    }
+    if (rel[0] == '\0') {
+        android_err(err, err_len,
+                    "JRE 里找不到库目录(找过 lib/<OS_ARCH>、jre/lib、lib;java_home 给错了?):%s",
+                    java_home);
+        return SXCL_ANDROID_JRE_ERR_NO_LIB_DIR;
+    }
+    if (strlen(rel) + 1 > out_len) {
+        android_err(err, err_len, "库目录相对路径装不下: %s", rel);
+        return SXCL_ANDROID_JRE_ERR_ARG;
+    }
+    memcpy(out, rel, strlen(rel) + 1);
+    return SXCL_ANDROID_JRE_OK;
+}
+
+int sxcl_android_jre_patch_libs_ex(const char *java_home, const char *native_lib_dir,
+                                   const char *expected_shim_dir, char *lib_dir_out,
+                                   size_t lib_dir_len, char *err, size_t err_len)
+{
+    char rel[SXCL_ANDROID_JRE_PATH_MAX];
     char lib_dir[SXCL_ANDROID_JRE_PATH_MAX];
     char src[SXCL_ANDROID_JRE_PATH_MAX];
     char dst[SXCL_ANDROID_JRE_PATH_MAX];
     int i = 0;
+    int rc;
 
     if (lib_dir_out != NULL && lib_dir_len > 0) {
         lib_dir_out[0] = '\0';
@@ -514,21 +665,22 @@ int sxcl_android_jre_patch_libs(const char *java_home, const char *native_lib_di
         return SXCL_ANDROID_JRE_ERR_ARG;
     }
 
-    /* jre8 的库在 <java_home>/jre/lib,其余在 <java_home>/lib(FCL:isJDK8 时前缀 "/jre")。
-     * 看哪个目录真的在,而不是去认版本号 —— 我们要的是"文件该放哪",不是"这是哪一代"。 */
-    if (jre_join(jre8_dir, sizeof(jre8_dir), java_home, "jre/lib") != 0 ||
-        jre_join(plain_dir, sizeof(plain_dir), java_home, "lib") != 0) {
-        android_err(err, err_len, "JRE 路径太长:%s", java_home);
-        return SXCL_ANDROID_JRE_ERR_ARG;
+    rc = sxcl_android_jre_shim_dir(java_home, rel, sizeof(rel), err, err_len);
+    if (rc != SXCL_ANDROID_JRE_OK) {
+        return rc;
     }
-    if (sxcl_fs_is_dir(jre8_dir)) {
-        (void)memcpy(lib_dir, jre8_dir, strlen(jre8_dir) + 1);
-    } else if (sxcl_fs_is_dir(plain_dir)) {
-        (void)memcpy(lib_dir, plain_dir, strlen(plain_dir) + 1);
-    } else {
-        android_err(err, err_len, "JRE 里既没有 jre/lib 也没有 lib(java_home 给错了?):%s",
-                    java_home);
-        return SXCL_ANDROID_JRE_ERR_NO_LIB_DIR;
+    /* 清单里说了 shim_dir 就必须与盘上算出来的一致:不一致 = 有一边是错的,
+     * 这时候"挑一个用"就是赌(赌错 = 设备上一片 dlopen 失败)。 */
+    if (expected_shim_dir != NULL && expected_shim_dir[0] != '\0' &&
+        strcmp(expected_shim_dir, rel) != 0) {
+        android_err(err, err_len,
+                    "清单说库目录是 %s,盘上算出来是 %s(两处不一致,拒绝把 .so 放进一个 JVM 不看的目录)",
+                    expected_shim_dir, rel);
+        return SXCL_ANDROID_JRE_ERR_SHIM_MISMATCH;
+    }
+    if (jre_join(lib_dir, sizeof(lib_dir), java_home, rel) != 0) {
+        android_err(err, err_len, "库目录路径太长:%s/%s", java_home, rel);
+        return SXCL_ANDROID_JRE_ERR_ARG;
     }
 
     /* 先体检两个源:缺一个就是 APK 打包坏了(构建在缺的时候直接失败),必须硬失败。
@@ -548,16 +700,16 @@ int sxcl_android_jre_patch_libs(const char *java_home, const char *native_lib_di
     for (i = 0; i < SXCL_ANDROID_JRE_LIB_COUNT; ++i) {
         int64_t src_size = 0;
         int64_t dst_size = 0;
-        int rc = 0;
+        int copy_rc = 0;
         if (jre_join(src, sizeof(src), native_lib_dir, kJreLibs[i]) != 0 ||
             jre_join(dst, sizeof(dst), lib_dir, kJreLibs[i]) != 0) {
             android_err(err, err_len, "路径太长:%s", lib_dir);
             return SXCL_ANDROID_JRE_ERR_ARG;
         }
-        rc = jre_copy_file(src, dst);
-        if (rc != 0) {
+        copy_rc = jre_copy_file(src, dst);
+        if (copy_rc != 0) {
             android_err(err, err_len, "拷贝 %s 失败(%s -> %s)", kJreLibs[i],
-                        (rc == -1) ? "源打不开" : "写不进去", dst);
+                        (copy_rc == -1) ? "源打不开" : "写不进去", dst);
             return SXCL_ANDROID_JRE_ERR_COPY;
         }
         /* 拷完核对长度:截断的 .so 在设备上表现为 dlopen 失败或直接崩,不值得赌。 */
@@ -577,5 +729,13 @@ int sxcl_android_jre_patch_libs(const char *java_home, const char *native_lib_di
     }
     (void)android_err(err, err_len, "两个 JRE 侧库都在位:%s", lib_dir);
     return SXCL_ANDROID_JRE_OK;
+}
+
+int sxcl_android_jre_patch_libs(const char *java_home, const char *native_lib_dir, char *lib_dir_out,
+                                size_t lib_dir_len, char *err, size_t err_len)
+{
+    /* 不校验 shim_dir(官方清单那条线没有这个字段);语义与 _ex 完全一致。 */
+    return sxcl_android_jre_patch_libs_ex(java_home, native_lib_dir, NULL, lib_dir_out, lib_dir_len,
+                                          err, err_len);
 }
 

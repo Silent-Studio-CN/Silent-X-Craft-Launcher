@@ -72,9 +72,43 @@ const char *sxcl_android_jre_lib_name(int index);
 #define SXCL_ANDROID_JRE_ERR_NO_LIB_DIR (-2) /**< JRE 里既没有 <java_home>/jre/lib 也没有 <java_home>/lib */
 #define SXCL_ANDROID_JRE_ERR_NO_SOURCE  (-3) /**< nativeLibraryDir 里缺源文件 = APK 打包坏了(硬失败) */
 #define SXCL_ANDROID_JRE_ERR_COPY       (-4) /**< 拷贝/校验失败(磁盘满、权限) */
+/** 算出来的库目录与清单里写的 shim_dir 不一致(硬失败:宁可报错也不把 .so 放进一个 JVM 不看的目录)。 */
+#define SXCL_ANDROID_JRE_ERR_SHIM_MISMATCH (-5)
 
-/** 结果的稳定名字("ok"/"arg"/"no_lib_dir"/"no_source"/"copy")。 */
+/** 结果的稳定名字("ok"/"arg"/"no_lib_dir"/"no_source"/"copy"/"shim_mismatch")。 */
 const char *sxcl_android_jre_patch_code_name(int code);
+
+/** 算"JRE 侧库该放进哪个目录"(**相对 java_home** 的路径,如 "lib/aarch64" / "jre/lib"),
+ *  规则按 FCL 的 RuntimeUtils.getJavaLibDir() 对齐(2026-09 核对):
+ *
+ *    1) 先从 <java_home>/release 读 OS_ARCH(如 "aarch64");
+ *    2) **优先 <java_home>/lib/<OS_ARCH>** —— Termux 那份 JRE 镜像布局就是 bin/ + lib/aarch64/
+ *       (jre8 也一样:lib/aarch64/jli/libjli.so),它的 sun.boot.library.path 正是这个目录;
+ *    3) 只有在 <java_home>/jre **与** <java_home>/bin/javac **同时存在**(FCL 的 isJDK8())
+ *       时才考虑 <java_home>/jre/lib[/<OS_ARCH>] —— 那种才是"真 JDK8"的老布局;
+ *    4) 都没有就退回 <java_home>/lib;再没有就 <java_home>/jre/lib;
+ *    5) 一个都不是目录 -> SXCL_ANDROID_JRE_ERR_NO_LIB_DIR。
+ *
+ *  为什么不能只看 "<jre>/lib 在不在":jre8 那份**没有 jre/ 子目录**,库在 lib/aarch64;
+ *  按老写法会把它放进 <jre>/lib,而 JVM 从 <jre>/lib/aarch64 找 —— **拷了但不生效**,
+ *  设备上表现为 AWT/声音相关的一堆 NoClassDefFound/dlopen 失败,极难查。
+ *
+ *  纯读盘,不写任何东西。out 装不下就写空串并返回 ERR_ARG。 */
+int sxcl_android_jre_shim_dir(const char *java_home, char *out, size_t out_len, char *err,
+                              size_t err_len);
+
+/** 同 sxcl_android_jre_patch_libs,但多一个"清单里说的 shim_dir"。
+ *
+ *  @param expected_shim_dir 可空/空串 = 不校验;非空时与算出来的相对路径**逐字比较**,
+ *         不一致直接 SXCL_ANDROID_JRE_ERR_SHIM_MISMATCH(并把人话写进 err)。
+ *         来源:自托管清单 sxcl.jre.index/1 里每个组件的 "shim_dir" 字段。
+ *         为什么硬失败:两处不一致说明"清单说的"和"盘上实际"对不上,这时候悄悄选一个
+ *         等于赌 —— 赌错就是设备上一片 dlopen 失败。
+ *
+ *  其余语义与 sxcl_android_jre_patch_libs 完全一致。 */
+int sxcl_android_jre_patch_libs_ex(const char *java_home, const char *native_lib_dir,
+                                   const char *expected_shim_dir, char *lib_dir_out,
+                                   size_t lib_dir_len, char *err, size_t err_len);
 
 /** 把 nativeLibraryDir 里的 libawt_xawt.so / libjsound.so 补进**已装好的** JRE。
  *
@@ -85,7 +119,7 @@ const char *sxcl_android_jre_patch_code_name(int code);
  *
  *  @param java_home      已装的 JRE 根(bin/java 的上一级)
  *  @param native_lib_dir 打包层给的 ApplicationInfo.nativeLibraryDir(真实文件,不是指向 APK 的符号链接)
- *  @param lib_dir_out    可空;写实际用的库目录(jre8 是 <java_home>/jre/lib,其余是 <java_home>/lib)。
+ *  @param lib_dir_out    可空;写实际用的库目录(见 sxcl_android_jre_shim_dir 的规则)。
  *                        装不下时只写空串(**不**截断出半条路径),返回码不受影响
  *  @param lib_dir_len    lib_dir_out 的容量
  *  @param err            可空;失败时写人话原因
