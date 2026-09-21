@@ -718,22 +718,38 @@ size_t sxcl_java_candidate_paths(const sxcl_java_env *env, sxcl_java_os os,
         push_candidate(out, cap, &count, full, home, "JAVA_HOME");
     }
 
-    /* 2) PATH:用户自己配的,排在 JAVA_HOME 之后(顺序即优先级) */
+    /* 2) PATH:用户自己配的,排在 JAVA_HOME 之后(顺序即优先级)。
+     * **分隔符按目标平台**:Windows 只认 ';' —— 认 ':' 会把盘符切断
+     * (实测:环境里的 "C:\Program Files\Git\cmd" 被切成 "C" 与 "\Program Files\Git\cmd",
+     * 于是候选表里冒出一堆 "C\java.exe" / "\Program Files\...\java.exe" 这种假路径)。
+     * POSIX 只认 ':'(';' 在合法文件名里是允许的,不该当分隔符)。 */
     if (env->path && *env->path) {
+        const char list_sep = (os == SXCL_JAVA_OS_WINDOWS) ? ';' : ':';
         const char *p = env->path;
         while (*p) {
             const char *end = p;
-            while (*end && *end != ';' && *end != ':') {
+            while (*end && *end != list_sep) {
                 ++end;
             }
             if (end > p) {
                 char up[SXCL_JAVA_PATH_MAX];
                 copy_n(tmp, sizeof(tmp), p, (size_t)(end - p));
-                join_path(full, sizeof(full), tmp, exe, sep);
-                path_parent(tmp, up, sizeof(up));
-                push_candidate(out, cap, &count, full, up, "PATH");
+                /* Windows 的 PATH 项常带引号("C:\Program Files\..."):去掉 */
+                char *text = tmp;
+                size_t len = strlen(text);
+                while (len > 0 && (text[len - 1] == ' ' || text[len - 1] == '"')) {
+                    text[--len] = '\0';
+                }
+                if (*text == '"') {
+                    ++text;
+                }
+                if (*text != '\0') {
+                    join_path(full, sizeof(full), text, exe, sep);
+                    path_parent(text, up, sizeof(up));
+                    push_candidate(out, cap, &count, full, up, "PATH");
+                }
             }
-            while (*end == ';' || *end == ':') {
+            while (*end == list_sep) {
                 ++end;
             }
             p = end;

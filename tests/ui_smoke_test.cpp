@@ -213,12 +213,15 @@ int main(int argc, char **argv) {
 
     // =================================================================
     section(QStringLiteral("② 导航:5 项主导航 + 底部设置 1 项"));
-    const QStringList wantKeys{QStringLiteral("home"), QStringLiteral("download"),
-                               QStringLiteral("tasks"), QStringLiteral("multiplayer"),
-                               QStringLiteral("more"), QStringLiteral("settings")};
-    const QStringList wantTitles{QStringLiteral("主页"), QStringLiteral("下载"),
-                                 QStringLiteral("任务"), QStringLiteral("联机"),
-                                 QStringLiteral("更多"), QStringLiteral("设置")};
+    // 口径 = Python src/app/main_window.py:105-119(逐条对应,不是我们自创):
+    //   Home / grass_block(版本) / Update(任务) / Layout(按键映射) / Globe(联机) / Setting(设置,底部)
+    // 老的"下载/更多"是 C 版早期自创项,已按 Python 口径替换 —— 本测试就是这条口径的守卫。
+    const QStringList wantKeys{QStringLiteral("home"), QStringLiteral("versions"),
+                               QStringLiteral("tasks"), QStringLiteral("keymap"),
+                               QStringLiteral("multiplayer"), QStringLiteral("settings")};
+    const QStringList wantTitles{QStringLiteral("主页"), QStringLiteral("版本"),
+                                 QStringLiteral("任务"), QStringLiteral("按键映射"),
+                                 QStringLiteral("联机"), QStringLiteral("设置")};
     const QVector<NavItem> &items = window.navItems();
     check(items.size() == 6, QStringLiteral("导航项数 = 6"),
           QStringLiteral("实际 %1").arg(items.size()));
@@ -339,8 +342,13 @@ int main(int argc, char **argv) {
                           lightAccent) < 24,
           QStringLiteral("按 libqf 主题色着色:墨迹平均色 ≈ 主题色"),
           QStringLiteral("accent=%1").arg(lightAccent.name()));
-    check(lightAccent == tb.accent() && lightAccent.isValid(),
-          QStringLiteral("主题色来自 libqf 单例(非本层定义)"), lightAccent.name());
+    // 强调色语义:FluentTheme::accent() 返回 **推导后**的值(Python theme.py:135/168 的 themeColor()),
+    // 它随深浅主题变化 —— 所以不能拿"浅色时抓到的那个值"去和"此刻(可能已切深色)"的值比。
+    // 这里断言的是真正要守的东西:**accent 来自 libqf 单例,不是本层自己定的**。
+    check(tb.accent() == fluent::FluentStyle::instance()->themeColor() && tb.accent().isValid(),
+          QStringLiteral("主题色来自 libqf 单例(推导值,非本层定义)"),
+          QStringLiteral("accent=%1 themeColor=%2").arg(tb.accent().name(),
+                      fluent::FluentStyle::instance()->themeColor().name()));
 
     // 回到浅色出图
     tb.setMode(fluent::Theme::Light);

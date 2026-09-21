@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QCursor>
+#include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QLocale>
 #include <QPainter>
@@ -14,7 +15,22 @@
 #include <QStyleHints>
 #include <QTimer>
 
+#include <climits>
 #include <cstdio>
+
+// 取证通路:动画参数复核(SXCL_ANIM_TRACE)的输出通道。
+// Android 上 fprintf(stderr) 不进 logcat(实测:整份 logcat 里一条 [sxcl-ui] 都没有),
+// 所以这里显式走 android log;桌面/其它平台仍旧走 stderr —— 两个平台是同一份采样代码。
+#if defined(__ANDROID__)
+#include <android/log.h>
+#define SXCL_UI_TRACE(...) __android_log_print(ANDROID_LOG_INFO, "sxcl-ui", __VA_ARGS__)
+#else
+#define SXCL_UI_TRACE(...)                             \
+    do {                                               \
+        std::fprintf(stderr, "[sxcl-ui] " __VA_ARGS__); \
+        std::fprintf(stderr, "\n");                    \
+    } while (0)
+#endif
 
 #include "icon_registry.h"
 #include "main_window.h"
@@ -68,6 +84,79 @@ static void dumpWidgetTree(QWidget *root, int maxDepth) {
     };
     Walker::walk(root, 0, maxDepth);
 }
+// ── 取证通路:动画参数复核(SXCL_ANIM_TRACE)──────────────────────────────
+// 只读:不创建、不修改任何动画对象,只按帧记录"动画跑起来之后控件真正呈现出来的
+// 位置/尺寸/透明度/遮罩"。桌面与 Android 共用这一份采样代码,所以两边打印的轨迹
+// 可以直接对比 —— docs/08 的触屏一节引用的就是这里的输出。
+//   SXCL_ANIM_TRACE=1:弹出层(Qt::Popup 顶层窗)出现时开始采样(位置/透明度/遮罩)
+//   SXCL_ANIM_TRACE=2:另外走产品路径点一次导航汉堡按钮,同时采样面板宽度
+namespace {
+
+struct SxclTraceState {
+    QElapsedTimer clock;
+    QList<QString> rows;
+    int last = INT_MIN;
+    int stable = 0;
+};
+
+// metric: 0 = y(弹出层下落/pull-up),1 = width(导航面板展开/折叠)
+void sxclTraceWidgetMotion(const QString &tag, QWidget *w, int timeoutMs, int metric) {
+    auto *st = new SxclTraceState();
+    st->clock.start();
+    auto *timer = new QTimer(w);
+    timer->setInterval(8); // 60fps 相邻两帧 ~16ms,8ms 采样不会漏掉关键帧
+    QObject::connect(timer, &QTimer::timeout, w, [tag, w, timeoutMs, metric, st, timer]() {
+        const qint64 t = st->clock.elapsed();
+        const QRect maskRect = w->mask().boundingRect();
+        const int value = metric == 1 ? w->width() : w->y();
+        st->rows.append(QStringLiteral("%1 t=%2ms %3=%4 opacity=%5 mask=(%6,%7 %8x%9)")
+                            .arg(tag)
+                            .arg(t)
+                            .arg(metric == 1 ? QStringLiteral("width") : QStringLiteral("y"))
+                            .arg(value)
+                            .arg(w->windowOpacity(), 0, 'f', 3)
+                            .arg(maskRect.x())
+                            .arg(maskRect.y())
+                            .arg(maskRect.width())
+                            .arg(maskRect.height()));
+        st->stable = (value == st->last) ? st->stable + 1 : 0;
+        st->last = value;
+        if (t >= timeoutMs || st->stable >= 10) {
+            timer->stop();
+            for (const QString &row : st->rows)
+                SXCL_UI_TRACE("%s", row.toUtf8().constData());
+            SXCL_UI_TRACE("%s SUMMARY samples=%d settle=%lldms first=[%s] last=[%s]",
+                          tag.toUtf8().constData(), int(st->rows.size()),
+                          static_cast<long long>(t),
+                          st->rows.isEmpty() ? "" : st->rows.first().toUtf8().constData(),
+                          st->rows.isEmpty() ? "" : st->rows.last().toUtf8().constData());
+            delete st;
+        }
+    });
+    timer->start();
+}
+
+// 弹出层是独立顶层窗(Qt::Popup):Show 一到就开始采样,不需要知道它的类名。
+class SxclAnimTraceFilter : public QObject {
+public:
+    bool eventFilter(QObject *obj, QEvent *ev) override {
+        if (ev->type() == QEvent::Show) {
+            auto *w = qobject_cast<QWidget *>(obj);
+            if (w != nullptr && w->isWindow() && (w->windowFlags() & Qt::Popup)
+                && !w->property("sxclTraced").toBool()) {
+                w->setProperty("sxclTraced", true);
+                SXCL_UI_TRACE("popup SHOW class=%s rect=(%d,%d %dx%d) dpr=%.2f",
+                              w->metaObject()->className(), w->x(), w->y(), w->width(),
+                              w->height(), w->devicePixelRatioF());
+                sxclTraceWidgetMotion(QStringLiteral("popup"), w, 600, 0);
+            }
+        }
+        return QObject::eventFilter(obj, ev);
+    }
+};
+
+} // namespace
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     // Python main.py:96 —— app.setStyle("Fusion")。不设的话 Windows 默认样式的控件度量
@@ -336,5 +425,28 @@ int main(int argc, char *argv[]) {
             QCoreApplication::quit();
         });
     }
+    // 取证通路:动画参数复核(见本文件上方 SXCL_ANIM_TRACE 的说明)
+    const int animTrace = qEnvironmentVariableIntValue("SXCL_ANIM_TRACE");
+    if (animTrace >= 1) {
+        qApp->installEventFilter(new SxclAnimTraceFilter());
+        SXCL_UI_TRACE("anim trace on (level=%d)", animTrace);
+        if (animTrace >= 2) {
+            QTimer::singleShot(1200, &window, [&window] {
+                sxcl::ui::NavPanel *nav = window.navPanel();
+                if (nav == nullptr) {
+                    SXCL_UI_TRACE("nav trace: no NavPanel");
+                    return;
+                }
+                SXCL_UI_TRACE("nav toggle: click menu button (collapsed=%d width=%d; spec %dms "
+                              "OutQuad %d<->%d)",
+                              int(nav->collapsed()), nav->width(),
+                              sxcl::ui::NavPanel::kExpandDurationMs,
+                              sxcl::ui::NavPanel::kCollapsedWidth, sxcl::ui::NavPanel::kExpandedWidth);
+                sxclTraceWidgetMotion(QStringLiteral("nav"), nav, 600, 1);
+                nav->menuButton()->click();
+            });
+        }
+    }
+
     return app.exec();
 }

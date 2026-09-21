@@ -49,6 +49,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -322,6 +323,15 @@ struct JavaEntry {
     bool compatible = false;
     QString compatibilityLabel;
 
+    // ── 实测结论(include/sxcl/launch.h 的 1c 节)──
+    // 能不能用**不是看目录名**,而是真的执行过 <path> -version 才知道。
+    // 检测到但不可用的(沙箱拒绝 / 共享存储 noexec / 没有执行位 / 不是 Java / 架构不符 /
+    // 跑不起来)照样列出来,附上原因 —— 用户有权知道"为什么没检出来"。
+    bool usable = true;      // false = 检测到但用不了
+    QString verdictText;     // "可用" / "沙箱拒绝" / "共享存储不能执行" …
+    QString reason;          // 原始原因(带路径与 errno/退出码原话)
+    QString hint;            // 下一步建议(核心库给的人话)
+
     // finder.py:66-68 display_name
     QString displayName() const {
         return QStringLiteral("Java %1 - %2").arg(version, QDir::toNativeSeparators(path));
@@ -416,6 +426,77 @@ QVector<JavaEntry> discoverJavaInstallations() {
         return a.path < b.path;
     });
 
+    // 实测很贵(每个候选起一次进程,几百毫秒),而 refresh() 在"主题/语言变了"时会被连着
+    // 调好几次 —— 用候选集合当键缓存一次结果(集合没变就不重复起进程)。
+    auto detectCached = [](const sxcl_java_env *env,
+                           const QVector<JavaEntry> &list) -> const sxcl_java_installations * {
+        static sxcl_java_installations cache;
+        static QString cacheKey;
+        QString key;
+        for (const JavaEntry &entry : list)
+            key += entry.path + QLatin1Char('|') + QString::number(entry.major) + QLatin1Char('\n');
+        if (key == cacheKey)
+            return &cache;
+        (void)sxcl_java_detect(env, sxcl_java_current_os(), 4000, &cache);
+        cacheKey = key;
+        return &cache;
+    };
+
+    // ── 实测:真的执行一次 <java> -version,把"能用/不能用 + 原因"贴上 ──
+    // 桌面平台上 sxcl_java_discover 只读了 release 文本;这一步才回答"它到底跑不跑得起来"。
+    // 安卓上不在这里跑(那里由 androidJavaProbeText/sxcl_java_probe_android 说明原因,
+    // 而且别人的私有目录注定起不了进程)；安卓的"本应用私有目录"那份会被 detect 扫到。
+    {
+        const sxcl_java_installations &detected = *detectCached(&envStore.env, items);
+        for (size_t i = 0; i < detected.count; ++i) {
+            const sxcl_java_installation &d = detected.items[i];
+            const QString dpath = normalizeJavaPath(QString::fromUtf8(d.info.path));
+            const bool ok = (d.verdict == SXCL_JAVA_RUN_OK);
+            bool hit = false;
+            for (JavaEntry &entry : items) {
+                if (normalizeJavaPath(entry.path) == dpath) {
+                    entry.usable = ok;
+                    entry.verdictText = QString::fromUtf8(sxcl_java_run_verdict_name(d.verdict));
+                    entry.reason = QString::fromUtf8(d.reason);
+                    entry.hint = QString::fromUtf8(sxcl_java_run_verdict_hint(d.verdict));
+                    hit = true;
+                    break;
+                }
+            }
+            if (hit || ok)
+                continue;
+            // 检测到但不在"可用清单"里(路径解析不出 release / 用不了):照样列出来
+            JavaEntry extra;
+            extra.path = QString::fromUtf8(d.info.path);
+            extra.version = QString::fromUtf8(d.info.version);
+            extra.major = d.info.major;
+            extra.usable = false;
+            extra.verdictText = QString::fromUtf8(sxcl_java_run_verdict_name(d.verdict));
+            extra.reason = QString::fromUtf8(d.reason);
+            extra.hint = QString::fromUtf8(sxcl_java_run_verdict_hint(d.verdict));
+            if (extra.major > 0)
+                fillCompatibility(extra);
+            else
+                extra.compatibilityLabel = QStringLiteral("版本未知");
+            items.append(extra);
+        }
+        // 用不了的排在最后:能用的那份列表本身按主版本降序
+        std::stable_sort(items.begin(), items.end(),
+                         [](const JavaEntry &a, const JavaEntry &b) {
+                             return (a.usable ? 0 : 1) < (b.usable ? 0 : 1);
+                         });
+    }
+
+    // 取证(安卓真机看 logcat):每个候选一行 —— 路径 / 来源 / 是否**真的执行过** /
+    // 结论 / 原因。桌面验收同样看这几行(截图看不出 tooltip)。
+    for (const JavaEntry &entry : items) {
+        std::fprintf(stderr,
+                     "[sxcl-ui] java-discover: %s major=%d usable=%d verdict=%s reason=%s\n",
+                     entry.path.toUtf8().constData(), entry.major, entry.usable ? 1 : 0,
+                     entry.verdictText.toUtf8().constData(),
+                     entry.reason.isEmpty() ? "-" : entry.reason.toUtf8().constData());
+    }
+
     QSet<QString> seen;
     for (const JavaEntry &entry : items) {
         if (seen.contains(entry.path))
@@ -426,14 +507,24 @@ QVector<JavaEntry> discoverJavaInstallations() {
     return result;
 }
 
-// finder.py:294-299 best_java_installation(最高版本的兼容 Java)
+// finder.py:294-299 best_java_installation(最高版本的兼容 Java)。
+// 只在**实测可用**的那些里挑:没真的跑起来过的(沙箱拒绝/架构不符/不是 Java)不当默认值,
+// 否则会自动选中一个注定启动失败的 java(用户会看到"选中的 Java 起不来")。
 const JavaEntry *bestJavaInstallation(const QVector<JavaEntry> &list) {
     const JavaEntry *best = nullptr;
     for (const JavaEntry &entry : list) {
-        if (!entry.compatible)
+        if (!entry.usable || !entry.compatible)
             continue;
         if (!best || entry.major > best->major)
             best = &entry;
+    }
+    if (best == nullptr) {
+        for (const JavaEntry &entry : list) { // 兜底:一个可用的都没有时仍给个默认值
+            if (!entry.compatible)
+                continue;
+            if (!best || entry.major > best->major)
+                best = &entry;
+        }
     }
     return best;
 }
@@ -736,8 +827,45 @@ public:
                 return;
             }
 
-            for (const JavaEntry &entry : m_installations) // :150-151
-                m_combo->addItem(entry.displayName(), entry.path);
+            for (const JavaEntry &entry : m_installations) { // :150-151
+                // 检测到但用不了的照样列出来,并且在条目上直接写清为什么(② 的要求:
+                // 分类给出不可用原因,别静默丢弃)
+                const QString text =
+                    entry.usable
+                        ? entry.displayName()
+                        : QStringLiteral("%1（不可用：%2）").arg(entry.displayName(),
+                                                                 entry.verdictText);
+                m_combo->addItem(text, entry.path);
+                const int row = m_combo->count() - 1;
+                if (!entry.usable) {
+                    QString tip = entry.reason;
+                    if (!entry.hint.isEmpty())
+                        tip += QStringLiteral("\n") + entry.hint;
+                    m_combo->setItemData(row, tip, Qt::ToolTipRole);
+                }
+            }
+            // 一条能用的都没有、但确实"检测到了"时,把原因写到状态行(而不是只说"未找到")
+            {
+                bool anyUsable = false;
+                for (const JavaEntry &entry : m_installations) {
+                    if (entry.usable) {
+                        anyUsable = true;
+                        break;
+                    }
+                }
+                if (!anyUsable && !m_installations.isEmpty()) {
+                    const JavaEntry &first = m_installations.first();
+                    m_statusLabel->setText(QStringLiteral("✗ 检测到 Java 但都用不了：%1")
+                                               .arg(first.verdictText));
+                    m_statusLabel->setTextColor(QColor(0xfa, 0x8c, 0x16),
+                                                QColor(0xff, 0xa9, 0x40));
+                    QStringList tips;
+                    for (const JavaEntry &entry : m_installations)
+                        tips << QStringLiteral("%1\n  %2").arg(entry.path, entry.reason);
+                    m_statusLabel->setToolTip(tips.join(QStringLiteral("\n\n")));
+                    m_downloadButton->setToolTip(tips.join(QStringLiteral("\n\n")));
+                }
+            }
 
             int selected = 0;                              // :153
             if (!preferredPath.isEmpty()) {                // :154-160 按归一化路径找
@@ -773,6 +901,12 @@ private:
     // java_setting_card.py:199-207 _update_status
     void updateStatus(const JavaEntry &entry) {
         const ThemeTokens &tokens = FluentTheme::instance().tokens();
+        if (!entry.usable) { // 检测到但用不了:状态行说清结论 + 原因,别显示"✓ 兼容"骗人
+            m_statusLabel->setText(QStringLiteral("✗ %1：%2").arg(entry.verdictText, entry.reason));
+            m_statusLabel->setTextColor(tokens.danger);
+            m_statusLabel->setToolTip(entry.hint);
+            return;
+        }
         if (entry.compatible) {
             m_statusLabel->setText(QStringLiteral("✓ %1").arg(entry.compatibilityLabel));
             m_statusLabel->setTextColor(tokens.success);
@@ -1333,7 +1467,47 @@ int SettingsPage::speedLimitKbps() const {
     return static_cast<int>(std::lround(bytesPerSecond / 1024.0));
 }
 
+// 取证:把"自动检测到的游戏目录"逐条打到 stderr(安卓真机看 logcat)。
+// 设置页的"游戏目录"卡就是拿这份数据让用户选的 —— 截图看不出每条的判据与优先级,
+// 所以留一行机器可读的输出给验收脚本(与版本页/Java 那两行同一个套路)。
+void logGameDirDetection() {
+#if defined(__ANDROID__)
+    const QByteArray files = qEnvironmentVariable("SXCL_ANDROID_FILES").toUtf8();
+    sxcl_game_folders folders;
+    char err[SXCL_PATHS_ERROR_MAX];
+    err[0] = '\0';
+    (void)sxcl_paths_detect_android(files.isEmpty() ? nullptr : files.constData(), nullptr, &folders,
+                                    nullptr, err, sizeof(err));
+    std::fprintf(stderr, "[sxcl-ui] gamedir-detect: 平台=android 候选=%zu 原因=%s\n",
+                 folders.count, err[0] ? err : "-");
+#else
+    sxcl_paths_env_store envStore;
+    sxcl_paths_env_capture(&envStore);
+    sxcl_game_folders folders;
+    char err[SXCL_PATHS_ERROR_MAX];
+    err[0] = '\0';
+    (void)sxcl_paths_detect_ex(&envStore.env, sxcl_paths_current_os(), &folders, nullptr, err,
+                               sizeof(err));
+    std::fprintf(stderr, "[sxcl-ui] gamedir-detect: 平台=%s 候选=%zu 原因=%s\n",
+                 sxcl_paths_os_name(sxcl_paths_current_os()), folders.count,
+                 err[0] ? err : "-");
+#endif
+    for (size_t i = 0; i < folders.count; ++i) {
+        const sxcl_game_folder &f = folders.items[i];
+        char marksText[SXCL_PATHS_DESC_MAX];
+        marksText[0] = '\0';
+        (void)sxcl_paths_marks_text(sxcl_paths_marks(f.path), f.versions, marksText,
+                                    sizeof(marksText));
+        std::fprintf(stderr,
+                     "[sxcl-ui] gamedir-probe: #%zu %s owner=%s label=%s versions=%d "
+                     "priority=%d marks=%d(%s)\n",
+                     i, f.path, f.owner[0] ? f.owner : "-", f.label, f.versions, f.priority,
+                     sxcl_paths_marks(f.path), marksText);
+    }
+}
+
 void SettingsPage::buildContent() {
+    logGameDirDetection();
     // ── 通用设置(settings_page.py:215-270)──
     auto *generalGroup = new SettingCardGroup(QString::fromUtf8(kGroupGeneral), m_view);
 
@@ -1812,10 +1986,57 @@ QString pickAndroidGameDir(QWidget *parent) {
     return QDir::fromNativeSeparators(QString::fromUtf8(folders.items[index].path));
 }
 
+// 桌面平台的"自动检测出来的游戏目录"选择器(①:别让用户自己填路径)。
+// 与安卓那路同一个形状:列出**真实存在**的候选(带来源标签 / 谁留的 / 版本数 / 判据),
+// 最后一项才是"手动选择其它目录…"。核心库 sxcl_paths_detect_ex 一次覆盖
+// 便携目录 / 官方启动器 / HMCL / MultiMC / Prism / CurseForge / ATLauncher / Flatpak /
+// 桌面,并且把 instances/<名字> 这种容器根展开成真正的实例目录。
+QString pickDetectedGameDir(QWidget *parent) {
+    sxcl_paths_env_store envStore;
+    sxcl_paths_env_capture(&envStore);
+    sxcl_game_folders folders;
+    char err[SXCL_PATHS_ERROR_MAX];
+    err[0] = '\0';
+    (void)sxcl_paths_detect_ex(&envStore.env, sxcl_paths_current_os(), &folders, nullptr, err,
+                               sizeof(err));
+    if (folders.count == 0)
+        return QString(); // 一个都没扫到:落回文件对话框,不打扰用户
+
+    QStringList items;
+    for (size_t i = 0; i < folders.count; ++i) {
+        const sxcl_game_folder &folder = folders.items[i];
+        char marksText[SXCL_PATHS_DESC_MAX];
+        marksText[0] = '\0';
+        (void)sxcl_paths_marks_text(sxcl_paths_marks(folder.path), folder.versions, marksText,
+                                    sizeof(marksText));
+        const QString owner = QString::fromUtf8(folder.owner);
+        const QString label = QString::fromUtf8(folder.label);
+        const QString source = owner.isEmpty() ? label : QStringLiteral("%1 / %2").arg(owner, label);
+        items << QStringLiteral("%1\n    %2 · %3")
+                     .arg(QDir::toNativeSeparators(QString::fromUtf8(folder.path)), source,
+                          QString::fromUtf8(marksText));
+    }
+    const QString manual = QStringLiteral("手动选择其它目录…");
+    items << manual;
+
+    bool ok = false;
+    const QString chosen =
+        QInputDialog::getItem(parent, QStringLiteral("选择 Minecraft 游戏目录"),
+                              QStringLiteral("自动检测到这些（选一个即生效）："), items, 0, false, &ok);
+    if (!ok || chosen.isEmpty() || chosen == manual)
+        return QString();
+    const int index = items.indexOf(chosen);
+    if (index < 0 || static_cast<size_t>(index) >= folders.count)
+        return QString();
+    return QDir::fromNativeSeparators(QString::fromUtf8(folders.items[index].path));
+}
+
 // settings_page.py:441-450 _pick_game_directory
 void SettingsPage::pickGameDirectory() {
-    // 先给候选(安卓上才有;桌面上返回空串,直接落回文件对话框)
+    // 先给候选:安卓走共享存储/各家启动器那张表;桌面走 ① 的候选根表。
     QString path = pickAndroidGameDir(this);
+    if (path.isEmpty())
+        path = pickDetectedGameDir(this);
     if (path.isEmpty()) {
         path = QFileDialog::getExistingDirectory(this, QStringLiteral("选择 Minecraft 游戏目录"),
                                                  gameDirectory());
