@@ -1,12 +1,9 @@
-// auth_dialog.cpp —— 设备码登录对话框的实现(声明/纪律见 auth_dialog.h)。
-//
-// Python 版**没有**这个对话框(它只有离线启动):这是新增界面,设计上延续 qf 语言 ——
-//   * 壳 = libqf 的 MessageBoxBase(python MessageBoxBase:居中卡片 + 遮罩 + 底部按钮组),
-//     与 fluent_dialog.cpp:158-191 的度量一致(按钮组定高 81、布局边距 24/12);
-//   * 文字层级 = docs/05-UI-1to1规格.md §3(SubtitleLabel 20/600、BodyLabel 14/400、
-//     CaptionLabel 12/400、TitleLabel 28/600 —— 8 位码用 TitleLabel,一眼能读);
-//   * 颜色 = §2 的令牌(成功/失败用 success/danger,**没有任何硬编码色值**);
-//   * 按钮 = §4(PushButton/PrimaryPushButton 高 32、字号 14)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "auth_dialog.h"
 
 #include <QClipboard>

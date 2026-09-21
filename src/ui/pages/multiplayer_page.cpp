@@ -1,20 +1,9 @@
-// multiplayer_page.cpp —— 联机页(占位 + 方案说明)
-//
-// 1:1 移植 Python 版 src/app/pages/multiplayer_page.py。
-// 结构逐条对照(行号指 Python 源):
-//   BasePage(title="联机", subtitle="和朋友一起玩：房间码加入 / P2P 打洞 / 中继兜底（开发中）")
-//     vBoxLayout: contentsMargins(28,24,28,24) / spacing 16 / AlignTop      base_page.py:51-53
-//       TitleLabel(title) / SubtitleLabel(subtitle, #606060|#AAAAAA)        base_page.py:55-60
-//       add_content(_status_card())                                         multiplayer_page.py:65
-//       add_content(_room_card())                                           multiplayer_page.py:66
-//       add_content(_notes_card())                                          multiplayer_page.py:67
-//       add_stretch()                                                       multiplayer_page.py:68
-//
-// 三张卡片都是 qf CardWidget(自绘背景 = 白色 13/255 叠在页面底色上),
-// 内边距/间距逐条照抄 Python:
-//   _status_card  QVBoxLayout margins(20,16,20,16) spacing 6   :70-90
-//   _room_card    QVBoxLayout margins(20,16,20,16) spacing 10  :92-129
-//   _notes_card   QVBoxLayout margins(20,16,20,16) spacing 6   :131-149
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "page_factory.h"
 
 #include "fluent_theme.h"

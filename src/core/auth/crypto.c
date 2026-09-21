@@ -1,16 +1,9 @@
-/* ChaCha20-Poly1305 AEAD(RFC 8439)—— 令牌加密存储用的加密原语,自研零依赖。
- *
- * 为什么自己写而不用系统库:
- *   - Windows 有 DPAPI、macOS 有 Keychain,那两条路**不需要**这个;
- *   - 但 Linux 上 libsecret 可能没有(GNOME Keyring 没装/无会话总线),这时只剩
- *     "0600 文件 + 本机派生密钥"这一条降级路。只用 0600 挡不住"文件被拷走",
- *     所以密钥之外还得有真正的加密 —— 于是有了这个 AEAD。
- *   - 自研要能被验证:实现直接对拍 RFC 8439 §2.3.2(块函数)/§2.5.2(Poly1305)/
- *     §2.8.2(AEAD)的官方测试向量,见 tests/auth_crypto_test.c。
- *
- * 只实现需要的:256 位密钥、96 位 nonce、16 字节 tag、单条消息(不分块)。
- * 不做常数时间承诺之外的侧信道加固(密钥来自本机文件,威胁模型是"拷走文件"而不是"同机计时攻击")。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

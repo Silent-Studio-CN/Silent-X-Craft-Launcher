@@ -1,4 +1,9 @@
-/* 校验层测试:大小/哈希/缺失/大小写/分块一致性 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1 /* sprintf/fopen 在 MSVC 下默认被标记弃用 */
 #endif

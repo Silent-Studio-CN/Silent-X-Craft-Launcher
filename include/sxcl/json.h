@@ -1,11 +1,9 @@
-/* SXCL-C JSON 解析器 —— 元数据层地基(自己写,零依赖)。
- *
- * 用途:解析 Mojang 的 version_manifest_v2.json / 版本 JSON / 资源索引。
- * 设计:一次性解析成 DOM(字符串在内部缓冲里就地 NUL 结尾,转义已解码),
- * 文档由调用方 sxcl_json_free 释放;所有节点指针在文档释放前有效。
- * 不追求通用库的完备性,只覆盖启动器真正需要的部分:
- * 对象/数组/字符串(含 \uXXXX 转义与代理对)/数字/布尔/null/嵌套。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_JSON_H
 #define SXCL_JSON_H
 

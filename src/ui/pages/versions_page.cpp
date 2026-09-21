@@ -1,28 +1,9 @@
-// versions_page.cpp —— 版本页(Python 版 src/app/pages/versions_page.py 的 1:1 C++ 移植)
-//
-// 逐条对照(每一处尺寸/文字/颜色都能指回下面某一条,见 docs/05-UI-1to1规格.md):
-//   * 版面骨架 = Python src/app/common/base_page.py:32-66(BasePage:ScrollArea + view 的
-//     QVBoxLayout margins(28,24,28,24)/spacing 16/AlignTop + TitleLabel + SubtitleLabel),
-//     见下面的 PageScaffold;
-//   * 工具栏 / 加载中区 / 状态行 / 列表 = versions_page.py:320-397;
-//   * 行自绘 = VersionRowDelegate.paint(versions_page.py:145-260),常量逐字照抄:
-//     ROW_HEIGHT 52、BTN_H 28、LOG_W 84、SRV_W 96、GAP 8、MARGIN 16,
-//     行内文字起点 left+16 / +152(宽 64) / +226(宽 110) / +340(图标 14) / +360(宽 60) / +424(标签);
-//   * 文案与过滤 = versions_page.py:453-503、622-645;
-//   * 颜色一律走 FluentTheme 令牌(theme.py 的 hover/hover_strong/text/text_tertiary/success/
-//     danger/accent);加载器色照抄 icons.py:67-75 LOADER_COLORS,标签文字照抄
-//     icons.py:222-232 loader_chip_text 与 loaders.py LOADER_NAMES。
-//
-// 数据来源(docs/04-页面规格.md §2.2「数据来源」已把 C 版缺口写死):
-//   UI 层还没有"取清单文本"的 HTTP 入口 —— sxcl_net_qt 只链进 sxcl-dl,没链进 sxcl-ui,
-//   而跨过 CMake 私自链接 Qt6::Network 会破坏"唯一 UI 依赖"的约定(边界:不许改 CMake)。
-//   所以本页按下面的顺序取数据,行结构/绘制三条路径完全一致:
-//     1) SXCL_UI_MANIFEST=<json 路径> 指定的清单文件(验收/离线复现用的显式入口);
-//     2) 共享缓存 <APPDATA>/SilentXCraftLauncher/cache/version_manifest_v2.json(若有);
-//     3) 退路:本地实例扫描 sxcl_instance_scan()(离线可用,已安装/加载器标签/problem 全都在);
-//     4) 三者都拿不到 -> 走 Python 的错误路径(状态行「加载失败」+ InfoBar.error)。
-//   把 sxcl_net_qt 链进 sxcl-ui 后,只需把 fetchManifestText() 换成
-//   sxcl_http_get_text(transport, url, ...) —— 解析、过滤、绘制都不用改。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "page_factory.h"
 
 #include <QAbstractListModel>

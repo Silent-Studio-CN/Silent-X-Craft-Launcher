@@ -1,8 +1,9 @@
-/* POSIX 侧文件系统实现(Linux / Android)。与 platform_win32.c 一一对应。
- * 说明:本文件在开发机(Windows)上不参与编译,由 CI/Linux 侧编译验证。 */
-/* 注意:这里**不要**定义 _POSIX_C_SOURCE。
- * 实测 macOS SDK 在该宏下会把 struct stat 收窄到既没有 st_mtim 也没有 st_mtimespec,
- * 而 CMake 用 -std=gnu11(pwrite/nanosleep/clock_gettime 默认可见),不需要它。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "sxcl/fs.h"
 
 #include <errno.h>

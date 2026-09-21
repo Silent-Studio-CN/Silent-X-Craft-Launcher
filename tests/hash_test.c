@@ -1,18 +1,9 @@
-/* SXCL-C 哈希模块测试（断言式）：任何失败都会让 main 返回非 0，ctest 判定失败。
- *
- * 覆盖内容：
- *   1) FIPS 180-4 / RFC 3174 公开标准向量（空串、abc、56 字节、112 字节、1,000,000 个 'a'）；
- *   2) 分块一致性：同一串数据按 1/2/3/7/64/65/127/1000 字节切片多次 update，
- *      结果必须与一次性 digest 逐位相同（两种算法都测），并扫描 0..200 及块边界长度；
- *   3) 补位边界长度向量（55/56/57/63/64/65/119/120/127 字节）；
- *   4) > 512 MiB 的 64 位长度路径（比特长度 > 2^32，必须走 64 位长度字段）；
- *   5) sxcl_hash_hex_equal 的大小写 / 长度不等 / 非法字符；
- *   6) 接口边界：出参缓冲区过小、未知算法、0 长度与 NULL、辅助查询函数；
- *   7) 吞吐打印（32 MiB 缓冲测 SHA-256，仅打印数字，不设阈值）。
- *
- * 期望值来源：题目给出的标准向量，以及 .NET System.Security.Cryptography
- * （IncrementalHash，独立实现）在配置阶段离线生成的参考值——不用被测实现自证。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

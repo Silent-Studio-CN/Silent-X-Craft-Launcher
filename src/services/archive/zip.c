@@ -1,17 +1,9 @@
-/* SXCL-C ZIP 读取实现 —— 语义见 include/sxcl/zip.h。
- *
- * 结构:
- *   1) zip_fopen_utf8():UTF-8 路径打开(Win32 走 _wfopen_s,不受代码页影响);
- *   2) EOCD 回扫 + 中央目录解析:一次读进内存建条目表(名字统一转 UTF-8),
- *      之后条目查询是纯内存操作;解压时才 seek 到本地头按需读压缩数据;
- *   3) 解压:stored 直通;deflate 交给 sxcl_inflate 流式解,全程只占
- *      一块 32 KiB 读缓冲 + 解压器自己的 32 KiB 窗口;
- *   4) extract_file 先写 <dest>.tmp 再原子改名(与 settings/hashcache 同一套路),
- *      写入用 fs.h 的 sxcl_file_*(Windows 下按 UTF-8 -> UTF-16 打开路径)。
- *
- * 只用 stdio + 本工程的 fs/inflate,无第三方依赖;
- * MSVC /W4 /WX 与 gcc -Wall -Wextra -Wpedantic -Werror 双零警告。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include "sxcl/zip.h"
 
 #include "sxcl/fs.h"

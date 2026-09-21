@@ -1,22 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// nav — 主导航(qf NavigationPanel / NavigationPushButton 的 1:1 复刻)
-//
-// 结构(逐条对应 qf navigation_panel.py:107-163):
-//   NavigationPanel(48 宽,折叠)
-//     vBoxLayout  contentsMargins(0,5,0,5)  spacing 4      <- navigation_panel.py:144,148
-//       topLayout contentsMargins(4,0,4,0)  spacing 4      <- navigation_panel.py:145,149
-//         [0] returnButton  NavigationToolButton(FIF.RETURN)  <- navigation_panel.py:84,162
-//         [1] menuButton    NavigationToolButton(FIF.MENU)    <- navigation_panel.py:83,163
-//         [2..] 6 个导航项(SXCL 的 addSubInterface,位置见 main_window.cpp kNavSpec)
-//       弹性(代替 qf 的 scrollArea)
-//       bottomLayout: 设置项(AlignBottom)                  <- navigation_panel.py:160
-//
-// 面板的 QSS 框(assets/theme/qf_exact/dark/navigation_interface.qss:8-13)
-//   NavigationPanel[menu=false] { background: transparent; border: 1px solid transparent;
-//                                 border-top-right-radius: 7; border-bottom-right-radius: 7; }
-// 底色透明 -> 透出窗口底 #202020(main_window 的 paintEvent);1px 的(透明)border 会把布局内容
-// 再收进 1px,所以条目实际落在 x=5 / y=6(参考图 py_home.png 实测:胶囊与指示条左缘 5.0,
-// 图标盒 x 16.5..32.5,菜单按钮图标盒 y 56..72)。
+
 #include <QFrame>
 #include <QHash>
 #include <QString>

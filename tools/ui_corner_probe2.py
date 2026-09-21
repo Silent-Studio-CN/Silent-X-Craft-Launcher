@@ -1,3 +1,7 @@
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import sys
 from PIL import Image
 

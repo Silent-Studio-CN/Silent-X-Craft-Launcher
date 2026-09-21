@@ -1,13 +1,9 @@
-/* 加密原语对拍:**RFC 8439 的官方向量**(ChaCha20 块函数 / Poly1305 / ChaCha20-Poly1305 AEAD)。
- *
- * 为什么值得逐位对拍:降级存储路径(0600 文件 + 本机密钥)能不能"真的算加密"全靠这个 AEAD。
- * 自己写的密码学只有两种状态 —— 被官方向量证明过,和不能用。这里选前者。
- *
- * 实测收获(两条都是这套向量抓出来的,肉眼看代码根本看不出来):
- *   1) Poly1305 的 r-clamping 在 5×26 位肢体里**每个肢体的掩码都不一样**,写成一个掩码会算错;
- *   2) AEAD 的 Poly1305 与"原始 Poly1305"是两套尾部规矩(一个是 pad16 + 每块带 2^128,
- *      一个是尾部补 0x01),搞混了 tag 就永远对不上。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <string.h>
 

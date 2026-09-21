@@ -1,3 +1,9 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "tray.h"
 
 #include <QAction>

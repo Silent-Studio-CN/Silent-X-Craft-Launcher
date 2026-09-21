@@ -1,4 +1,7 @@
-# 隔离实验:裸 qf 窗口 + 卡片,测出 qf 自己渲染的颜色(排除 SXCL 的干扰)
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import sys
 from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout

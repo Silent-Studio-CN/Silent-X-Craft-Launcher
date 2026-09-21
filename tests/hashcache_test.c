@@ -1,5 +1,9 @@
-/* 哈希缓存测试:键语义 / 落盘往返 / 坏文件容错 / prune_missing / 扩容 / 上限保护。
- * 断言式:任何一项失败,main 返回 1。临时文件放在 build/ 下,测试结束删掉。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1 /* fopen/fprintf 在 MSVC 下默认被标记弃用 */
 #endif

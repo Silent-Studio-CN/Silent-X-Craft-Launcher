@@ -1,3 +1,9 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "main_window.h"
 
 #include "pages/page_factory.h"
@@ -705,13 +711,31 @@ void MainWindow::paintEvent(QPaintEvent *) {
 
 void MainWindow::changeEvent(QEvent *e) {
     FluentWindowBase::changeEvent(e);
+    if (e->type() != QEvent::WindowStateChange || m_inShutdown)
+        return;
+
     // 最大化/还原时三键的图标要跟着变(qf 的 TitleBar.eventFilter 也是在 WindowStateChange
     // 时刷 maxBtn 的图标;我们的最大化键在绘制时读 window()->isMaximized(),所以要主动重绘)。
-    if (e->type() == QEvent::WindowStateChange && m_titleBar) {
+    if (m_titleBar) {
         const QList<QAbstractButton *> buttons = m_titleBar->findChildren<QAbstractButton *>();
         for (QAbstractButton *b : buttons)
             b->update();
     }
+
+    // 「最大化 ⇒ 置顶」必须同生同灭:用户从**任何**入口进出最大化(标题栏双击、
+    // 系统快捷键),置顶标志都要跟着走 —— 只接按钮点击那条路一定会漏。
+    // 小窗口形态不算最大化(它的规则是"小窗口",不申请置顶)。
+    if (m_mode != WindowMode::Mini) {
+        const bool wantTopMost = isMaximized();
+        if (wantTopMost != isTopMost())
+            applyTopMost(wantTopMost);
+    }
+
+    // 窗口被系统最小化(任务栏按钮、Win+Down 之类)也按「最小化 = 隐藏界面」处理:
+    // 用户给的规则是对"最小化"这个**动作**说的,不只是对标题栏那个按钮说的。
+    // 用一个 0 延时排到事件循环之后,免得在状态切换的中途再 hide() 自己。
+    if (isMinimized() && m_tray != nullptr)
+        QTimer::singleShot(0, this, &MainWindow::hideToTray);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *e) {
@@ -727,4 +751,650 @@ void MainWindow::resizeEvent(QResizeEvent *e) {
         m_nav->setCollapsed(true);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 窗口行为:关闭 / 最大化(置顶) / 缩成小窗口 / 最小化(隐藏)
+//
+// 这一整块都是**新增设计**:Python 版 src/app/main_window.py 的窗口部分没有这套语义 ——
+// 它最小化就缩到任务栏、关闭即退出、没有置顶、没有小窗口、没有托盘。规则由用户口述给出
+// (「关闭就是关闭;最大化申请悬于其他应用窗口;缩成小窗口;最小化就退出但不杀进程」),
+// 这里逐条实现,并保证每条都给出可核对的客观读数。完整说明见 docs/13-窗口行为.md。
+//
+// 一句话原则:**窗口状态只有一个写入口**。标题栏三键、标题栏双击、托盘菜单、自检脚本
+// 走的都是本文件这一组方法,不存在"谁把窗口藏了/谁又把它显示出来"互相覆盖。
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────── 客观读数(只读)───────────────────────────
+
+bool MainWindow::taskRunning(const QString &pageKey) const {
+    return runningThreadsUnder(m_pages.value(pageKey, nullptr)) > 0;
+}
+
+int MainWindow::runningTaskCount() const {
+    int n = 0;
+    for (const TaskRecord &record : m_tasks)
+        n += runningThreadsUnder(m_pages.value(record.id, nullptr));
+    return n;
+}
+
+QString MainWindow::currentTaskSummary() const {
+    for (const TaskRecord &record : m_tasks) {
+        QWidget *page = m_pages.value(record.id, nullptr);
+        if (runningThreadsUnder(page) <= 0)
+            continue;
+        // 进度取页面**自己**那根进度条的值:不另立一份计数,免得两个数字对不上
+        const QProgressBar *bar = pageProgressBar(page);
+        if (bar != nullptr)
+            return QStringLiteral("%1 · %2%").arg(record.title).arg(bar->value());
+        return record.status.isEmpty()
+                   ? record.title
+                   : QStringLiteral("%1 · %2").arg(record.title, record.status);
+    }
+    return QString();
+}
+
+bool MainWindow::isTopMost() const {
+#ifdef Q_OS_WIN
+    // 直接问窗口管理器,不问 Qt 的 hint 标志:WS_EX_TOPMOST 才是"真的悬在别人上面"的判据。
+    // (Qt 的 WindowStaysOnTopHint 走 setWindowFlag,会重建原生窗口 —— 我们不那么做。)
+    HWND hwnd = reinterpret_cast<HWND>(const_cast<MainWindow *>(this)->winId());
+    if (hwnd == nullptr)
+        return false;
+    const LONG_PTR style = ::GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    return (style & WS_EX_TOPMOST) != 0;
+#else
+    return (windowFlags() & Qt::WindowStaysOnTopHint) != 0;
+#endif
+}
+
+QString MainWindow::windowStateLine() const {
+    const char *modeName = m_mode == WindowMode::Maximized ? "maximized"
+                           : m_mode == WindowMode::Mini    ? "mini"
+                                                           : "normal";
+    const QRect rect = geometry();
+    const QRect normal = normalGeometry();
+#ifdef Q_OS_WIN
+    HWND hwnd = reinterpret_cast<HWND>(const_cast<MainWindow *>(this)->winId());
+    const LONG_PTR exStyle = hwnd != nullptr ? ::GetWindowLongPtrW(hwnd, GWL_EXSTYLE) : 0;
+    const int sysVisible = hwnd != nullptr ? (::IsWindowVisible(hwnd) ? 1 : 0) : -1;
+#else
+    // 非 Windows 分支**只能用可移植类型**:LONG_PTR 是 Win32 的,Android/Linux 上不存在
+    // (实测挡住过 Android 构建)。qintptr 在 Windows 上就是指针宽度,和 GetWindowLongPtrW 的返回同宽。
+    const qintptr exStyle = 0;
+    const int sysVisible = isVisible() ? 1 : 0;
+#endif
+    // 一行里把"窗口在哪儿/有多大/可不可见/是不是置顶"全摊开 ——
+    // 验收要的是读数,不是"看着像":这行和 PowerShell 侧独立取的值是同一批 Win32 常量。
+    return QStringLiteral(
+               "win | pid=%1 mode=%2 qtVisible=%3 win32IsWindowVisible=%4 hiddenToTray=%5 "
+               "exstyle=0x%6 wsExTopmost=%7 rect=(%8,%9 %10x%11) normalRect=(%12,%13 %14x%15) "
+               "runningTasks=%16 task=[%17]")
+        .arg(QCoreApplication::applicationPid())
+        .arg(QString::fromLatin1(modeName))
+        .arg(isVisible() ? 1 : 0)
+        .arg(sysVisible)
+        .arg(m_hiddenToTray ? 1 : 0)
+        .arg(qlonglong(exStyle), 0, 16)
+        .arg(isTopMost() ? 1 : 0)
+        .arg(rect.x())
+        .arg(rect.y())
+        .arg(rect.width())
+        .arg(rect.height())
+        .arg(normal.x())
+        .arg(normal.y())
+        .arg(normal.width())
+        .arg(normal.height())
+        .arg(runningTaskCount())
+        .arg(currentTaskSummary());
+}
+
+// ─────────────────────── 最大化 = 最大化 + 置顶 ───────────────────────
+
+void MainWindow::applyTopMost(bool on) {
+#ifdef Q_OS_WIN
+    HWND hwnd = reinterpret_cast<HWND>(winId());
+    if (hwnd == nullptr)
+        return;
+    // HWND_TOPMOST / HWND_NOTOPMOST = 用户要的"申请悬于其他应用窗口之上"。
+    // SWP_NOMOVE | SWP_NOSIZE:只改 Z 序与扩展样式,绝不动最大化算好的那套矩形;
+    // SWP_NOACTIVATE:拿置顶不该把焦点从别的程序那里抢过来。
+    ::SetWindowPos(hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#else
+    if (on == ((windowFlags() & Qt::WindowStaysOnTopHint) != 0))
+        return;
+    const bool wasVisible = isVisible();
+    setWindowFlag(Qt::WindowStaysOnTopHint, on);
+    if (wasVisible)
+        show();
+#endif
+}
+
+void MainWindow::setWindowMode(WindowMode mode) {
+    // 形态的**唯一**写入口(小窗口那条路走 setMiniMode,它还要顺手记 geometry)
+    switch (mode) {
+    case WindowMode::Maximized:
+        showMaximized();
+        applyTopMost(true); // 「最大化申请悬于其他应用窗口」——最大化与置顶同生
+        break;
+    case WindowMode::Normal:
+        applyTopMost(false); // 先摘置顶再还原,免得还原那一瞬间还压着别的程序
+        showNormal();
+        break;
+    case WindowMode::Mini:
+        return; // 小窗口不从这里进
+    }
+    m_mode = mode;
+    updateChromeForMode();
+    syncTray();
+    uiTrace(windowStateLine());
+}
+
+void MainWindow::toggleMaximize() {
+    // 小窗口形态下点最大化:先退出小窗口(恢复原 geometry),再按普通规则最大化
+    if (m_mode == WindowMode::Mini)
+        setMiniMode(false);
+    if (m_mode == WindowMode::Maximized || isMaximized())
+        setWindowMode(WindowMode::Normal);
+    else
+        setWindowMode(WindowMode::Maximized);
+}
+
+// ────────────────────── 缩成小窗口 / 恢复原尺寸 ──────────────────────
+
+void MainWindow::buildMiniPanel() {
+    // 「小窗口」保留的东西(用户要求"至少保留"):
+    //   * 标题栏 —— 就是上面那条真标题栏(三键照旧可用),不是另画的假标题
+    //   * 当前任务 + 进度 —— 本面板的两行;没有任务时显示"当前任务:无"
+    //   * 恢复键 —— 「恢复原尺寸」,点它回到进入小窗口之前的尺寸与位置
+    m_miniPanel = new QWidget(this);
+    m_miniPanel->setObjectName(QStringLiteral("sxclMiniPanel"));
+    m_miniPanel->setAttribute(Qt::WA_StyledBackground, true);
+    m_miniPanel->hide(); // 只在「缩成小窗口」形态里出现
+
+    auto *lay = new QVBoxLayout(m_miniPanel);
+    lay->setContentsMargins(16, 12, 16, 12);
+    lay->setSpacing(8);
+
+    m_miniTaskLabel = new QLabel(QStringLiteral("当前任务:无"), m_miniPanel);
+    m_miniTaskLabel->setObjectName(QStringLiteral("sxclMiniTask"));
+
+    m_miniProgress = new QProgressBar(m_miniPanel);
+    m_miniProgress->setObjectName(QStringLiteral("sxclMiniProgress"));
+    m_miniProgress->setRange(0, 100);
+    m_miniProgress->setValue(0);
+    m_miniProgress->setTextVisible(false);
+    m_miniProgress->setFixedHeight(6);
+
+    auto *row = new QHBoxLayout();
+    row->setContentsMargins(0, 0, 0, 0);
+    row->setSpacing(8);
+    m_miniRestoreButton = new QPushButton(QStringLiteral("恢复原尺寸"), m_miniPanel);
+    m_miniRestoreButton->setObjectName(QStringLiteral("sxclMiniRestore"));
+    m_miniRestoreButton->setCursor(Qt::PointingHandCursor);
+    // "再点一次恢复原尺寸与位置"的那个入口(托盘菜单里还有同一个动作)
+    connect(m_miniRestoreButton, &QPushButton::clicked, this, [this] { setMiniMode(false); });
+    row->addStretch(1);
+    row->addWidget(m_miniRestoreButton);
+
+    lay->addWidget(m_miniTaskLabel);
+    lay->addWidget(m_miniProgress);
+    lay->addLayout(row);
+    lay->addStretch(1);
+}
+
+void MainWindow::layoutMiniPanel() {
+    if (m_miniPanel == nullptr)
+        return;
+    // 贴在标题栏下面,占满余下整块 —— 绝对定位,不进根布局(qf 的 1:1 摆法不动)
+    m_miniPanel->setGeometry(0, kTitleBarHeight, width(), qMax(0, height() - kTitleBarHeight));
+}
+
+void MainWindow::setMiniMode(bool on) {
+    if (on == (m_mode == WindowMode::Mini)) {
+        syncTray(); // 已经在目标形态里(托盘菜单可能重复点),把菜单文案对齐就够
+        return;
+    }
+
+    if (on) {
+        // 记住"原尺寸与位置"。**不用先 showNormal() 再读 geometry()**:那要等窗口系统把
+        // 还原做完,读早了拿到的还是最大化尺寸。QWidget::normalGeometry() 正是"最大化之前
+        // 那个普通矩形",Qt 自己记着,读它才是可靠的。
+        const bool fromMaximized = (m_mode == WindowMode::Maximized) || isMaximized();
+        m_preMiniMode = fromMaximized ? WindowMode::Maximized : WindowMode::Normal;
+        m_normalGeometry = fromMaximized ? normalGeometry() : geometry();
+        m_haveNormalGeometry = true;
+        if (fromMaximized)
+            showNormal(); // 小窗口不是"最大化的缩小版":先真的还原
+
+        // 主窗口最小 900x600:不先放开这个下限,窗口根本缩不到 420x168
+        setMinimumSize(kMiniWidth, kMiniHeight);
+        m_mode = WindowMode::Mini;
+        updateChromeForMode();
+
+        // 位置沿用原来的左上角(看起来是"原地缩小"),但**夹回屏幕可用区** ——
+        // 原来在屏幕右下角的窗口缩完之后不该跑到屏幕外面去。
+        QPoint at = m_normalGeometry.topLeft();
+        QScreen *screen = QGuiApplication::screenAt(at);
+        if (screen == nullptr)
+            screen = QGuiApplication::primaryScreen();
+        if (screen != nullptr) {
+            const QRect avail = screen->availableGeometry();
+            at.setX(qBound(avail.left(), at.x(), qMax(avail.left(), avail.right() - kMiniWidth + 1)));
+            at.setY(qBound(avail.top(), at.y(), qMax(avail.top(), avail.bottom() - kMiniHeight + 1)));
+        }
+        setGeometry(QRect(at, QSize(kMiniWidth, kMiniHeight)));
+    } else {
+        m_mode = m_preMiniMode;
+        // 先把形态摆回去(导航/内容栈回来),再复原矩形 —— 顺序反了的话内容栈会先在
+        // 小矩形里布局一次,用户看到的是"先挤一下再展开"。
+        setMinimumSize(kMinimumWidth, kMinimumHeight);
+        updateChromeForMode();
+        if (m_haveNormalGeometry)
+            setGeometry(m_normalGeometry); // **原尺寸与位置**,逐值相等
+        if (m_preMiniMode == WindowMode::Maximized) {
+            showMaximized();
+            applyTopMost(true);
+        }
+    }
+    syncTray();
+    uiTrace(windowStateLine());
+}
+
+void MainWindow::toggleMiniMode() { setMiniMode(m_mode != WindowMode::Mini); }
+
+void MainWindow::updateChromeForMode() {
+    const bool mini = (m_mode == WindowMode::Mini);
+    if (m_nav != nullptr)
+        m_nav->setVisible(!mini);
+    if (m_stack != nullptr) {
+        m_stack->setVisible(!mini);
+        // 内容列的容器就是栈的父控件:栈藏了它也就没内容了,一起藏,免得留一块空列。
+        // (不另存成员:buildUi 里 body 就是 m_stack 的父控件。)
+        if (QWidget *body = m_stack->parentWidget())
+            body->setVisible(!mini);
+    }
+    if (m_miniPanel != nullptr) {
+        m_miniPanel->setVisible(mini);
+        if (mini) {
+            layoutMiniPanel();
+            m_miniPanel->raise(); // 盖在根布局的内容之上(标题栏随后再 raise 一次)
+        }
+    }
+    layoutTitleBar();
+    if (m_tray != nullptr)
+        m_tray->setMiniMode(mini);
+}
+
+// ──────────────────── 最小化 = 隐藏窗口(进程照跑)────────────────────
+
+void MainWindow::hideToTray() {
+    if (m_tray == nullptr) {
+        // 没有托盘就**不能**藏:藏了用户没有任何入口把窗口叫回来,进程会变成不可见的残留。
+        // 如实记一行,窗口保持原样 —— 宁可不隐藏,也不能让窗口失踪。
+        uiTrace(QStringLiteral("win | 本会话没有系统托盘,忽略「最小化=隐藏」,窗口保持可见"));
+        return;
+    }
+    // 隐藏,而不是 showMinimized():
+    //   用户要的是"退出界面但不杀进程" —— 界面就该从桌面上消失,而不是缩到任务栏留个按钮。
+    //   hide() 之后 IsWindowVisible(hwnd) = 0,而进程、事件循环、worker 线程全都照跑。
+    m_hiddenToTray = true;
+    hide();
+    // 顺手把还在跑的任务落一次盘:进程虽然没退,但状态已经写在磁盘上了
+    persistTaskState(true);
+    syncTray();
+    uiTrace(QStringLiteral("win | 最小化=隐藏到托盘(进程与后台任务继续跑) %1")
+                .arg(windowStateLine()));
+}
+
+void MainWindow::showMainWindow() {
+    if (isMinimized())
+        showNormal(); // 万一被系统最小化过
+    show();
+    raise();
+    activateWindow();
+    m_hiddenToTray = false;
+    // 回来时保持原来的形态:最大化状态下退的界面,回来还得是最大化 + 置顶
+    if (m_mode == WindowMode::Maximized)
+        applyTopMost(true);
+    syncTray();
+    uiTrace(QStringLiteral("win | 显示主窗口 %1").arg(windowStateLine()));
+}
+
+// ───────────────────────── 关闭 = 真关闭 ─────────────────────────
+
+void MainWindow::closeEvent(QCloseEvent *e) {
+    // 关闭 = **真关闭**(退出、释放资源)。这里**不是**隐藏 —— 隐藏是"最小化"那条规则。
+    if (m_inShutdown) {
+        e->accept();
+        return;
+    }
+    const int running = runningTaskCount();
+    if (running > 0 && closeNeedsConfirm()) {
+        const auto answer = QMessageBox::question(
+            this, QStringLiteral("退出"),
+            QStringLiteral("还有 %1 个任务在跑。现在退出会把它们停下 —— 任务状态已经记下来了,"
+                           "下次启动可以继续。要退出吗?")
+                .arg(running),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            e->ignore();
+            uiTrace(QStringLiteral("win | 退出确认里选了「不退出」,继续运行"));
+            return;
+        }
+    }
+    e->accept();
+    finishAndQuit();
+}
+
+void MainWindow::requestClose() { close(); } // -> closeEvent -> finishAndQuit
+
+void MainWindow::showEvent(QShowEvent *e) {
+    QWidget::showEvent(e);
+    // 从托盘回来时置顶标志会被系统清掉,这里补回来(最大化形态必须仍然悬在上面)
+    if (!m_inShutdown && m_mode == WindowMode::Maximized)
+        applyTopMost(true);
+}
+
+void MainWindow::hideEvent(QHideEvent *e) {
+    QWidget::hideEvent(e);
+    if (m_inShutdown)
+        return;
+    // 隐藏本身**什么都不做**:进程、事件循环、worker 线程照跑 —— 这正是"最小化 ≠ 退出"。
+    // 这一行日志就是那条规则的证据:窗口已经不可见,后台任务仍在跑。
+    uiTrace(QStringLiteral("win | 窗口已隐藏(进程与后台任务继续) %1").arg(windowStateLine()));
+}
+
+void MainWindow::finishAndQuit() {
+    if (m_quitting)
+        return; // 关闭键与托盘「退出」可能先后到达,收尾只做一次
+    m_quitting = true;
+
+    const int running = runningTaskCount();
+    uiTrace(QStringLiteral("win | 关闭:开始收尾(runningTasks=%1)").arg(running));
+
+    // 1) **先把任务状态落盘** —— 用户明确要求"默认直接退出,但要先把任务状态落盘"。
+    //    顺序不能反:先落盘,再停 worker。
+    persistTaskState(true);
+
+    // 2) 显式结束后台 worker(不在这里 join:原因见 stopBackgroundWork 的注释)
+    stopBackgroundWork();
+
+    // 3) 托盘先收掉:否则任务栏上会留下一个要等鼠标划过才消失的幽灵图标
+    if (m_tray != nullptr)
+        m_tray->hide();
+
+    // 4) 退出事件循环 -> main() 返回 -> 窗口析构 -> 页面析构 -> worker 析构(取消 + join)
+    m_inShutdown = true;
+    uiTrace(QStringLiteral("win | 关闭:退出事件循环,进程即将消失"));
+    QCoreApplication::quit();
+}
+
+int MainWindow::stopBackgroundWork() {
+    int stopped = 0;
+    for (const TaskRecord &record : m_tasks) {
+        QWidget *page = m_pages.value(record.id, nullptr);
+        if (page == nullptr)
+            continue;
+        const QList<QThread *> threads = page->findChildren<QThread *>();
+        for (QThread *thread : threads) {
+            if (thread == nullptr || !thread->isRunning())
+                continue;
+            ++stopped;
+            // 只发收工请求,不在这里 wait():主线程等下载线程会把"关闭"变成一个卡住的关闭。
+            // 真正的"停"由 worker 自己的析构完成 —— install_worker.cpp:104-113 与
+            // launch_worker.cpp:45-53:置取消标志 -> quit() -> wait()。页面随窗口析构时执行。
+            thread->requestInterruption();
+            thread->quit();
+        }
+    }
+    uiTrace(QStringLiteral("win | 退出:后台 worker 线程 %1 条接到收工请求(join 由页面析构负责)")
+                .arg(stopped));
+    return stopped;
+}
+
+// ───────────────────────────── 托盘 ─────────────────────────────
+
+void MainWindow::buildTray() {
+    if (!SxclTray::available()) {
+        uiTrace(QStringLiteral("win | 本会话没有系统托盘:不建托盘,最小化也不会隐藏窗口"));
+        return;
+    }
+    m_tray = new SxclTray(this);
+    connect(m_tray, &SxclTray::showWindowRequested, this, &MainWindow::showMainWindow);
+    connect(m_tray, &SxclTray::toggleMiniRequested, this, &MainWindow::toggleMiniMode);
+    connect(m_tray, &SxclTray::quitRequested, this, &MainWindow::finishAndQuit);
+    m_tray->show();
+
+    // 「最小化 = 隐藏界面但进程活着」的前提:关掉最后一个窗口**不**结束进程。
+    // **只有真的有托盘时才打开这条规则** —— 没有托盘还打开的话,窗口一藏用户就再也找不回来了。
+    // Qt6 里 setQuitOnLastWindowClosed 在 **QGuiApplication**(QApplication 继承)上,
+    // 不在 QCoreApplication 上 —— 写错就是编译错误(实测被 Android 与桌面同时抓到)。
+    QGuiApplication::setQuitOnLastWindowClosed(false);
+    syncTray();
+}
+
+void MainWindow::syncTray() {
+    // 小窗口面板那一行与托盘菜单的「当前任务」共用这一份取值(currentTaskSummary),
+    // 所以两处永远说同一句话,不会一个说"在下载"一个说"无"。
+    const QString summary = currentTaskSummary();
+
+    if (m_miniTaskLabel != nullptr) {
+        m_miniTaskLabel->setText(summary.isEmpty()
+                                     ? QStringLiteral("当前任务:无")
+                                     : QStringLiteral("当前任务:%1").arg(summary));
+    }
+    int percent = -1;
+    for (const TaskRecord &record : m_tasks) {
+        QWidget *page = m_pages.value(record.id, nullptr);
+        if (runningThreadsUnder(page) <= 0)
+            continue;
+        if (const QProgressBar *bar = pageProgressBar(page))
+            percent = bar->value();
+        break;
+    }
+    if (m_miniProgress != nullptr) {
+        m_miniProgress->setVisible(percent >= 0);
+        m_miniProgress->setValue(percent >= 0 ? percent : 0);
+    }
+
+    if (m_tray != nullptr) {
+        m_tray->setMiniMode(m_mode == WindowMode::Mini);
+        m_tray->setTaskSummary(summary);
+    }
+}
+
+// ─────────── 任务状态落盘 / 下次启动恢复(「关掉也能接着下」)───────────
+
+void MainWindow::rememberTask(const TaskRecord &record) {
+    for (TaskRecord &existing : m_tasks) {
+        if (existing.id != record.id)
+            continue;
+        // 只覆盖非空字段:addOrUpdateTask 只带标题/状态,不能把恢复用的版本信息抹成空
+        if (!record.kind.isEmpty())
+            existing.kind = record.kind;
+        if (!record.title.isEmpty())
+            existing.title = record.title;
+        if (!record.status.isEmpty())
+            existing.status = record.status;
+        if (!record.versionId.isEmpty())
+            existing.versionId = record.versionId;
+        if (!record.versionName.isEmpty())
+            existing.versionName = record.versionName;
+        if (!record.loaderType.isEmpty())
+            existing.loaderType = record.loaderType;
+        if (!record.loaderVersion.isEmpty())
+            existing.loaderVersion = record.loaderVersion;
+        return;
+    }
+    m_tasks.append(record);
+}
+
+void MainWindow::persistTaskState(bool interrupted) {
+    const QString path = taskStatePath();
+
+    QJsonArray tasks;
+    for (TaskRecord &record : m_tasks) {
+        record.running = taskRunning(record.id); // **实测**它在不在跑,不是猜
+        if (!record.running)
+            continue; // 跑完的/没跑的任务不需要恢复
+        QJsonObject item;
+        item[QStringLiteral("id")] = record.id;
+        item[QStringLiteral("kind")] = record.kind;
+        item[QStringLiteral("title")] = record.title;
+        item[QStringLiteral("status")] = record.status;
+        item[QStringLiteral("versionId")] = record.versionId;
+        item[QStringLiteral("versionName")] = record.versionName;
+        item[QStringLiteral("loaderType")] = record.loaderType;
+        item[QStringLiteral("loaderVersion")] = record.loaderVersion;
+        tasks.append(item);
+    }
+
+    if (tasks.isEmpty()) {
+        // 没有没跑完的任务 = 下次启动没什么可恢复的。留着旧文件只会让下次开机去"恢复"
+        // 一个早就做完的任务 —— 删掉(不存在也不算错)。
+        if (QFile::exists(path) && QFile::remove(path))
+            uiTrace(QStringLiteral("win | 任务状态:没有未完成任务,%1 已清除").arg(path));
+        return;
+    }
+
+    QJsonObject root;
+    root[QStringLiteral("schema")] = 1;
+    root[QStringLiteral("app")] = QString::fromUtf8(kTitle);
+    root[QStringLiteral("interrupted")] = interrupted;
+    root[QStringLiteral("closedAt")] = QDateTime::currentDateTime().toString(Qt::ISODate);
+    root[QStringLiteral("tasks")] = tasks;
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        uiTrace(QStringLiteral("win | 任务状态**落盘失败**:%1 打不开(%2)")
+                    .arg(path, file.errorString()));
+        return;
+    }
+    const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    const qint64 written = file.write(bytes);
+    file.close();
+    uiTrace(QStringLiteral("win | 任务状态已落盘:%1(%2 个未完成任务,%3 字节)")
+                .arg(path)
+                .arg(tasks.size())
+                .arg(written));
+}
+
+void MainWindow::loadTaskState(bool autoResume) {
+    const QString path = taskStatePath();
+    QFile file(path);
+    if (!file.exists() || !file.open(QIODevice::ReadOnly))
+        return;
+    const QByteArray bytes = file.readAll();
+    file.close();
+
+    const QJsonDocument doc = QJsonDocument::fromJson(bytes);
+    if (!doc.isObject()) {
+        uiTrace(QStringLiteral("win | 任务状态文件不是 JSON,按没有处理:%1").arg(path));
+        return;
+    }
+    const QJsonArray tasks = doc.object().value(QStringLiteral("tasks")).toArray();
+    if (tasks.isEmpty())
+        return;
+
+    // **无人值守时不自作主张起网络任务**:offscreen / 无显示平台没人能看见、也没人能取消它。
+    // 真实桌面会话里默认自动续上;SXCL_UI_RESUME_TASKS=0/1 可以钉死这个行为(取证通路)。
+    const QString pinned = qEnvironmentVariable("SXCL_UI_RESUME_TASKS");
+    const bool headless =
+        QGuiApplication::platformName().compare(QLatin1String("offscreen"), Qt::CaseInsensitive) == 0;
+    const bool resume = !pinned.isEmpty() ? (pinned != QLatin1String("0")) : !headless;
+
+    int resumed = 0;
+    for (const QJsonValue &value : tasks) {
+        const QJsonObject item = value.toObject();
+        TaskRecord record;
+        record.id = item.value(QStringLiteral("id")).toString();
+        record.kind = item.value(QStringLiteral("kind")).toString();
+        record.title = item.value(QStringLiteral("title")).toString();
+        record.status = item.value(QStringLiteral("status")).toString();
+        record.versionId = item.value(QStringLiteral("versionId")).toString();
+        record.versionName = item.value(QStringLiteral("versionName")).toString();
+        record.loaderType = item.value(QStringLiteral("loaderType")).toString();
+        record.loaderVersion = item.value(QStringLiteral("loaderVersion")).toString();
+        if (record.id.isEmpty())
+            continue;
+        rememberTask(record);
+        if (!resume || !autoResume || record.kind != QLatin1String("download") ||
+            record.versionId.isEmpty())
+            continue;
+        // **恢复走产品路径**:重新打开下载进度页。安装引擎自己按 SHA-1 复核磁盘上已有的
+        // 文件(已完整的跳过、没下完的续传),不是这里另写一条"续传"捷径。
+        switchToDownloadProgress(
+            record.versionId,
+            record.versionName.isEmpty() ? record.versionId : record.versionName,
+            record.loaderType, record.loaderVersion);
+        ++resumed;
+    }
+
+    uiTrace(QStringLiteral("win | 上次退出时有 %1 个未完成任务:%2(状态文件 %3)")
+                .arg(tasks.size())
+                .arg(resumed > 0 ? QStringLiteral("已自动恢复 %1 个").arg(resumed)
+                                 : QStringLiteral("只登记,未自动启动"))
+                .arg(path));
+
+    // 恢复过一次就删:否则每次开机都会把同一个任务再排一遍
+    if (resumed > 0 && QFile::remove(path))
+        uiTrace(QStringLiteral("win | 任务状态文件已消费(恢复过一次就不再重复恢复)"));
+}
+
+// ─────────────── 取证通路:SXCL_UI_WINCHECK 脚本化自检 ───────────────
+
+void MainWindow::startWindowSelfCheck(const QString &script) {
+    // 分号分隔的一串命令。用 QString 版本切分,免得为一个小工具引入字符字面量。
+    m_checkSteps = script.split(QStringLiteral(";"), Qt::SkipEmptyParts);
+    for (QString &step : m_checkSteps)
+        step = step.trimmed();
+    m_checkIndex = 0;
+    std::fprintf(stderr, "[wincheck] 脚本 %d 步: %s\n", int(m_checkSteps.size()),
+                 script.toUtf8().constData());
+    std::fflush(stderr);
+    QTimer::singleShot(kCheckStepDelayMs, this, &MainWindow::runSelfCheckStep);
+}
+
+void MainWindow::runSelfCheckStep() {
+    if (m_checkIndex >= m_checkSteps.size())
+        return;
+    const QString step = m_checkSteps.at(m_checkIndex++);
+    int delay = kCheckStepDelayMs;
+
+    if (step == QLatin1String("probe")) {
+        // 什么也不做:只为让下面那行读数落下来
+    } else if (step == QLatin1String("max")) {
+        setWindowMode(WindowMode::Maximized);
+    } else if (step == QLatin1String("normal")) {
+        setWindowMode(WindowMode::Normal);
+    } else if (step == QLatin1String("mini")) {
+        setMiniMode(true);
+    } else if (step == QLatin1String("unmini")) {
+        setMiniMode(false);
+    } else if (step == QLatin1String("togglemax")) {
+        toggleMaximize();
+    } else if (step == QLatin1String("min")) {
+        hideToTray();
+    } else if (step == QLatin1String("show")) {
+        showMainWindow();
+    } else if (step.startsWith(QLatin1String("download:"))) {
+        const QString versionId = step.mid(int(qstrlen("download:")));
+        switchToDownloadProgress(versionId, versionId);
+    } else if (step.startsWith(QLatin1String("wait:"))) {
+        delay = step.mid(int(qstrlen("wait:"))).toInt();
+        if (delay < 0)
+            delay = 0;
+    } else if (step == QLatin1String("quit")) {
+        requestClose(); // 走的是产品路径:closeEvent -> finishAndQuit
+        return;
+    } else {
+        std::fprintf(stderr, "[wincheck] 未知命令: %s\n", step.toUtf8().constData());
+    }
+
+    std::fprintf(stderr, "[wincheck] step=%d/%d cmd=%s\n", m_checkIndex,
+                 int(m_checkSteps.size()), step.toUtf8().constData());
+    std::fprintf(stderr, "[wincheck]   %s\n", windowStateLine().toUtf8().constData());
+    std::fflush(stderr);
+    QTimer::singleShot(delay, this, &MainWindow::runSelfCheckStep);
+}
 } // namespace sxcl::ui

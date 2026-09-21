@@ -1,17 +1,9 @@
-/* Java 版链的后三跳:login_with_xbox → 权益(mcstore)→ 档案(profile)。
- *
- *   POST https://api.minecraftservices.com/authentication/login_with_xbox
- *        {"identityToken":"XBL3.0 x=<uhs>;<XSTS token>"}
- *        → {"username":"…","access_token":"…","token_type":"Bearer","expires_in":86400}
- *   GET  https://api.minecraftservices.com/entitlements/mcstore      (Bearer)
- *        → {"items":[{"name":"product_minecraft",…}],"signature":"…"}     ← 买了才有条目
- *   GET  https://api.minecraftservices.com/minecraft/profile         (Bearer)
- *        → {"id":"<32 位无横线 uuid>","name":"<玩家名>",…}
- *        → 404 = **这个账号没有 Java 版**,必须如实报错,不许拿默认名继续启动。
- *
- * 注意:第 6 跳的两条**不是**同一件事。mcstore 是"商店权益",profile 是"档案存在性";
- * 有的账号是"有档案但没有 ownership 记录"(老账号/迁移中),所以两条都查、分开报。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

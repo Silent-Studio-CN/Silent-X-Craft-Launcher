@@ -1,4 +1,9 @@
-/* 阶段 0 冒烟测试：确认编译链、C11、静态库链接可用。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include <stdio.h>
 #include <string.h>
 

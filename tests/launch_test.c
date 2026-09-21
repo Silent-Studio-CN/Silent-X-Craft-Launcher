@@ -1,10 +1,9 @@
-/* 启动层纯逻辑测试:Java 版本解析 / release 文件 / 候选排序 / 参数拼装 / 日志归类。
- *
- * 这里**不启动任何进程、不联网、不依赖机器上装了什么 Java**:
- *   - java -version 的输出是内嵌字符串(把已捕获的输出喂进解析函数是正式用法,不是测试后门);
- *   - release 文件也走内嵌字符串;另有一条真实文件的小用例,写在 build 目录下(不进仓库);
- *   - 日志样本是照着 Windows 与安卓(& Krypton 包装层 + Mali GPU)实际会出现的版式写的。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

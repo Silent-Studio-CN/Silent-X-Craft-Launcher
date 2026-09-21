@@ -1,24 +1,9 @@
-/* 基岩版链:与 Java 版**同源不同链**。
- *
- *   微软 access_token
- *     → XBL 用户认证(同一跳,可以复用)
- *     → XSTS,**中继方换成 https://multiplayer.minecraft.net/**(必须重新要一次,不能拿 Java 那份)
- *     → POST https://multiplayer.minecraft.net/authentication
- *          {"identityPublicKey":"<base64 P-384 未压缩公钥>","certificate":null,
- *           "token":"XBL3.0 x=<uhs>;<XSTS token>"}
- *        → {"chain":["<JWT>", …]}  ← 这就是进官方基岩客户端要用的证书链
- *
- * 权益为什么必须分开谈:
- *   Java 版和基岩版是**两次独立购买**。买了 Java 不代表有基岩(反之亦然)。
- *   基岩这边没有 mcstore 那样的公开权益接口:能不能拿到 chain 本身就是判据 ——
- *   账号没买基岩时 multiplayer.minecraft.net 会拒绝(常见 403，错误正文里带原因)。
- *   所以我们把 entitlement_checked/entitled 单独记在 bedrock 段里,不去看 Java 段的结论。
- *
- * 诚实边界(写在文档里的同一条):
- *   这条链能拿到 chain,但**把 chain 送进官方基岩客户端**是另一件事 —— 客户端的身份
- *   私钥签名后续的握手包,而安卓上的官方客户端不接受外来的 chain(签名/密钥库都不对)。
- *   本模块只负责"把链取回来",不假装能替官方客户端登录。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

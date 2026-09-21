@@ -1,7 +1,9 @@
-// sxcl-ui — Silent X Craft Launcher 图形前端入口(阶段 6 地基)
-//
-// 这里只做三件事:起 Qt 应用、把图标/主题准备好、开主窗口。
-// 页面内容由后续批次补;命令行前端(sxcl-dl)与核心库保持独立,不受这里影响。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include <QApplication>
 #include <QColor>
 #include <QCursor>

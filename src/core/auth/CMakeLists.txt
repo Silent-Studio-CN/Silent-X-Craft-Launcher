@@ -1,5 +1,7 @@
-# 本目录(auth,正版登录)的源文件由这里追加到 sxcl 目标(见根 CMakeLists 的说明)。
-# 子代理请只改这个文件,不要动根 CMakeLists。
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 target_sources(sxcl PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/util.c        # 缓冲/编码/随机数/时间/人话错误
   ${CMAKE_CURRENT_SOURCE_DIR}/crypto.c      # ChaCha20-Poly1305(RFC 8439,降级存储用)

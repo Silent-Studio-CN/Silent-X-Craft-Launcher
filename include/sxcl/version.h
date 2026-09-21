@@ -1,4 +1,9 @@
-/* SXCL-C 公共头：版本信息。唯一对外契约的起点，勿在此处包含平台头。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #ifndef SXCL_VERSION_H
 #define SXCL_VERSION_H
 

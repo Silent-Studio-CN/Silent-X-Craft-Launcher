@@ -1,3 +1,7 @@
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import json, sys
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt

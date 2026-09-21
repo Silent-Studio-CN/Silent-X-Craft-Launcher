@@ -1,15 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// sxcl_icons —— 方块图标(对应 Python 版 src/app/icons.py)
-//
-// 语义与缩放规则逐条照抄 Python 版:
-//   * 数据源:assets/icons/blocks/*.png(13 个,64x64),键盘映射见 BLOCK_FILES;
-//   * DPR:物理尺寸 = round(size * 屏幕缩放比),生成后 setDevicePixelRatio 标回去,
-//     这样 125%/150% 屏上不会糊(icons.py:187-201 的"图标分辨率极低"根因修复);
-//   * 缩放:整数倍用最近邻(FastTransformation),非整数倍才平滑(icons.py:164-179);
-//   * QIcon 多尺寸:size、max(16,size/2)、size*2(icons.py:203-208);
-//   * 状态映射:state_icon_kind()(icons.py:78-97)与 BLOCK_FILES(icons.py:101-116)。
-// 注意:Python 版 `icons.py:197` 会在缺资源时调用 `_drawn_block`,而该函数**在仓库里没有定义**
-// (死代码;因 assets 存在所以从不触发)。C 版不复制这个 bug:缺资源时返回空图并回报一次。
+
 #include <QHash>
 #include <QIcon>
 #include <QPixmap>

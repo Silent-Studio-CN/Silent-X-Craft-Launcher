@@ -1,17 +1,9 @@
-/* SXCL-C 键位映射核心 —— sxcl.keymap.v1 的模型/解析/序列化/校验/冲突/搜索。
- *
- * 与安卓端 Java 实现的对应关系(逐函数):
- *   sxcl_keymap_parse          <- KeymapLayout.fromJson / ControlButton.fromJson / DirectionControl.fromJson
- *   sxcl_keymap_to_json        <- KeymapLayout.toJson(字段顺序也照着来)
- *   sxcl_keymap_validate       <- KeymapLayout.validate()
- *   sxcl_keymap_conflicts      <- KeymapLayout.conflicts()
- *   sxcl_keymap_find           <- KeymapLayout.find()
- *   sxcl_keymap_action_owners  <- KeymapLayout.actionIndex()
- * 与 Python 版(model.py)的差异:Python 会把坐标/透明度**钳制**到合法区间,Java 不钳制。
- * 这里取"钳制 + 把钳制过的项报出来"(非法项要能报出来,而不是悄悄改),
- * 这样安卓端拿到我们保存的文件也不会画出屏幕外的东西。
- * 内置预设见 keymap_presets.c(presets.py),FCL 互转见 keymap_fcl.c(fcl.py)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1  /* 用了几处 C 串函数,MSVC 默认标弃用(工程惯例,不压 pragma) */
 
 #include "keymap_internal.h"

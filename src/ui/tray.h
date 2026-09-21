@@ -1,16 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// tray —— 任务栏托盘图标(「最小化 = 隐藏窗口」的唯一恢复入口)
-//
-// 为什么是**新增设计**:Python 版 src/app/main_window.py 的窗口部分没有这套语义 ——
-// 它最小化就是最小化到任务栏、关闭即退出、没有托盘。用户对 C 版的要求是
-//   「最小化就退出(界面)但不杀进程,后台任务继续跑」
-// 界面既然退走了,就必须留一个回来的入口 —— 这个类就是那个入口。
-// 所以本文件不是对 Python 版的移植,与 qf 的视觉规格无关:托盘菜单是 Windows
-// 自己的菜单,颜色/字体走系统,不存在"要和参考图逐像素对齐"的对象。
-//
-// 职责边界:**只管托盘,不碰窗口**。三个动作各发一个信号,由 MainWindow 决定怎么做
-// (显示窗口要 raise + 重新置顶,退出要先结束 worker 再落盘)。托盘自己不 new 窗口、
-// 不 close 窗口,免得窗口状态有三个地方改。
+
 #include <QObject>
 #include <QString>
 

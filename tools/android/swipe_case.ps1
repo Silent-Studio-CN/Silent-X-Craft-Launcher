@@ -1,17 +1,7 @@
-# swipe_case.ps1 - one controlled device swipe case, with before/after pixels.
-#
-# Evidence layout (all under build/_android/out/touch/<case>/):
-#   before.png, after.png   - device screencaps (2400x1600, landscape)
-#   measure.txt             - output of the SAME ruler (measure_swipe.py) every time
-#   log.txt                 - the app's own INPUT / scroll MOVE lines for this run
-# so "before fix" and "after fix" are always measured by one instrument.
-#
-# The device screen is kept awake and the keyguard dismissed: a sleeping screen
-# returns a 18 KB flat screenshot and input swipe goes nowhere (found the hard
-# way - the first run measured a black screen).
-#
-# ASCII only. Example:
-#   pwsh -File build/_android/scripts/swipe_case.ps1 -Route home -Case home_before -Swipe 1200,1250,1200,450,400
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 param(
   [string]$Route = 'home',
   [Parameter(Mandatory = $true)][string]$Case,

@@ -1,18 +1,9 @@
-/* P-384(NIST secp384r1)密钥对生成 —— 只做基岩链需要的那一件事:
- * 生成私钥 d,算出公钥 Q = d*G,导出未压缩点(0x04||X||Y,97 字节)的 base64,
- * 填进 POST https://multiplayer.minecraft.net/authentication 的 identityPublicKey。
- *
- * 为什么自研而不是拉个库:仓库的硬约束是"纯 C11、零第三方依赖"。需要的算术不多,
- * 就一小块有限域 + 一条曲线,自己写反而可控(而且能被官方测试向量逐位对拍)。
- *
- * 参数与测试向量**全部来自 RFC 5903 §3.2 / §8.2**(NIST P-384):
- *   p = 2^384 − 2^128 − 2^96 + 2^32 − 1
- *   y² = x³ − 3x + b
- *   私钥 i 与 g^i 的官方向量见 tests/auth_bedrock_test.c —— 只要标量乘法有一位算错,对拍立刻红。
- *
- * 实现:12 个 32 位肢体的 Montgomery 乘法(CIOS)+ Jacobian 坐标双倍/加点 + 求逆用费马小定理。
- * 不做常数时间加固:这里生成的是**本机身份密钥**,不是长期签名密钥,威胁模型里没有计时攻击者。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

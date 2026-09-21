@@ -1,21 +1,9 @@
-/* Xbox Live 两跳:用户认证(拿 XBL token)→ XSTS 授权(拿 XSTS token + uhs)。
- *
- *   POST https://user.auth.xboxlive.com/user/authenticate
- *        {"Properties":{"AuthMethod":"RPS","SiteName":"user.auth.xboxlive.com",
- *                       "RpsTicket":"d=<微软 access_token>"},
- *         "RelyingParty":"http://auth.xboxlive.com","TokenType":"JWT"}
- *   POST https://xsts.auth.xboxlive.com/xsts/authorize
- *        {"Properties":{"SandboxId":"RETAIL","UserTokens":["<XBL token>"]},
- *         "RelyingParty":"rp://api.minecraftservices.com/","TokenType":"JWT"}
- *
- * 中继方(RelyingParty)决定拿到的是"哪一份授权":
- *   rp://api.minecraftservices.com/     → Java 版(第 5 跳用)
- *   https://multiplayer.minecraft.net/  → 基岩版(第二条链)
- * 两者**必须各要一次 XSTS**,不能拿一个去换另一个。
- *
- * XSTS 失败时返回的是 HTTP 401 + {"Identity":"0","XErr":<数字>,"Message":"…","Redirect":"…"}:
- * 那个数字才是真正的原因(账号没档案/地区不支持/未成年…),必须翻成人话 —— 见下面的映射表。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

@@ -1,29 +1,9 @@
-/* SXCL-C 按键布局存取 —— 与 Python 版 src/core/keymap/store.py 逐函数对齐。
- *
- * 目录结构(两边共用同一份文件,安卓端拿起就能用):
- *     {配置目录}/keymaps/preset-minimal.json   内置预设(首次运行落盘,可覆盖)
- *     {配置目录}/keymaps/my-pvp.json           用户自己存的
- *     {配置目录}/keymaps/active.json           {"active": "my-pvp"}
- * {配置目录} = Python platform.py:default_config_directory("SilentXCraftLauncher")
- *   Windows %APPDATA%/SilentXCraftLauncher;macOS ~/Library/Application Support/…;
- *   Linux XDG_CONFIG_HOME 或 ~/.config 下的 silentxcraftlauncher。
- *
- * 对函数(store.py -> 这里):
- *   keymap_dir()          -> sxcl_keymap_store_dir()
- *   list_layouts()        -> sxcl_keymap_store_list()
- *   load()                -> sxcl_keymap_store_load()
- *   save()                -> sxcl_keymap_store_save()
- *   delete()              -> sxcl_keymap_store_delete()
- *   active_name()         -> sxcl_keymap_store_active()
- *   set_active()          -> sxcl_keymap_store_set_active()
- *   ensure_presets()      -> sxcl_keymap_store_ensure_presets()
- *
- * 与 store.py 的两处**有意**差异(都是加固,不是格式差异,见 include/sxcl/keymap.h 的说明):
- *   1) key 带路径分隔符一律拒绝(store.py 会把它拼进路径);
- *   2) 文件名安全化在 C 里按码点近似 str.isalnum()(见 safe_key/py_alnum_cp):
- *      常用文字范围(含中文)与 Python 一致,极冷门文字可能被丢掉。
- * 除这两条外,文件名、字段、JSON 写法(含 set_active 的两空格缩进)都照 store.py 来。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1
 
 #include "keymap_internal.h"

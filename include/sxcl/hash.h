@@ -1,17 +1,9 @@
-/* SXCL-C 公共头：哈希模块（SHA-1 / SHA-256）。
- *
- * 纯 C11 自研实现，零第三方依赖（不依赖 OpenSSL / BCrypt / CryptoAPI），
- * 可移植到 Windows / Linux / Android。
- *
- * 典型用法（下载引擎边下边算）：
- *     sxcl_hash_ctx ctx;
- *     sxcl_hash_init(&ctx, SXCL_HASH_SHA1);
- *     while (读到一块数据) sxcl_hash_update(&ctx, buf, n);
- *     char hex[41];
- *     if (sxcl_hash_final_hex(&ctx, hex, sizeof hex) != 0) { ... }
- *
- * 线程安全：所有状态都在调用方持有的 ctx 内，无全局可变状态，可多线程并行使用。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_HASH_H
 #define SXCL_HASH_H
 #include <stddef.h>

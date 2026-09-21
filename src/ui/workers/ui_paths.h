@@ -1,14 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// ui_paths —— 界面层共用的"运行期取值"解析(工作线程层;**不碰任何控件**)
-//
-// 为什么单独一份:下载配置页、下载进度页、启动页、安装/启动 worker 都要问同样几个问题 ——
-// 游戏目录在哪、我们自己的设置文件在哪、内存给多少、要不要打进度追踪。
-// 以前只有主页有这一份(home_page.cpp:129-192),几处各写一遍必然漂移。
-//
-// 取值口径与主页、CLI 完全一致:**环境变量 > sxcl_settings > 核心库平台默认**。
-//   SXCL_UI_GAME_DIR   验收/取证通路:钉死游戏目录(不动用户配置)
-//   SXCL_UI_SETTINGS   验收/取证通路:钉死设置文件
-//   SXCL_UI_TRACE=1    把核心库回调里的真实数字打到 stderr(验收要的"进度回调真实日志")
+
 #include <QString>
 
 namespace sxcl::ui {

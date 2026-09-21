@@ -1,19 +1,9 @@
-/* 环回重定向服务器(授权码流的"接收端")—— 只监听 127.0.0.1,只活一次登录。
- *
- * 为什么走环回而不是"复制粘贴授权码":
- *   官方推荐的桌面公共客户端做法(RFC 8252):起一个**短命**的本地 HTTP 服务,
- *   把 redirect_uri 指到 http://localhost:<随机端口>/callback,浏览器授权后自动跳回来。
- *   用户不用手抄 code,也不会把 code 抄错。
- *
- * 安全上的三条硬规矩:
- *   1) **只 bind 127.0.0.1**(不是 0.0.0.0):局域网里的其它机器连不上这个端口;
- *   2) **随机端口**(bind 端口 0 让系统分配):避免和别的程序撞端口,也避免被猜到;
- *   3) **校验 state**:回调里的 state 必须和发起时一致,否则直接拒(防 CSRF/串号),
- *      而且**只接受 /callback 一条路径**。
- *
- * 生命周期:start(拿端口与 redirect_uri)→ wait(等一次回调,可超时/可取消)→ destroy。
- * 只服务一次登录,用完立刻关 —— 不留常驻端口。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

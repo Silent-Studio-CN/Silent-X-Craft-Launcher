@@ -1,6 +1,7 @@
-# Device side: install the APK, take a visible-run screenshot, then render the
-# nine acceptance routes at 1100x750 @1.5 (offscreen QPA) and pull them back.
-# Runs on THIS machine (the devices are on the local LAN). ASCII only.
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 param([string]$Apk = 'D:\SilentStudio\prog\Silent-X-Craft-Launcher - C\build\_android\out\sxclui-debug.apk')
 $ErrorActionPreference = 'Continue'
 function L($s) { Write-Output ('[dev] ' + $s) }

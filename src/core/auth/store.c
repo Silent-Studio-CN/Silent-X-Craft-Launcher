@@ -1,17 +1,9 @@
-/* 令牌加密存储:会话 ↔ JSON ↔ 加密文件。
- *
- * 三条后端路径(见 auth_store.h 的说明):
- *   Windows → DPAPI(CryptProtectData,密钥绑用户凭据)
- *   macOS   → Keychain(SecItemAdd/SecItemCopyMatching,kSecClassGenericPassword)
- *   Linux   → 运行时 dlopen libsecret(GNOME Keyring);失败就降级
- *   降级    → 0600 文件 + 本机派生密钥 + ChaCha20-Poly1305(AEAD 带认证,改一个字节都解不开)
- *
- * 文件长这样(16 字节头 + 载荷;头同时是 AEAD 的附加认证数据):
- *   "SXCLAUTH" | ver(1) | backend(1) | flags(2) | payload_len(4) | payload
- *
- * **测试可覆盖**:sxcl_auth_store_set_backend_for_test() 能把后端钉死,
- *   于是"降级路径"也能在 Windows 上被真实地跑一遍(而不是"只在 Linux 上大概能跑")。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

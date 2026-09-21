@@ -1,15 +1,9 @@
-/* java_runtime 测试:**完全不联网** —— 官方清单当夹具,文件传输用内存假传输。
- *
- * 覆盖(交付要求的那四条):
- *   1) 正常安装:清单两级解析 -> 逐文件 SHA-1 -> 落盘 -> 可执行位 -> 标记文件 -> 找得到 java;
- *   2) 校验失败:假装服务端返回的字节被改过 -> 引擎判失败 -> 安装返回 ERR_DOWNLOAD;
- *      另外单独一条:组件清单自身的 SHA-1 不符 -> ERR_MANIFEST(不换源硬上);
- *   3) 取消:下到第一个文件后用户按取消 -> ERR_CANCELLED(与普通失败可区分);
- *   4) 已存在跳过:第二次装同一个目录 -> 一个字节都不下、一次传输都不发(files_skipped 如实计数)。
- *
- * 另外覆盖:平台键、MC 版本 -> Java 主版本、组件枚举/挑选(排除 minecraft-java-exe)、
- * 组件不存在、runtime 根目录、find 扫描。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #else

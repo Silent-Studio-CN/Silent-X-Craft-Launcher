@@ -1,25 +1,9 @@
-/* SXCL-C 哈希缓存:路径|大小|mtime_ns -> 摘要 的磁盘缓存(纯 C11,零第三方依赖)。
- *
- * 用途:下载引擎每次启动都要校验几千个文件(客户端 jar + 74 个库 + 5147 个资源对象,
- * 461MB),完整重算 SHA-1 太慢;命中缓存即可直接跳过重算。
- *
- * 语义(与 Python 版 src/core/download/verify.py 的 HashCache 对齐):
- *   - 键 = "路径|大小|mtime_ns",竖线分隔;同一路径但 size/mtime_ns 变了就是另一条
- *     记录(旧记录保留不影响正确性,只是占地方,可用 prune_missing 清理)。
- *   - 磁盘格式:第一行是版本标记,之后每行
- *         hex<TAB>size<TAB>mtime_ns<TAB>path
- *     版本标记不认识的整份文件当作空缓存;单行格式不对的只跳过该行(坏行忽略,
- *     绝不因为缓存文件损坏而失败)。写入方保证路径里不含 TAB/换行。
- *   - 落盘是原子的:先写 "<path>.tmp" 再改名覆盖 <path>,不会留下半截文件。
- *   - 线程安全:内部一把互斥锁,下列所有函数都可以直接在多线程里调用。
- *   - get 返回的是缓存内部持有的字符串,调用方不得释放;在别的线程对本缓存做写操作
- *     (put/remove/prune/clear/close)之前有效。
- *
- * 上限保护(与 Python 版"防无限增长"的意图一致):
- *   条目数上限 20000。写入新条目时若已有条目数已达到上限,先调用 prune_missing
- *   清掉"文件已不在"的条目;若仍然达到上限,则整体清空缓存,然后再写入本次条目。
- *   于是 count 永远不会超过 20000,且清空之后本次写入必然保留。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_HASHCACHE_H
 #define SXCL_HASHCACHE_H
 #include <stddef.h>

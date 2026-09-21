@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 """measure_swipe.py - vertical displacement between two device screenshots.
 
 One ruler for "before / after" swipe evidence: give it the two PNGs taken with

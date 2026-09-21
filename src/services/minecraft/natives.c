@@ -1,16 +1,9 @@
-/* Minecraft 原生库(natives)抽取 —— 实现说明见 include/sxcl/natives.h。
- *
- * 三个关键实现决定:
- *   1) **幂等靠一份状态文件**(<natives_dir>/.sxcl_natives.state),不是"文件存在就跳过"。
- *      状态里记的是"哪个 jar(大小+mtime)+ 它解出了哪些文件";只有三者都对得上才跳过。
- *      这么做是为了同时挡住两种情况:jar 被重新下载过(内容变了要重解),
- *      以及文件被误删/被杀软吃掉(记了但文件没了要重解)。
- *   2) **extract.exclude 是前缀匹配**,和官方启动器一致("META-INF/" 就是把整个目录挡掉),
- *      不做 glob —— glob 的语义在各家启动器里就没统一过。
- *   3) **解压失败即整体失败**,错误信息里带上 jar 与条目名。启动器在 natives 不全时启动,
- *      用户看到的只会是 LWJGL 的 UnsatisfiedLinkError(而且往往在游戏窗口起来之后),
- *      不如当场说清楚是哪个 jar 的哪个条目出了问题。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

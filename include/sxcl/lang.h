@@ -1,26 +1,9 @@
-/* SXCL-C 国际化(i18n)查表 —— 纯 C11,不依赖 Qt。
- *
- * 对应参考实现:
- *   * Python 版 src/core/lang.py(键值表 + 语言文件自动下载/内置回退);
- *   * 语言文件 config/lang/<code>.lang(格式:key = value,# 注释,空行忽略)。
- *
- * 三条硬约束(逐条兑现,不许打折):
- *   1) **格式逐字段兼容** Python 版:.lang 文件按"整行 strip -> 第一个 '=' 切分 ->
- *      键/值各自 strip"解析,与 lang.py:137-150 的 _parse 一字不差 —— 直接拿 Python 版
- *      那份 config/lang/en-us.lang 就能用(测试 tests/lang_test.c 拿真文件逐条对拍)。
- *   2) **找不到的键回落到中文**:查表顺序 = 当前语言(磁盘 -> 内置) -> 简体中文(磁盘 -> 内置)
- *      -> 调用方给的 def。所以英文包少一条也不会显示成空串。
- *   3) **不联网也能用**:中文/英文两份默认文案编译进库(见 lang_table.inc,由 Python 版
- *      的 .lang 生成),磁盘上的 .lang 只是"覆盖/翻译更新"的入口。Python 版首次运行要
- *      去 GitHub 拉语言包(lang.py:117-135);C 版不联网也有完整两份,拉取是纯可选。
- *
- * 语言代码:归一化到小写短横线形式("zh-CN"/"zh_CN"/"zh" -> "zh-cn"),认不出的回落到
- *   zh-cn —— 与 lang.py:164-165(`if lang_code not in _SUPPORTED: lang_code = "zh-cn"`)同语义。
- *
- * 线程契约:句柄本身**不加锁**(与 settings.c 一个口径)。另外提供一个进程级默认表
- *   (sxcl_lang_set_default / sxcl_lang_tr):只在启动与"切语言"时由主线程写,查询只读。
- *   UI 线程之外要用,请自己拿句柄或用锁。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_LANG_H
 #define SXCL_LANG_H
 

@@ -1,7 +1,9 @@
-/* Qt 传输后端测试:离线路径必须确定性通过;联网路径由环境变量开关控制。
- * 联网用例默认不开(CI 上网络抖动会变成假失败),本地联调时设:
- *   $env:SXCL_NET_ONLINE_TEST = "1"
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QProcessEnvironment>

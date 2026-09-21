@@ -1,13 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// icon_registry — 图标注册表(阶段 6 地基)
-//
-// 图源:PCL 抽出来的矢量图 assets/icons/pcl/*.svg(53 个,viewBox 已归一化到墨迹包围盒)。
-// 选图依据一律来自 assets/icons/pcl/index.tsv(文件名 / 原名称 / 来源文件 / 样式 / 路径长度),
-// 不靠猜:每个语义名都记着它对应的 index.tsv 行,自检与报告都引用它。
-//
-// 着色:SVG 里的墨迹是 fill="currentColor",加载后按**当前主题**替换成目标色 ——
-// 所以同一份 svg 在浅色/深色下都成立,不是"只在白底好看"。
-// 颜色的来源是 libqf 的主题令牌(见 theme_bridge),本层不定义任何主题色。
+
 #include <QByteArray>
 #include <QColor>
 #include <QIcon>

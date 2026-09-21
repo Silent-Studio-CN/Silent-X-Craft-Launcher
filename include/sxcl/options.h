@@ -1,13 +1,9 @@
-/* Minecraft options.txt 读写(键:值 文本,UTF-8,保留顺序与未知行)。
- *
- * 为什么需要它:
- *  实测(安卓 26.2):把图形 API 切到 Vulkan,退出游戏再进又变回"默认" —— 游戏在 Vulkan
- *  初始化失败时会回退并把自己认为合适的值写回 options.txt。也就是说**这个设置不能交给游戏自己记**,
- *  必须由启动器持有:每次启动前按实例配置重新写入,启动后从日志确认实际用了哪个后端,
- *  发现静默回退就在界面上说明原因(而不是让用户以为设置没生效)。
- *
- * 格式:每行 `key:value`;没有冒号的行原样保留(bare 行)。空行保留。写入用 tmp + 原子改名。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_OPTIONS_H
 #define SXCL_OPTIONS_H
 

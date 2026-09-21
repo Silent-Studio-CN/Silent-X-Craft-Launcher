@@ -1,3 +1,9 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #ifndef SXCL_SETTINGS_H
 #define SXCL_SETTINGS_H
 #include <stddef.h>

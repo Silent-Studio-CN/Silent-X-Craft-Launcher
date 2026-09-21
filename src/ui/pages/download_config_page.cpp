@@ -1,31 +1,9 @@
-// download_config_page.cpp —— 下载配置页(临时页,从"版本"页进来)
-//
-// 逐条移植 Python 版 src/app/pages/download_config_page.py(行号见每段注释),外壳照抄
-// src/app/common/base_page.py(BasePage = qf ScrollArea),折叠卡片照抄
-// src/app/widgets/section_card.py,加载器行照抄 src/app/widgets/loader_row.py。
-// 外观的唯一依据:docs/05-UI-1to1规格.md + Python 源码,尺寸/颜色/字号逐条指回出处。
-//
-// 控件树(实测 build/ref/TREE_py_download_config.txt;页面可用区 1051x701,窗口内左上角 (48,48)):
-//   DownloadConfigPage(ScrollArea, objectName=DownloadConfigPage, 1px StyledPanel 边框)
-//     └ view(QWidget, background: transparent)
-//        └ QVBoxLayout(margins 28,24,28,24; spacing 16; AlignTop)
-//           ├ QPushButton "←  返回版本列表"  993x33  (insertWidget(0);13px;accent;左对齐)
-//           ├ TitleLabel     "安装 <id>"     993x38  (28px/600)
-//           ├ SubtitleLabel  ""              993x27  (20px/600;Python 没 hide,留着占位)
-//           ├ SectionCard "版本名称" 📝      993x89  (外框 4,4,4,8;头部定高 46;展开)
-//           │   ├ 头部 HBox(14,0,14,0) sp10: 图标 20x46 + 标题 56x46 + 弹性
-//           │   │                            + summary 6x46 + 箭头 "▴" 7x46
-//           │   └ body VBox(14,0,14,8) sp6: QLineEdit 957x23(1px input_border/圆角 6)
-//           │                              + BodyLabel "⚠ 不能与现有版本名相同"(初始隐藏)
-//           ├ SectionCard "模组加载器" 🔧    993x58  (收起 -> body 隐藏)
-//           ├ CardWidget  下载按钮卡         993x44  (HBox(0,0,0,0) sp6)
-//           │   ├ QWidget compat_box 494x44 (初始可见且为空 -> 与按钮平分宽度)
-//           │   └ PrimaryPushButton "开始下载" 493x44
-//           └ 弹簧
-//
-// 数据来源说明(见交付报告):加载器版本列表来自核心服务(mod_loader/api),UI 层没有网络
-// 层,所以四行停在 Python 构造后、worker 回来之前的初始态("加载中…" / OptiFine "检测中…")。
-// 这不是"没做完":参考图就是在这个状态下抓的(见 tools/grab_reference_ui.py 的临时页分支)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "page_factory.h"
 
 #include <QAbstractButton>

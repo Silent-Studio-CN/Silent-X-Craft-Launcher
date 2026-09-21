@@ -1,19 +1,9 @@
-/* SXCL-C 原生库(natives)抽取测试:不需要 GPU、不需要网络、不需要真 Minecraft。
- *
- * 夹具:测试自己写一棵目录树,再用 system() 调 PowerShell 的 Compress-Archive 压成 jar
- * (与 zip_test.c 同一套办法;这样仓库里不留任何二进制,生成物都在 build-b/ 下)。
- *
- * 覆盖:
- *   1) 老形态(1.12 及更早):library.natives.<os> -> downloads.classifiers[..].path;
- *   2) 新形态(1.19 起):独立库条目 name 带 ":natives-<os>" 分类器,jar 在 downloads.artifact;
- *   3) extract.exclude = ["META-INF/"] 必须把整个目录挡在门外;
- *   4) sub/bar.so 的相对路径必须保留(解到 <natives>/sub/bar.so);
- *   5) 幂等:第二次调用不报错、文件还在、**mtime 不被无谓改写**;
- *   6) jar 变了(重新下载/内容不同)必须重解 —— 幂等不能变成"永远不动";
- *   7) jar 不存在时,错误信息要能指明是哪个库的哪个分类器;
- *   8) 接进启动驱动:dry_run 也能看到 natives 被准备好(count > 0),文件真的落到了
- *      -Djava.library.path 指向的那个目录里。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1 /* 测试里用 fopen/fwrite 造夹具,MSVC 会标记弃用 */
 
 #include <stdio.h>

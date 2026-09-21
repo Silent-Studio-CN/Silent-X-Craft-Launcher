@@ -1,4 +1,9 @@
-/* SXCL-C 机器信息实现(物理内存 / CPU)—— 各平台只用系统自带能力,见 sxcl/sysinfo.h。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

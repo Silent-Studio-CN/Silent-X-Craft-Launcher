@@ -1,20 +1,9 @@
-/* SXCL-C "一次取回一整段文本" 的 HTTP 小入口 —— net.h 只提供流式 transport,这里补齐
- * 版本清单 / 版本 JSON / 加载器列表 / JRE 清单都需要的那一层(元数据层)。
- *
- * 与 net.h 的分工:
- *   net.h 管"连上去、发请求、读字节";本模块只管"把响应体读进内存 + 把状态码翻成人话"。
- *   换后端(WinHTTP / Qt / libcurl)不需要动这里,因为用的就是 sxcl_transport 函数指针。
- *
- * 语义(逐条定死,别猜):
- *   - 成功返回 SXCL_HTTP_OK,*out 是 malloc 出来的缓冲,内容后面额外补一个 NUL(方便当 C 串用),
- *     *out_len 是**正文字节数**(不含补的 NUL);调用方 free(*out)。失败时 *out=NULL、*out_len=0。
- *   - 只接受 2xx。3xx/4xx/5xx 一律失败(SXCL_HTTP_ERR_STATUS),err 里是"状态码 + 人话"
- *     ("资源不存在(HTTP 404)" / "服务器错误(HTTP 503),请稍后再试")。
- *   - 默认最大 8 MiB,超过就报 SXCL_HTTP_ERR_TOO_LARGE 而不是把内存吃光:
- *     能提前知道(Content-Length)就提前拒,不知道也在读的过程中随时掐断。
- *   - 响应体里可以有 NUL 字节(get_text 这个名字只表示"一次全拿回来";文本/二进制都走它)。
- *   - 不抛异常、不 abort:所有失败都返回负错误码 + 人话 err。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_HTTP_H
 #define SXCL_HTTP_H
 

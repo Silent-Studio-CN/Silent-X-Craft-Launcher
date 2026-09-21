@@ -1,22 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// account —— 账户模块(UI 侧):把核心库 sxcl 的正版登录接到界面上。
-//
-// **Python 版没有这个功能**(它只有离线启动),所以这一层是**新增功能**,不是移植:
-// 控件/卡片/令牌/字号一律延续 qf(libqf)与 docs/05-UI-1to1规格.md 的既有口径
-// —— 只加内容,不发明任何配色与尺寸(见 §2 令牌 / §3 字号 / §5 应用级样式)。
-//
-// 依据(核心库已实现并真机实测,见 docs/09-正版登录.md):
-//   include/sxcl/auth.h        整链 API(sxcl_auth_login / refresh / session_bedrock)、回调、取消
-//   include/sxcl/auth_store.h  加密落盘(DPAPI;文件里**没有**明文 token)
-//   include/sxcl/launch.h      正版身份启动(sxcl_launch_request 的 player_name/uuid/access_token)
-//   docs/09-正版登录.md §6.3   微软令牌一到手就落盘:后面任何一跳失败都不许把这枚凭据丢掉
-//
-// ── 线程纪律(硬要求) ──
-// 核心库的登录/续期/启动都是**同步阻塞**的(内部自己起事件循环等 HTTP),
-// 所以本模块把它们全部放进 work 线程(AccountTask / AccountLaunchTask),
-// UI 线程只收 signal 回填。**主线程绝不允许调用任何 sxcl_auth_* / sxcl_launch_* 阻塞接口。**
-//
-// 令牌纪律:令牌只在内存里传给核心库,**不进日志、不进界面、不进信号**(界面只显示玩家名)。
+
 #include <QMutex>
 #include <QObject>
 #include <QString>

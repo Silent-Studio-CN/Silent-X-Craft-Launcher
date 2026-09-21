@@ -1,13 +1,9 @@
-/* SXCL-C 内置按键预设 —— 与 Python 版 src/core/keymap/presets.py **逐字段一致**。
- * 之所以要求逐字段一致:安卓端 assets/keymaps/*.json 就是这套预设生成的
- * (script 生成时带了 guide 之类的 meta),测试会把那 9 份资产喂进来与本模块造出来的
- * 预设逐控件比对 —— 对不上就说明两边跑偏了。
- *
- * 五个预设(minimal/survival/building/pvp/one_hand):
- *   * 每个预设自带教学提示(hint),进游戏长按按钮就能看到这个键干嘛用;
- *   * 坐标是 0~1 归一化的,横竖屏各有自己的排布;
- *   * one_hand 无视请求的屏幕方向(它天生就是竖屏单手)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1
 
 #include "keymap_internal.h"

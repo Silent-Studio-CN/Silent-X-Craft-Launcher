@@ -1,13 +1,9 @@
-/* SXCL-C 传输层接口 —— 只负责"把一段字节从 URL 拿回来",不掺下载调度逻辑。
- *
- * 为什么要抽这一层:
- *   多连接 Range、断点续传、令牌桶限速、SHA 校验、换源重试都在引擎里(自研部分);
- *   TLS 握手、证书校验、代理、连接复用属于"商品化能力",按平台换实现即可:
- *     - Windows : WinHTTP(系统自带,零额外依赖)
- *     - Android : Qt Network(Qt 已是 UI 层依赖)
- *     - 测试     : 内存假实现,让引擎可以在没有网络的情况下被完整测试
- * 引擎只认这个结构体的函数指针,不认具体后端。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_NET_H
 #define SXCL_NET_H
 

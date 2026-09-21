@@ -1,4 +1,7 @@
-# 分区比对:把 1:1 的差距定位到具体区域
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import sys
 from collections import Counter
 from PIL import Image

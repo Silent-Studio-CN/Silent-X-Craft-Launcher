@@ -1,16 +1,9 @@
-/* 版本 JSON 落盘回归测试 —— **不联网**。
- *
- * 背景(实测踩出来的产品级缺陷):
- *   sxcl-dl version 把版本 JSON 只留在缓存目录(sxcl-cache/<id>.json),**不写**
- *   <游戏目录>/versions/<id>/<id>.json —— 而启动层读的正是后者。
- *   症状:用户"下载完成了"却启动不了,报"找不到版本 JSON"(D:\mc-test 上真实复现过)。
- *
- * 这个用例守住四件事:
- *   1) 写到 **<游戏目录>/versions/<id>/<id>.json**(路径就是启动层要的那一个);
- *   2) 内容能被启动层解析 —— 不只是"JSON 合法",而是真让 sxcl_launch_run 以 dry_run 读它一次;
- *   3) 重复落盘**不会损坏已有文件**(原子改名),也不留 .tmp 垃圾;
- *   4) 版本名带 "../" 之类会被拒(不让它写到 versions/ 外面去)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

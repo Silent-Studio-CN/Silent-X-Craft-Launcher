@@ -1,31 +1,9 @@
-/* SXCL-C 官方 Java 运行时(JRE/JDK)安装 —— 纯 C11,复用下载引擎与校验层。
- *
- * 参考实现(行为对齐,不是照抄代码):
- *   * Python 版 src/services/java/mojang_runtime.py(清单结构、平台键、组件挑选、装到哪、
- *     逐文件 SHA-1、可执行位、.sxcl_runtime.json 标记文件、find_installed_runtimes);
- *   * HMCL HMCLCore/.../download/java/mojang/{MojangJavaDownloads,MojangJavaRemoteFiles,
- *     MojangJavaDownloadTask}.java 与 HMCL/.../java/JavaManager.getMojangJavaPlatform()
- *     (GPLv3;本文件是按它们描述的**协议与行为**用 C 重写,没有拷贝 Java 代码 —— 见 docs/10)。
- *
- * 清单结构(官方 all.json,两级):
- *   all.json[平台][组件] = [ { manifest: {url, sha1, size}, version: {name, released} } ]
- *   组件清单 manifest.files[相对路径] = {
- *       type: "file" | "directory" | "link",
- *       executable: bool,
- *       downloads: { raw: {url, sha1, size}, lzma: {...} },
- *   }
- *
- * 装到哪(与 Python 一致):
- *   <target_root>/<组件名>-<平台键>/…     例如 %APPDATA%/SilentXCraftLauncher/runtime/java-runtime-delta-windows-x64
- *   Android 上 target_root 必须是**应用私有目录**(沙箱 + /data 分区 noexec,/sdcard 需要
- *   MANAGE_EXTERNAL_STORAGE);默认根见 sxcl_java_runtime_default_root($SXCL_ANDROID_FILES/…)。
- *   两个根都可由调用方覆盖(便携版/多份运行时/测试各装各的)。
- *
- * 复用而不是重写:清单抓取走 sxcl_http.h(带期望 SHA-1),文件下载走 sxcl_engine
- *   (断点续传/限速/换源/逐文件 SHA-1/已存在快路径跳过),本文件里没有自己的下载循环。
- *
- * 不联网也能装(夹具/离线):请求里可以直接给 all_json_text / manifest_text(测试就是这么做的)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_JAVA_RUNTIME_H
 #define SXCL_JAVA_RUNTIME_H
 

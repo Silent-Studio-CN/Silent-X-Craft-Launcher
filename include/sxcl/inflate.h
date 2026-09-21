@@ -1,18 +1,9 @@
-/* SXCL-C DEFLATE 解压模块(RFC 1951 raw deflate)。
- *
- * 纯 C11 自研实现,零第三方依赖(不用 zlib / libdeflate / OS 压缩 API),
- * 四平台(Windows / Linux / macOS / Android)只需标准 C 运行时。
- *
- * 用途:ZIP 条目(jar / zip)的解压。两种用法:
- *   1) 一次性:数据不大(install_profile.json / version.json),直接用 sxcl_inflate_raw;
- *   2) 流式:大条目(几十 MB 的 maven 依赖)边解边写,用 open/feed/finish/close,
- *      sink 里写文件即可,内存占用恒为 32 KiB 窗口 + 少量表。
- *
- * 实现约定:
- *   - 只吃 raw deflate(不含 zlib 的 2 字节头,也不含 gzip 头);
- *   - 32 KiB 环形窗口,匹配距离可以跨块回溯到本流此前的任意已输出字节;
- *   - 数据损坏、截断、距离超出已输出长度一律返回错误,绝不越界读写。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_INFLATE_H
 #define SXCL_INFLATE_H
 

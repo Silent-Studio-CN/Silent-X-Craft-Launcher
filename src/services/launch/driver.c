@@ -1,23 +1,9 @@
-/* 启动驱动 —— 把已经做好的几层串成"真的把游戏跑起来"这一条线。
- *
- * 依赖的都是已有模块,一层都不重造:
- *   sxcl/json.h      读版本 JSON            sxcl/launch.h(§1/§2/§3) 选 Java / 拼 argv / 归类日志
- *   sxcl/options.h   写 options.txt         sxcl/settings.h  每实例设置(渲染后端、上次实际后端)
- *   sxcl/process.h   起进程 + 逐行回调       sxcl/fs.h        建 natives 目录
- *
- * 顺序是有讲究的(每一步都对应一个真实的坑):
- *   1. 先读版本 JSON —— 没有它连该用哪个 Java 都不知道;
- *   2. 按 javaVersion.majorVersion 选 Java —— 选不出来就给"装哪个版本、去哪装"的人话,而不是抛个错误码;
- *   3. **启动前**把实例的渲染后端写进 options.txt —— options.h 的实测结论是:游戏在 Vulkan 起不来时
- *      会静默回退并把 options.txt 改成自己觉得合适的值,所以这个设置必须每次启动前由启动器重写;
- *   4. natives 目录先建好,并把 classifier jar 里的 .dll/.so 解进去 —— 目录空着等于
- *      LWJGL 加载原生库时抛 UnsatisfiedLinkError,启动参数拼得再对也没用;
- *   5. 拼 argv 起进程,on_line 同时喂给 logscan 与调用方(取消/提前收工都靠回调返回非 0);
- *   6. 结束后拿 logscan 的汇总当结论;如果设置的是 Vulkan 而日志出现回退,就明说"你选的 Vulkan 没生效,
- *      实际跑的是 OpenGL",并把实际后端写回 instance.<实例名>.lastGraphicsApi。
- *
- * 不做:资源补全。库/assets 缺了不该由启动驱动负责,但日志里抽到的"缺什么"会原样带在结果里。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

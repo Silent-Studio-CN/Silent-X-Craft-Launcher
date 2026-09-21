@@ -1,3 +1,7 @@
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import importlib.util, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("sfh", os.path.join(here, "strip_file_headers.py"))

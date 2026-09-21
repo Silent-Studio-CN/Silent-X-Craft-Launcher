@@ -1,5 +1,7 @@
-# 从 build-b2/fixtures 里的真实响应与安卓端 assets 切片,生成测试用的 C 字符串片段(.inc)。
-# 逐行发一个字符串字面量:这样永远不会把 \n / \" 这种转义从中间劈开(踩过一次)。
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 $ErrorActionPreference = 'Stop'
 $T = $PSScriptRoot
 $ROOT = Split-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) -Parent

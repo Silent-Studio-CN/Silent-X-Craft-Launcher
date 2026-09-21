@@ -1,5 +1,9 @@
-/* SXCL-C "一次取回一整段文本" 的实现 —— 只用 net.h 的 sxcl_transport 函数指针,
- * 所以换后端(WinHTTP/Qt/libcurl)不用动这里。语义见 http.h 的文件头。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

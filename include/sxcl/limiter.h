@@ -1,13 +1,9 @@
-/* SXCL-C 全局下载限速器(令牌桶) —— Python 版 src/core/download/limiter.py 的 C 移植。
- *
- * 语义要点(与 Python 版逐条对应,改动前先改 Python 版再同步):
- *  - 全局唯一:所有连接共享同一个桶,所以"限速 5MB/s"是整条管道的上限。
- *  - 可运行时改速:上调立刻放行,下调收敛到新桶容量。
- *  - 桶容量 = clamp(rate * 0.25s, 64KiB, 8MiB);容量小则限速硬,但必须大于读取块。
- *  - 令牌不足时**不清零**:保留已攒的零头,否则每次多等一轮(实测把 5MB/s 限成 2MB/s)。
- *  - rate <= 0 表示不限速。
- *  - 单次请求大于桶容量时,清空令牌并按 n/rate 等待(攒满即放行,避免永远等不满)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_LIMITER_H
 #define SXCL_LIMITER_H
 

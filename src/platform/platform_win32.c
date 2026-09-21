@@ -1,4 +1,9 @@
-/* Windows 侧文件系统实现。UTF-8 入口 -> UTF-16 调用 Win32,不依赖 CRT 代码页。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
 #endif

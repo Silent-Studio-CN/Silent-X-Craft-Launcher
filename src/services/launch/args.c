@@ -1,28 +1,9 @@
-/* 启动参数拼装 —— 版本 JSON + 上下文 -> argv 数组。
- *
- * 关键裁决(为什么这么定):
- *
- *  1) argv 里**不含 java 可执行文件**。program 单独交给 process.h 的 program 字段:
- *     换一个 Java 只要换 program,不必重拼整串参数;也避免"第一个参数到底是 java 还是参数"的歧义。
- *
- *  2) 新老两种格式都吃:
- *     - arguments.jvm / arguments.game:数组里既有字符串也有 {rules, value} 对象,
- *       rules 求值直接调 sxcl_rules_allow(与下载计划用同一套判定,不会出现"下下来了却不加进 classpath");
- *     - minecraftArguments:按空格切分的老格式。
- *
- *  3) 不重复注入 -cp / -Djava.library.path:
- *     先扫一遍 arguments.jvm,发现版本 JSON 已经自带就跳过我方那份。官方新版本 JSON 的
- *     jvm 参数里本来就有 "-cp ${classpath}" 与 "-Djava.library.path=${natives_directory}",
- *     无脑再补一份不仅难看,还会让后来的 -D 覆盖掉别人精心拼的值(比如 Forge 改过的库路径)。
- *
- *  4) classpath 顺序固定:客户端 jar 在前,库**按库名升序**(不是按 JSON 里的顺序)。
- *     同一份版本 JSON 必须拼出同一个 argv,否则"能不能启动"这种问题没法复现。
- *
- *  5) 内存/GC 参数有默认值,且默认值按 (位数, Java 主版本) 分档;调用方可以用
- *     ctx->memory_mb / ctx->jvm_args / ctx->extra_jvm_args 三层覆盖。
- *     位数未知时**一律按 32 位的保守档**(SerialGC):G1 在 32 位 JVM 上会直接拒绝启动,
- *     而 SerialGC 在 64 位 JVM 上只是慢一点 —— 宁可慢,不可起不来。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

@@ -1,16 +1,9 @@
-/* 键位映射核心测试:不联网、不依赖安卓目录。
- *
- * 覆盖:
- *   1) 跨端一致性 —— 把安卓端 assets/keymaps 的 9 套布局(逐字节嵌在 keymap_assets.inc 里)
- *      喂进 C 实现:解析成功 + 关键字段与独立解析(PowerShell ConvertFrom-Json)的期望值一致 +
- *      往返保存后内容等价 + **C 内置预设与资产逐控件一致**;
- *   2) 四事件(按下/长按/单击/双击)、非法项报错、冲突检测、模糊搜索;
- *   3) 预设(键名/中文名/推荐/单手固定竖屏);
- *   4) FCL 导入导出(GLFW 键码、像素坐标归一化);
- *   5) 文件存取与坏输入。
- * 若编译时定义了 SXCL_ANDROID_KEYMAPS_DIR(本机存在安卓目录时 CMake 会加),
- * 还会把内嵌文本与磁盘上的真实资产逐字节比对,防止两边跑偏。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1
 #include <stdio.h>
 #include <stdlib.h>

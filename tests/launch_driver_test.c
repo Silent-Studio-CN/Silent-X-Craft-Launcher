@@ -1,21 +1,9 @@
-/* 启动驱动测试:用"假 java"把整条链路走完 —— 不需要 GPU,也不需要真的 Minecraft。
- *
- * 假 java 是什么:
- *   Windows 上是一个 .bat(CreateProcess 能直接跑批处理),POSIX 上是可执行 sh 脚本。
- *   它做的事就是"按剧本打印一段仿真游戏日志,然后按剧本的退出码结束"。
- *   另外它还会把**当前工作目录下的 options.txt 打印出来** —— 游戏进程的 cwd 就是游戏目录,
- *   所以这一招能证明"启动器确实在起进程之前就把渲染后端写进了 options.txt",
- *   而不是事后补写的。
- *
- * 三组剧本对应三件真事:
- *   a) 一切正常(打印 GL 版本行 + 正常退出)      -> 结论必须是"正常退出/未见异常"
- *   b) Java 版本不符(还会顺带刷 NoClassDefFoundError)-> 结论必须指向 Java 版本,不能被次生错误带偏
- *   c) 切了 Vulkan 但设备回退到 OpenGL           -> 结论必须说"Vulkan 没生效,实际是 OpenGL",
- *      并且把 lastGraphicsApi 写成 opengl
- * 外加:超时透传、版本没装好时的报错。
- *
- * 夹具全部写在 build-b/ 下(gitignored),仓库里不留任何产物。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

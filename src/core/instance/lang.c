@@ -1,22 +1,9 @@
-/* SXCL-C 国际化查表实现 —— 纯 C11、零第三方依赖。
- *
- * 见 include/sxcl/lang.h 的语义约定。这里只写"怎么做到的"和踩过的坑:
- *
- *   1) 解析逐字段对齐 Python:lang.py:137-150 是
- *          stripped = line.strip()
- *          if not stripped or stripped.startswith("#"): continue
- *          if "=" in stripped: key, value = stripped.split("=", 1)
- *                              self._data[key.strip()] = value.strip()
- *      注意是**整行 strip 之后**再按第一个 '=' 切 —— 所以"  key  =  a=b  " 得到
- *      key -> "a=b",而 "\tkey\t= value" 也认。C 版照抄这个顺序,不自作聪明。
- *      重复键:后者覆盖前者(Python 是 dict,位置沿用第一次出现的位置)。
- *      没写进 Python 但明显该有的容错:BOM(Windows 记事本存的 UTF-8)与 CRLF。
- *   2) 内置表先进、磁盘文件后覆盖:所以"用户改一条文案"只需在 .lang 里写那一条,
- *      不用把 76 条全抄一遍。
- *   3) 中文兜底单独一份表:当前语言查不到就去中文表查(同一份句柄,释放时一起放)。
- *   4) 一点不撒谎的取舍:超过 SXCL_LANG_KEY_MAX 的键整条丢弃(不截断成半个键),
- *      超过 SXCL_LANG_TEXT_MAX 的文案截断 —— 这两个上限远大于真实语言包(最长键 26 字节)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 """selftest_measure_swipe.py - calibrate the ruler before trusting its numbers.
 
 measure_swipe.py is the only instrument used for the "before fix / after fix"

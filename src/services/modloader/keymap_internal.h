@@ -1,5 +1,9 @@
-/* 键位映射模块内部共用的小工具(keymap.c / keymap_presets.c / keymap_fcl.c 之间)。
- * 不进 include/sxcl/,外面不该 include 它。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #ifndef SXCL_KEYMAP_INTERNAL_H
 #define SXCL_KEYMAP_INTERNAL_H
 

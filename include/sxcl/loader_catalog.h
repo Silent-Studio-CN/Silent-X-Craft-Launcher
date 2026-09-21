@@ -1,31 +1,9 @@
-/* SXCL-C 加载器版本目录(元数据层) —— 补 docs/04-页面规格.md §7 缺口 #2。
- *
- * 解决什么:下载配置页要显示"Forge / NeoForge / Fabric / Quilt / OptiFine 在某个原版下
- * 有哪些版本、哪个是最新/推荐、是不是 Beta、它配套的 MC 与 Forge 版本是什么"。
- * 在这之前 C 版核心层一个字节都没有(loader.h 只吃调用方喂进来的 available_versions)。
- *
- * 数据来源(全是实测过的官方地址;镜像走 BMCLAPI 代理,**不做 URL 猜测**):
- *   Forge     https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml   (maven XML)
- *   NeoForge  https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml (maven XML)
- *   Fabric    https://meta.fabricmc.net/v2/versions/loader/<mc>                              (JSON 数组)
- *   Quilt     https://meta.quiltmc.org/v3/versions/loader/<mc>                               (JSON 数组)
- *   OptiFine  官方只有网页 https://optifine.net/downloads(HTML 表格,里面 colForge 就是配套 Forge);
- *             带 forge 字段的结构化接口只有 BMCLAPI https://bmclapi2.bangbang93.com/optifine/<mc>(JSON)。
- *             注意:官方**没有** OptiFine 的 XML 接口(optifine.net/downloads.xml 实测 404),
- *             所以这里两个形态都吃:网页行(<tr class=downloadLine>…<td class=colForge>)与
- *             BMCLAPI 的 JSON(patch/type/forge 字段)。两者都解析成同一套条目。
- *
- * 分工(与 http.h):
- *   本模块**不自己发网络请求**:文本怎么来的由调用方决定(测试直接喂字符串)。
- *   想省事就用 sxcl_catalog_fetch():它内部走 sxcl_http_get_text() 取文本再调 sxcl_catalog_parse()。
- *
- * 版本串的解析(Forge "1.20.1-47.2.0" -> mc="1.20.1";NeoForge "21.1.72" -> mc="1.21.1")
- * **复用 loader.h 的 sxcl_loader_parse_version()**,这里一个字都不重写;
- * OptiFine 的 "Forge 47.2.18" -> "47.2.18" 复用 sxcl_loader_parse_forge_requirement()。
- *
- * 线程安全:解析/过滤/排序/拼 URL 全是纯函数(只读入参、写调用方给的缓冲),可重入;
- *   只有 sxcl_catalog_fetch 会碰传输层,线程安全性由调用方的 transport 决定。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_LOADER_CATALOG_H
 #define SXCL_LOADER_CATALOG_H
 

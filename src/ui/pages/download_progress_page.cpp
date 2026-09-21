@@ -1,44 +1,9 @@
-// download_progress_page.cpp —— 下载/安装进度页(临时页)
-//
-// 逐条移植 Python 版 src/app/pages/download_progress_page.py(行号见每段注释),外壳照抄
-// src/app/common/base_page.py。外观的唯一依据:docs/05-UI-1to1规格.md + Python 源码。
-//
-// 控件树(实测 build/ref/TREE_py_download_progress.txt;页面可用区 1051x701):
-//   DownloadProgressPage(ScrollArea, objectName=DownloadProgressPage, 1px StyledPanel 边框)
-//     └ view(QWidget, transparent)
-//        └ QVBoxLayout(margins 28,24,28,24; spacing 16; AlignTop)
-//           ├ TitleLabel     "正在安装 <版本名>"  993x38 (28px/600)
-//           ├ SubtitleLabel  ""  -> hide()              (与下载配置页不同,这里 Python 明确 hide)
-//           ├ CardWidget     993x316  VBox(32,24,32,24) sp12
-//           │   ├ HBox: StrongBodyLabel "准备安装"(15px) + 弹性 + BodyLabel "● 进行中"
-//           │   ├ QProgressBar 929x6(h[6..6];range 0..100;textVisible=false;圆角 3)
-//           │   ├ BodyLabel "0%" 右对齐(text_tertiary)
-//           │   ├ BodyLabel 详情行(空;12px)
-//           │   └ 阶段列表 VBox sp6 margins(0,8,0,0):6 行
-//           │       StageIndicator 20x20 + BodyLabel 13px + 弹性(行内 sp10)
-//           ├ HBox sp12: PushButton "取消" 54x32 + 弹性 + PrimaryPushButton "返回" 54x32(禁用)
-//           └ 弹簧
-//
-// ── 接线(阶段 7:下载 -> 安装 的界面侧)──────────────────────────────────────
-// 本页原来是"构造完成、worker 未起"的初始态。现在真的起安装:
-//
-//   构造函数末尾 _start_installation()
-//     └ InstallWorker(workers/install_worker.h)—— 在工作线程里跑核心库的 sxcl_install_run
-//          ├ planReady      -> 照**核心库的阶段表**重画阶段行
-//          │                    (install.h:20-21 明说:UI 直接照 sxcl_install_plan_stage_*
-//          │                     画行,不要自己另写一份表 —— 所以这里不再用构造期那份硬编码)
-//          ├ stageChanged   -> 上一行打勾、本行转圈、顶部大字写中文阶段名
-//          ├ progress       -> 进度条 / 百分比 / 详情行(阶段名 · 速度 · 已下载/总量 · 当前文件)
-//          ├ logLine        -> 详情行 + stderr 追踪(SXCL_UI_TRACE=1)
-//          └ finished       -> 成功 / 失败 / **已取消** 三种终态文案分开;失败带核心库的真实原因
-//
-//   取消:cancel_btn -> worker->cancel() -> 核心库 is_cancelled -> 清理 .part -> ERR_CANCELLED
-//
-// 线程模型:界面线程只连信号;核心库的进度回调(可能来自引擎的工作线程,install.h:194-197)
-// 在 worker 里统一 emit,Qt 队列投递到界面线程。**主线程全程不阻塞**。
-//
-// 任务页联动:成功/失败/取消分别调 TasksPage 的 setTaskDone / setTaskFailed / updateTask
-// (任务 id 与 main_window.cpp:437-446 登记的键一致:"download_progress_<版本名>")。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "page_factory.h"
 
 #include <QAbstractButton>

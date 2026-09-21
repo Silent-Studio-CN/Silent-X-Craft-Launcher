@@ -1,5 +1,9 @@
-/* 子进程(Windows 实现):CreateProcess + 两条匿名管道 + 轮询读取。
- * 不用 Qt/不用 CRT 的 popen,因为要同时收两条流、要逐行回调、要能超时终止。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
 #endif

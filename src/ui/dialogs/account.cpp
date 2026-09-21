@@ -1,6 +1,9 @@
-// account.cpp —— 账户模块的实现(声明与纪律见 account.h)。
-//
-// 一句话:**核心库负责登录,界面只负责"什么时候在什么线程里叫它、把它说的话如实显示出来"。**
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "account.h"
 
 #include <QByteArray>

@@ -1,17 +1,9 @@
-/* SXCL-C 机器信息(物理内存 / CPU 核心)—— 设置页的内存滑块与线程数建议都靠它。
- *
- * 各平台实现(都只用系统自带能力,零第三方依赖):
- *    Windows  GlobalMemoryStatusEx(内存)+ GetSystemInfo / GetLogicalProcessorInformationEx(CPU)
- *    Linux    /proc/meminfo 的 MemTotal / MemAvailable(拿不到就用 sysconf 兜底)
- *    Android  同上(/proc/meminfo 一直有;不依赖 glibc 的 sysinfo())
- *    macOS    sysctl hw.memsize + hw.physicalcpu + sysconf
- *
- * 约定:
- *   - 全部返回 MB(uint64),算不出来返回 0;查询失败给 SXCL_SYSINFO_ERR_* + 人话 err。
- *   - 不抛异常、不 abort;拿不到就是拿不到(界面显示"未知"),不要用假数字糊弄。
- *   - 推荐堆 = 物理内存的 1/2,夹在 1024 MB ~ 8192 MB 之间(PCL 的口径:太小不够用,太大 JVM 反而崩);
- *     这正是设置页内存滑块的默认值来源。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_SYSINFO_H
 #define SXCL_SYSINFO_H
 

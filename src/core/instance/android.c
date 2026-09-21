@@ -1,11 +1,9 @@
-/* SXCL-C Android 适配实现 —— 见 include/sxcl/android.h 的长注释(为什么要这个模块)。
- *
- * 这里只有文件系统事实,没有猜测:
- *   * stat/access 的 errno 决定是"不存在"还是"被沙箱拒绝";
- *   * /proc/self/mounts 的挂载选项决定是"共享存储不能执行"还是"没有执行位";
- *   * 两者都不满足才算 OK。
- * 挂载表的解析做成纯函数(吃文本),所以单测可以在 Windows 上跑,夹具用的是设备原文。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1 /* access() 在 MSVC 下被标记不安全;C4996 在 /WX 下会打挂构建 */
 #endif

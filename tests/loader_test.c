@@ -1,8 +1,9 @@
-/* 模组加载器静默安装模块测试:不联网、不跑安装器(命令行构造只是拼字符串)。
- * 覆盖:版本串解析 / 兼容冲突检测 / launcher_profiles.json 合并与原子写 /
- *       方式 A 命令行构造(含 OptiFine 沙箱 APPDATA)/ 安装器进度标记解析 /
- *       Maven 坐标 / 版本 JSON 改写。
- * 夹具一律写在 build/ 下(仓库里不留二进制/临时夹具)。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

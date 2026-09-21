@@ -1,22 +1,9 @@
-/* 按键布局存取(store.py)+ FCL 导入(fcl.py)测试:不联网、不碰用户真实配置。
- *
- * 覆盖:
- *   1) ensure_presets 落盘(5 份)、第二次不再写、overwrite 强制重写;
- *   2) 保存 -> 列出 -> 读取 往返;重名直接覆盖(文件数不变);
- *   3) 文件名安全化(中文/全角标点/斜杠/空格;key 与布局名两个来源);
- *   4) 非法 JSON 拒绝:列目录跳过坏文件、load 返回错误码;
- *   5) active.json:默认值 / set_active(去掉 preset- 前缀)/ 坏文件返回 "";
- *   6) delete:用户布局能删、内置预设拒删、路径穿越拒绝;
- *   7) FCL 导入:字段映射与容错(空 id/label 回落、GLFW 码、字符串键、混合坐标、
- *      alpha=0、未知类型、非对象项跳过),并与 **Python 生成的期望文件**
- *      (tests/fcl_fixture_expected.json / fcl_fixture_array_expected.json)逐字段比对
- *      —— 这是"两边一致"的硬证据;夹具由 tools/keymap_parity.py --write-fixtures 生成。
- *
- * 临时产物写在构建目录的 keymap_store_out/(跑之前整个删掉),仓库里不留产物;
- * FCL 夹具在源码树 tests/ 下,CMake 用 SXCL_KEYMAP_FIXTURE_DIR 把路径编进来。
- * 跑完这个测试后,仓库根目录的 tools/keymap_parity.py 会拿这里的产物与 Python 版
- * 现场生成的产物逐字段比对(见交付报告)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1
 
 #include <stdio.h>

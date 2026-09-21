@@ -1,11 +1,9 @@
-/* SVG 归一化:把 viewBox 收紧到"墨迹包围盒"(自动留边距)。
- *
- * 为什么要它:PCL 的图标路径各自在自己的坐标系里画,有的几何很小(在 1024 视图框里几乎看不见),
- * 有的很大。UI 里要的是"视觉大小一致",而这正好等价于按墨迹包围盒归一化。
- * 纯 Qt 实现,可重复执行;每次重跑抽取脚本后跑一遍即可。
- *
- * 用法: sxcl-svgnorm <目录> [边距比例,默认 0.04]
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <QGuiApplication>
 #include <QImage>
 #include <QPainter>

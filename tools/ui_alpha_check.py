@@ -1,3 +1,7 @@
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 from PIL import Image
 for tag, path in (("设计", r"D:\SilentStudio\prog\Silent-X-Craft-Launcher - C\build\ref\py_home.png"), ("实装", r"D:\SilentStudio\prog\Silent-X-Craft-Launcher - C\build\ref\c_home.png")):
     im = Image.open(path)

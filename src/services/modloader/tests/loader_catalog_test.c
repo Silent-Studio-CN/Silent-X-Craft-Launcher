@@ -1,7 +1,9 @@
-/* 加载器版本目录测试:**不联网**(片段都是真实响应切下来的,见 catalog_fragments.inc 的注释)。
- * 覆盖:最小 XML 扫描器(含坏 XML)/ Forge+NeoForge 的 maven XML / Fabric+Quilt 的 meta JSON /
- *       OptiFine 的网页与 BMCLAPI JSON / 按 MC 过滤 / 排序 / latest·recommended·Beta 标记 / URL 拼接。
- * 夹具在仓库里是纯文本 .inc(带来源与抓取日期),构建目录下不留东西。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #define _CRT_SECURE_NO_WARNINGS 1
 #include <stdio.h>
 #include <stdlib.h>

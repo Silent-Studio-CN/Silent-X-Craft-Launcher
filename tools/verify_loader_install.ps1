@@ -1,12 +1,7 @@
-# Forge/NeoForge 静默安装的端到端验收(PowerShell,无 Python)。
-# 用法: pwsh -File tools/verify_loader_install.ps1 [-GameDir build/e2e/mc] [-Forge 1.21.11]
-#
-# 判据(全部真跑,不许"看起来装上了"):
-#   1) 安装器 jar 用我们自己的下载器取回,并且哈希与官方 maven 的 .sha1 一致
-#   2) 静默安装退出码为 0,且**不依赖 jar 是否生成**这个弱判据
-#   3) 版本目录里出现 versions/<目标版本>/<目标版本>.json
-#   4) 该版本 JSON 能被 sxcl-dl 自己的 JSON 解析器读通,且 libraries 全在磁盘上、逐个 SHA-1 校验通过
-#   5) launcher_profiles.json 里出现该实例,且**原有档案一个都没丢**(合并而非覆盖)
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 param(
     [string]$GameDir = 'build/e2e/mc',
     [string]$Forge = '1.21.11',

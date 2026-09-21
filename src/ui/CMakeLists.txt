@@ -1,7 +1,6 @@
-# src/ui/CMakeLists.txt —— 阶段 6:Qt6 + libqf 图形前端(地基)
-#
-# 只有根 CMakeLists 打开 SXCL_BUILD_UI 时才会 add_subdirectory 到这里。
-# 核心库(sxcl)是纯 C,Qt 头文件一律不进那边;这个目录是唯一的 C++/Qt 侧。
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Svg)
 

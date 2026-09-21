@@ -1,24 +1,10 @@
 #!/usr/bin/env python3
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 # -*- coding: utf-8 -*-
-"""strip_file_headers.py —— 把源文件开头的"大段头注"换成统一版权头。
-
-为什么要有这个脚本(而不是手工改 160 个文件):
-  * 手工改必然漏、必然风格不一;脚本可重跑(幂等),新文件也能用同一条规则;
-  * 头注里那些设计说明**不丢** —— 全部原文归档到 docs/14-源码头注归档.md,
-    再配合 git 历史,信息一条不少。
-
-规则:
-  1) 只动**文件最前面**的注释(允许中间夹空行);遇到第一行代码就停。
-  2) 头文件若是 "#pragma once" 起头,把它留下,继续吃掉它后面的头注。
-  3) 特殊保留(不删):含 clang-format / NOLINT / coding: 的行(工具指令,删了会改行为)。
-  4) 输出 = 版权头 + 空行 + [pragma once] + 空行 + 正文(去掉正文前多余空行)。
-  5) 行尾风格(CRLF/LF)原样保留;编码 UTF-8。
-
-用法:
-  python tools/strip_file_headers.py --dry-run     # 只报告,不写文件
-  python tools/strip_file_headers.py               # 真改 + 归档
-"""
-
+#   4) 特殊保留(不删):含 clang-format / NOLINT / coding: / SPDX 的行(工具指令,删了会改行为)。
 import argparse
 import os
 import re
@@ -48,6 +34,21 @@ FENCE = chr(96) * 3
 
 def banner_for(style):
     return list(BANNER_C if style == "c" else BANNER_HASH)
+
+
+def extract_shebang(lines, style):
+    """把 shebang 摘出来(它必须在第 1 行),顺带修复"版权头插在它前面"的历史文件。"""
+    if style != "hash":
+        return "", lines
+    if lines and lines[0].startswith("#!"):
+        return lines[0], lines[1:]
+    if [l.rstrip("\r") for l in lines[:3]] == BANNER_HASH:
+        j = 3
+        while j < len(lines) and lines[j].strip() == "":
+            j += 1
+        if j < len(lines) and lines[j].startswith("#!"):
+            return lines[j], lines[:j] + lines[j + 1:]
+    return "", lines
 
 
 def eat_leading_comments(lines, i, out, style):
@@ -95,12 +96,16 @@ def eat_leading_comments(lines, i, out, style):
 
 def transform(text, style):
     lines = text.split("\n")
+    shebang, lines = extract_shebang(lines, style)
     header = []
     i = eat_leading_comments(lines, 0, header, style)
 
-    # 幂等保护:文件开头已经是我们的版权头 -> **一个字都不动**(脚本要能安全重跑)
+    empty_meta = {"header_lines": 0, "removed": [], "guard": "", "pragma": False}
+
+    # 幂等保护:开头已经是我们的版权头 -> 除了把 shebang 摆正,别的一个字都不动
     if any("Copyright by SilentStudio" in ln for ln in header):
-        return text, {"header_lines": 0, "removed": [], "guard": "", "pragma": False}
+        body = "\n".join(lines)
+        return ((shebang + "\n" + body) if shebang else body), empty_meta
 
     pragma = ""
     if i < len(lines) and PRAGMA_ONCE.match(lines[i].rstrip("\r")):
@@ -123,7 +128,7 @@ def transform(text, style):
     while removed and removed[-1].strip() == "":
         removed.pop()
 
-    out = banner_for(style) + [""]
+    out = ([shebang] if shebang else []) + banner_for(style) + [""]
     if pragma:
         out.append(pragma)
         out.append("")
@@ -157,10 +162,21 @@ def collect(root):
                 style = "hash"
             else:
                 continue
-            if name == "strip_file_headers.py":
-                continue
             files.append((os.path.join(dirpath, name), style))
     return sorted(files)
+
+
+def load_archive(path):
+    """已有归档 -> {路径: 原文};重跑时据此增量合并,不冲掉历史。"""
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    parts = re.split(r"^## (.+?)\s*$", text, flags=re.M)
+    out = {}
+    for k in range(1, len(parts) - 1, 2):
+        out[parts[k].strip()] = parts[k + 1].strip("\n")
+    return out
 
 
 def main():
@@ -173,7 +189,7 @@ def main():
 
     root = args.root
     files = collect(root)
-    changed, skipped, total_removed, warnings, archive = [], [], 0, [], []
+    changed, skipped, total_removed, warnings, fresh = [], [], 0, [], {}
     for path, style in files:
         rel = os.path.relpath(path, root).replace(os.sep, "/")
         if args.only and args.only not in rel:
@@ -186,37 +202,39 @@ def main():
         else:
             changed.append(rel)
             total_removed += len(meta["removed"])
-            archive.append((rel, meta["removed"]))
+            fresh[rel] = "\n".join(meta["removed"])
         if meta["guard"]:
             warnings.append("include-guard 起头(只加不删): " + rel)
         if not args.dry_run and new_text != text:
             with open(path, "w", encoding="utf-8", newline="") as fh:
                 fh.write(new_text)
 
-    if not args.dry_run and archive:
+    if not args.dry_run and fresh:
         apath = os.path.join(root, args.archive)
         os.makedirs(os.path.dirname(apath), exist_ok=True)
+        merged = load_archive(apath)
+        merged.update(fresh)
+        total_lines = sum(len(v.split("\n")) for v in merged.values())
         with open(apath, "w", encoding="utf-8", newline="") as fh:
             fh.write("# 源码头注归档\n\n")
             fh.write("> 本文件由 tools/strip_file_headers.py 生成:源文件开头的设计说明已从这里"
                      "移到统一版权头,原文**一字不改**留档,便于检索历史决策。\n"
                      "> 需要改行为时以源码为准;需要知道\"当初为什么这么写\"时来这里搜。\n\n")
-            fh.write("共 %d 个文件,归档 %d 行。\n\n" % (len(archive), total_removed))
-            for rel, removed in archive:
+            fh.write("共 %d 个文件,归档 %d 行。\n\n" % (len(merged), total_lines))
+            for rel in sorted(merged):
                 fh.write("## " + rel + "\n\n" + FENCE + "text\n")
-                fh.write("\n".join(removed))
+                fh.write(merged[rel])
                 fh.write("\n" + FENCE + "\n\n")
 
     print("FILES_SCANNED=%d  CHANGED=%d  NO_HEADER=%d  ARCHIVED_LINES=%d"
           % (len(files), len(changed), len(skipped), total_removed))
     for w in warnings:
         print("WARN " + w)
-    print("--- changed (first 30) ---")
-    for rel in changed[:30]:
+    for rel in changed[:20]:
         print("  " + rel)
     if skipped:
         print("--- no header (只加版权头) %d ---" % len(skipped))
-        for rel in skipped[:20]:
+        for rel in skipped[:12]:
             print("  " + rel)
 
 

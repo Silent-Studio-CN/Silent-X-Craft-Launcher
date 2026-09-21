@@ -1,14 +1,9 @@
-/* PKCE(RFC 7636)—— 授权码流的防拦截核心:code_verifier 只有本进程知道,
- * 授权码即使被别的程序截走,没有 verifier 也换不出 token。
- *
- *    code_verifier  = 43..128 个 unreserved 字符 [A-Za-z0-9-._~](我们生成 64 个)
- *    code_challenge = BASE64URL-ENCODE( SHA256( ASCII(code_verifier) ) )   无填充
- *    code_challenge_method = "S256"
- *
- * 对拍依据:RFC 7636 附录 B 的官方向量(见 tests/auth_pkce_test.c):
- *    verifier  = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
- *    challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

@@ -1,18 +1,9 @@
-/* SXCL-C JSON 解析器测试(断言式):任何失败都会让 main 返回非 0,ctest 判定失败。
- *
- * 覆盖内容:
- *   1) 基本类型与嵌套:{"a":1,"b":[true,false,null,"x"],"c":{"d":-2.5e3}};
- *   2) 全部转义(\" \\ \/ \b \f \n \r \t \uXXXX)与代理对 \uD83D\uDE00 -> 4 字节 UTF-8,
- *      以及中文键/值原样透传(逐字节比对);
- *   3) get/get_string/get_int64/get_bool/size/at/string/number 的越界与类型不符路径;
- *   4) 非法输入逐条验证:必须解析失败且 err 非空(尾随逗号、未闭合字符串/数组/对象、
- *      非法转义、孤立代理、深度超限、单引号、注释、NaN/Infinity、前导零、裸控制字符……);
- *   5) 空对象/空数组/纯字符串/纯数字/字面量/带 BOM/不带 NUL 结尾的输入;
- *   6) 数字:整数、小数、指数、超长数字、上溢/下溢、int64 截断与钳位;
- *   7) 重复键以最后一个为准;
- *   8) sxcl_json_parse_file 读写临时文件(自己写、自己删)与打开失败路径;
- *   9) 深度边界:64 层通过、65 层报错;大规模数组(20000 元素)练 tmpvec 扩容。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

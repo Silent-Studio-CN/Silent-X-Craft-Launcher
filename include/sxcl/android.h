@@ -1,24 +1,9 @@
-/* SXCL-C Android 适配:文件系统层面的"这个东西到底能不能用"。
- *
- * 安卓上没有"系统 JDK",Java 只有两种来源:
- *   1) 启动器(本应用)自己下载到**本应用私有目录**的运行时
- *      —— /data/data/<本应用>/files/runtime/<x>/bin/java;
- *   2) 别的启动器(HMCL / FCL / PojavLauncher)已经装好的运行时
- *      —— 在**它们的**私有目录里(如 FCL 的
- *         /data/data/com.tungsten.fcl/app_runtime/java/jre25/bin/java)。
- *
- * 第 2 种我们**用不了**,而且是两道锁同时锁死(192.168.220.33 实测,原文见 docs/08 第 14 节):
- *   * 沙箱:每个应用的私有目录属于各自的 uid,SELinux 域也不同。别的应用的 uid 去
- *     stat/opendir 会直接 EACCES —— "ls: /data/user/0/com.tungsten.fcl/...: Permission denied";
- *   * noexec:共享存储(/storage/emulated)是 fuse 挂载、带 **noexec**,即使文件有 +x 位也起不了进程
- *     —— "/system/bin/sh: /sdcard/exec_probe: can't execute: Permission denied"。
- * 所以本模块的职责是**把"为什么用不了"说清楚并给出下一步**,而不是假装能扫到。
- *
- * 纯逻辑 + 只读文件系统:挂载表文本可以注入(mounts_text),所以单测既不依赖真的挂载表,
- * 也不需要真的存在另一个应用;任何一步都**不执行**被探测的程序。
- *
- * 许可证:GNU AGPLv3(见仓库 LICENSE)。本文件是原创实现,不含 HMCL(GPLv3)代码。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_ANDROID_H
 #define SXCL_ANDROID_H
 

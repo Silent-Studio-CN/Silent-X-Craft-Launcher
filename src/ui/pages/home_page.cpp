@@ -1,27 +1,9 @@
-// home_page.cpp —— 主页(已安装版本列表 + 快速启动)
-//
-// 逐条移植 Python 版 src/app/pages/home_page.py(行号见每段注释),外壳照抄
-// src/app/common/base_page.py(BasePage = qf ScrollArea)。外观的唯一依据:
-// docs/05-UI-1to1规格.md + Python 源码;尺寸/颜色/字号在下面每条都能指回出处。
-//
-// 控件树(Python home_page.py:68-110):
-//   HomePage(ScrollArea, objectName=HomePage, setWidgetResizable, 横向滚动条关)
-//     └ view(QWidget, background: transparent)
-//        └ QVBoxLayout(margins 28,24,28,24; spacing 16; AlignTop)
-//           ├ TitleLabel     "主页"                          (28px/600)
-//           ├ SubtitleLabel  "Silent X Craft Launcher v0.1.0" (20px/600, #606060/#AAAAAA)
-//           ├ CardWidget     游戏目录卡   QHBox(20,12,20,12) spacing 6(布局默认值)
-//           ├ CardWidget     联机入口卡   QHBox(20,12,20,12) spacing 12
-//           ├ BodyLabel      空态提示(有版本时隐藏)
-//           ├ QWidget        版本卡网格   QVBox(margins 0, spacing 8)
-//           │   └ CardWidget 版本卡 ×N    定高 56,QHBox(20,0,16,0) spacing 16
-//           └ 弹簧
-//
-// 游戏目录:C 版还没有自己的设置层,先读与 Python 版**同一份**用户配置
-// (%APPDATA%/SilentXCraftLauncher/config.json 的 Game.GameDirectory,即
-// launcher_config.py:144 的 cfg.gameDirectory),读不到再退回平台默认
-// <home>/.minecraft(platform.py:165-167 default_game_directory)。见交付报告:
-// 需要主代理给 sxcl_ui_core 接上 sxcl 核心库(settings / paths)后就能换掉。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "page_factory.h"
 
 #include <QAbstractButton>

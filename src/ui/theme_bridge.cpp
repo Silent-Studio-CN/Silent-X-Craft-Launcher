@@ -1,3 +1,9 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "theme_bridge.h"
 
 #include "fluent_theme.h" // 令牌的唯一来源(docs/05-UI-1to1规格.md §2)

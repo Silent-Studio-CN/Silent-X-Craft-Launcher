@@ -1,4 +1,7 @@
-# Popup acceptance on device: locate the popup, drag inside it, tap an item.
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 param([string]$Dev = '192.168.220.33:5555', [int]$PopupIdx = 2, [int]$Tall = 60)
 $ErrorActionPreference = 'Continue'
 $adb = 'D:\AndroidSdk\platform-tools\adb.exe'

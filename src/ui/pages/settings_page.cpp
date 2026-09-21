@@ -1,21 +1,9 @@
-// settings_page.cpp —— 设置页(1:1 移植 Python 版 src/app/pages/settings_page.py)
-//
-// 依据(每一条都能指回出处;不许自己发明颜色/尺寸):
-//   * 版面骨架 = Python src/app/common/base_page.py:32-66(BasePage:ScrollArea + view 的
-//     QVBoxLayout margins(28,24,28,24)/spacing 16/AlignTop + TitleLabel + SubtitleLabel),
-//     与 tasks_page.cpp / versions_page.cpp 用的是同一套外壳;
-//   * 设置卡片族 = qfluentwidgets components/settings/*(SettingCard 定高 70/50、图标 16x16、
-//     hBox margins(16,0,0,0)、图标后 16、vBox(标题 14px / 说明 11px)、右控件后 16;
-//     SettingCardGroup = 组标题 20px + 12 间距 + 卡片列 spacing 2)。C 版直接用 libqf 的
-//     SettingCard / SettingCardGroup / ComboBoxSettingCard / ColorSettingCard /
-//     SwitchSettingCard / PushSettingCard / HyperlinkCard(libqf 的 fluent_setting_cards.cpp
-//     与 qf 的 setting_card.py:36-114 逐条对齐);
-//   * 页面结构/文字/尺寸 = Python src/app/pages/settings_page.py(逐段标注行号)
-//     + src/app/widgets/java_setting_card.py + src/app/common/launcher_config.py;
-//   * 颜色令牌/字号 = docs/05-UI-1to1规格.md §2/§3/§5/§6。
-//
-// 设置持久化:一律走 C 核心库 sxcl_settings(include/sxcl/settings.h),**不**去读 Python 版
-// 的 %APPDATA%/SilentXCraftLauncher/config.json。键名、默认值、以及"核心库缺什么"见交付报告。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "page_factory.h"
 
 #include <QApplication>

@@ -1,5 +1,9 @@
-/* settings 存储测试:默认值、顺序、解析回退、坏行/注释/CRLF、每实例键、原子写往返。
- * 断言式:任一断言失败,main 返回 1。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

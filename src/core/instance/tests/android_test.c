@@ -1,12 +1,9 @@
-/* Android 适配层测试:挂载表解析 / 路径体检 / 安卓候选表 / 安卓诊断。
- *
- * 夹具是**设备原文**:下面的 kMounts 是 192.168.220.33(Android 16 / arm64-v8a,平板)
- * 上 adb shell cat /proc/self/mounts 的筛选摘录,一个字没改 —— 这样"共享存储是 noexec"
- * 这条结论在单测里也是可复现的,而不是只写在文档里。
- *
- * 目录夹具建在构建目录下(ctest 的 WORKING_DIRECTORY 就是本模块的构建目录,已被 .gitignore
- * 忽略:仓库里不留二进制/临时夹具)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

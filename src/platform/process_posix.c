@@ -1,5 +1,9 @@
-/* 子进程(POSIX 实现):fork/execvp + 两条管道 + poll 轮询。
- * 本机(Windows)不编译这条分支,由四平台 CI 验证。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "sxcl/process.h"
 
 #include <errno.h>

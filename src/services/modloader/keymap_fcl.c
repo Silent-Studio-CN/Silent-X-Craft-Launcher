@@ -1,12 +1,9 @@
-/* SXCL-C FCL(Fold Craft Launcher)布局互转 —— 与 Python 版 src/core/keymap/fcl.py 对齐。
- *
- * FCL 的布局是它自己的安卓数据(MenuSetting / ControlButton / ControlDirection),
- * 字段名与坐标单位(像素)都可能随版本变化,所以这里是**容错导入**:
- *   * 坐标支持像素(配合 screen_w/screen_h 归一化)与已经归一化的 0~1 两种写法;
- *   * 按键支持 GLFW 整数键码、上下左右/空格等常用名,以及 MOUSE_* 写法;
- *   * 认不出的字段原样保留在 layout.meta.fcl_raw 里,方便对照排查。
- * 导出是 FCL 风格的视图列表(像素坐标),方便用户搬回去对比。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1
 
 #include "keymap_internal.h"

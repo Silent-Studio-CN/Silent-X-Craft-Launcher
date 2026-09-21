@@ -1,15 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// theme_bridge — 主题桥接(阶段 6 地基)
-//
-// 硬性规则(踩过的坑,别再犯):本层**不定义 themeMode / themeColor**,也**不存**自己的
-// 主题状态。主题模式与主题色一律读/写 libqf 的单例 fluent::FluentStyle
-// (对应 Python 版的 qconfig.themeMode / qconfig.themeColor)。
-//
-// 本层只做两件事:
-//   1) 把界面层要用的颜色收敛成"语义令牌"(bg / card / nav / text / border / accent ...),
-//      其中画布色取自 libqf FluentBackgroundTheme,强调色取自 FluentStyle::themeColor();
-//   2) 主题一变(或窗口刚建好)就把令牌重新套到登记过的窗口上 —— 对应 Python
-//      src/app/theme.py 的 apply_theme()/refresh_widgets(),但只刷新不重建窗口。
+
 #include <QColor>
 #include <QPointer>
 #include <QString>

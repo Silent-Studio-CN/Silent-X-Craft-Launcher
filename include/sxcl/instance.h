@@ -1,68 +1,9 @@
-/* SXCL-C 实例扫描与识别 —— 扫 <游戏目录>/versions/* 产出"这个实例是什么"。
- *
- * 这一份是 Python 版 src/services/minecraft/loaders.py + pcl_compat.py 的逐条搬运,
- * 规则**不重新发明**,方括号里就是 Python 版注释的原意。三条硬性事实决定了怎么写:
- *
- *  1) Forge 1.13+ / Fabric / Quilt 装的版本**没有自己的 jar**(靠 inheritsFrom 继承原版)。
- *     以前按"jar + json 都在"判断,这些版本在界面里根本不显示;现在只要求 JSON。
- *  2) PCL 装出来的版本是"拍平"的单层 JSON:没有 inheritsFrom、没有 jar,id == 文件夹名,
- *     另外多一个 clientVersion 字段(= Mojang 原始版本号)—— 这是它的身份标记,
- *     所以取原版版本号要**优先看 clientVersion**。
- *  3) 识别加载器宁可多认几条线索:JSON 里的 libraries 坐标 > mainClass > 整段 JSON 文本
- *     (PCL 的判据) > PCL 的 Setup.ini 缓存 > 目录名兜底。同一加载器只保留一条
- *     (越靠前的线索版本号越准)。另外 PCL 会把状态缓存在 versions/<版本>/PCL/Setup.ini,
- *     我们只读不写,用来补全信息与显示它设过的自定义图标。
- *
- * 搬过来的规则清单(逐条,括号里是 Python 的位置;测试里一条一个用例):
- *   A. libraries 坐标(loaders.py LIBRARY_RULES):net.neoforged:neoforge|net.neoforged:forge|
- *      net.neoforge -> NeoForge(必须排在 Forge 前面,NeoForge 的坐标里也含 minecraftforge);
- *      net.minecraftforge:forge|fmlloader|minecraftforge -> Forge;
- *      net.fabricmc:fabric-loader|intermediary -> Fabric;org.quiltmc:quilt-loader|quilted-fabric-loader -> Quilt;
- *      optifine:OptiFine|launchwrapper-of -> OptiFine;com.mumfrey:liteloader -> LiteLoader。
- *      坐标版本号取 "group:artifact:version" 的第 3 段;坐标缺失时退回 downloads.artifact.path。
- *   B. mainClass(MAIN_CLASS_RULES):net.neoforged / net.minecraftforge.bootstrap / cpw.mods.modlauncher /
- *      net.minecraftforge -> Forge;net.fabricmc.loader -> Fabric;org.quiltmc.loader -> Quilt;
- *      net.optifine -> OptiFine;com.mumfrey.liteloader -> LiteLoader(都只给种类,不给版本号)。
- *   C. 整段 JSON 文本(TEXT_RULES,PCL 的判据):net.neoforge / minecraftforge / net.fabricmc:fabric-loader /
- *      org.quiltmc:quilt-loader / optifine / liteloader;其中"文本里有 net.neoforge"时**不再**认 Forge。
- *      OptiFine 的版本号从 "HD_U_" 后面取;Fabric/Quilt 从 "fabric-loader:"/"quilt-loader:" 后面取数字;
- *      NeoForge 从 neoForgeVersion/forgeVersion 键取。取到的版本号里的 "+build" 会被去掉。
- *   D. PCL 的 versions/<版本>/PCL/Setup.ini(Key:Value,无 section):VersionFabric/VersionForge/
- *      VersionNeoForge/VersionOptiFine/VersionLiteLoader;值为空或 "Unknown" 时不算。
- *   E. 目录名(NAME_RULES,PCL 的命名习惯):neoforge<N> / forge<N>(前面是 "neo" 的不算,即 NeoForge 不会被
- *      当成 Forge)/ fabric[_-]?loader?<N> / quilt...<N> / OptiFine<VER> / LiteLoader<VER>。
- *      这一条只在该种类前面几条线索都没认出来时才用(所以 from_json=0)。
- *   F. 原版版本号推断顺序(PCL 的顺序,loaders.py _base_from_json):
- *        1. clientVersion(PCL 拍平标记,可靠)
- *        2. HMCL:patches 里 id=="game" 的 version —— 但顶层有 "time" 字段时这条不生效
- *        3. inheritsFrom(标准继承,可靠)
- *        4. JSON 文本里的 --fml.mcVersion(新版 Forge 写在 arguments 里,可靠)
- *        5. "jar" 字段(LiteLoader 常靠它,可靠)
- *        6. 目录名里像 1.x / a1.x / b1.x 的那一段(不可靠,base_reliable=0)
- *        7. 目录名里任意 x.y.z(不可靠)
- *   G. 加载器版本号去掉原版前缀:版本号以 "<base>-" 开头时把这段删掉("1.20.1-47.2.0" -> "47.2.0")。
- *   H. 前置版本缺失(inheritsFrom 指向的 <父>/<父>.json 不在 versions/ 下)-> missing_parent,
- *      文案"需要安装 X 作为前置版本"(PCL 的说法),不可启动。
- *   I. HMCL 补丁(patches 是数组且顶层没有 "time")-> launcher="hmcl";
- *      否则有 PCL/Setup.ini 或 PCL/ 目录 -> launcher="pcl"(识别出来只是想让用户少困惑)。
- *   J. 自定义图标:Setup.ini 的 LogoCustom 为 True/1 且 PCL/Logo.png 存在 -> has_custom_logo,
- *      路径给界面直接用。
- *   K. 版本目录的取舍:空文件夹跳过(PCL 也跳过);JSON 和 jar 都没有就跳过;
- *      没有 JSON 时目录名叫 cache/BLClient/PCL 的跳过;同名 JSON 优先,没有就找任意一个
- *      含 mainClass+type+id 的 *.json 顶上(PCL 的兜底)。
- *   L. PCL 的 versions/<版本>/PCL/config.json 里的 InstanceForcedJava = 启动页"选 Java 第一优先级"
- *      (Python: read_instance_java;配了但文件不在了不算数)。
- *
- * 两处**故意与 Python 不同**(都在测试里写明了,父代理可以裁决):
- *   1) Python 的 LOADER_ORDER 漏了 Quilt(于是 Quilt 实例被当成原版显示),C 版把 Quilt 补进返回顺序。
- *   2) Python 的 ready 只看 JSON(不管 jar),C 版按任务书把"原版实例缺自己的 jar"也算成不可启动,
- *      并给出独立问题码 SXCL_INSTANCE_PROBLEM_MISSING_JAR;另外"目录名与 JSON id 不一致"会给
- *      SXCL_INSTANCE_PROBLEM_ID_MISMATCH —— 因为 C 的启动驱动只认 <版本 id>/<版本 id>.json
- *      (src/services/launch/driver.c:213-215),这种实例现在必然启动失败,提前告诉用户。
- *      json_path 字段始终给出**实际读到的**那个 JSON 的路径,父代理若让驱动改用它,忽略问题码即可。
- *
- * 线程安全:纯函数,无全局可变状态;scan 只读磁盘。异常一律不抛:失败给人话 err。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_INSTANCE_H
 #define SXCL_INSTANCE_H
 

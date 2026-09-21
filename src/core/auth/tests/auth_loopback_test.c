@@ -1,12 +1,9 @@
-/* 环回重定向服务器测试 —— **真起一个本地 HTTP 服务,再真发一次 HTTP 请求**(不联网,全在本机)。
- *
- * 验的是授权码流最容易出错的一段:端口、回调路径、state 校验、错误回调、超时。
- * 为什么值得真起服务:这段代码是**唯一**碰网络栈的地方(套接字/accept/HTTP 头),
- * 用假实现"测"它等于没测。
- *
- * 客户端直接用套接字手写请求(测试自己的小客户端,不依赖被测代码),
- * 并且**先把请求发出去再等回调** —— 连接会排在 accept 队列里,不需要开线程。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <string.h>
 

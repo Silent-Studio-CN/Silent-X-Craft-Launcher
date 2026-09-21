@@ -1,10 +1,9 @@
-/* 递归删除目录树(独立文件,避免改动平台大文件)。
- *
- * 为什么需要:失败的安装要能清掉"本次新建的实例目录"(页面规格 §2.8 断言 10:
- * 失败后 versions/<版本名>/ 必须不存在),而 fs.h 原来只有删单个文件。
- * 用法约定(调用方负责判断安全性):只删自己刚建的目录,绝不删用户已有实例 ——
- * 这个函数本身不做这种判断,它只是"递归删"。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include "sxcl/fs.h"
 
 #if defined(_WIN32)

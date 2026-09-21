@@ -1,5 +1,9 @@
-/* SXCL-C 游戏目录探测实现 —— 逐条对齐 Python 版 src/services/minecraft/folders.py。
- * 注意:所有函数都"不抛异常",失败给人话 err;路径一律 UTF-8。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1 /* getenv/snprintf 在 MSVC 下被标记不安全;C4996 在 /WX 下会打挂构建 */
 #endif

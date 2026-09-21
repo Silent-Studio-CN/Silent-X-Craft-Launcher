@@ -1,12 +1,7 @@
-# SXCL C - Android detection evidence on a REAL device (before/after storage grant).
-#
-# Proves the two things this round is about, from the app itself (logcat tag 'sxcl'):
-#   1) without MANAGE_EXTERNAL_STORAGE every shared-storage game dir is DENIED,
-#      so auto-detection can never see the user's .minecraft;
-#   2) after granting it, the same scan reads the directory and counts versions.
-# It also shows the Java verdicts (FCL/HMCL/Pojav private dirs -> denied; our own -> usable).
-#
-# ASCII only. Usage:  pwsh -File android_detect_evidence.ps1 [-Dev 192.168.220.33:5555]
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 param([string]$Dev = '192.168.220.33:5555',
       [string]$Apk = 'D:\SilentStudio\prog\Silent-X-Craft-Launcher - C\build\_android\out\sxcl-debug.apk')
 $ErrorActionPreference = 'Continue'

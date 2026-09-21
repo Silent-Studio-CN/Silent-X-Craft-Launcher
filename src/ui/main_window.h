@@ -1,21 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// main_window — 主窗口外壳(1:1 复刻 Python 版 src/app/main_window.py 的 FluentWindow 骨架)
-//
-// 窗口骨架来自 libqf(FluentWindowBase 无边框窗口 + FluentTitleBar 标题栏 + StackedWidget 内容框),
-// 但**布局关系照 qf 的 FluentWindow** 摆(qfluentwidgets/window/fluent_window.py:255-274,344-346):
-//
-//   FluentWindow
-//     hBoxLayout(0 边距, 0 间距)
-//       [0] navigationInterface  <- 整窗高(0..H),宽 48(折叠)/322(展开);左边缘,含标题栏那一段
-//       [1] widgetLayout(拉伸 1)
-//             setContentsMargins(0, 48, 0, 0)   <- 顶部给标题栏让位
-//               stackedWidget                    <- 内容框 (48,48)-(1100,750),占满余下空间
-//     titleBar  <- **浮层**,不进布局:resizeEvent 里 move(46,0) / resize(W-46,48),然后 raise_()
-//
-// 所以标题栏与导航面板在 y<48 的那一段是**重叠**的:面板占 x 0..48(含标题栏高度),
-// 标题栏从 x=46 起盖在上面(参考图 py_home.png 里左上是导航面板的返回键 + 汉堡键,
-// 不是标题栏的按钮)。窗口**没有任何阴影留白**:qf 在 Windows 上靠 DWM 画阴影,
-// 窗口内不留 30px 边距,内容才能落在 (48,48) 1052x702。
+
 #include <QByteArray>
 #include <QHash>
 #include <QRect>

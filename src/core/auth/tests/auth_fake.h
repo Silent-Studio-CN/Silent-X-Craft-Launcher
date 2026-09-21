@@ -1,14 +1,9 @@
-/* 测试公用件:最小断言 + 夹具装载 + **假传输后端**(不联网也能把整条链跑完)。
- *
- * 假传输做的事很少,但正好够验登录链:
- *   - 按 URL 匹配"路由",把 tests/fixtures/auth/*.json 当响应正文返回(状态码在路由里写死);
- *   - 一条路由可以配**一串**响应(设备码轮询:pending → pending → slow_down → 成功);
- *   - 把每次请求的 method/url/body/Content-Type/Authorization 记下来,测试就能断言
- *     "RpsTicket 是不是 d=<token>""identityToken 是不是 XBL3.0 x=uhs;xsts";
- *   - 请求打到没配过的 URL 时**返回连接失败**,而不是偷偷给个 200 —— 免得测试自己骗自己。
- *
- * 这个头文件被多个测试 include,所有函数都是 static,不会重复符号。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_AUTH_TEST_FAKE_H
 #define SXCL_AUTH_TEST_FAKE_H
 

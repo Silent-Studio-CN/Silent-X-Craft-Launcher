@@ -1,13 +1,9 @@
-/* 登录链整链测试:**不联网**(夹具 + 假传输)把成功链与全部失败分支跑一遍。
- *
- * 覆盖(对应任务书"测试夹具"一节):
- *   成功链              MS token → XBL → XSTS → login_with_xbox → mcstore → profile
- *   各档 XSTS 错误码    2148916233 / 2148916235 / 2148916238 / 认不出的码(必须原样带出)
- *   name 为空           没买 Java 版 → 必须报错,**不许继续**
- *   refresh 过期        invalid_grant + AADSTS700082 → ERR_EXPIRED + 中文排查建议
- *   device code         pending / slow_down / expired / declined 四种流程控制
- *   PKCE 之外还要验:请求体是不是对的(RpsTicket="d=…"、identityToken="XBL3.0 x=uhs;xsts")
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <string.h>
 

@@ -1,21 +1,9 @@
-/* SXCL-C DEFLATE 解压测试:任何失败都会让 main 返回非 0,ctest 判定失败。
- *
- * 覆盖内容:
- *   1) 手写 raw deflate 样本(测试里自带一个独立的位写入器 + 定长/动态块编码器,
- *      字节序列完全由本文件推导,不依赖任何外部压缩工具或 zip 文件):
- *        - stored 块(含空块、多块连续、LEN/NLEN 校验);
- *        - fixed Huffman 单符号(只输出一个 'A' 再 EOB);
- *        - fixed Huffman 带重叠匹配(dist < len);
- *        - dynamic Huffman(码长全 1 的两符号树、单符号距离树、15 位码、16/17/18 重复);
- *        - 跨 32 KiB 窗口的距离引用(dist = 32768,含环形回绕);
- *   2) 流式接口:1 字节一段地喂,结果必须与一次性解压逐字节相同;
- *   3) 损坏数据:截断、非法 BTYPE、非法 HLIT/HDIST、LEN/NLEN 不互补、距离超界、
- *      非法 Huffman 码 —— 必须返回错误而不是崩溃/越界;
- *   4) 接口边界:输出缓冲不够(-2 且 out_len 写出真实长度)、sink 主动中止(-3);
- *   5) 大输出(100 KB 字面量)压过"窗口未交付水位"的交付阈值与环形回绕。
- *
- * 手写样本的字节序列另用 Python zlib(独立实现)离线交叉验证过,见报告。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

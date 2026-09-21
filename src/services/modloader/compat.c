@@ -1,9 +1,9 @@
-/* SXCL-C 模组加载器兼容判定与版本串解析 —— 纯逻辑:不联网、不碰进程、不写文件。
- *
- * 这里搬的是 Python 版 src/services/mod_loader/compat.py 与 loaders.py 的判据,
- * 以及 api.py 里两条版本换算(Forge 的 "1.21.1-52.1.16" 前缀过滤、NeoForge 的
- * _parse_version/_mc_key)。逐条对应写在每个函数头上,不是自己想的规则。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1  /* vsnprintf 之外还用了几处 C 串函数,MSVC 默认标弃用 */
 
 #include "sxcl/loader.h"

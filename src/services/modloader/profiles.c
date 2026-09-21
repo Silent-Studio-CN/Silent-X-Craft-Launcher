@@ -1,21 +1,9 @@
-/* SXCL-C launcher_profiles.json 的读取 / 合并 / 原子写 —— 官方安装器的硬性前置。
- *
- * 为什么非要有它:Forge/NeoForge 的官方安装器靠 launcher_profiles.json 判定"这是个
- * 合法的游戏目录",缺了这个文件它直接报 "There is no minecraft launcher profile"
- * 然后什么都不装(Python 版注释里记的就是这条)。
- *
- * 为什么只合并不覆盖:这个文件同时是官方启动器/PCL 的档案库,登录后还会往里补
- * authenticationDatabase —— 整份覆盖会毁掉用户的档案与登录信息(Python:
- * "只能合并,绝不能整份覆盖")。所以本模块:
- *   * 用 sxcl/json.h 解析原文件;
- *   * 序列化时**把所有我们不认识的字段、所有原有档案原样写回**(自己写的 JSON 输出,
- *     不是"重建一份" —— 重建就等于覆盖);
- *   * 同名档案已经存在时保持原样(Python: "已经有了就不动它");
- *   * 写回是原子的:先写 <路径>.tmp 再改名,任何一步失败都不留半个文件。
- *
- * 与 Python 版**故意不同**的一处:原文件解析失败时,Python 会把数据当成空字典然后
- * 覆盖写(等于丢光用户档案);这里报 SXCL_LOADER_ERR_FORMAT 并原封不动保留文件。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1
 
 #include "sxcl/loader.h"

@@ -1,9 +1,9 @@
-/* auth 模块内部共用的小工具(不对外公开;测试可以直接 include 这个文件)。
- *
- * 这里只放"每个 .c 都要用、又不值得单开一个模块"的东西:
- *   动态缓冲、JSON 转义、表单编码、base64(url)、随机数、人话错误、安全清零。
- * 全部纯 C11、无第三方依赖,不分配全局状态。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_AUTH_INTERNAL_H
 #define SXCL_AUTH_INTERNAL_H
 

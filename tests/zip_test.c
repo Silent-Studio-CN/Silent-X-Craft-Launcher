@@ -1,22 +1,9 @@
-/* SXCL-C ZIP 读取测试:任何失败都会让 main 返回非 0,ctest 判定失败。
- *
- * 覆盖内容:
- *   1) 手工拼出来的 zip(测试里自带一个最小 ZIP 写入器,字节完全可控):
- *         - stored / deflate(手写 fixed Huffman 流)两种方法;
- *         - 名字编码:纯 ASCII、CP437(0x82 = é)、UTF-8 标志位置位的非 ASCII;
- *         - "本地头大小字段为 0 + 数据描述符"的条目 —— 必须按中央目录取值;
- *         - 目录条目、不支持的方法(12 = bzip2)、加密位、ZIP64 大小字段;
- *         - 损坏数据:不是 zip、空文件、尾部被截断、本地头签名损坏、
- *           压缩长度超出文件、中央目录偏移超出文件 —— 必须报错不崩;
- *   2) 真实 zip 夹具:测试里用 system() 调 PowerShell 的 Compress-Archive
- *      把一棵已知内容的临时目录压成 zip,再用 sxcl_zip_open 打开它,
- *      校验条目名 / 大小 / 方法,并把每条解出来的内容与原始字节逐字节比对;
- *   3) 提取到文件:自动建父目录、内容正确、原子落位后 .tmp 不残留。
- *
- * 夹具生成方式说明:不用 add_test 之前的外部步骤(那会改动 CMakeLists 的结构),
- * 而是测试自己写一个 .ps1 再 system() 调用,生成物落在 ctest 的工作目录(build/),
- * 测试结束把 zip 删掉,仓库里不留任何 zip 二进制。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1   /* 测试里用 fopen/fwrite 造夹具,MSVC 会标记弃用 */
 
 #include <stdio.h>

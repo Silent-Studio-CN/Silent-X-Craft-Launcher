@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 # -*- coding: utf-8 -*-
 """按键映射:C 版核心库 vs Python 版核心库 的一致性工具。
 

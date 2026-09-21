@@ -1,10 +1,9 @@
-/* SXCL-C 内部 IO 小工具(只给 src/core/instance/ 下的实现与测试用,不进公共头文件)。
- *
- * 为什么需要它:公共的 sxcl/fs.h 只有"问单个文件/建目录",**没有目录列举**
- * (实例扫描、游戏目录版本计数都要列目录)。fs.h 是既有头文件、本轮不许改,
- * 所以这里自己实现一份平台分支的目录列举 + 递归删除 + 整个文件读进内存。
- * 路径一律 UTF-8;Windows 侧内部转宽字符(与 platform_fopen.c 同样的理由:中文目录)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_INSTANCE_IO_INTERNAL_H
 #define SXCL_INSTANCE_IO_INTERNAL_H
 

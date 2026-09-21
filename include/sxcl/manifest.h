@@ -1,12 +1,9 @@
-/* SXCL-C 元数据层 —— 把 Mojang 的清单/版本 JSON 翻译成"可下载可校验的任务清单"。
- *
- * 只做启动器真正需要的事:
- *   - 版本清单:版本号 -> 版本 JSON 的 url/sha1/size,以及 latest.release
- *   - 版本 JSON:客户端 jar、资源索引、依赖库(含 rules 平台过滤与 natives 分类器)
- *   - 产出 sxcl_task 数组,可直接丢给引擎;每个 Mojang 给了 sha1 的条目都带强校验
- *
- * 不做:资源对象(assets/objects)的展开 —— 需要先下 assetIndex 再解析,属于下一层。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_MANIFEST_H
 #define SXCL_MANIFEST_H
 

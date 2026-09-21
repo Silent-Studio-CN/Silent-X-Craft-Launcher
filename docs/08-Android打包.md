@@ -25,7 +25,7 @@ Qt 6.11.2 的 Widgets/Gui/Core/Svg/Network + qtforandroid/offscreen 平台插件
 | 设备侧运行 | ✅ 真机 **G6012BS / Android 16 / arm64-v8a**:`.13` 首验、**`.33` 全新安装终验**、窗口在前台、可见截图有我们的令牌色(§6.2/§6.6) |
 | 新设备状态 | ✅ 游戏目录 = **Android 应用私有路径**(`/data/user/0/com.silentstudio.sxcl/files/.minecraft`,logcat 实测)、版本列表为空 = 空态;两条真缺陷已修(§6.6/§6.7) |
 | 空态 | ✅ 版本页「没有版本」不再当失败:danger InfoBar **1.49% → 0.00%**、文案改为「暂无已安装的版本 · 前往「下载」页安装」(§6.7) |
-| 触屏 | ⚠️ 部分完成:QScroller 已挂 18 个 viewport,**设置页 swipe 0 → -358px 闭环**;主页/按键映射因 swipe 落点被内部子区吃掉未测到位移(§11,未完成项) |
+| 触屏 | ✅ 已闭环(2026-09-21 重测,§11):常规窗口下**只有设置页有可滚内容**(vp=725/content=1981),swipe 位移 **520 逻辑 px**;主页/按键映射 0px 是"没有可滚内容"的正确行为(逐路由几何见 §11.3);压缩窗口正向证据 155 逻辑 px(§11.5);弹层点选回填三重断言 + 超高弹层内部滚动 224 逻辑 px(§11.6)。旧表的 `-358px / 478-578` 已作废(§11.9) |
 | 退出 SIGABRT | ⚠️ 已知缺陷:Activity 销毁时 hwuiTask FORTIFY abort;BACK 必现 / HOME 不现;**无系统崩溃弹窗、无 ANR**,仅日志噪声(§12) |
 | 设备侧 1:1 像素 | ✅ **已取得** —— 九页离屏渲染各 **1650x1125**,DIFF 实测见 §6.3(含 Android vs 参考图 与 Android vs 桌面 C 两组,差异归因见 §6.4) |
 
@@ -700,9 +700,48 @@ index 1..5     : list viewport_h == content_h,scrollable=0                      
 `MenuActionListWidget [comboListWidget]` 共 42 次 valueChanged,`63,68,74 … 280,285,287`,**位移 224 逻辑 px = 448 物理 px**。
 (这一项以 App 自己的滚动条轨迹为准:同一批帧里弹层后面的设置页自己还在动,像素三法分歧较大,已在报告里注明。)
 
-**已知现象(未修,不在本次范围)**:下拉弹层可能被放到**屏幕外**。实测一个弹层的逻辑矩形 `(1051,677 135x203)`,
-换到屏幕是 y 1402..1808,而屏幕只有 1600 高 —— 有一半在屏幕外。第一轮点选就是踩在这个上(按"弹层中心"点,
-落点在屏幕之外),改成"弹层矩形 ∩ 屏幕"的中心才拿到干净数据。
+### 11.6.1 缺陷与修复:下拉弹层可能被放到屏幕外
+
+**现象(修复前,Android 实测)**:弹层的逻辑矩形 `(1051,677 135x203)`(另一次 `(1034,677 135x203)`),
+换到屏幕是 y 1402..1808,而屏幕只有 1600 高 —— **底边超出可用区 81px,近半在屏幕外**。
+第 3 项第一轮点选就是踩在这个上:按"弹层中心"算出来的落点在 y=1605(屏幕之外),点了等于没点。
+
+**定位(源码级)**:
+
+- 边界取自 `currentScreenGeometry()` = `QGuiApplication::screenAt(QCursor::pos())` 的 **`QScreen::availableGeometry()`**
+  (光标不在任何屏时回落主屏)——用的是**屏幕可用区**,不是窗口几何;
+- 空间估算 `availableViewSize()`:DropDown 用 `ss.bottom() - pos.y() - 10`,PullUp 用 `pos.y() - ss.top() - 28`;
+- 锚点 `pd = owner->mapToGlobal(x, owner->height())`(下拉框正下方)与 `pu = owner->mapToGlobal(x, 0)`(下拉框顶),
+  `popup()` 取可用高度大的那一支,所以空间不足会翻转到 pull-up;
+- 落点 `animateAndShow()`:DropDown `y = min(pd.y()-4, ss.bottom()-menuH+10)`;
+  PullUp `y = max(pu.y()-menuH+10, ss.top()+4)` —— **只钳上边界,从不检查下边界**。
+
+**触发条件(不是"窗口 1200x777 vs 屏幕 1200x800"那条差异)**:两者同坐标系同原点,锚点在视口内时两条分支代数上都放得下。
+真正会出事的是**锚点不在可见视口内**:`isVisible()` 只表示"控件及祖先没有被 hide",**不表示落在视口内**;
+设置页可滚,滚出视口的下拉框 `isVisible()` 仍为真,此时 `pu.y()` 可以大于窗口高度(实测推到 870,窗口只有 777):
+
+```
+PullUp: hu = pu.y()-28 = 842(超过内容高,取内容高 203)
+        y  = max(870-203+10, 4) = 677 ;  底边 = 880
+屏幕可用区底 = 799  =>  超出 81 px
+```
+
+**修复**(`PyQf to C/src/fluent/fluent_menu.cpp::ComboBoxMenu::animateAndShow`,算完 `endPos` 之后加两轴钳制):
+
+```cpp
+if (endPos.x() + menuW > ss.right() + 1)  endPos.setX(ss.right() + 1 - menuW);
+if (endPos.y() + menuH > ss.bottom() + 1) endPos.setY(ss.bottom() + 1 - menuH);
+if (endPos.x() < ss.left())  endPos.setX(ss.left());
+if (endPos.y() < ss.top())   endPos.setY(ss.top());
+```
+
+放在 libqf 而不是 Android 入口的理由:这是纯几何问题(锚点与边界不一致),与平台无关,
+桌面在多显示器/小窗口下同样能遇到;放平台层会让同一份 UI 出现两套定位。
+**"本来就放得下"时这段是恒等变换**,所以桌面 1:1 弹层几何一个像素都不动(桌面 A/B 抓图逐像素比对,见 §11.7.1)。
+
+**验收(命令与几何)**:`build/_android/scripts/popup_fix_accept.ps1` 会逐索引记录每个弹层的矩形、
+屏幕可用区、窗口矩形,并给出"是否整块落在可用区内"的判定,最后对最靠下的那个弹层跑一遍点选回填。
+代入修复前的实测值(y=677,h=203,可用区底 799)⇒ 修复后应为 **y=597、底边 800**,整块可见。
 
 ### 11.7 动画参数复核(桌面与 Android 同一套,实测拟合)
 

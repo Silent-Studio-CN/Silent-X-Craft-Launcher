@@ -1,18 +1,9 @@
-/* Qt Network 传输后端 —— 四平台通用(Win/Android/macOS/Linux)。
- *
- * 为什么用它打头阵:
- *   - 零新增依赖:Qt 已经是 UI 层依赖,四平台都有官方包;
- *   - TLS 走平台后端(Windows SChannel / macOS Secure Transport / Linux+Android OpenSSL),
- *     不必为 macOS 单独构建 OpenSSL;
- *   - 系统代理与 PAC 由 Qt 自动处理(libcurl 不解析 PAC,这是它的短板);
- *   - HTTP/2 在 Qt 6 默认开启,几千个小文件能省掉大量握手。
- *
- * 调用模型:net.h 的接口是"阻塞式"的(request 拿头,read 逐段取正文),
- * 这里用嵌套 QEventLoop 把 Qt 的异步信号转成阻塞调用,正好对上引擎的
- * "一个工作线程一条传输"模型;将来要换成单线程 multi 模型,只需换后端。
- *
- * 线程约束:一个实例只属于创建它的线程(QNetworkAccessManager 有线程亲和性)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include "sxcl/net.h"
 
 #include <QByteArray>

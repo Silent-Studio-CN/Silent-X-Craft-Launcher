@@ -1,5 +1,9 @@
-/* SXCL-C 文件系统小工具(只做启动器真正需要的几件事,不追求完整 POSIX 兼容)。
- * 路径一律 UTF-8;Windows 侧内部转宽字符,避免代码页问题。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #ifndef SXCL_FS_H
 #define SXCL_FS_H
 

@@ -1,4 +1,9 @@
-/* 见 io_internal.h 的说明。平台分支:Windows 走 FindFirstFileW,POSIX 走 opendir/readdir。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1 /* _wremove/_wfopen 系列在 MSVC 下被标记弃用;C4996 在 /WX 下会打挂构建 */
 #endif

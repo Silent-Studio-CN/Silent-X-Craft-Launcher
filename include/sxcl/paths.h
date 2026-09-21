@@ -1,19 +1,9 @@
-/* SXCL-C 游戏目录探测(路径层)—— 别让用户自己填路径。
- *
- * 逐条对齐 Python 版 src/services/minecraft/folders.py(那份是实测过的):
- *   1) 启动器所在目录(便携版习惯:SXCL.exe 旁边的 .minecraft,也认 minecraft / MC)
- *   2) APPDATA/.minecraft(官方启动器;HMCL 也爱往这儿塞)
- *   3) 用户主目录下的 .minecraft
- *   4) 桌面上的 .minecraft(真的有用户这么放,含中文"桌面")
- *   5) 当前配置里的目录(哪怕是空的也列出来,让用户知道现在用的是哪个)
- * 每个候选都**实际数一下 versions/ 里有多少版本**(含只有 JSON 没有 jar 的加载器版本),
- * 这样"装了 12 个版本的那个目录"会排在"刚建的空目录"前面。
- *
- * 术语:候选(候选目录)= 一个可能放游戏数据的路径;择优 = 按 Python 的 score 取第一个。
- *
- * 不抛异常:所有函数都返回错误码,人话原因写进调用方的 err 缓冲(可空)。
- * 路径一律 UTF-8(Windows 侧内部转宽字符,中文/日文路径可用)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_PATHS_H
 #define SXCL_PATHS_H
 

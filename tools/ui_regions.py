@@ -1,4 +1,7 @@
-# 精确同色区块提取 — 把截图变成可执行的布局规格
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import sys
 from collections import Counter
 from PIL import Image

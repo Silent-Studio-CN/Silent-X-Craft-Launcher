@@ -1,55 +1,9 @@
-/* SXCL-C 安装编排层 —— 把"装一个版本"需要的零件串成一条带阶段、进度、取消、清理的任务。
- *
- * 为什么要有这一层:下载引擎(engine.h)、版本计划(manifest.h)、加载器静默安装(loader.h)、
- * natives 抽取(natives.h)都是"零件";下载进度页与任务页要的是"阶段 + 每阶段进度 + 取消 +
- * 失败清理",没人给。本层只做编排:每个阶段把活派给对应零件,自己不重造轮子。
- *
- * 阶段表(固定,**枚举数值就是执行顺序**,UI 与日志都依赖它):
- *
- *   0  manifest          获取版本清单        取 version_manifest_v2.json,按版本号找到版本 JSON 的 url/sha1/size
- *   1  version_json      下载并解析版本 JSON  下到 versions/<实例>/<实例>.json 并解析(引擎按清单里的 sha1 强校验)
- *   2  client_jar        下载客户端 jar       必须成功:失败即整体中断(加载器要拿它做 patch)
- *   3  libraries         下载依赖库           含 natives 分类器;单文件失败只记录,不中断
- *   4  asset_index       下载资源索引         资源级别 NONE 时不排这个阶段
- *   5  asset_objects     下载资源对象         展开索引里的 objects;单文件失败只记录;级别不到 FULL 时不排
- *   6  loader_installer  下载加载器安装器     只有含加载器的计划才排这个阶段
- *   7  loader_run        执行加载器安装       sxcl_loader_install;它要的依赖库回调里再走一遍下载钩子
- *   8  natives           解压 natives         <游戏目录>/versions/<实例>/<实例>-natives
- *   9  finish            整理文件             清 .part 残留、按需删本次下到的安装器 jar
- *
- * 原版 + 全量资源 = 8 个阶段(没有 6/7);含加载器 = 10 个。计划里**实际会跑**的阶段用
- * sxcl_install_plan_stage_count/at 取,UI 直接照它画行,不要自己另写一份表。
- * 与 Python 下载进度页 UI 行(规格 §2.8)的对应:"下载原版 json 文件" = 0+1、
- * "下载原版 client.jar" = 2、"下载原版支持库文件" = 3、"下载原版资源文件" = 4+5、
- * "下载加载器" = 6、"分析加载器依赖"+"下载加载器依赖库" = 7 内部(方式 B 的 on_libraries)、
- * "执行加载器安装" = 7、"整理文件" = 9。natives 是 Python worker 有、UI 行漏掉的一步(规格 §6
- * 已把它记为 Python 自身的不一致),本层按 worker 实际流程保留。
- *
- * 失败策略(与 Python 版有一处**故意不同**,见下):
- *   - 阶段 0/1/2/6 任一文件失败 = 整体中断(客户端 jar 拿不到,装了也启动不了);
- *   - 阶段 3/4/5 单文件失败**不中断**:记进 result.files_failed 并写日志,继续往下跑
- *     (Python 版依赖库失败会整体中断;实测镜像抽风时"差一个可选库"不该让整个安装失败);
- *   - 结果里一定带:失败阶段(枚举 + 稳定字符串名)、人话原因、是否建议重试。
- *
- * 取消:is_cancelled 回调与 engine/loader 的取消语义一致(非 0 = 取消)。取消后
- *   ① 正在跑的阶段被叫停(引擎走 sxcl_engine_cancel,安装器走 request 里的 is_cancelled);
- *   ② 未完成产物被清理(**所有计划内任务的 <dest>.part / <dest>.part.json**,以及本次下的安装器 jar);
- *   ③ 返回 SXCL_INSTALL_ERR_CANCELLED(与普通失败可区分)。
- *
- * 绝不重复下载:本层不做任何"文件在不在"的判断,任务原样交给引擎 ——
- *   引擎的快路径(engine.c 的 run_task)会自己对 <dest> 做大小 + SHA-1 校验,通过就一个字节都不下。
- *
- * 依赖注入(为了可测):所有外部动作都在 sxcl_install_io 里(取文本/下载/加载器安装/natives),
- *   测试塞假实现即可"不联网、不跑安装器、不碰真文件";sxcl_install_default_io() 是真实现。
- *
- * 本层**不做**(明说,免得有人以为有):
- *   - 不算镜像地址(官方/BMCLAPI 双源改写是另一条线,规格 §7 缺口 8):任务里的候选 URL 由
- *     manifest.h 的 rules 生成,加载器安装器 URL 由 plan.installer_url 给(加载器版本列表层的活);
- *   - 不改版本 JSON 里的 "id"(自定义实例名时目录名与 JSON 里的 id 可能不一致;Python 版会改写);
- *   - 不递归删版本目录(Python 的 _cleanup_on_failure 会 rmtree versions/<名>):C 侧还没有
- *     "递归删目录"的公共文件系统接口,本层只清理自己产生的 .part 与安装器 jar;
- *   - 不重放加载器的 processors(loader.h 已声明那块不在它范围内)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_INSTALL_H
 #define SXCL_INSTALL_H
 

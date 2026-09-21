@@ -1,15 +1,9 @@
-/* lang(i18n)测试:**不联网**。覆盖
- *   1) 语言代码归一化(zh-CN / en_US / zh-Hans-CN / 认不出的 -> zh-cn);
- *   2) 内置默认表(与 Python config/lang/*.lang 生成的表逐条对拍);
- *   3) .lang 解析规则(整行 strip -> 第一个 '=' 切分 -> 键值各自 strip;注释/空行/BOM/CRLF/
- *      重复键/带 '=' 的值/超长键)与 Python src/core/lang.py:137-150 逐字段一致;
- *   4) 找不到的键回落到中文;
- *   5) {占位符} 替换(未知占位符原样保留);
- *   6) 进程级默认表(set_default / tr / shutdown)。
- *
- * 有 Python 版那份 config/lang 时(CMake 探测到就定义 SXCL_LANG_FIXTURE_DIR),再做一次
- * **真文件对拍**:把 en-us.lang / zh-cn.lang 读进来,与内置表逐键逐字比一次。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #else

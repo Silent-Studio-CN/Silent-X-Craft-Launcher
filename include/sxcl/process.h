@@ -1,13 +1,9 @@
-/* 子进程启动与输出捕获 —— 静默安装加载器、启动游戏、抓日志的地基。
- *
- * 为什么自研而不是用 system()/popen():
- *   - 要同时收 stdout 与 stderr,并且**逐行回调**(安装器的进度标记、游戏的日志都要边跑边解析);
- *   - 要有超时与"回调里主动终止"的能力(静默安装卡死时不能挂住启动器);
- *   - 不能弹控制台窗口(Windows 上 CREATE_NO_WINDOW),GUI 启动器里闪黑框很刺眼;
- *   - 参数与环境变量按数组给,不拼 shell 字符串(路径带空格/中文时不至于被拆坏)。
- *
- * 线程模型:sxcl_process_run 阻塞,内部在工作线程语义下逐行回调(回调里别做重活)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_PROCESS_H
 #define SXCL_PROCESS_H
 

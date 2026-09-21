@@ -1,4 +1,9 @@
-/* auth 内部工具实现:动态缓冲、编码、随机数、错误人话、时间。纯 C11,零依赖。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1 /* snprintf/time 在 MSVC 下会报 C4996;/WX 下会打断构建 */
 #endif

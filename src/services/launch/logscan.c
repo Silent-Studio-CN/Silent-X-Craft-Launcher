@@ -1,16 +1,9 @@
-/* 日志归类与故障分类 —— 一行文本进,类别 + 关键信息出;一批行进,一条人话结论出。
- *
- * 为什么要有这一层:
- *   启动失败时把整篇日志糊到用户脸上等于没说。用户需要的是三句话之一:
- *   "你的 Java 版本不对" / "你的显卡驱动不支持你选的图形后端" / "你没登录或网络不通"。
- *   所以这里只做两件事:把每一行归到一个**固定的**类别;把整篇日志收敛成**一条**结论。
- *
- * 判定顺序是固定的"越具体越优先",不是打分:
- *   崩溃 > Vulkan 回退 > Java 版本 > 模组/加载器 > 缺东西 > 账户网络 > 图形栈 > 正常退出 > 未知
- *   (单行)而汇总结论另有一套优先级 —— 见 sxcl_log_summary_finish 的注释。
- *
- * 不做:不解析日志时间戳、不还原堆栈、不读文件(调用方逐行喂进来,和 process.h 的 on_line 天然对接)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

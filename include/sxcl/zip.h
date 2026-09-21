@@ -1,22 +1,9 @@
-/* SXCL-C ZIP 读取模块(只读,不写 zip)。
- *
- * 纯 C11 自研实现,零第三方依赖(不用 libzip / minizip / Info-ZIP),
- * 解压走本工程的 sxcl/inflate.h(自带 raw DEFLATE 解压)。
- *
- * 用途:Forge / NeoForge / OptiFine 安装器都是 jar(ZIP),启动器要静默从里面
- * 取 install_profile.json、version.json、maven/* 依赖并自己完成安装。
- *
- * 实现约定:
- *   - 一律以中央目录为准(PK\x01\x02):流式写入的 zip 本地头里的大小字段可能是 0,
- *     只有中央目录是权威的;EOCD(PK\x05\x06)从文件尾部回扫定位;
- *   - 文件名:UTF-8 标志(通用位 11)置位时按 UTF-8 原样使用,否则按 CP437 转成 UTF-8,
- *     纯 ASCII 名直接跳过转换;名字比较大小写敏感;
- *   - 压缩方法 0(stored)与 8(deflate)支持,其它视为不支持(返回 -3);
- *   - ZIP64 条目(大小/偏移为 0xFFFFFFFF)明确报"不支持";整包 ZIP64(>4 GiB 或
- *     > 65535 个条目)在 open 阶段直接判为打不开;
- *   - 条目只在 sxcl_zip_open 时读一次中央目录:几千个条目的 jar 也只占几百 KB 内存,
- *     后续解压按需 seek 本地头,不把整包读进内存。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_ZIP_H
 #define SXCL_ZIP_H
 

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 """fit_anim_trace.py - what animation did the app ACTUALLY run?
 
 Input: the SXCL_ANIM_TRACE=1/2 output ([sxcl-ui] <tag> t=<ms>ms <metric>=<v> ...),

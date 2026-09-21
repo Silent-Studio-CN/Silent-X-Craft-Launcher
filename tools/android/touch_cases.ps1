@@ -1,5 +1,7 @@
-# Touch cases with focus assertion + retries: a case is only accepted when BOTH
-# frames were taken while OUR activity had focus (this device keeps stealing it).
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 param([string]$Tag = 'before', [string]$Dev = '192.168.220.13:5555', [int]$Tries = 4)
 $ErrorActionPreference = 'Continue'
 $adb = 'D:\AndroidSdk\platform-tools\adb.exe'

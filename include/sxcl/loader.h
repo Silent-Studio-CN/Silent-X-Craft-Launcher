@@ -1,41 +1,9 @@
-/* SXCL-C 模组加载器"静默安装"模块 —— 把 Python 版(src/services/mod_loader)里
- * 已经踩过坑的裁决原样搬到 C:方括号里的话就是 Python 版注释的原意,不要"重新发明"。
- *
- * 两条路(PCL 也是这么干的):
- *   方式 A  跑安装器自己的静默入口。Forge/NeoForge 是
- *           java -jar <installer.jar> --installClient <游戏目录>
- *           参数名必须是 --installClient(不是 --installDir/--target,那两个老安装器才认);
- *           并且**必须先保证 <游戏目录>/launcher_profiles.json 存在** ——
- *           官方安装器靠它判定目录合法,缺了会直接报 "There is no minecraft launcher profile"
- *           然后什么都不装。
- *   方式 B  解包安装(方式 A 失败,或这种加载器根本没有无头 CLI):
- *           不启动安装器进程,只从 jar 里取 install_profile.json / version.json,
- *           拼出版本 JSON,把安装器自带的 maven/ 与通用 jar 解包进 libraries/。
- *   OptiFine 特殊:它的安装器**没有"能指定目标目录的静默 CLI"**(传 --installClient <目录>
- *           也被忽略,它只认 %APPDATA%\.minecraft),所以给它一个临时 APPDATA 沙箱,
- *           装完再把产物搬回实例目录。
- *
- * 结束判据不能只看"jar 有没有生成":方式 A 成功的判据是
- *   返回码为 0(或看到安装器自己打的完成标记) **且** versions/<实例名>/ 里真的有版本 JSON;
- *   安装器把版本写到别的目录名时,按 _handle_generated_files 的那几个候选名找回来。
- *
- * 返回码与所有权约定(全模块统一):
- *   - 0 / SXCL_LOADER_OK         成功
- *   - SXCL_LOADER_ERR_ARG       (-1) 参数不合法(必填项为空、越界、认不出的坐标)
- *   - SXCL_LOADER_ERR_IO        (-2) 文件读写失败(打不开/写不出/改名失败)
- *   - SXCL_LOADER_ERR_FORMAT    (-3) JSON 解析失败
- *   - SXCL_LOADER_ERR_NOMEM     (-4) 内存不足
- *   - SXCL_LOADER_ERR_SPACE     (-5) 输出缓冲/路径长度不够(内容被截断时也报它)
- *   - sxcl_loader_install 另有一套:0 = 成功,1 = 安装失败(原因在结果的 error 里),
- *     负数 = 参数错误(压根没开始装)。
- *   - 所有形如 "char *out_text" 的出参都是 malloc 出来的,调用方 free();
- *     其余出参都是调用方提供、模块只填内容的固定大小缓冲区,不需要也不许 free。
- *   - 入参字符串只在调用期间被读取,模块不接管所有权(可以传栈上的临时串)。
- *
- * 线程安全:纯函数(解析/判定/命令行构造/标记解析)无全局状态、可重入;
- *   sxcl_loader_install 会创建子进程、临时目录,并且(仅 OptiFine 沙箱期间)临时改本进程的
- *   APPDATA 环境变量,所以**同一时刻只许有一个安装在跑**。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_LOADER_H
 #define SXCL_LOADER_H
 

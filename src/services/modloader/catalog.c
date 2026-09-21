@@ -1,19 +1,9 @@
-/* SXCL-C 加载器版本目录 —— 纯逻辑为主:解析(自写最小 XML 扫描器 + 复用 json.h)、
- * 过滤、排序、标记、拼 URL;只有 sxcl_catalog_fetch 会碰传输层。
- *
- * 这里搬的是 Python 版的取数规则(src/services/mod_loader/api.py):
- *   Forge:    maven-metadata.xml 里 "1.20.1-" 前缀过滤(api.py:ForgeAPI.fetch_versions 的官方兜底);
- *   NeoForge: _parse_version/_mc_key 的 "21.1.72 -> 1.21.1" 换算 + "-beta" 判定;
- *   Fabric:   meta 的 loader.version / loader.stable;
- *   OptiFine: BMCLAPI 的 type_patch 拼法(download_config_page.py:_on_loader_loaded)与 forge 字段;
- *   版本排序: api.py:_version_key(把版本串拆成数字元组比大小,新的在前)。
- * 版本串 -> (mc, loader) 的解析**不在这里**,复用 loader.h 的 sxcl_loader_parse_version()。
- *
- * 实测过的地址(2026-09-17 抓取时全部可用)见 sxcl_catalog_url();镜像一律走 BMCLAPI 代理,
- * 不猜地址:BMCLAPI 的 /maven/ 是 maven 仓库的透传(/net/neoforged/... 实测可用),
- * /fabric-meta/ 是 meta.fabricmc.net 的透传,/optifine/<mc> 是它独有的 OptiFine 接口。
- * 注意 Quilt 在 BMCLAPI 上**没有**对应透传(/quilt-meta/ 实测 404),所以 Quilt 只有官方源。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1  /* 用了几处 C 串函数,MSVC 默认标弃用(工程惯例,不压 pragma) */
 
 #include "sxcl/loader_catalog.h"

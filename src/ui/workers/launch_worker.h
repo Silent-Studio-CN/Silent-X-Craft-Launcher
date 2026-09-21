@@ -1,30 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// launch_worker —— 启动页的执行侧:Java 探测 → 最终命令行 → 真起进程 → 日志归类
-//
-// 全部落在工作线程里;界面线程只收信号(队列投递)。**主线程绝不阻塞**。
-//
-// ── 为什么是"两遍"(核心库接口的实话) ──
-// 核心库的 sxcl_launch_run 一次就把"读版本 JSON / 选 Java / 写 options.txt / 解 natives /
-// 拼 argv / 起进程 / 归类日志"全干完,但 sxcl_launch_result **不回传 argv**(launch.h:484-506
-// 没有这个字段)。而启动页必须显示"最终命令行(accessToken 打码)"。
-// 核心库留的口子在 driver.c:355-378:dry_run 且给了 on_line 时,它会把自己拼出来的
-// **打码后的**命令行逐行回调出来。所以本层跑两遍:
-//
-//   第一遍 dry_run=1 :真实走完全部准备(选 Java、写 options.txt、解 natives、拼 argv),
-//                     并从 on_line 里收下最终命令行 —— 这是**核心库自己的 argv**,
-//                     本层不另抄一份参数拼装逻辑(抄一份必然与核心漂移)。
-//   第二遍 dry_run=0 :真起进程。准备部分幂等(options.txt 重写、natives 已存在即跳过),
-//                     所以第二遍不会重复下载/重复解压出问题。
-//
-//   请求里 dryRun=1 时**只跑第一遍** —— 这就是"启动 --dry-run"那条验收路。
-//
-// ── 取消 ──
-// 两条路都有,按可用性择一(以前只有第一条,有真实边界):
-//   ① 核心库 launch.h:477-479 明写的那条:**on_line 返回非 0 = 请求终止进程**。
-//      它的边界是"游戏一行输出都没有时要等下一次输出才生效"。
-//   ② launch.h 的 **on_started(userdata, pid)**:进程真起来时把 PID 交给我们。
-//      于是取消可以**直接按 PID 结束** —— 立刻生效,不依赖任何输出。
-// 准备阶段(还没起进程)的取消在两遍之间检查,也是立刻生效。
+
 #include <QObject>
 #include <QString>
 #include <QStringList>

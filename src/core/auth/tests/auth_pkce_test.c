@@ -1,11 +1,9 @@
-/* PKCE 对拍 + 配置解析 + 错误码人话 + 端点拼接。
- *
- * 核心那一条:**RFC 7636 附录 B 的官方向量**
- *   verifier  = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
- *   challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
- * 算错一位,微软就会在换 token 那一步回 invalid_grant —— 那时代码看着"能跑",
- * 实际永远登不上,所以这条必须逐字符对拍。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

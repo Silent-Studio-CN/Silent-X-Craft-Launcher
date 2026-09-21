@@ -1,23 +1,9 @@
-// keymap_page.cpp —— 按键映射页(在电脑上编排手机用的虚拟按键)
-//
-// 1:1 移植 Python 版 src/app/pages/keymap_page.py(+ 它依赖的 src/core/keymap 数据模型)。
-//
-// 页面结构(keymap_page.py:235-306 _build_content):
-//   BasePage(title="按键映射", subtitle="给手机端用的虚拟按键布局；可在此编排、检查冲突、导出教学")
-//     vBoxLayout: contentsMargins(28,24,28,24) / spacing 16 / AlignTop     base_page.py:51-53
-//       toolbar  QWidget + QHBoxLayout margins(0,0,0,0) spacing 10        :236-239
-//                BodyLabel("预设") / ComboBox(预设) / ComboBox(横竖屏,固定宽 90) / SearchLineEdit(stretch 1)
-//       canvas_card  CardWidget + QVBoxLayout margins(8,8,8,8)            :308-314
-//       body    QHBoxLayout spacing 16: canvas(stretch 3) + side(stretch 2) :278-281
-//               side = QVBoxLayout spacing 8: StrongBodyLabel("冲突检查") / QListWidget(minH 110)
-//                                            StrongBodyLabel("新手教学（可导出给手机端）") / QListWidget
-//       buttons QHBoxLayout spacing 8: 六个按钮 + addStretch(1)            :283-300
-//
-// 画布(KeymapCanvas,:80-218)按 0~1 归一化坐标绘制"手机形状 + 虚拟按键",
-// 颜色/线宽/圆角/字号全部照抄 Python,无一自创:
-//   底色 bg / 手机 card+border_strong 2px 圆角 14 / 顶部一行 8pt tertiary 说明
-//   普通键 accent alpha=255*min(0.75,opacity) 圆或圆角 8 矩形,描边 border_strong 1.4
-//   摇杆画"中心圆(bg+border_strong 1.2)+ 摇杆帽(accent)",标签字号 max(7.5,min(11,h/3.2))pt
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "page_factory.h"
 
 #include "fluent_theme.h"

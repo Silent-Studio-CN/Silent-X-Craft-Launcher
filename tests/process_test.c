@@ -1,4 +1,9 @@
-/* 进程启动与输出捕获测试:正常输出、退出码、超时终止、回调主动终止 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1 /* strcat 在 MSVC 下默认被标记弃用 */
 #endif

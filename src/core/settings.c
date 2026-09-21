@@ -1,19 +1,9 @@
-/* SXCL-C 设置存储实现 —— 纯 C11、零第三方依赖、四平台可移植。
- *
- * 设计要点(与 include/sxcl/settings.h 的约定一致):
- *   1) 内存模型:一个有序数组 {key,value},键值都是 malloc 出来的 C 串。
- *      查找线性扫描(设置项只有几十条,不值得上哈希表,也就没有哈希表带来的顺序问题)。
- *   2) 读:自己写 fgets 循环(MSVC 没有 getline),逐行剥 CR/LF;注释/空行/坏行跳过不报错。
- *      同名键后出现的覆盖先出现的(和 json.c"重复键以最后一次为准"一致),位置不变。
- *   3) 数字解析自己写,不用 strtod/strtoll:strtod 受 locale 影响(有的区域拿 ',' 当小数点),
- *      strtoll 也没法干净地区分"非法"和"恰好是 0"。小数按"整数尾数 + 十进制指数"一次性
- *      换算,314/100 这种能得到最接近的 double,不会一位一位加出累积误差。
- *   4) 原子写:先写 <path>.tmp,再 sxcl_fs_rename_replace 覆盖;父目录用
- *      sxcl_fs_mkdirs_for_file 兜底;任何一步失败都把 .tmp 删掉,不留半个文件。
- *   5) UTF-8 路径:Windows 上 fopen 按 ANSI 代码页解释路径(中文路径直接打不开),
- *      所以统一走 _wfopen_s,写法与 src/core/json.c 的 open_utf8_path 一致。
- *   6) 无全局可变状态,但**不承诺**并发:同一句柄多线程读写是数据竞争(设置是主线程的)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

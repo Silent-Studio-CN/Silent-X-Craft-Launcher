@@ -1,14 +1,7 @@
-# 从 PCL 源码的 XAML 里抽取矢量图标(Logo="..."/Data="..."),输出为独立 SVG。
-# 用法: pwsh -File tools/extract_pcl_icons.ps1 [-PclRoot <PCL 源码根>] [-OutDir <输出目录>]
-#
-# 为什么要这么干:PCL 的界面图标不是图片文件,而是内嵌在 XAML 属性里的 SVG 路径数据
-# (例如 PageDownloadLeft.xaml 里 Title="Mod" Logo="M789.504 912.896h-195.072a35.328...").
-# 抽成独立 SVG 之后,我们的 Qt 界面可以直接用 QSvgRenderer 渲染并按主题着色。
-#
-# 两种图标都要处理(踩过):
-#   - 填充式:元素只有 Logo/Data  -> <path fill="currentColor"/>
-#   - 描边式:元素还带 StrokeThickness(如 FormMain.xaml 的 ShapeTitleLogo) -> 必须用 stroke,
-#     否则开放的细线路径填充后什么都看不见(自测覆盖率 < 0.5% 才发现)
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 param(
     [string]$PclRoot = 'C:\dsh_work\dev\PCL',
     [string]$OutDir = (Join-Path $PSScriptRoot '..\assets\icons\pcl')

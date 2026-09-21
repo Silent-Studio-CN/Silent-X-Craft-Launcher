@@ -1,4 +1,7 @@
-# Compare the nine device-side renders with build/ref/py_<route>.png (1:1 check).
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 param([string]$Device = 'D:\SilentStudio\prog\Silent-X-Craft-Launcher - C\build\_android\out\device')
 $ErrorActionPreference = 'Continue'
 $ref = 'D:\SilentStudio\prog\Silent-X-Craft-Launcher - C\build\ref'

@@ -1,29 +1,9 @@
-/* SXCL-C 登录令牌的加密落盘 —— refresh token 是"免密续期"的唯一凭据,等价于密码。
- *
- * 硬规矩:**文件里绝不放明文 token**。存储后端按平台挑,挑不到强后端就走降级路径并且
- * 由 sxcl_auth_store_backend() 如实报出来,让界面/文档能告诉用户风险。
- *
- *   后端              平台        说明
- *   ───────────────────────────────────────────────────────────────────────────
- *   DPAPI            Windows     CryptProtectData,密钥由用户登录凭据派生(换用户/换机器解不开)
- *   Keychain         macOS       SecItemAdd / SecItemCopyMatching(kSecClassGenericPassword)
- *   libsecret        Linux       运行时 dlopen libsecret-1(GNOME Keyring 等),找不到就降级
- *   文件 + 本机密钥   全部         0600 权限文件 + ChaCha20-Poly1305,密钥 = SHA256(本机派生材料 + 盐)
- *
- * 降级路径的风险(必须如实说明):"本机派生密钥"只能防"拷走文件到别的机器解密",
- * 防不住"同一台机器上的其它程序读走密钥文件再解密" —— 它挡的是离线窃取与误提交,
- * 不是同机恶意软件。所以能上 DPAPI/Keychain/libsecret 就一定上。
- *
- * 文件格式(小端,固定头 + 后端自描述载荷;二进制,不是 JSON):
- *   magic   8 字节 "SXCLAUTH"
- *   version 1 字节 (= 1)
- *   backend 1 字节 (sxcl_auth_store_kind)
- *   flags   2 字节 (保留,= 0;将来做"多账户/多 profile"时用)
- *   length  4 字节 (载荷长度)
- *   payload …
- * 载荷内部再是后端自己的格式(DPAPI 是 DATA_BLOB;文件后端是 nonce||密文||tag)。
- * 头部同时作为 AEAD 的附加认证数据(AAD),所以改头会导致解密失败,而不是静默读出错数据。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_AUTH_STORE_H
 #define SXCL_AUTH_STORE_H
 

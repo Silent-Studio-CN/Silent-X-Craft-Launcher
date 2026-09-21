@@ -1,20 +1,9 @@
-/* SXCL-C 启动层(纯逻辑)—— Java 运行时探测 / 启动参数拼装 / 日志归类。
- *
- * 这一层**不启动任何进程**:它只做"能单独喂输入就能断言输出"的纯逻辑,
- * 把真正起 java.exe 的活留给上层(process.h + 下一步的 launch/session)。
- * 这样单测不需要这台机器装了 JDK、也不需要 GPU。
- *
- * 三块内容:
- *   1) Java 运行时探测(§1,java.c)
- *      - 按平台给出候选路径(纯字符串)+ 真实扫目录找 bin/java;
- *      - 解析 <java_home>/release 键值清单(比跑 java -version 快,且不依赖执行权限);
- *      - 也支持从**已有的 java -version 文本**解析,供调用方把捕获到的输出喂进来;
- *      - 按版本 JSON 的 javaVersion.majorVersion 排序候选:精确匹配 > 更高 > 更低。
- *   2) 启动参数拼装(§2,args.c):版本 JSON + 上下文 -> argv 数组(可直接给 sxcl_process_opts)。
- *   3) 日志归类(§3,logscan.c):一行文本 -> 类别 + 抽取到的关键信息;一批行 -> 一条人话结论。
- *
- * 命名/内存约定与其它模块一致:返回的指针归句柄所有,句柄释放即失效;不抛出、不 abort。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_LAUNCH_H
 #define SXCL_LAUNCH_H
 

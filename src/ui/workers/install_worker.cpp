@@ -1,3 +1,9 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "install_worker.h"
 
 #include <QByteArray>

@@ -1,10 +1,9 @@
-/* 会话小工具 + 配置解析(client_id / 租户段)+ 令牌打码。
- *
- * 这些函数看着零碎,但它们决定了"用户在哪配置、代码认哪一个"的唯一口径:
- *   client_id:显式参数 > SXCL_AUTH_CLIENT_ID 环境变量 > settings["auth.client_id"] > 内置默认
- *   租户段   :显式参数 > SXCL_AUTH_TENANT    环境变量 > settings["auth.tenant"]    > consumers
- * 别在别的文件里再写一套 if(getenv(...)) —— 两个口径迟早会分叉。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

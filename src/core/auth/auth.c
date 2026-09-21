@@ -1,16 +1,9 @@
-/* 登录编排:一次调用把整条链跑完(微软 → XBL → XSTS → Minecraft → 权益/档案)。
- *
- * 授权码主路(默认):
- *   PKCE 生成 verifier/challenge → 起 127.0.0.1 环回服务 → 拼授权 URL → 打开浏览器
- *   → 等 /callback?code=…(校验 state)→ 换 token → 跑后面的链
- * 设备码兜底(--device-code / 没有浏览器 / 环回端口起不来):
- *   devicecode 拿 user_code 交给前端 → 轮询 → 换到 token → 跑后面的链
- * 续期(refresh):
- *   用落盘的 refresh_token 直接换新 token → 跑后面的链(全程不要用户参与)
- *
- * 铁律:任何一跳失败都**如实上报**,绝不"用上一次的结果接着往下走" ——
- * 尤其是 profile 的 name 为空(没买 Java 版)必须直接失败,不能拿默认名字去启动游戏。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

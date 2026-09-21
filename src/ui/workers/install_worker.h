@@ -1,36 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// install_worker —— 把核心库的**阻塞式**安装编排(sxcl_install_run)放进工作线程
-//
-// 为什么要有这一层:下载进度页要的是"阶段 + 每阶段进度 + 速度 + 剩余 + 当前文件 + 取消",
-// 而 sxcl_install_run 是一路阻塞跑到底的 C 函数。直接把 C++ 的调用搬到别的线程只是第一步;
-// 真正要解决的是三件事:
-//
-//   1) **主线程绝不阻塞**。start() 立刻返回;核心库的进度回调(install.h:194-197 明说
-//      可能来自引擎的工作线程)统一走 Qt 队列连接投递到界面线程 —— 回调里只做复制与投递。
-//   2) **速度与剩余**。核心库的 sxcl_install_progress **没有** speed 字段(它只给
-//      bytes_done/bytes_total),所以速度和 ETA 由本层从"字节增量 / 墙钟增量"算出来。
-//      这是导出量,不是编的:算不出来(speed<=0 或总量未知)就报 -1,由界面显示"—"。
-//   3) **取消要如实**。核心库的取消语义是"is_cancelled 返回非 0"(install.h:34-37):
-//      正在跑的阶段被叫停、未完成产物被清理、返回 SXCL_INSTALL_ERR_CANCELLED。
-//      本层把 cancelled 单独放进 finished 信号,界面必须显示"已取消"而**不是**成功。
-//
-// 线程模型(每个 worker 一个线程,跑完即退):
-//
-//   界面线程                     工作线程(m_thread)
-//   --------                     ------------------
-//   start()  ── m_thread->start() ──> run():
-//                                       读设置 / 建 engine_opts
-//                                       拼 sxcl_install_plan
-//                                       emit planReady(...)          ─┐
-//                                       sxcl_install_run(...)         │ 自动连接
-//                                         │                           │ = 队列投递
-//                                         └─ 进度回调(任意引擎线程) ─┤ 到界面线程
-//                                              emit progress/logLine  ─┘
-//                                       emit finished(...)
-//   cancel() ── m_cancel.store(true) ──> is_cancelled 回调看到非 0 -> 核心库开始收尾
-//
-// 归属:本文件只"驱动"核心库,不含任何下载/校验/安装逻辑 —— 校验(SHA-1)、断点续传、
-// 已存在快路径、natives 解压、加载器安装全在核心库里,这里一个都不重写、也不放宽。
+
 #include <QObject>
 #include <QString>
 #include <QStringList>

@@ -1,4 +1,7 @@
-# 文本色块图:把两张图变成可对比的字母网格(我看不到图,只能这样"看")
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import sys
 from collections import Counter
 from PIL import Image

@@ -1,15 +1,9 @@
-/* 微软 OAuth2 三条路:授权码(+PKCE+环回)、refresh_token 续期、设备码轮询。
- *
- * 端点(租户段可配置,见 auth.h):
- *   GET  {authority}/{tenant}/oauth2/v2.0/authorize  ?response_type=code&client_id=…
- *         &redirect_uri=http://localhost:<随机端口>/callback&scope=XboxLive.signin offline_access
- *         &code_challenge=…&code_challenge_method=S256&state=…
- *   POST {authority}/{tenant}/oauth2/v2.0/token       (application/x-www-form-urlencoded)
- *   POST {authority}/{tenant}/oauth2/v2.0/devicecode  (application/x-www-form-urlencoded)
- *
- * 设备码流的流程控制全在 4xx 正文里(见 http_auth.c 的说明):
- *   authorization_pending → 继续等;slow_down → 间隔 +5s;expired_token → 重新登录。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

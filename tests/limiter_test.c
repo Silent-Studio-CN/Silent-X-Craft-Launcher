@@ -1,4 +1,9 @@
-/* 限速器测试:语义对齐 Python 版 src/core/download/limiter.py */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include <stdio.h>
 #include <math.h>
 #include <string.h>

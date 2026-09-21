@@ -1,5 +1,9 @@
-/* 元数据层测试:版本清单索引、rules 平台过滤、natives 分类器、下载计划生成。
- * 用内嵌的小样本(模仿真实 version JSON 的结构),不联网。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include <stdio.h>
 #include <string.h>
 

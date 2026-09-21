@@ -1,3 +1,7 @@
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import json, sys
 from pathlib import Path
 d = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))

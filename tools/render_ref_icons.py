@@ -1,3 +1,7 @@
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import sys, os
 from pathlib import Path
 sys.path.insert(0, r"D:\SilentStudio\prog\Silent-X-Craft-Launcher")

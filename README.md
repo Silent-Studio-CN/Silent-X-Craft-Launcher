@@ -58,11 +58,26 @@ UI 需要 Qt 6.11.2（WS2025 已装，含 4 套安卓套件）与 `libqf`；纯�
 
 ## 不变量（改代码前先读）
 
-- **本工程不含 Python**：没有 `.py` 文件、不依赖 Python 运行时、不调用 Python 脚本；
-  构建、测试、打包一律 CMake + MSVC + `.bat`/PowerShell。Python 版只作为**语义与数据格式的参考**，
-  阅读它可以，但它的代码、脚本、生成流程都不进这个仓库。
-- 跨平台代码默认不写平台专有 API；必须写时收敛到 `src/platform/`，并在文件头注明支持的平台。
+- **本工程不依赖 Python**：构建、测试、打包一律 CMake + MSVC + PowerShell，产物里没有 Python 运行时。
+  `tools/` 下有用 Python 写的**取证/比对脚本**（抓参考图、逐像素比对、批量处理文件头），
+  它们只在开发机上跑、不参与构建与发布；Python/PySide6 版实现保留在 `legacy-python` 分支，
+  只作为**语义与数据格式的参考**，其源码与生成流程不进本仓库。
+- 跨平台代码默认不写平台专有 API；必须写时收敛到 `src/platform/`。
 - 面向用户的行为改动，先在 Python 版确认语义，再在 C 版实现（避免两版分叉），但实现与验证都在 C 侧完成。
+- **文件头只放版权头三行**（C/C++ 用 `/* */`，脚本与 CMake 用 `#`），不要再往文件开头堆大段设计说明 ——
+  开源读者第一眼要看的是代码：
+
+  ```c
+  /*
+   * (C) Silent X Craft Launcher
+   * Copyright by SilentStudio.
+   * All rights reserved.
+   */
+  ```
+
+  为什么这么写、当初踩过什么坑，写进 `docs/`。历史遗留的文件头说明已**原文归档**到
+  `docs/14-源码头注归档.md`（可全文搜索）。批量工具：`tools/strip_file_headers.py`（幂等，保护 shebang 与
+  `#pragma once`）与 `tools/verify_header_strip.py`（独立校验：只删了注释，正文逐行全等）。
 
 ## 现状
 

@@ -1,16 +1,9 @@
-/* SXCL-C 哈希模块实现：SHA-1 / SHA-256，按 FIPS 180-4 自研实现。
- *
- * 设计约束（与工程要求一致）：
- *  1) 零第三方依赖：不用 OpenSSL / BCrypt / CryptoAPI，仅用 <string.h>；
- *  2) 增量式：update 可任意分块，内部只有结构体里的 64 字节缓冲，绝不 malloc；
- *  3) 长度用 64 位字节计数器 + 64 位比特长度补位，> 512 MiB（比特长度 > 2^32）也正确；
- *  4) 无未定义行为：不做未对齐的 32 位读取，不做违反严格别名的类型双关，
- *     位运算移位量恒在 1..31，字节序用移位手工拼装（天然大小端无关）；
- *  5) C11，MSVC /W4 /WX 与 gcc -Wall -Wextra -Wpedantic -Werror 双重零警告。
- *
- * 记法：buf 中未处理的字节数恒 < 64（每凑满一块立即压缩），因此 final 里
- * buf[buf_len] = 0x80 不会越界（buf_len <= 63，写入后 <= 64）。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include "sxcl/hash.h"
 
 #include <string.h>

@@ -1,11 +1,9 @@
-/* auth_replay.c —— 登录对话框取证用的**夹具回放传输**(实现见 auth_replay.h)。
- *
- * 纪律:它**只在** SXCL_UI_AUTH_REPLAY=<夹具目录> 显式设了时被建出来,
- * 产品路径(不设变量)仍然走 sxcl_transport_qt_create() 打真网络。
- * 回放的路由与 tests/fixtures/auth/README.md 记的用例一一对应:
- *   设备码申请 → 200;轮询 → 400 authorization_pending ×2 → 200 成功;
- *   XBL → XSTS → login_with_xbox(可选 403)→ mcstore → profile。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1 /* fopen/snprintf:MSVC 会标成"不安全",/WX 下会断构建 */
 #endif

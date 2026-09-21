@@ -1,3 +1,7 @@
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 cmake_minimum_required(VERSION 3.24)
 project(sxcl_c VERSION 0.1.0 LANGUAGES C CXX)
 

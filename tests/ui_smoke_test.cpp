@@ -1,13 +1,9 @@
-// tests/ui_smoke_test.cpp —— 阶段 6(UI 地基)的程序化验收
-//
-// 全程 -platform offscreen,不需要显示器,也不弹窗。断言分五组:
-//   ① 主窗存在、标题正确、尺寸合理(初始 1100x750,最小 900x600)
-//   ② 主导航 = 主页/下载/任务/联机/更多 五项 + 底部「设置」一项(逐项断言标题文本)
-//   ③ 五个语义图标都加载成功,且 QSvgRenderer 渲染到 QImage 后墨迹覆盖率 > 3%
-//   ④ 主题令牌浅色/深色各取一次,断言两种模式下窗口背景色不同(主题桥接真的生效)
-//   ⑤ 截图 <build>/ui_shot.png,整图墨迹覆盖率 > 5%(不是白屏)
-//
-// 失败不 early-return:所有断言跑完再给退出码,一次性看到全部问题。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include <QApplication>
 #include <QDir>
 #include <QFileInfo>

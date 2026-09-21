@@ -1,11 +1,7 @@
-# 本目录的源文件由这里追加到 sxcl 目标(见根 CMakeLists 的说明)。
-# 子代理请只改这个文件,不要动根 CMakeLists。
-#
-# 归属说明(给父代理):
-#   catalog.c         加载器版本目录(元数据层)—— 补 docs/04-页面规格.md §7 缺口 #2
-#   keymap*.c         键位映射核心 —— 补 §7 缺口 #6。**逻辑上属于 src/core/keymap/**,
-#                     为了不依赖"往根 CMakeLists 加 add_subdirectory"而先放在本目录;
-#                     等 src/core/keymap/CMakeLists.txt 建好,把下面这几行搬过去即可(文件可直接移)。
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 target_sources(sxcl PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/catalog.c
   ${CMAKE_CURRENT_SOURCE_DIR}/keymap.c

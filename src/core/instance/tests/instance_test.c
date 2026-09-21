@@ -1,9 +1,9 @@
-/* 实例扫描 / 游戏目录探测 / HTTP 取文本 / 机器信息 的测试。
- *
- * 夹具:一棵**假的游戏目录树**,建在构建目录下(ctest 的 WORKING_DIRECTORY 就是本模块的构建目录,
- * 已被 .gitignore 忽略:仓库里不留任何二进制/临时夹具)。每个版本目录对应 Python 版
- * loaders.py / folders.py / pcl_compat.py 里的一条识别规则,下方注释逐条写明是哪一条。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

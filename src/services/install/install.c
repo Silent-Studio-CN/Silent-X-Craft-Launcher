@@ -1,8 +1,9 @@
-/* SXCL-C 安装编排层实现 —— 契约、阶段表与失败策略见 include/sxcl/install.h。
- *
- * 本文件只做"编排":取清单/建任务/把任务交给下载钩子/把阶段与人话状态报出去/失败与取消时清理。
- * 具体下载在 engine.h(默认钩子)、加载器安装在 loader.h、natives 在 natives.h。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

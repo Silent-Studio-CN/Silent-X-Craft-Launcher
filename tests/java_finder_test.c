@@ -1,18 +1,9 @@
-/* Java 检测测试(②:必须**真的执行** java -version,不能只看目录名)——
- * 不联网、不依赖机器上装没装 JDK。
- *
- * 覆盖:
- *   1) java -version 文本解析:多厂商多版本(Oracle 8 / Temurin 21 / Zulu 17 / Corretto 11 /
- *      Liberica 8 / Microsoft 17 / GraalVM / OpenJ9-Sem eru),主版本与架构归一化;
- *   2) 可执行文件的机器码:ELF(x64/x86/arm64/arm32)、PE(x64/x86/arm64)、Mach-O、以及认不出;
- *   3) **真实执行**:用一个"冒充 java"的夹具程序真的起一次进程,验证
- *      正常 / 不是 JRE / 起不来(退出码 127)三种结论;
- *   4) 全链路 sxcl_java_detect:候选表(注入 env)-> 逐个实测 -> 分类(可用/不在/不是 JRE/
- *      架构不符),并按 来源优先级 -> 主版本 排序。
- *
- * 夹具程序路径由 ctest 用参数传进来(见 src/services/install/CMakeLists.txt 的注册),
- * 复制出来的假 java 放在构建目录下的夹具树里(仓库不留产物)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

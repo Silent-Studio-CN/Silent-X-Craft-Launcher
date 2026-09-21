@@ -1,13 +1,9 @@
-/* 登录链的统一 HTTP 出口 —— 只做三件事:发请求(可带 Bearer)、把状态码与正文一起拿回来、
- * 把 OAuth 的错误 JSON 翻成人话。
- *
- * 为什么要"非 2xx 也读正文":微软的 token/devicecode 端点把**正常流程控制**放在 4xx 里 ——
- *   400 {"error":"authorization_pending"}  用户还没在浏览器里点同意,继续轮询
- *   400 {"error":"slow_down"}              轮太快了,间隔 +5 秒
- *   400 {"error":"expired_token"}          设备码过期,重来
- * 用"只认 2xx"的 sxcl_http_get_text 会把这些全变成"服务器返回了意外状态(HTTP 400)",
- * 轮询逻辑就没法写了。所以这里走 accept_error_status=1 的路径。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

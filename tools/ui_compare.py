@@ -1,4 +1,7 @@
-# 设计图 vs 实装图 逐像素比对(1:1 验收)
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import sys
 from collections import Counter
 from PIL import Image

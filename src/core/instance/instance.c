@@ -1,4 +1,9 @@
-/* SXCL-C 实例扫描与识别实现 —— 规则清单与两处与 Python 的有意差异见 sxcl/instance.h。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

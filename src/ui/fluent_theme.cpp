@@ -1,10 +1,9 @@
-// fluent_theme.cpp —— 1:1 主题层实现（依据 docs/05-UI-1to1规格.md）
-//
-// 数据来源（不许改）：
-//   * 令牌表：Python 版 src/app/theme.py 的 _LIGHT / _DARK
-//   * 强调色派生：qfluentwidgets/common/style_sheet.py:449-504 ThemeColor.color()
-//   * 全局样式：Python 版 src/app/main_window.py:298  setStyleSheet(f"FluentWindow {{ background-color: {token('bg')}; }}")
-//   * 组件样式：qf 原版 QSS（assets/theme/qf_exact/<theme>/*.qss，从 Python 端同版本资源抽出）
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "fluent_theme.h"
 
 #include "libqf.h" // libqf = 本工程的 qf 引擎(主题/样式/控件),统一由本层驱动

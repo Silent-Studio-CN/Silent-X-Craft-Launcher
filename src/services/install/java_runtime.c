@@ -1,16 +1,9 @@
-/* SXCL-C 官方 Java 运行时(JRE/JDK)安装实现 —— 见 include/sxcl/java_runtime.h 的语义约定。
- *
- * 参考实现与出处(行为对齐):
- *   * Python 版 src/services/java/mojang_runtime.py(本文件每一步都能指回它的行号);
- *   * HMCL(GPLv3,HMCLCore/.../download/java/mojang/MojangJavaDownloadTask.java 与
- *     HMCL/.../java/JavaManager.getMojangJavaPlatform())。本文件按它们描述的**协议与行为**
- *     用 C 重写,没有拷贝 Java 代码;从 HMCL 取的只有两点:平台键的取值集合(含 windows-x86
- *     与 mac-os-arm64),以及"raw 与 lzma 同时存在时两者都可选"。我们只走 raw —— 官方清单里
- *     raw 一直在,省一个 LZMA 解码器(差异写进 docs/10-Java安装与国际化.md)。
- *
- * 这里**没有**自己的下载循环:清单走 sxcl_http.h(带期望 SHA-1),文件走 sxcl_engine
- * (断点续传/换源/逐文件 SHA-1/已存在快路径)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

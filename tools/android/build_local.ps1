@@ -1,6 +1,7 @@
-# SXCL C - Android APK build, LOCAL fallback (this machine).
-# No VFS overlay here: the 'loader*' deletion quirk is a WS2025 host behaviour only.
-# Everything lands on D: (C: has ~2GB free). ASCII only.
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 param([string]$Stage = 'D:\SilentStudio\prog\Silent-X-Craft-Launcher - C\build\_android\stage',
       [string]$Local = 'D:\sxcl_local')
 $ErrorActionPreference = 'Continue'

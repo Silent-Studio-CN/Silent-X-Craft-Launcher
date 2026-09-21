@@ -1,4 +1,7 @@
-# 从 Python 版 SXCL 抓取参考界面（widget.grab 自渲染，不受其它窗口遮挡）
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import os, sys, traceback
 from pathlib import Path
 

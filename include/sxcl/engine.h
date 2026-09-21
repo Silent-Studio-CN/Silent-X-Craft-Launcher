@@ -1,15 +1,9 @@
-/* SXCL-C 下载引擎 —— 自研部分在此处:任务调度、续传、限速、校验、换源。
- *
- * 与传输层(net.h)的分工:传输层只负责把字节拿回来,本引擎负责
- *   - 工作线程池 + 优先级队列(清单/版本 JSON 先于库,库先于资源)
- *   - .part 断点续传(按已写字节数续起,服务端不兑现 Range 时自动改全量重下)
- *   - 全局限速(所有连接共用一个令牌桶,限速值就是整条管道上限)
- *   - 强校验:大小 + SHA-1/SHA-256,失败即换下一条候选路重下
- *   - 慢源判定:某条路持续低于阈值就换路(阈值与 Python 版一致:512KB/s / 8 秒宽限)
- *   - 进度与速度采样(500ms 一次,回调在工作线程里触发)
- *
- * 取消语义:sxcl_engine_cancel 是异步的,已入队的任务状态变 CANCELLED,随后 run() 返回。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_ENGINE_H
 #define SXCL_ENGINE_H
 

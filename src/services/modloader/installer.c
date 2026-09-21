@@ -1,31 +1,9 @@
-/* SXCL-C 模组加载器安装驱动 —— 方式 A(静默 CLI)+ 方式 B(解包)+ OptiFine 沙箱。
- *
- * 逐条对应 Python 版 src/services/mod_loader/installer.py 的裁决(注释里标了函数名):
- *
- *   1) 方式 A 只跑安装器自己声明的静默入口,参数名是 --installClient(见 sxcl_loader_build_commands);
- *      **绝不**构造"不带参数"的命令行 —— 那会弹图形安装器,用户关掉窗口同样返回 0,
- *      会被误判成安装成功(_build_command_variants 的注释)。
- *   2) 跑之前必须先有 <游戏目录>/launcher_profiles.json(_ensure_launcher_profiles)。
- *   3) 结束判据不是"退出码 0"也不是"jar 有没有生成",而是**产物**:versions/<实例名>/ 里
- *      真的有 .json(_version_ready);安装器写到别的目录名时按候选名找回来(_handle_generated_files)。
- *   4) 进度按安装器自己打印的标记推进(Extracting json / Downloading libraries /
- *      Building Processors / Task: xxx),看到完成标记就主动终止进程(process.h 的 on_line 回调
- *      返回非 0),别死等;另有总超时(默认 30 分钟)与取消。
- *   5) 方式 A 失败 -> 方式 B:只从 jar 里取 install_profile.json / version.json 拼版本 JSON,
- *      把安装器自带的 maven/ 与通用 jar 解包进 libraries/(_extract_install)。
- *   6) OptiFine 的安装器忽略我们传的目录,只认 %APPDATA%\.minecraft,所以给它一个临时
- *      APPDATA 沙箱、摆好原版版本文件,装完再把产物与库搬回实例目录(_install_optifine)。
- *
- * 关于 APPDATA 沙箱:首选通道就是 process.h 的 opts->env(地基两条腿都实现了:POSIX 用 putenv,
- * Windows 用"父环境 + 覆盖项 → 环境块 + CREATE_UNICODE_ENVIRONMENT")。只有当子进程明显没认环境块
- * (沙箱里什么都没生成)时,才退回"临时把本进程 APPDATA 指过去"的兜底方式重试一次 —— 这也是本模块
- * "同一时刻只许一个安装在跑"的原因。
- *
- * 另一条实测踩出来的坑(真跑 Forge 1.20.1 时抓到):子进程的工作目录是游戏目录,而命令行里的
- * -jar / --installClient 是相对路径时,会被**子进程**按它自己的工作目录去解析 ——
- * "java -jar build/x.jar" 会被它找成 <游戏目录>/build/x.jar,直接 "Unable to access jarfile" 退出 1。
- * 所以驱动在开跑前把游戏目录/安装器 jar/带分隔符的 java 路径一律转成绝对路径(见 make_absolute)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #define _CRT_SECURE_NO_WARNINGS 1
 
 #include "sxcl/loader.h"

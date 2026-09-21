@@ -1,14 +1,9 @@
-/* Java 运行时探测 —— 扫路径 + 解析 release / java -version 文本 + 按需求排序候选。
- *
- * 为什么以 release 文件为主,而不是跑 "java -version":
- *   - 快:一次 fopen 就能读完,不用为每个候选起一个进程(JVM 冷启动动辄 200ms+);
- *   - 稳:不依赖可执行权限、不依赖目标平台能不能跑(判断安卓/32 位运行时也成立);
- *   - 全:release 里有版本、厂商、OS_ARCH,正好是启动器要展示的三样东西。
- * 只有明确要看"它到底能不能跑起来"的时候才该去执行 java —— 那不属于这一层。
- *
- * 纯文本入口(sxcl_java_parse_release / sxcl_java_parse_version_output)不碰文件系统,
- * 所以单测不需要机器上真的装了 JDK,也不需要往仓库里塞夹具。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

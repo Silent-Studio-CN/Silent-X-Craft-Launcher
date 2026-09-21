@@ -1,30 +1,9 @@
-/* SXCL-C 正版登录(Xbox Live / 微软账号)—— 纯 C11,零第三方依赖;TLS 交给 sxcl_transport。
- *
- * 链路(Java 版,逐跳固定;每一跳都必须自己拿到凭据,不许"从上一跳推断"):
- *
- *   [授权码主路]  GET  login.microsoftonline.com/consumers/oauth2/v2.0/authorize
- *                        ?response_type=code&redirect_uri=http://localhost:<随机端口>/callback
- *                        &code_challenge=<S256>&scope=XboxLive.signin offline_access
- *                 ├─ 本模块起一个**只监听 127.0.0.1** 的短命 HTTP 服务收 code(loopback.c)
- *                 └─ POST .../oauth2/v2.0/token(grant_type=authorization_code + code_verifier)
- *   [兜底设备码]  POST .../oauth2/v2.0/devicecode → 轮询 POST .../oauth2/v2.0/token
- *                        (grant_type=urn:ietf:params:oauth:grant-type:device_code)
- *   ↓ 微软 access_token(refresh_token 是免密续期的唯一凭据)
- *   [3] POST user.auth.xboxlive.com/user/authenticate   (RpsTicket="d=<ms token>")
- *   [4] POST xsts.auth.xboxlive.com/xsts/authorize      (RelyingParty=rp://api.minecraftservices.com/)
- *   [5] POST api.minecraftservices.com/authentication/login_with_xbox
- *   [6] GET  api.minecraftservices.com/entitlements/mcstore  +  .../minecraft/profile
- *   [7] 续期:refresh_token → 回到第 1 步的 token 端点(grant_type=refresh_token),免密重跑 3~6
- *
- * 基岩版是**同一条登录派生出的第二条链**,权益与令牌与 Java 版各自独立:
- *   XSTS 的 RelyingParty 换成 https://multiplayer.minecraft.net/ → POST .../authentication。
- *   Java 买了不代表基岩买了(两次购买),所以 bedrock 段自己存自己的权益结论。
- *
- * 安全边界:
- *   - 只认 client_id(公共客户端,无 secret);client_id 可配置,仓库里不许出现任何 secret。
- *   - refresh token 只经 sxcl_auth_store_*(见 auth_store.h)加密落盘,文件里没有明文 token。
- *   - 本模块**不打印、不记录** token:对外只给前缀(sxcl_auth_mask_token)与过期时间。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_AUTH_H
 #define SXCL_AUTH_H
 

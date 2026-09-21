@@ -1,24 +1,9 @@
-/* SXCL-C DEFLATE 解压实现(RFC 1951 raw deflate)—— 语义见 include/sxcl/inflate.h。
- *
- * 设计要点:
- *   1) 位读取器:字节按 LSB-first 进 32 位累加器,bitbuf 里"超过 bitcnt 的高位恒为 0",
- *      所以取位只是移位;取位前用 inf_fill 保证位数够,不够就返回"需要更多输入"且
- *      不消费任何位(位还留在累加器里),这样 feed 可以任意切分输入。
- *   2) Huffman 表用规范码(counts/first_code/first_index/symbols 四张表),
- *      解码是 O(码长) 的逐位比较,不建查表矩阵 —— 表小、无歧义、边界清楚:
- *        - 码长全 1、只有 1 个符号、空表(距离树全 0)、最长 15 位码都能建表;
- *        - 超额(oversubscribed,Kraft 和 > 1)直接判损坏;
- *        - 不完整(Kraft 和 < 1)允许建表,解到不存在的码时报损坏 —— 真实压缩器
- *          (zlib 的 HDIST=1 单符号距离树)就会产出不完整的距离树。
- *   3) 输出走 32 KiB 环形窗口:字面量写窗口,匹配从窗口回溯拷贝(逐字节拷贝,
- *      天然支持 dist < len 的重叠匹配)。窗口里"还没交给 sink"的水位恒定 < 24 KiB,
- *      所以环形回绕绝不会覆盖未交付的数据。
- *   4) 状态机可重入:所有中间状态(块类型、动态表读取进度、待拷贝的长度/距离、
- *      stored 块的 LEN/NLEN 已读字节数)都放在结构体里,feed 中途返回后可以接着喂。
- *      Huffman 符号的"读到一半"用位状态快照回滚,不丢位也不重复消费。
- *   5) 距离超出已输出长度(total_out)直接报损坏 —— 这是最容易越界读的地方。
- *   6) 只用 stdlib/string,MVSC /W4 /WX 与 gcc -Wall -Wextra -Wpedantic -Werror 零警告。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include "sxcl/inflate.h"
 
 #include <stdlib.h>

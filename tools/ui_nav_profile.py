@@ -1,4 +1,7 @@
-# 侧边栏图标墨迹剖面:每一行导航项里"非底色像素"的数量与包围盒
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import sys
 from PIL import Image
 

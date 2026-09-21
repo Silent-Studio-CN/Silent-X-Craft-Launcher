@@ -1,23 +1,9 @@
-// tasks_page.cpp —— 任务页(Python 版 src/app/pages/tasks_page.py 的 1:1 C++ 移植)
-//
-// 逐条对照(尺寸/文字/颜色都能指回下面某一条,见 docs/05-UI-1to1规格.md):
-//   * 版面骨架 = Python src/app/common/base_page.py:32-66(BasePage:ScrollArea + view 的
-//     QVBoxLayout margins(28,24,28,24)/spacing 16/AlignTop + TitleLabel + SubtitleLabel);
-//     这里**内联**写了一遍而不是抽公共头 —— 与主代理约定过"不新增共享头文件",见最终报告;
-//   * 空态标签 / 任务容器 / 弹簧 = tasks_page.py:218-231;
-//   * TaskCard 三行结构 = tasks_page.py:118-207(固定高 80、内边距 16/12/16/12、
-//     ProgressBar 固定高 4、明细行 12px);
-//   * _StatusIcon = tasks_page.py:40-96(24×24,盲文转轮 10 帧 120ms/帧,✓/✕);
-//   * _DeleteBtn  = tasks_page.py:99-115(20×20,叉号,danger,默认隐藏);
-//   * 对外 API 与自动移除 = tasks_page.py:235-288。
-//
-// 与 Python 逐字相同的硬编码色:#888(空态标签/状态文本)、#999(明细行)、#606060/#AAAAAA
-// (副标题)。其余一律走 FluentTheme 令牌(hover_bg / hover_bg_strong / accent / success / danger)。
-//
-// 两处等价替换(C 版机制差异,外观不变):
-//   1) Python 用类名选择器 TaskCard { … };C 版的 TaskCard 带 Q_OBJECT,moc 的 className
-//      就是 "TaskCard",选择器与 Python 完全一致;
-//   2) Python 布局间距用 Qt 样式默认值(实测 6),这里显式写成 6,免得换样式后漂移。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "page_factory.h"
 
 #include <QEnterEvent>

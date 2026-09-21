@@ -1,18 +1,9 @@
-/* SXCL-C 文件校验 —— 凡是 Mojang 给了 SHA-1 的资源一律强校验。
- *
- * 校验矩阵(全部来自官方元数据,不允许跳过):
- *   版本清单 / 版本 JSON  version_manifest_v2.json 里每个版本的 sha1
- *   客户端/服务端 jar    downloads.client.sha1 / server.sha1
- *   依赖库              downloads.artifact.sha1 与 classifiers.*.sha1
- *   资源索引            assetIndex.sha1
- *   资源对象            文件名即 sha1(objects[*].hash)
- *   官方 JRE 文件        files[*].downloads.raw.sha1
- *
- * 语义对齐 Python 版 src/core/download/verify.py:
- *   - expected_hex 为空 => 只校验大小(size 为 0 表示连大小也不校验);
- *   - 先比大小再算哈希(大小不符时不算哈希,省时且可区分故障);
- *   - 哈希比较大小写不敏感。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_VERIFY_H
 #define SXCL_VERIFY_H
 

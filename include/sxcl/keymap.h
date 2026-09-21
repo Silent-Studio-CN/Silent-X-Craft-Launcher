@@ -1,44 +1,9 @@
-/* SXCL-C 键位映射核心 —— 补 docs/04-页面规格.md §7 缺口 #6(按键映射页的整页阻塞项)。
- *
- * 唯一数据契约是 **sxcl.keymap.v1**:
- *   桌面端(Python,src/core/keymap/model.py)· 安卓端(Java,
- *   android/app/src/main/java/com/silentstudio/sxcl/keymap/KeymapLayout.java)
- *   · 本模块(C)读写的是同一份 JSON。字段名、嵌套结构、默认值一律以安卓端
- *   已实现的 schema 为准(android/app/src/main/assets/keymaps/ 下有 9 套现成布局,
- *   测试逐文件把它们喂进来验证,见 tests/keymap_assets.inc)。
- *
- * JSON 结构(逐字段对应安卓端):
- *   {
- *     "schema": "sxcl.keymap.v1",         // 缺省就是它
- *     "name": "极简", "screen": "landscape",   // landscape / portrait
- *     "mc_version": "", "description": "",
- *     "meta": { ... },                    // 原样保留(安卓端在里面放 builtin/preset/guide)
- *     "buttons": [ {
- *         "id","label","hint","icon",
- *         "x","y","w","h",                // 0~1 归一化坐标
- *         "shape":"round|square|pill", "opacity":0.55, "group":"", "alias_of":"",
- *         "events": { "press": {"action","keys":[…],"behavior":"hold|toggle|tap"},
- *                     "long_press": …, "click": …, "double_click": … }
- *     } ],
- *     "directions": [ {
- *         "id","label","hint","x","y","w","h",
- *         "style":"dpad|rocker|dpad_compact","opacity","dead_zone","group",
- *         "keys": {"up","down","left","right"}, "sprint_key"
- *     } ]
- *   }
- *
- * 四种事件与 FCL 一致:press(按下)/long_press(长按)/click(单击)/double_click(双击);
- * 三种行为:hold=按住 / toggle=切换 / tap=点一下。
- *
- * 所有权(全模块统一):
- *   - sxcl_keymap_layout 里的按钮/方向数组是模块 malloc 的,sxcl_keymap_layout_free 释放;
- *   - sxcl_keymap_layout_init 之后才能用;结构体可以整体 memset 成 0 再 init,也可以直接 init;
- *   - "char **out_text" 之类的出参是 malloc 的,调用方 free;
- *   - 入参字符串只在调用期间读,模块不接管所有权。
- *
- * 线程安全:每个 layout 是独立对象(不含全局状态),同一个 layout 别在两个线程里同时改;
- *   解析/校验/冲突/搜索都是纯读,可并发。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #ifndef SXCL_KEYMAP_H
 #define SXCL_KEYMAP_H
 

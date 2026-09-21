@@ -1,4 +1,9 @@
-/* options.txt 读写测试:格式、顺序、bare 行、原子写、边界 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include <stdio.h>
 #include <string.h>
 

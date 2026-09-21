@@ -1,22 +1,9 @@
-/* SXCL-C 哈希缓存实现 —— 语义见 include/sxcl/hashcache.h。
- *
- * 设计要点:
- *   1) 内存表 = 开放寻址 + 线性探测,槽位数是 2 的幂,索引 = FNV-1a(key) & (cap-1)。
- *      key 就是 "path|size|mtime_ns" 这个逻辑键(与 Python 版 _key() 一致),但不落成
- *      字符串存起来 —— 槽里存 path/size/mtime_ns 三段,比较时先比 size/mtime 再比 path,
- *      省掉一份键字符串的内存。
- *   2) 装载因子 0.7:插入前 count+1 > cap*0.7 就翻倍重建(重哈希)。
- *   3) 删除用"后移填补"(backward shift),不用墓碑:删除后把后面那些"搬过来也不会
- *      破坏探测链"的条目往前挪一格,表里永远没有墓碑,get 的探测链不会随时间退化。
- *   4) 落盘是"先写 <path>.tmp 再改名覆盖",失败会把 .tmp 删掉,不留半截文件。
- *      读盘时第一行必须是版本标记,之后每行 "hex<TAB>size<TAB>mtime_ns<TAB>path";
- *      版本不认识 = 整份作废,单行不合法 = 只跳过该行,末行没有换行符 = 半截,也跳过。
- *      任何读取失败都只当作"空缓存",绝不让缓存文件损坏影响主流程。
- *   5) 上限 20000 条:插入时若已达上限,先 prune_missing,仍满则整体清空(清空后本次
- *      写入照常保留),与 Python 版"防无限增长"的意图一致。
- *   6) Windows 下用 _wfopen_s 打开 UTF-8 路径(和 src/core/json.c 同一套转换思路),
- *      避免代码页问题,也避免 /WX 下踩 _wfopen/fopen 的 C4996。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include "sxcl/hashcache.h"
 
 #include "sxcl/fs.h"

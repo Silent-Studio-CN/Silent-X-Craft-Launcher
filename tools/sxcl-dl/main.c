@@ -1,19 +1,9 @@
-/* sxcl-dl —— 纯 C 命令行下载器(引擎的端到端验收工具,不含任何 Python)。
- *
- * 用法:
- *   sxcl-dl get <url> <目标路径> [--sha1 HEX] [--size N] [--rate 5MB] [--workers N] [--mirror URL]
- *   sxcl-dl manifest <目标路径> [--rate 5MB]
- *   sxcl-dl version <版本号|latest> <游戏目录> [--rate 5MB] [--workers N] [--verbose]
- *       └ 拉取该版本的客户端 jar + 全部依赖库 + 资源索引,每个文件强校验 SHA-1
- *   sxcl-dl list [--limit N]      列出官方版本清单(取 latest 与前 N 个)
- *   sxcl-dl loader <forge|neoforge|fabric|quilt|optifine> <加载器版本> <MC 版本> <游戏目录>
- *                  [--java PATH] [--instance NAME] [--installer JAR] [--timeout MS]
- *                  [--maven-mirror URL] [--no-fallback] [--verbose]
- *       └ 静默安装模组加载器(方式 A 跑安装器自己的无头入口,失败回退方式 B 解包安装)
- *
- * 限速值支持 "5MB" / "512kb" / "0"(不限速),解析规则与 Python 版 parse_rate 一致。
- * 退出码:0 全部成功;1 有任务失败;2 参数错误。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1 /* fopen/fgets 在 MSVC 下默认被标记弃用 */
 #endif

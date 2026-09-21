@@ -1,19 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// auth_dialog —— 微软账户**设备码登录对话框**(qf 风格)。
-//
-// **Python 版没有这个功能**(Python 版只有离线启动),所以这是**新增**界面,
-// 不是移植:控件与观感一律沿用 qf/libqf 既有件(MessageBoxBase 遮罩弹窗基座 +
-// TitleLabel/BodyLabel/CaptionLabel + PushButton/PrimaryPushButton),
-// 颜色全部走 docs/05-UI-1to1规格.md §2 的令牌,字号走 §3,按钮尺寸走 §4(高 32/字号 14)。
-//
-// 为什么不走授权码流(环回 + 浏览器):设备码流**不需要**能监听 127.0.0.1,
-// 在受限环境/沙箱里也能用(docs/09 §8.4);核心库两条路都实现了,界面用设备码这条。
-//
-// ── 线程(硬要求) ──
-// 核心库 sxcl_auth_login 是**同步阻塞**的(内部自己起事件循环等 HTTP 与用户操作)。
-// 本对话框把整条链交给 AccountTask 在 **work 线程**里跑,
-// UI 侧只 connect 信号(userCode / deviceCodeInfo / statusText / finished),
-// **主线程全程不阻塞**:倒计时、复制/打开按钮、取消都能正常响应。
+
 #if defined(_MSC_VER)
 #pragma warning(push, 0) // libqf 是外部依赖,头文件在 /W4 下不干净(见 libqf.h 的说明)
 #endif

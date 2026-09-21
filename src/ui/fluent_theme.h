@@ -1,12 +1,11 @@
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #pragma once
-// fluent_theme —— 1:1 主题层（对应 Python 版 src/app/theme.py + qfluentwidgets 的样式机制）
-//
-// 三条硬规矩（依据见 docs/05-UI-1to1规格.md）：
-//   1) 颜色令牌逐字等于 Python _LIGHT / _DARK，不许自己挑颜色；
-//   2) 强调色按 qf 的 ThemeColor 算法从主色派生（HSV 变换照抄 qf common/style_sheet.py:463-504）；
-//   3) 样式表直接用 qf 原版 QSS（assets/theme/qf_exact/<theme>/*.qss，从 Python 端同版本的
-//      _rc/resource.py 抽出），只替换 --FontFamilies / --ThemeColor* 占位符。
-// 因此：本层不发明任何视觉，只负责"把 Python 端的数据搬过来并套上"。
+
 #include <QColor>
 #include <QObject>
 #include <QString>

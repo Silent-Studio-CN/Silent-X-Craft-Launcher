@@ -1,15 +1,9 @@
-/* 令牌加密落盘测试:往返、**文件里没有明文**、改一位就解不开、换台机器解不开、退出登录删干净。
- *
- * 这一组是"refresh token 必须加密落盘"那条硬要求的证据:
- *   1) 存进去再读出来,字段一个不差;
- *   2) 把文件当二进制读一遍,搜不到任何 token 明文(明文串故意选成不会偶然出现的 NEEDLE 形式);
- *   3) 改一个字节 → 认证失败(不是"读出乱七八糟的东西");
- *   4) 换一份盐(等价于另一台机器/另一个用户)→ 解不开;
- *   5) logout 之后文件真的没了。
- *
- * Windows 上还会额外验 DPAPI 那条路(本机默认后端就是它);降级路径用
- * sxcl_auth_store_set_backend_for_test 强制跑一遍 —— 否则"降级路只在 Linux 上大概能跑"。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <string.h>
 

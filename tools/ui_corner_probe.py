@@ -1,4 +1,7 @@
-# 左上角逐像素色块图(逻辑 0..26, 0..26;DPR1.5 -> 物理 0..39)
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import sys
 from PIL import Image
 

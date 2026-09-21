@@ -1,46 +1,9 @@
-// launch_page.cpp —— 启动进度页(临时页)
-//
-// 逐条移植 Python 版 src/app/pages/launch_page.py(行号见每段注释),外壳照抄
-// src/app/common/base_page.py。外观的唯一依据:docs/05-UI-1to1规格.md + Python 源码。
-//
-// 控件树(实测 build/ref/TREE_py_launch.txt;页面可用区 1051x701):
-//   LaunchProgressPage(ScrollArea, objectName=LaunchProgressPage, 1px StyledPanel 边框)
-//     └ view(QWidget, transparent)
-//        └ QVBoxLayout(margins 28,24,28,24; spacing 16; AlignTop)
-//           ├ TitleLabel     "启动 <id>"  993x38 (28px/600)
-//           ├ SubtitleLabel  "" -> hide()
-//           ├ CardWidget     993x282  VBox(28,20,28,20) sp12
-//           │   ├ HBox: StrongBodyLabel "准备启动" + 弹性 + BodyLabel "● 准备中"(accent/500)
-//           │   ├ QProgressBar 937x4(h[4..4];range 0..100;textVisible=false;圆角 2)
-//           │   ├ 5 行阶段: LaunchIndicator 12x12 + BodyLabel(行内 sp8)+ 弹性
-//           │   └ BodyLabel 日志行(空;定高 40;color #9a9a9a)
-//           ├ HBox: PushButton "取消" 54x32 + 弹性 + PrimaryPushButton "返回" 54x32(禁用)
-//           └ 弹簧
-//
-// ── 接线(阶段 7:真的启动)────────────────────────────────────────────────
-// 本页原来是"构造完成、worker 未起"的初始态。现在真的启动:
-//
-//   构造函数末尾 _start_launch()
-//     └ LaunchWorker(workers/launch_worker.h)
-//          ├ phaseChanged  -> 5 行阶段灯(上一行打勾 / 本行转圈 / 完成变绿 / 失败变红)
-//          ├ javaInfo      -> "Java:<路径>(Java 21,64 位)"一行
-//          ├ commandLine   -> "最终命令行"文本框(**核心库打码后的**,accessToken 是 ***)
-//          ├ logLine       -> "游戏输出"文本框,每行带核心库的归类标签(logscan)
-//          └ finished      -> 退出码 / "游戏已退出" / 失败原因 / **已取消**
-//
-// 身份(与 CLI 完全同一条核心通路):
-//   已登录账户可用(loadAccountSnapshot + accountCanLaunch,dialogs/account.h 的现成入口)
-//     -> player_name/uuid/access_token/userType,xuid;判据与 tools/sxcl-dl/main.c:898-921 一致
-//   否则 -> 离线身份(--offline <名字>,默认 "Player";SXCL_UI_OFFLINE_NAME 可钉)
-//   **本页不碰任何账户代码**:令牌只从 account.h 的快照里读出来交给核心库启动层,
-//   核心库负责不把它打进日志/命令行(driver.c:358-373 的 argv 打码)。
-//
-// 取消:cancel_btn -> worker->cancel() -> ① 已知 PID 就直接结束它(立刻生效);
-//       ② 同时置取消位,核心库的 on_line 返回非 0 那条路照样在(launch.h:477-479)。
-// 进程起来时 on_started 交来 PID -> 状态徽标显示 "运行中 · PID xxx"。
-//
-// 线程模型:本页只在界面线程里连信号;LaunchWorker 在自己的线程里跑阻塞的
-// sxcl_launch_run。**主线程全程不阻塞**(否则游戏跑多久窗口就卡多久)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #include "page_factory.h"
 
 #include <QAbstractButton>

@@ -1,13 +1,9 @@
-/* 游戏目录候选表 / 判定 测试 —— 不联网,夹具全在构建目录下。
- *
- * 覆盖三件事(对应用户点名的 ①):
- *   1) **候选表**:三个桌面平台 + 安卓,候选**逐条**覆盖官方启动器、HMCL、MultiMC/Prism、
- *      CurseForge、ATLauncher、FCL/PojavLauncher、共享存储 —— 纯字符串,注入 env 就能在
- *      任何一台机器上验(Windows 上也能验 Linux/macOS 的规则,反过来也一样);
- *   2) **判定**:sxcl_paths_marks 的"像不像 MC 目录"判据(versions/libraries/assets/
- *      launcher_profiles/logs),以及 count_versions 对"只有 JSON 的加载器版本"的口径;
- *   3) **排序**:已配置目录最高优先;同优先级才比 score(有版本 > 有资源 > 有 profiles)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif

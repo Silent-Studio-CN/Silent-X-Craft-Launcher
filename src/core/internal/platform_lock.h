@@ -1,4 +1,9 @@
-/* 内部头:跨平台互斥锁(不进公共 API,不安装)。 */
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
+ */
+
 #ifndef SXCL_INTERNAL_PLATFORM_LOCK_H
 #define SXCL_INTERNAL_PLATFORM_LOCK_H
 

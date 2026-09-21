@@ -1,4 +1,7 @@
-# 像素级量测：把参考图变成可执行的规格数字
+# (C) Silent X Craft Launcher
+# Copyright by SilentStudio.
+# All rights reserved.
+
 import sys
 from collections import Counter
 from PIL import Image

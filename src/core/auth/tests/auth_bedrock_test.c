@@ -1,9 +1,9 @@
-/* 基岩链测试:P-384 身份密钥(**RFC 5903 官方向量对拍**)+ 第二条链的请求形状与权益判定。
- *
- * 为什么必须对拍官方向量:P-384 的标量乘法自己写,一旦有一位算错,公钥就是个"看起来像"的乱码 ——
- * 本地自测发现不了,只有服务端会拒。RFC 5903 第 8.2 节给了 (私钥 i, 公钥 g^i) 的官方数值,
- * 拿它一比,对错立判。另外还验了"公钥确实在曲线上"(把"曲线参数抄错"也一起挡住)。
+/*
+ * (C) Silent X Craft Launcher
+ * Copyright by SilentStudio.
+ * All rights reserved.
  */
+
 #include <stdio.h>
 #include <string.h>
 
