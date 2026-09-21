@@ -76,7 +76,13 @@ typedef struct sxcl_install_plan {
     const char *manifest_url;    /**< 版本清单地址;空 = SXCL_INSTALL_MANIFEST_URL */
     const char *manifest_text;   /**< 已经拿在手里的清单文本(UI 刚取过就别再取一次);空 = 自己去取 */
     const char *asset_base_url;  /**< 资源对象 CDN 根;空 = SXCL_ASSET_OBJECTS_BASE(manifest.h) */
-    const char *mirror_base;     /**< 资源对象镜像根(第二候选路);可空 */
+    const char *mirror_base;     /**< 镜像根(第二候选路);可空。资源对象走它 + "/assets",
+                                  *   版本 JSON/客户端 jar/依赖库由它映射(见 manifest.h)。 */
+    int prefer_mirror;           /**< 1 = 镜像优先:每个文件先走镜像、官方作第二候选(镜像不通自动切回);
+                                  *   0 = 官方优先(老行为,零初始化也是它)。
+                                  *   只在"计划装配完、开始下载前"生效一次(见
+                                  *   sxcl_version_plan_prefer_mirror 的"只应调用一次")。
+                                  *   mirror_base 为空时用 SXCL_MIRROR_BMCLAPI_BASE。 */
     const char *loader_mirror_maven; /**< 给加载器安装器的 maven 镜像(--mirror);可空 */
     sxcl_install_assets assets;  /**< 资源完整性级别;零初始化 = 全量 */
     int keep_installer;          /**< 1 = 留着本次下到的安装器 jar(排查用);0 = 收尾时删掉(与 Python 一致) */

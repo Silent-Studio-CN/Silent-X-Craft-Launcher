@@ -99,6 +99,13 @@ int sxcl_manifest_mirror_url(const char *url, const char *mirror_base, char *out
 int sxcl_version_plan_add_mirror(sxcl_version_plan *plan, const char *mirror_base, char *err,
                                  size_t err_len);
 
+/** 把每个任务的候选顺序改成"镜像在前、官方在后"(只有一条候选的任务不动)。
+ *  为什么要:设置里的下载源以前只作用于清单;download.source=bmclapi 时游戏文件(版本 JSON/
+ *  客户端 jar/依赖库/资源对象)仍然优先走官方,镜像要等官方失败才用得上。
+ *  返回被调换的任务数(被调换 = 本来就有第二条候选),<0 表示 plan 为空(参数错误)。
+ *  **只应调用一次**:它只做一次交换、不记状态,再调一次就把顺序换回"官方在前"了。 */
+int sxcl_version_plan_prefer_mirror(sxcl_version_plan *plan);
+
 /** 本机平台名,与 Mojang rules 里的 os.name 一致:"windows" / "linux" / "osx"。 */
 const char *sxcl_platform_os_name(void);
 

@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<manifest package="com.silentstudio.sxcl" xmlns:android="http://schemas.android.com/apk/res/android"
+    android:versionName="0.1.0-android" android:versionCode="1" android:installLocation="auto">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- Shared storage. Minecraft data (game dir, saves, mods, resource packs) lives
+         on /storage/emulated/0, and HMCL/FCL/PojavLauncher put their .minecraft there.
+         Measured on 192.168.220.33 (Android 16, targetSdk 34): with only the two
+         permissions above, stat("/storage/emulated/0/FCL/.minecraft") from our uid
+         returns EACCES, so auto-detection could never see the user's game directory.
+         MANAGE_EXTERNAL_STORAGE ("All files access") is what unlocks it; the user
+         grants it in system settings, and the launcher offers that page directly.
+         NOTE: this is a Google Play *restricted* permission - publishing on Play
+         requires a declaration form; side-loading / self-use is unaffected.
+         Android 10 and below use the legacy READ/WRITE pair instead, hence the
+         maxSdkVersion caps (WRITE has been a no-op since Android 11 / API 30). -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+    <!-- "Display over other apps" (SYSTEM_ALERT_WINDOW). NOT needed for the
+         floating window itself: the maximise button uses picture-in-picture
+         first, which is a plain activity flag and needs no permission.
+         This permission is only the FALLBACK panel: when the device/ROM refuses
+         PiP, the launcher shows a small native panel over other apps. It is
+         granted by the user in system settings (Settings.canDrawOverlays), and
+         the launcher opens that page for them. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <application android:label="Silent X Craft Launcher" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:hardwareAccelerated="true">
+        <activity android:name="com.silentstudio.sxcl.SxclActivity"
+            android:label="Silent X Craft Launcher" android:icon="@mipmap/ic_launcher"
+            android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc"
+            android:launchMode="singleTop" android:screenOrientation="unspecified" android:exported="true"
+            android:resizeableActivity="true"
+            android:supportsPictureInPicture="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <meta-data android:name="android.app.lib_name" android:value="sxclui"/>
+        </activity>
+    </application>
+</manifest>

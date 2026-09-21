@@ -47,7 +47,14 @@ static void on_progress(void *userdata, const sxcl_task *task)
     if (task->state == SXCL_TASK_DONE) {
         ++st->done;
         if (st->verbose) {
-            printf("  [完成] %s  %.2f MB\n", name, (double)task->bytes_done / (1024.0 * 1024.0));
+            /* 打出真正成功的那条候选(source_index)与它的 URL:
+             * 这是"镜像到底排第几"的直接证据,不靠猜。 */
+            const char *used = (task->source_index >= 0 && task->source_index < 4 &&
+                                task->urls[task->source_index] != NULL)
+                                   ? task->urls[task->source_index]
+                                   : "(未知)";
+            printf("  [完成] %s  %.2f MB  来源 #%d %s\n", name,
+                   (double)task->bytes_done / (1024.0 * 1024.0), task->source_index, used);
         } else {
             printf("\r  已完成 %d 个文件", st->done);
         }
@@ -84,6 +91,7 @@ typedef struct cli_opts {
     int verbose;
     int limit;
     int skip_assets;
+    int prefer_mirror; /* --source:1 = 镜像(默认 BMCLAPI)排第一、官方作第二候选;0 = 官方优先 */
     const char *mirror;
     const char *asset_mirror;
     const char *cache;
@@ -170,8 +178,9 @@ static int usage(void)
            "  sxcl-dl get <url> <dest> [--sha1 HEX] [--size N] [--rate 5MB] [--workers N] [--mirror URL]\n"
            "  sxcl-dl manifest <dest> [--rate 5MB]\n"
            "  sxcl-dl version <版本号|latest> <游戏目录> [--rate 5MB] [--workers N] [--verbose]\n"
-           "      [--mirror URL] [--skip-assets] [--asset-mirror URL]\n"
-           "      └ 清单/版本 JSON/客户端 jar/依赖库:官方为第一路,镜像(默认 BMCLAPI)自动作第二路\n"
+           "      [--source bmclapi|mojang|auto] [--mirror URL] [--skip-assets] [--asset-mirror URL]\n"
+           "      └ --source 决定哪条路排第一(默认 bmclapi):bmclapi/auto = 镜像优先、官方作第二候选\n"
+           "        (镜像不通自动切官方);mojang = 官方优先。清单/版本 JSON/客户端 jar/依赖库/资源都算\n"
            "  sxcl-dl list [--limit N]\n"
            "  sxcl-dl options <options.txt> [--get KEY] [--set KEY=VALUE] [--remove KEY] [--dump]\n"
            "  sxcl-dl loader <forge|neoforge|fabric|quilt|optifine> <加载器版本> <MC 版本> <游戏目录>\n"
@@ -254,7 +263,8 @@ static int cmd_get(int argc, char **argv, const cli_opts *o)
             task.urls[1] = v;
             ++i;
         } else if (strcmp(a, "--rate") == 0 || strcmp(a, "--workers") == 0 ||
-                   strcmp(a, "--conn") == 0 || strcmp(a, "--cache") == 0) {
+                   strcmp(a, "--conn") == 0 || strcmp(a, "--cache") == 0 ||
+                   strcmp(a, "--source") == 0) {
             ++i; /* 通用参数已在 main 里解析,这里只需跳过它的值 */
         } else if (strcmp(a, "--no-cache") == 0 || strcmp(a, "--verbose") == 0) {
             /* 无值参数 */
@@ -280,7 +290,8 @@ static int cmd_get(int argc, char **argv, const cli_opts *o)
 }
 
 /** 下载并解析版本清单,返回文档与路径(调用方负责 free)。 */
-static sxcl_json *fetch_manifest(sxcl_engine *engine, const char *path, size_t path_len)
+static sxcl_json *fetch_manifest(sxcl_engine *engine, const char *path, size_t path_len,
+                                 int prefer_mirror)
 {
     /* 必须是静态存储:引擎会一直持有这个任务指针(后面还要跑资源那一批),
      * 用栈上局部变量的话函数一返回地址就被复用了 —— 引擎第二次 run() 扫描任务表时会读到
@@ -288,8 +299,9 @@ static sxcl_json *fetch_manifest(sxcl_engine *engine, const char *path, size_t p
     static sxcl_task task;
     memset(&task, 0, sizeof(task));
     task.dest = path;
-    task.urls[0] = kManifestUrl;
-    task.urls[1] = kManifestMirrorUrl;
+    /* --source 默认 bmclapi:镜像排第一,官方退第二(镜像不通引擎自动切回官方) */
+    task.urls[0] = prefer_mirror ? kManifestMirrorUrl : kManifestUrl;
+    task.urls[1] = prefer_mirror ? kManifestUrl : kManifestMirrorUrl;
     task.algo = SXCL_HASH_SHA1;
     task.priority = 0;
     task.label = "version_manifest_v2.json";
@@ -315,7 +327,7 @@ static int cmd_manifest(const cli_opts *o, const char *dest)
     if (make_engine(o, &st, &engine) != 0) {
         return 1;
     }
-    sxcl_json *doc = fetch_manifest(engine, dest, strlen(dest));
+    sxcl_json *doc = fetch_manifest(engine, dest, strlen(dest), o->prefer_mirror);
     sxcl_engine_destroy(engine);
     if (!doc) {
         return 1;
@@ -335,7 +347,7 @@ static int cmd_list(const cli_opts *o)
     if (make_engine(o, &st, &engine) != 0) {
         return 1;
     }
-    sxcl_json *doc = fetch_manifest(engine, path, sizeof(path));
+    sxcl_json *doc = fetch_manifest(engine, path, sizeof(path), o->prefer_mirror);
     sxcl_engine_destroy(engine);
     if (!doc) {
         return 1;
@@ -458,7 +470,7 @@ static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
     }
 
     /* 1) 版本清单 */
-    sxcl_json *doc = fetch_manifest(engine, manifest_path, sizeof(manifest_path));
+    sxcl_json *doc = fetch_manifest(engine, manifest_path, sizeof(manifest_path), o->prefer_mirror);
     if (!doc) {
         sxcl_engine_destroy(engine);
         return 1;
@@ -497,8 +509,13 @@ static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
         vjson_mirror[0] = '\0';
     }
     vjson.dest = vjson_path;
-    vjson.urls[0] = entry->url;
-    vjson.urls[1] = (vjson_mirror[0] != '\0') ? vjson_mirror : NULL;
+    if (o->prefer_mirror && vjson_mirror[0] != '\0') {
+        vjson.urls[0] = vjson_mirror; /* 镜像优先:官方退成第二候选,不通自动切 */
+        vjson.urls[1] = entry->url;
+    } else {
+        vjson.urls[0] = entry->url;
+        vjson.urls[1] = (vjson_mirror[0] != '\0') ? vjson_mirror : NULL;
+    }
     vjson.sha1 = entry->sha1;
     vjson.algo = SXCL_HASH_SHA1;
     vjson.size = entry->size;
@@ -558,6 +575,14 @@ static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
                    (o->mirror != NULL && o->mirror[0] != '\0') ? o->mirror
                                                                 : SXCL_MIRROR_BMCLAPI_BASE,
                    mirrored);
+            /* --source 默认 bmclapi:把镜像挪到第一路。**只调这一次**(见 manifest.h):
+             * 资源对象是后面才追加的,它们的顺序在下面按同一个开关单独定。 */
+            if (o->prefer_mirror) {
+                const int swapped = sxcl_version_plan_prefer_mirror(plan);
+                printf("下载源: 镜像优先,%d 个文件镜像排第一(官方作第二候选,不通自动切)\n", swapped);
+            } else {
+                printf("下载源: 官方优先(mojang),镜像只作第二候选\n");
+            }
         }
     }
     size_t total = sxcl_version_plan_count(plan);
@@ -590,8 +615,23 @@ static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
             ++failed;
         } else {
             const int before = st.done + st.failed;
-            const int added = sxcl_version_plan_add_asset_objects(plan, idoc, game_dir, NULL,
-                                                                  o->asset_mirror, aerr, sizeof(aerr));
+            /* 资源对象的顺序在这里一次定好(--asset-mirror 没给就默认 BMCLAPI 的 /assets);
+             * 不能靠再调一次 prefer_mirror —— 那会把前面那批已换好的又换回官方在前。 */
+            char asset_mirror_default[1024];
+            const char *asset_base = NULL;
+            const char *asset_mirror = o->asset_mirror;
+            if (o->prefer_mirror) {
+                if (o->asset_mirror && o->asset_mirror[0] != '\0') {
+                    snprintf(asset_mirror_default, sizeof(asset_mirror_default), "%s", o->asset_mirror);
+                } else {
+                    snprintf(asset_mirror_default, sizeof(asset_mirror_default), "%s/assets",
+                             SXCL_MIRROR_BMCLAPI_BASE);
+                }
+                asset_base = asset_mirror_default;
+                asset_mirror = SXCL_ASSET_OBJECTS_BASE;
+            }
+            const int added = sxcl_version_plan_add_asset_objects(plan, idoc, game_dir, asset_base,
+                                                                  asset_mirror, aerr, sizeof(aerr));
             if (added < 0) {
                 fprintf(stderr, "展开资源对象失败: %s\n", aerr);
                 ++failed;
@@ -1003,7 +1043,7 @@ static int cmd_loader(int argc, char **argv, const cli_opts *opts_in)
             no_fallback = 1;
         } else if (strcmp(a, "--rate") == 0 || strcmp(a, "--workers") == 0 ||
                    strcmp(a, "--conn") == 0 || strcmp(a, "--cache") == 0 ||
-                   strcmp(a, "--mirror") == 0) {
+                   strcmp(a, "--mirror") == 0 || strcmp(a, "--source") == 0) {
             ++i; /* 通用参数已在 main 里解析,这里只需跳过它的值 */
         } else if (strcmp(a, "--no-cache") == 0 || strcmp(a, "--verbose") == 0) {
             /* 无值参数 */
@@ -1651,6 +1691,7 @@ int main(int argc, char **argv)
     }
     cli_opts o;
     memset(&o, 0, sizeof(o));
+    o.prefer_mirror = 1; /* --source 默认 bmclapi:镜像优先(用户要求"默认走 bmc,官方不好使自动切") */
     for (int i = 2; i < argc; ++i) {
         const char *a = argv[i];
         const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -1659,6 +1700,16 @@ int main(int argc, char **argv)
             ++i;
         } else if (strcmp(a, "--workers") == 0 && v) {
             o.workers = atoi(v);
+            ++i;
+        } else if (strcmp(a, "--source") == 0 && v) {
+            if (strcmp(v, "mojang") == 0) {
+                o.prefer_mirror = 0;
+            } else if (strcmp(v, "bmclapi") == 0 || strcmp(v, "auto") == 0) {
+                o.prefer_mirror = 1;
+            } else {
+                fprintf(stderr, "认不出的下载源: %s(可用 bmclapi|mojang|auto)\n", v);
+                return usage();
+            }
             ++i;
         } else if (strcmp(a, "--mirror") == 0 && v) {
             o.mirror = v;

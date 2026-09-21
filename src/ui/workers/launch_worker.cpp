@@ -55,13 +55,19 @@ LaunchWorker::~LaunchWorker() {
         m_cancel.store(true);
         m_thread->quit();
         m_thread->wait();
+        delete m_thread; // 线程对象归本类所有(没有 parent,也没有 deleteLater)
+        m_thread = nullptr;
     }
 }
 
 void LaunchWorker::start() {
     if (m_started.exchange(true))
         return;
-    m_thread = new QThread(this);
+    // 与 install_worker 同一个坑:QThread 带 parent 时 moveToThread 会被 Qt 拒绝
+    // ("Cannot move objects with a parent"),run() 就还在界面线程里跑。线程对象由析构函数收尾。
+    // 线程对象没有 parent,**由本类析构函数 delete**(不接 finished->deleteLater:
+    // 那样析构里再 delete 会与排队的删除撞成二次释放)。
+    m_thread = new QThread();
     moveToThread(m_thread);
     connect(m_thread, &QThread::started, this, &LaunchWorker::run);
     connect(m_thread, &QThread::finished, this, [this] { m_running.store(false); });

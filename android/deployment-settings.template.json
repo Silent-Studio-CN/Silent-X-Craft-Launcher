@@ -1,0 +1,25 @@
+{
+    "android-compile-sdk-version": "@COMPILE_SDK@",
+    "android-min-sdk-version": "@MIN_SDK@",
+    "android-target-sdk-version": "@TARGET_SDK@",
+    "android-package-name": "@PACKAGE_NAME@",
+    "android-version-code": "@VERSION_CODE@",
+    "android-version-name": "@VERSION_NAME@",
+    "android-package-source-directory": "@BUILD_PKG@",
+    "application-binary": "sxclui",
+    "architectures": {
+        "arm64-v8a": "aarch64-linux-android"
+    },
+    "deployment-dependencies": "@DEPLOYMENT_DEPENDENCIES@",
+    "ndk": "@NDK@",
+    "ndk-host": "windows-x86_64",
+    "qml-importscanner-binary": "@QT_HOST@/bin/qmlimportscanner.exe",
+    "qt": {
+        "arm64-v8a": "@QT_ANDROID@"
+    },
+    "sdk": "@SDK@",
+    "sdkBuildToolsRevision": "@BUILD_TOOLS@",
+    "stdcpp-path": "@NDK@/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib",
+    "toolchain-prefix": "llvm",
+    "verbose": 1
+}

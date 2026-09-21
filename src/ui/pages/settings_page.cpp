@@ -63,6 +63,7 @@
 
 // 账户(正版登录)—— Python 版无此功能,新增。实现见 dialogs/account.* 与 dialogs/auth_dialog.*
 #include "workers/ui_error.h"  // 统一错误出口:完整上下文 + 自动复制剪贴板
+#include "workers/ui_paths.h"  // uiSettingsFilePath():设置文件路径的唯一权威(见 settingsFilePath)
 
 #include "dialogs/account.h"
 #include "dialogs/auth_dialog.h"
@@ -178,14 +179,11 @@ int valueIndex(const QStringList &values, const QString &value, int fallback) {
 // 核心库那份按平台走,安卓落到应用私有目录($SXCL_ANDROID_FILES/SilentXCraftLauncher),
 // 另外支持 SXCL_CONFIG_DIR 覆盖(便携版/测试)。
 QString settingsFilePath() {
-    char path[1024];
-    char err[SXCL_SETTINGS_ERR_MAX];
-    err[0] = '\0';
-    if (sxcl_settings_default_path(path, sizeof(path), err, sizeof(err)) == SXCL_SETTINGS_OK)
-        return QDir::fromNativeSeparators(QString::fromUtf8(path)); // 统一 '/' 口径(Qt 惯例)
-    // 连配置目录都拼不出来(极端受限环境):退回旧口径,至少不让设置页整个不可用。
-    // 这条兜底不会在正常平台上走到(Windows 有 APPDATA/macOS 有 HOME/Linux 有 HOME)。
-    return QDir::homePath() + QStringLiteral("/.config/SilentXCraftLauncher/settings.conf");
+    // **不要再自己拼路径**:交给 ui_paths.cpp 的 uiSettingsFilePath()(内部就是核心库的
+    // sxcl_settings_default_path(),并支持 SXCL_UI_SETTINGS 取证覆盖)。
+    // 以前这里手拼一份、ui_paths/account 又各手拼一份 —— Android 上"写的文件"和"读的文件"
+    // 不是同一个,于是设置页改完重启就回默认值(用户报的"设置关闭重开直接打回原形")。
+    return uiSettingsFilePath();
 }
 
 // ─────────────────────────── 语言(i18n)───────────────────────────
@@ -1052,11 +1050,10 @@ private:
             // 下载参数从设置读(环境变量优先:SXCL_DL_*),与其它下载路径同一口径
             sxcl_settings_download dl;
             memset(&dl, 0, sizeof(dl));
-            char cfg[1024];
-            char cfgErr[128];
-            if (sxcl_settings_default_path(cfg, sizeof(cfg), cfgErr, sizeof(cfgErr)) ==
-                SXCL_SETTINGS_OK) {
-                if (sxcl_settings *settings = sxcl_settings_open(cfg)) {
+            // 同一份设置文件(与设置页写的是同一个;见 settingsFilePath 的说明)
+            const QByteArray cfg = settingsFilePath().toUtf8();
+            if (!cfg.isEmpty()) {
+                if (sxcl_settings *settings = sxcl_settings_open(cfg.constData())) {
                     sxcl_settings_resolve_download(settings, &dl);
                     sxcl_settings_free(settings);
                 }
@@ -1578,7 +1575,9 @@ void SettingsPage::buildContent() {
     m_sourceCard = new ComboBoxSettingCard( // :246-253
         FluentIcon::qicon(FluentIcon::DOWNLOAD), QStringLiteral("版本下载源"),
         QStringLiteral("选择版本清单与资源文件的下载源"), sourceTexts, sourceValues,
-        valueIndex(sourceValues, m_store.text(kKeyDownloadSource, QStringLiteral("auto")), 0),
+        // 默认 **BMCLAPI**(用户指定):Python 版"重置设置"落地的也是 bmclapi;
+        // 运行期真读这个键的是 ui_paths.cpp 的 uiDownloadSource()(版本页清单与下载都按它排序)。
+        valueIndex(sourceValues, m_store.text(kKeyDownloadSource, QStringLiteral("bmclapi")), 0),
         generalGroup);
 
     const QStringList refreshTexts = textList(kRefreshTexts, kRefreshCount); // :261

@@ -13,6 +13,7 @@
 #include "sxcl/fs.h"
 #include "sxcl/hash.h"
 #include "sxcl/install.h"
+#include "sxcl/manifest.h" /* SXCL_MIRROR_BMCLAPI_BASE / SXCL_ASSET_OBJECTS_BASE(下载源用例要用) */
 #include "sxcl/net.h"
 
 #define TMP_ROOT  "build-c/_install_tmp"
@@ -178,6 +179,13 @@ typedef struct fake {
     int stopped_early;
     char natives_dir_seen[1024];
     char natives_game_dir[1024];
+    /* 下载源(镜像优先)用例:假下载器看到的候选顺序 */
+    char want_prefix[256];    /* 每个任务 urls[0] 必须以它开头(空 = 不检查) */
+    char forbid_prefix[256];  /* 每个任务 urls[0] 不许以它开头(空 = 不检查) */
+    size_t url0_unexpected;   /* 第一候选不符合 want_prefix 的任务数 */
+    size_t url0_forbidden;    /* 第一候选撞上 forbid_prefix 的任务数 */
+    size_t missing_second;    /* 没有第二候选(官方退路)的任务数 */
+    char fetch_url[1024];     /* 第一次 fetch_text 拿到的 URL */
     /* 假加载器收到的请求 */
     char loader_game_dir[1024];
     char loader_instance[256];
@@ -322,8 +330,10 @@ static int write_payload(const char *dest) {
 
 static int fake_fetch_text(void *userdata, const char *url, char **out_text, char *err, size_t err_len) {
     fake *f = (fake *)userdata;
-    (void)url;
     ++f->fetch_calls;
+    if (url && !f->fetch_url[0]) {
+        snprintf(f->fetch_url, sizeof(f->fetch_url), "%s", url); /* 记下第一条被取的路 */
+    }
     record_call(CALL_FETCH, SXCL_INSTALL_STAGE_MANIFEST);
     if (err && err_len) {
         err[0] = '\0';
@@ -359,6 +369,20 @@ static int fake_download(void *userdata, const sxcl_install_download *request,
         sxcl_task *t = request->tasks[i];
         if (!t) {
             continue;
+        }
+        /* 候选顺序(下载源)记账:第一候选是谁、有没有留官方退路 */
+        if (t->urls[0] != NULL) {
+            if (f->want_prefix[0] != '\0' &&
+                strncmp(t->urls[0], f->want_prefix, strlen(f->want_prefix)) != 0) {
+                ++f->url0_unexpected;
+            }
+            if (f->forbid_prefix[0] != '\0' &&
+                strncmp(t->urls[0], f->forbid_prefix, strlen(f->forbid_prefix)) == 0) {
+                ++f->url0_forbidden;
+            }
+        }
+        if (t->urls[1] == NULL) {
+            ++f->missing_second;
         }
         if (t->size > 0) {
             bytes_total += t->size;
@@ -1256,6 +1280,55 @@ static void test_default_download_hook(void) {
     check(strstr(err, "传输后端") != NULL, "原因说清楚了是传输后端");
 }
 
+/* ── 下载源:prefer_mirror 真的把镜像排到了第一候选 ── */
+
+static void test_prefer_mirror(void) {
+    group("下载源(镜像优先)");
+    char game[1024];
+    sxcl_install_plan plan;
+    sxcl_install_result res;
+
+    /* 1) 镜像优先:每个文件的第一候选都必须是镜像 */
+    reset_all();
+    case_dir("mirror_first", game, sizeof(game));
+    base_plan(&plan, game);
+    plan.mirror_base = "https://bmclapi2.bangbang93.com";
+    plan.prefer_mirror = 1;
+    snprintf(g_fake.want_prefix, sizeof(g_fake.want_prefix), "%s", plan.mirror_base);
+    const int rc = run_install(&plan, &res);
+    check_int(rc, SXCL_INSTALL_OK, "镜像优先:整次安装成功");
+    check_int((long)g_fake.url0_unexpected, 0, "镜像优先:每个任务的第一候选都是镜像");
+    check_int((long)g_fake.missing_second, 0, "镜像优先:每个任务都留了官方第二候选(不通用自动切)");
+    check(g_fake.download_requests >= 6, "镜像优先:确实下载了文件(不是全跳过)");
+    check(strncmp(g_fake.fetch_url, plan.mirror_base, strlen(plan.mirror_base)) == 0,
+          "镜像优先:版本清单也是先走镜像");
+
+    /* 2) 对照:官方优先(老行为)—— 第一候选不许是镜像,镜像仍作第二候选 */
+    reset_all();
+    case_dir("mojang_first", game, sizeof(game));
+    base_plan(&plan, game);
+    plan.mirror_base = "https://bmclapi2.bangbang93.com";
+    plan.prefer_mirror = 0;
+    snprintf(g_fake.forbid_prefix, sizeof(g_fake.forbid_prefix), "%s", plan.mirror_base);
+    const int rc2 = run_install(&plan, &res);
+    check_int(rc2, SXCL_INSTALL_OK, "官方优先:整次安装成功");
+    check_int((long)g_fake.url0_forbidden, 0, "官方优先:没有任务把镜像排在第一");
+    check_int((long)g_fake.missing_second, 0, "官方优先:镜像仍留着作第二候选");
+    check(strncmp(g_fake.fetch_url, plan.mirror_base, strlen(plan.mirror_base)) != 0,
+          "官方优先:版本清单先走官方");
+
+    /* 3) prefer_mirror=1 且没给 mirror_base:用核心默认 BMCLAPI,不是"没有镜像" */
+    reset_all();
+    case_dir("mirror_default", game, sizeof(game));
+    base_plan(&plan, game);
+    plan.prefer_mirror = 1;
+    snprintf(g_fake.want_prefix, sizeof(g_fake.want_prefix), "%s", SXCL_MIRROR_BMCLAPI_BASE);
+    const int rc3 = run_install(&plan, &res);
+    check_int(rc3, SXCL_INSTALL_OK, "默认镜像:整次安装成功");
+    check_int((long)g_fake.url0_unexpected, 0, "默认镜像:不给 mirror_base 时默认用 BMCLAPI");
+    check_int((long)g_fake.missing_second, 0, "默认镜像:官方仍是第二候选");
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0); /* 崩了也要看到已经跑过的用例 */
     ft_create(NULL); /* 让静态表先初始化好(不调用也安全) */
@@ -1274,6 +1347,7 @@ int main(void) {
     test_args();
     test_http_text();
     test_default_download_hook();
+    test_prefer_mirror();
     group("(结束)");
 
     printf("install 编排测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);

@@ -692,6 +692,34 @@ static int download_batch(install_run *r, sxcl_install_stage stage, const char *
 
 /* ── 各阶段 ── */
 
+/** 这次安装要用的镜像根:计划里给了就用它;prefer_mirror=1 且没给就用核心默认(BMCLAPI)。
+ *  返回 NULL = 这次不补镜像(与老行为一致:官方一条路)。 */
+static const char *install_mirror_base(const sxcl_install_plan *plan) {
+    if (plan->mirror_base && *plan->mirror_base) {
+        return plan->mirror_base;
+    }
+    return plan->prefer_mirror ? SXCL_MIRROR_BMCLAPI_BASE : NULL;
+}
+
+/** 资源对象的镜像根:plan.mirror_base 是"镜像根"(与 add_mirror 一个口径,如
+ *  https://bmclapi2.bangbang93.com),资源对象在它下面的 /assets;调用方要是已经写成
+ *  ".../assets" 就不再拼一层(免得出现 /assets/assets)。空 = 这次不配资源对象镜像。 */
+static void install_asset_mirror_base(const sxcl_install_plan *plan, char *out, size_t cap) {
+    out[0] = '\0';
+    const char *root = install_mirror_base(plan);
+    if (!root || !*root) {
+        return;
+    }
+    const size_t n = strlen(root);
+    static const char suffix[] = "/assets";
+    const size_t sn = sizeof(suffix) - 1;
+    if (n >= sn && strcmp(root + n - sn, suffix) == 0) {
+        snprintf(out, cap, "%s", root);
+    } else {
+        snprintf(out, cap, "%s%s", root, suffix);
+    }
+}
+
 static int stage_manifest(install_run *r) {
     char err[SXCL_INSTALL_ERROR_MAX];
     err[0] = '\0';
@@ -705,8 +733,23 @@ static int stage_manifest(install_run *r) {
     } else {
         const char *url = (r->plan->manifest_url && *r->plan->manifest_url) ? r->plan->manifest_url
                                                                             : SXCL_INSTALL_MANIFEST_URL;
-        if (r->io->fetch_text(r->io->userdata, url, &text, err, sizeof(err)) != 0 || !text) {
-            return fail(r, SXCL_INSTALL_ERR_MANIFEST, "取版本清单失败: %s", err[0] ? err : "未知原因");
+        /* 镜像优先:先试镜像,不通再走官方(自动切)。不开开关就一条路都不加,与老行为一致。 */
+        char mirror[1024];
+        const char *mirror_url = NULL;
+        const char *base = install_mirror_base(r->plan);
+        if (r->plan->prefer_mirror && base &&
+            sxcl_manifest_mirror_url(url, base, mirror, sizeof(mirror)) == 0) {
+            mirror_url = mirror;
+        }
+        const char *first = mirror_url ? mirror_url : url;
+        if (r->io->fetch_text(r->io->userdata, first, &text, err, sizeof(err)) != 0 || !text) {
+            if (!mirror_url) {
+                return fail(r, SXCL_INSTALL_ERR_MANIFEST, "取版本清单失败: %s", err[0] ? err : "未知原因");
+            }
+            if (r->io->fetch_text(r->io->userdata, url, &text, err, sizeof(err)) != 0 || !text) {
+                return fail(r, SXCL_INSTALL_ERR_MANIFEST, "取版本清单失败(镜像与官方都不通): %s",
+                            err[0] ? err : "未知原因");
+            }
         }
     }
 
@@ -738,7 +781,22 @@ static int stage_version_json(install_run *r) {
     sxcl_task task;
     memset(&task, 0, sizeof(task));
     task.dest = r->version_json_path;
-    task.urls[0] = r->version_json_url;
+    /* 版本 JSON 的第二路(镜像):镜像优先时它排第一,官方退成第二候选 */
+    char vjson_mirror[1024];
+    vjson_mirror[0] = '\0';
+    const char *mirror_base = install_mirror_base(r->plan);
+    const char *vjson_mirror_url = NULL;
+    if (mirror_base && sxcl_manifest_mirror_url(r->version_json_url, mirror_base, vjson_mirror,
+                                                sizeof(vjson_mirror)) == 0) {
+        vjson_mirror_url = vjson_mirror;
+    }
+    if (r->plan->prefer_mirror && vjson_mirror_url) {
+        task.urls[0] = vjson_mirror_url;
+        task.urls[1] = r->version_json_url;
+    } else {
+        task.urls[0] = r->version_json_url;
+        task.urls[1] = vjson_mirror_url;
+    }
     task.sha1 = r->version_json_sha1;
     task.algo = SXCL_HASH_SHA1;
     task.size = r->version_json_size;
@@ -777,6 +835,22 @@ static int stage_version_json(install_run *r) {
     r->version_plan = sxcl_version_plan_build(r->version_doc, r->game_dir, r->instance, err, sizeof(err));
     if (!r->version_plan) {
         return fail(r, SXCL_INSTALL_ERR_VERSION, "版本 JSON 生成下载计划失败: %s", err[0] ? err : "未知原因");
+    }
+
+    /* 计划装配完、开始下载(客户端 jar/依赖库/资源索引这一批)之前:
+     *   1) 给每个文件补一条镜像第二路 —— 以前 install.c 只给资源对象配了镜像,
+     *      客户端 jar/依赖库/资源索引只有官方一条路,设置里的下载源对它们等于没有;
+     *   2) prefer_mirror=1 时把镜像挪到第一路(官方自动退成第二候选)。
+     * 注意 prefer_mirror **只调这一次**(见 manifest.h):资源对象是后面才追加的另一批,
+     * 它们的顺序在 stage_asset_objects 里按同一个开关一次定好,不能再调第二次(会换回去)。 */
+    if (mirror_base) {
+        char merr[SXCL_INSTALL_ERROR_MAX];
+        merr[0] = '\0';
+        /* 补不上第二路不致命:官方那条路还在;失败信息不吞掉,写进 err 交给下面的人话文案 */
+        (void)sxcl_version_plan_add_mirror(r->version_plan, mirror_base, merr, sizeof(merr));
+        if (r->plan->prefer_mirror) {
+            (void)sxcl_version_plan_prefer_mirror(r->version_plan);
+        }
     }
 
     set_text(r->summary, sizeof(r->summary), "版本 JSON 已就绪: %s (%d 个下载条目)",
@@ -886,9 +960,22 @@ static int stage_asset_objects(install_run *r) {
         return fail(r, SXCL_INSTALL_ERR_IO, "资源索引解析失败: %s", err[0] ? err : "解析失败");
     }
     const size_t before = sxcl_version_plan_count(r->version_plan);
+    /* 资源对象是后追加的一批:候选顺序在这里一次定好。镜像优先 -> 参数位置对调
+     * (base=镜像的 /assets,第二候选=官方 CDN),这样不必再调一次 prefer_mirror
+     * (调第二次会把版本计划那批已经换好的又换回官方在前)。 */
+    char asset_mirror_base[1024];
+    install_asset_mirror_base(r->plan, asset_mirror_base, sizeof(asset_mirror_base));
+    const char *asset_base = r->plan->asset_base_url;
+    const char *asset_mirror = (asset_mirror_base[0] != '\0') ? asset_mirror_base : NULL;
+    if (r->plan->prefer_mirror && asset_mirror) {
+        const char *official = (r->plan->asset_base_url && *r->plan->asset_base_url)
+                                   ? r->plan->asset_base_url
+                                   : SXCL_ASSET_OBJECTS_BASE;
+        asset_base = asset_mirror;
+        asset_mirror = official;
+    }
     const int added = sxcl_version_plan_add_asset_objects(r->version_plan, index, r->game_dir,
-                                                         r->plan->asset_base_url, r->plan->mirror_base,
-                                                         err, sizeof(err));
+                                                         asset_base, asset_mirror, err, sizeof(err));
     sxcl_json_free(index);
     if (added < 0) {
         return fail(r, SXCL_INSTALL_ERR_IO, "展开资源对象失败: %s", err[0] ? err : "未知原因");
@@ -940,7 +1027,22 @@ static int stage_loader_installer(install_run *r) {
     sxcl_task task;
     memset(&task, 0, sizeof(task));
     task.dest = r->installer_path;
-    task.urls[0] = r->plan->installer_url;
+    /* 安装器也有第二路(能映射的镜像站才认;认不出 URL 就还是官方一条路,不造假 URL) */
+    char installer_mirror[1024];
+    installer_mirror[0] = '\0';
+    const char *installer_base = install_mirror_base(r->plan);
+    const char *installer_mirror_url = NULL;
+    if (installer_base && sxcl_manifest_mirror_url(r->plan->installer_url, installer_base,
+                                                   installer_mirror, sizeof(installer_mirror)) == 0) {
+        installer_mirror_url = installer_mirror;
+    }
+    if (r->plan->prefer_mirror && installer_mirror_url) {
+        task.urls[0] = installer_mirror_url;
+        task.urls[1] = r->plan->installer_url;
+    } else {
+        task.urls[0] = r->plan->installer_url;
+        task.urls[1] = installer_mirror_url;
+    }
     task.algo = SXCL_HASH_SHA1;
     task.size = 0; /* 安装器没有官方哈希:只校验"下下来了且非空" */
     task.priority = 0;

@@ -14,6 +14,8 @@
 
 #include <cstring>
 
+#include "workers/ui_paths.h" // uiSettingsFilePath():设置文件路径的唯一权威
+
 #include "auth_replay.h"    // 取证:夹具回放传输(默认不启用)
 #include "sxcl/launch.h"
 #include "sxcl/net.h"       // sxcl_transport_qt_create / bootstrap
@@ -37,17 +39,10 @@ QString timeText(qint64 unixSeconds) {
 } // namespace
 
 QString uiSettingsPath() {
-#if defined(Q_OS_WIN)
-    QString base = qEnvironmentVariable("APPDATA");
-    if (base.isEmpty())
-        base = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-    return base + QStringLiteral("/SilentXCraftLauncher/settings.conf");
-#elif defined(Q_OS_MACOS)
-    return QDir::homePath() +
-           QStringLiteral("/Library/Application Support/SilentXCraftLauncher/settings.conf");
-#else
-    return QDir::homePath() + QStringLiteral("/.config/SilentXCraftLauncher/settings.conf");
-#endif
+    // 与设置页写的是**同一个文件**:唯一权威在 ui_paths.cpp 的 uiSettingsFilePath()
+    // (它内部走核心库 sxcl_settings_default_path)。这里以前手拼一份 —— Android 上
+    // 会落到 ~/.config(安卓 HOME 是 "/",写不进去),于是启动恢复读不到任何设置。
+    return uiSettingsFilePath();
 }
 
 QString defaultTokenPath() {

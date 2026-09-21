@@ -178,7 +178,15 @@ int qtRequest(void *ctx, const sxcl_http_request *req, sxcl_http_response *resp,
     int status = 0;
     for (;;) {
         status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        if (status != 0 || reply->isFinished() || clock.elapsed() >= deadlineMs) {
+        /* 3xx 不是最终状态:Qt 正按 RedirectPolicy 继续跟。
+         * 实测 BMCLAPI(镜像站)每个文件都先 302 到预签名 URL、再 200(共 2 跳);
+         * 以前这里"一看到状态码就跳出",拿到的是第一跳的 302,于是镜像那条路**永远算失败**、
+         * 每次回落到官方 —— 镜像排第一等于白排。
+         * 只有"重定向且 Qt 还在跟"时才继续等;真跟不下去(reply 已结束)照样退出。 */
+        const bool redirecting = (status == 301 || status == 302 || status == 303 || status == 307 ||
+                                  status == 308) &&
+                                 !reply->isFinished();
+        if ((status != 0 && !redirecting) || reply->isFinished() || clock.elapsed() >= deadlineMs) {
             break;
         }
         pumpReply(reply, 50);

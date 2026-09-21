@@ -541,6 +541,26 @@ int sxcl_version_plan_add_mirror(sxcl_version_plan *plan, const char *mirror_bas
     return added;
 }
 
+int sxcl_version_plan_prefer_mirror(sxcl_version_plan *plan)
+{
+    if (!plan) {
+        return -1;
+    }
+    int swapped = 0;
+    for (size_t i = 0; i < plan->count; ++i) {
+        sxcl_task *t = plan->tasks[i];
+        if (!t || !t->urls[0] || !t->urls[1]) {
+            continue; /* 没有第二候选:官方仍是唯一的一条路,不动它 */
+        }
+        /* plan 接管了这些字符串的生命周期(plan->owned),这里只换指针,不复制也不释放 */
+        const char *first = t->urls[0];
+        t->urls[0] = t->urls[1];
+        t->urls[1] = first;
+        ++swapped;
+    }
+    return swapped;
+}
+
 /* ── 资源对象展开(assets/objects) ── */
 
 static uint64_t fnv1a64(const char *s)

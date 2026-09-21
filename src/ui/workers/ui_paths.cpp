@@ -45,22 +45,36 @@ QString legacyConfigString(const QString &group, const QString &key) {
 } // namespace
 
 QString uiSettingsFilePath() {
-    // 取证通路:钉死设置文件(不改用户配置)。空串 = 没钉。
-    const QString pinned = qEnvironmentVariable("SXCL_UI_SETTINGS");
-    if (!pinned.isEmpty())
-        return pinned;
-    // 与 home_page.cpp:129-141 的 ownSettingsFilePath() 逐字同口径。
-#if defined(Q_OS_WIN)
-    QString base = qEnvironmentVariable("APPDATA");
-    if (base.isEmpty())
-        base = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-    return base + QStringLiteral("/SilentXCraftLauncher/settings.conf");
-#elif defined(Q_OS_MACOS)
-    return QDir::homePath() +
-           QStringLiteral("/Library/Application Support/SilentXCraftLauncher/settings.conf");
-#else
-    return QDir::homePath() + QStringLiteral("/.config/SilentXCraftLauncher/settings.conf");
-#endif
+    // **唯一权威:核心库 sxcl_settings_default_path()**。
+    //
+    // 为什么必须这样(这是个真事故,不是洁癖):设置页写文件用的是核心库那条路径,
+    // 而这里以前**自己手拼**了一份 —— Windows 上两者碰巧一致(都是 %APPDATA%/SilentXCraftLauncher)，
+    // 所以桌面看不出来;Android 上核心库给的是 <应用私有 files>/SilentXCraftLauncher,
+    // 这里给的是 ~/.config/... 而安卓的 HOME 是 "/" —— 于是**读的与写的根本不是同一个文件**:
+    // 设置页改了、界面上看着也改了,重启后启动恢复(主题/强调色/语言)、游戏目录、Java 路径、
+    // 内存、下载源全部回落默认值,用户看到的就是"设置关闭重开直接打回原形"。
+    // Linux 上也有同一类错位(核心库/XDG 用全小写目录名,这里用大写)。
+    static const QString path = [] {
+        // 取证通路:钉死设置文件(不改用户配置)。空串 = 没钉。
+        const QString pinned = qEnvironmentVariable("SXCL_UI_SETTINGS");
+        if (!pinned.isEmpty())
+            return QDir::fromNativeSeparators(pinned);
+        char buf[1024];
+        char err[SXCL_SETTINGS_ERR_MAX];
+        err[0] = '\0';
+        if (sxcl_settings_default_path(buf, sizeof(buf), err, sizeof(err)) == SXCL_SETTINGS_OK)
+            return QDir::fromNativeSeparators(QString::fromUtf8(buf));
+        // 连路径都拼不出来(极端受限环境)才兜底,避免整个设置页不可用。
+        return uiLauncherDataRoot() + QStringLiteral("/settings.conf");
+    }();
+    // 一行取证:桌面上可以直接核对"读的和写的到底是不是同一个文件"。
+    // 注意:**不能用 lambda 捕获 path** —— 它是 static 存储期,简单捕获在 C++ 里是编译错误(C3495)。
+    static bool traced = false;
+    if (!traced) {
+        traced = true;
+        uiTrace(QStringLiteral("settings | 文件=") + path);
+    }
+    return path;
 }
 
 QString uiLauncherDataRoot() {
@@ -68,25 +82,13 @@ QString uiLauncherDataRoot() {
     const QString pinned = qEnvironmentVariable("SXCL_UI_DATA_DIR");
     if (!pinned.isEmpty())
         return QDir::fromNativeSeparators(pinned);
-#if defined(Q_OS_WIN)
-    // platform.py:148-152 default_config_directory():与 Python 版同一目录,过渡期共用
-    QString base = qEnvironmentVariable("APPDATA");
-    if (base.isEmpty())
-        base = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-    return base + QStringLiteral("/SilentXCraftLauncher");
-#elif defined(Q_OS_MACOS)
-    return QDir::homePath() +
-           QStringLiteral("/Library/Application Support/SilentXCraftLauncher");
-#elif defined(Q_OS_ANDROID)
-    // Qt for Android 的 AppDataLocation 落在 App 私有目录里(可写,且不需要任何权限);
-    // 拿不到时退回 HOME 下的隐藏目录(HOME 在 Android 上也是私有 files 目录)。
-    const QString standard =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    return standard.isEmpty() ? QDir::homePath() + QStringLiteral("/.silentxcraftlauncher")
-                              : standard;
-#else
-    return QDir::homePath() + QStringLiteral("/.config/SilentXCraftLauncher");
-#endif
+    // 与设置文件**同一个目录**(同一个权威:核心库)。缓存/配置散在两处是上一个事故的同类写法。
+    char buf[1024];
+    char err[256];
+    err[0] = '\0';
+    if (sxcl_settings_default_dir(buf, sizeof(buf), err, sizeof(err)) == SXCL_SETTINGS_OK)
+        return QDir::fromNativeSeparators(QString::fromUtf8(buf));
+    return QDir::homePath() + QStringLiteral("/.silentxcraftlauncher");
 }
 
 QString uiGameDirectory() {
@@ -165,6 +167,23 @@ int uiMemoryMb() {
         return mb > 0 ? mb : 0;
     }
     return 0;
+}
+
+QString uiDownloadSource() {
+    // 取证通路优先(钉死源,不动用户设置)
+    const QString pinned = qEnvironmentVariable("SXCL_UI_DOWNLOAD_SOURCE");
+    if (!pinned.isEmpty())
+        return pinned.trimmed().toLower();
+    // 设置页写的就是 download.source(settings_page.cpp 的 kKeyDownloadSource)
+    if (sxcl_settings *st = sxcl_settings_open(uiSettingsFilePath().toUtf8().constData())) {
+        const char *value = sxcl_settings_get(st, "download.source", "bmclapi");
+        const QString text = value != nullptr ? QString::fromUtf8(value) : QString();
+        sxcl_settings_free(st); // 返回的指针归句柄所有,释放即失效 -> 先拷贝再释放
+        const QString normalized = text.trimmed().toLower();
+        if (!normalized.isEmpty())
+            return normalized;
+    }
+    return QStringLiteral("bmclapi");
 }
 
 bool uiTraceEnabled() {

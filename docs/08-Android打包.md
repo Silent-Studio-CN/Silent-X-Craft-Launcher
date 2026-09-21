@@ -2,7 +2,8 @@
 
 > 本文只写**实测**。每条结论后面都能找到命令与输出。
 > 令牌/证书指纹一律不出现(那份在 `分币必赚/ssm/docs/WS2025-连接手册.md`,是不外发文档)。
-> 打包层全部是**新增文件**(在 `build/_android/`),不在 `src/**` 内;`docs/0[5-7]*` 未改动。
+> 打包层全部是**新增文件**,它们现在的**家**是仓库里的 `android/`(`build/_android/` 只是工作副本,见 §3.1),
+> 不在 `src/**` 内;`docs/0[5-7]*` 未改动。
 
 ---
 
@@ -66,15 +67,29 @@ QtActivity/QtLoader 会 dlopen `lib<lib_name>_<abi>.so` 并调用它的 `main()`
 | `docs/androiddeployqt-main.cpp.txt` | JQt 留存的 Qt 官方源码参考件(4260 行) | 只当排障参考 |
 | UI 代码 | `src/ui/**` 原样(含 `SXCL_UI_ROUTE`/`SXCL_UI_SHOT`/`SXCL_UI_ACCENT` 验收通路) | 一个字节没改地进 APK |
 
-## 3. 打包层(本次新增,全在 `build/_android/`)
+## 3. 打包层(仓库内 `android/`;`build/_android/` 只是工作副本)
 
-    build/_android/
+    ── 仓库里(被 git 跟踪,见 §3.1)──────────────────────────────────────
+    android/
+      AndroidManifest.xml           # package=com.silentstudio.sxcl / activity=SxclActivity / lib_name=sxclui
+      java/com/silentstudio/sxcl/SxclActivity.java
+      res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png
+      icon_512.png
       app/CMakeLists.txt            # Android-only CMake 工程:复用 SXCL 根 CMakeLists + src/ui/CMakeLists
       app/sxcl_android_main.cpp     # Android 入口(见下)
-      pkg/AndroidManifest.xml       # package=com.silentstudio.sxcl / activity=SxclActivity / lib_name=sxclui
-      pkg/java/com/silentstudio/sxcl/SxclActivity.java
-      scripts/build_local.ps1       # 本机一键(实际出包的那条)
-      scripts/{stage,r0_all,r1_build,r2_deploy,run,poll,mkoverlay,verify_overlay,keep,r3_device,compare_all}.ps1
+      deployment-settings.template.json    # androiddeployqt 的输入(占位符;机器路径不进 git)
+      gradle/settings.gradle        # gradle 工程配置(androiddeployqt 不生成 settings.gradle)
+      gradle/build.gradle           # 同上,原样取自 Qt 生成的那份(无机器路径)
+      gradle/gradle-wrapper.properties
+      gradle/gradle.properties.template    # 带占位符(里面有 qtAndroidDir 等本机路径)
+      scripts/sync_to_build.ps1     # android/ -> build/_android/{pkg,app} 单向同步(/PURGE,不会留过期文件)
+      scripts/build_apk.ps1         # 一键构建(从零 clone 的入口)
+
+    ── 构建机上(gitignore,随时可删)────────────────────────────────────
+    build/_android/
+      pkg/ app/                     # sync_to_build.ps1 从 android/ 铺出来的工作副本
+      scripts/build_local.ps1       # 转发到 android/scripts/build_apk.ps1(旧入口保留,不再自己实现一份)
+      scripts/{stage,r0_all,r1_build,r2_deploy,run,poll,mkoverlay,verify_overlay,keep,r3_device,compare_all,build_apk_stage_wa}.ps1
       stage/                        # 上传/构建用的源码树(仓库副本 + libqf 副本 + 打包层)
       out/                          # 产物与取证(APK + badging/apksigner/内容清单)
       evidence/                     # 往届 Android 真机截图等旁证
@@ -94,6 +109,47 @@ QtActivity/QtLoader 会 dlopen `lib<lib_name>_<abi>.so` 并调用它的 `main()`
 3. **1:1 取证设计**:手机屏幕不是 1100x750,所以验收时用 `offscreen` QPA 让窗口保持 `MainWindow::resize(1100,750)`,
    `QT_SCALE_FACTOR=1.5` 对齐参考图密度(`build/ref/py_*.png` = 1650x1125 = 1100x750@1.5),再走 `main.cpp` 自带的 `SXCL_UI_SHOT` 自渲染通路。
    **没有为 Android 另做任何布局** —— 只是换 QPA 与缩放。
+
+### 3.1 打包层纳入版本控制(2026-09-21,缺口修复)
+
+**修之前的问题(是真缺口,不是洁癖)**:manifest / `SxclActivity.java` / 启动图标 / gradle 配置 /
+Android 入口 **只存在于 `build/_android/`**,而仓库 `.gitignore` 里有 `build/`。
+后果:这份开源仓库**从零 clone 重建不出 APK** —— 缺的不是游戏源码,是打包层本身。
+
+| 东西 | 之前在哪(未跟踪) | 现在在哪(**git 跟踪**) |
+|---|---|---|
+| `AndroidManifest.xml` | `build/_android/pkg/` | `android/AndroidManifest.xml` |
+| `SxclActivity.java` | `build/_android/pkg/java/**` | `android/java/com/silentstudio/sxcl/SxclActivity.java` |
+| 五档启动图标 | 只在 `build/_android/stage/pkg/res/`(由 `scripts/make_icon.py` 生成) | `android/res/mipmap-*/ic_launcher.png` |
+| Android 入口 + 打包 CMake | `build/_android/app/` | `android/app/{sxcl_android_main.cpp,CMakeLists.txt}` |
+| `deployment-settings.json` | 只在 `build/_android/stage/pkg/`(**含本机绝对路径**) | `android/deployment-settings.template.json`(占位符)+ 每次构建由脚本展开 |
+| gradle 配置 | 由 `androiddeployqt` 生成到 `D:\sxcl_local\out`(`settings.gradle` 是脚本现写的) | `android/gradle/**`(**仓库那份覆盖生成的那份**) |
+| 一键构建脚本 | `build/_android/scripts/build_local.ps1` | `android/scripts/build_apk.ps1`(`build_local.ps1` 变成 3 行转发) |
+
+纪律:**源头只有一个 —— `android/`**。`build/_android/{pkg,app}` 是它铺出来的工作副本。
+两个脚本在动手之前都会先跑 `android/scripts/sync_to_build.ps1`(带 `/PURGE`),
+所以**不可能**再用到过期的 manifest / Java / res:
+
+```
+android/scripts/build_apk.ps1  ->  sync_to_build.ps1  ->  build/_android/{pkg,app}  ->  stage  ->  gradle
+build/_android/scripts/build_local.ps1          (转发到上面那条)
+build/_android/scripts/build_apk_stage_wa.ps1   (顶部同样先跑 sync,再走它自己的 stage 修补)
+```
+
+验证(原始命令 + 原始输出见 §16.4):
+
+```powershell
+git ls-files android
+```
+
+**仍然不在仓库里的(诚实清单)**:
+
+- `libqf`(目录 `PyQf to C`)是**仓库外**的源码树:`src/ui/CMakeLists.txt` 用
+  `SXCL_PYQFTO_DIR`(默认 `D:/SilentStudio/PyQf to C`)去找它。没有这棵树就编不出界面。
+  这是本工程既有结构,不在本次改动范围内,只是不能让"打包层进仓库"这句话被读成
+  "clone 下来就能出包"。
+- Qt 6.11.2 的 android kit、NDK 28.2.13676358、JDK 17、gradle 9.3.1 是**环境**,不进仓库;
+  `android/scripts/build_apk.ps1` 的参数默认值就是这份环境清单(可按机器覆盖)。
 
 ## 4. 逐步复现命令
 
@@ -129,7 +185,11 @@ foreach ($f in 'stage','r1_build','r2_deploy','run','poll','mkoverlay') {
 ```powershell
 # 1) 装 Qt android kit(qtbase+qtsvg)到 D 盘 —— 见 §8 的镜像/校验说明
 # 2) 一键构建(native -> libsxclui_arm64-v8a.so -> androiddeployqt -> gradle)
+#    入口二选一:仓库内那份(推荐,§3.1)或旧的本地入口(现在只是转发)
+& powershell -NoProfile -ExecutionPolicy Bypass -File "<仓库>\android\scripts\build_apk.ps1"
 & powershell -NoProfile -ExecutionPolicy Bypass -File "<仓库>\build\_android\scripts\build_local.ps1"
+# 路径不是本机的可以覆盖:
+#   -Stage <stage 目录> -Local D:\sxcl_local -QtAndroid <kit> -QtHost <host kit> -Ndk <ndk> -PyQf <libqf 源码>
 # 产物:D:\sxcl_local\out\build\outputs\apk\debug\sxcl-debug.apk
 ```
 
@@ -739,9 +799,23 @@ if (endPos.y() < ss.top())   endPos.setY(ss.top());
 桌面在多显示器/小窗口下同样能遇到;放平台层会让同一份 UI 出现两套定位。
 **"本来就放得下"时这段是恒等变换**,所以桌面 1:1 弹层几何一个像素都不动(桌面 A/B 抓图逐像素比对,见 §11.7.1)。
 
-**验收(命令与几何)**:`build/_android/scripts/popup_fix_accept.ps1` 会逐索引记录每个弹层的矩形、
-屏幕可用区、窗口矩形,并给出"是否整块落在可用区内"的判定,最后对最靠下的那个弹层跑一遍点选回填。
-代入修复前的实测值(y=677,h=203,可用区底 799)⇒ 修复后应为 **y=597、底边 800**,整块可见。
+**验收(命令与几何)**:`build/_android/scripts/popup_fix_accept.ps1` 逐索引记录每个弹层的矩形、屏幕可用区、
+窗口矩形,给出"是否整块落在可用区内"的判定,并对最靠下的弹层跑一遍点选回填。
+
+设备实测(修复后):
+
+```
+screen available = (0,0 1200x776)   window rect = (0,0 1200x776) dpr=2.00   <- 两者一致,差异不是成因
+index 0: popup=(1063,218 110x236) bottom=454  INSIDE
+index 2: popup=(666,648 344x71)   bottom=719  INSIDE
+index 3: popup=(1063,218 110x236) bottom=454  INSIDE
+```
+
+点选回填同一次运行仍成立:`currentIndex 1 -> 0`、文字 `深色 -> 浅色`、弹层区域 +400ms 变化 32.175%。
+
+**诚实缺口**:修复后的探测里**没有**再选中"当初那个锚点滚出视口的组合框"(6 个可见下拉的顺序每次进程启动都不同),
+所以"钳制把出屏那一例拉回来"这条是**推理 + 同源证据**(钳制生效时会表现为 `bottom == 776`;这几轮探到的 bottom 是 454/719,即未触发),
+不是同一控件的 before/after 直接观测。要补这条需要给验收挡位加一个"按 objectName 指定下拉"的入口。
 
 ### 11.7 动画参数复核(桌面与 Android 同一套,实测拟合)
 
@@ -759,6 +833,23 @@ if (endPos.y() < ss.top())   endPos.setY(ss.top());
 - 按钮 hover/pressed **没有补间**:libqf 只置 `m_hover`/`m_pressed` 后 `update()`(无 QAnimation 对象),
   视觉由 QSS 状态规则决定(`qf-dark.qss:163` hover / `:167` pressed),桌面与 Android 同为"一次重绘瞬时切换",
   且 Android 上 hover 根本不触发(无指针设备)。
+
+**Android 侧(真机,同一条通路)**:`build/_android/scripts/anim_trace_android.ps1`(`--es animgbtrace 1/2`)
+
+```
+[nav]   nav toggle: click menu button (collapsed=1 width=48; spec 150ms OutQuad 48<->322)
+        nav SUMMARY samples=15 settle=258ms first=[nav t=24ms width=48] last=[nav t=258ms width=322]
+[popup] popup SHOW class=ComboBoxMenu rect=(1063,98 110x236) dpr=2.00
+        mask 轨迹 (0,0 0x0) -> (0,71 230x256) -> (0,59 ...) -> (0,0 230x256)   <- setMask 在 Android 上确实在跑
+```
+
+结论分两层,别混:
+
+- **定性/轨迹**:同一份源码、同一套参数在真机上跑起来了 —— 导航 48↔322、弹层 drop-down + 逐帧收拢的 mask,且 spec 行把 150ms OutQuad 打了出来;
+- **定量**:Android 上**不做曲线拟合结论**。原因是采样器第一次 tick 在 `QEvent::Show` 之后约 160ms(桌面约 8ms),
+  有效样本只有 6-8 个量化台阶;自由拟合给出 `OutQuint 478ms` 这类与源码明显不符的结果,钉住端点后 rms 仍有 9-15px。
+  所以定量以桌面 offscreen 拟合为准(上表),Android 只给"参数同源 + 轨迹可见"。
+  要拿到 Android 的定量结果,需要把探针从"8ms 轮询控件几何"改成"在动画对象上挂 valueChanged 钩子按帧取值"(另一次构建,未做)。
 
 ### 11.8 设备状态变更与还原证据(全局状态的实验必须留这一节)
 
@@ -1020,6 +1111,183 @@ $ adb -s .33 shell "grep emulated /proc/$(pidof com.silentstudio.sxcl)/mounts"
   能用不能用由"可执行 + 读得出 release"判定;真正的 `java -version` 由启动层去跑。
 - 设备侧探针在 `run-as` 会话里跑:私有目录与共享存储的**挂载表与 App 进程一致**(已核对),
   所以结论对 App 本体成立;但授权后的"能真正读到"以 APK 内的 logcat 证据为准(见 14.5 的复验)。
+
+---
+
+## 15. 安卓上的三键(最小化 = 退到后台 / 最大化 = 悬浮窗 / 关闭 = 退出)
+
+**用户原话(2026-09-21,明确说了"三大将对应只有安卓")**:
+
+> 最小化:退出桌面,不用管托盘,就是关闭窗口,用户从底部滑起来能选进来
+> 最大化:如果是全屏,单击就变成悬浮窗口,就是涉及到安卓的那个"允许应用在其他应用上显示"
+> 关闭:关闭
+> 三大将对应只有安卓
+
+**桌面(Windows)那套一个字没动** —— `src/ui/main_window.cpp` 的改动在 `git diff` 里
+**全是纯插入(没有一行删除)**,桌面分支原样包在 `#else` 里。桌面语义见 `docs/13-窗口行为.md`。
+
+| 键 | 桌面(Windows,不改) | 安卓(本次) |
+|---|---|---|
+| 最小化 | `hideToTray()`:`hide()` 隐藏窗口,托盘图标是恢复入口 | `moveTaskToBack()`:整个 task 退到后台(等同按 Home)。**没有托盘**;恢复入口 = 底部上滑 / 最近任务 |
+| 最大化 | `showMaximized()` + `WS_EX_TOPMOST` 置顶 | 全屏 <-> 悬浮窗:C1 画中画 -> C2 overlay 原生小面板 -> C3 InfoBar 提示 |
+| 关闭 | `closeEvent -> finishAndQuit()` 真退出 | **同一条路,未改动** |
+
+### 15.1 最小化 = 退到后台(进程与任务照跑)
+
+- 打包层 `SxclActivity.moveTaskToBack()`:`instance.moveTaskToBack(true)`,
+  返回 false 时再试一次 `moveTaskToBack(false)`(两种 ROM 对 nonRoot 的处理不一样),
+  两次都不成才返回 false 让 C++ 侧给提示。
+- C++ 侧 `MainWindow::hideToTray()` 的 `#ifdef Q_OS_ANDROID` 分支:**故意不调 `hide()`**。
+  Qt 窗口一旦 `hide()`,从最近任务回来时它仍然是不可见的;把"界面消失"这件事交给系统
+  (整个 task 退到后台,界面自然不在屏幕上)。
+- `#else` 分支就是原来的托盘路,一个字节没动;**安卓上 `m_tray` 恒为空**
+  (`QSystemTrayIcon::isSystemTrayAvailable()` 在安卓上是 false),所以旧代码在安卓上
+  会直接 `return` 什么都不做 —— 这正是这次要修的行为。
+
+### 15.2 最大化 = 全屏 <-> 悬浮窗
+
+按用户点名的优先级实现,三步都有落地:
+
+- **C1 画中画(PiP),首选**。安卓原生的"应用变悬浮窗浮在别的应用之上",
+  **不需要任何权限**,显示的就是启动器自己的界面(系统把 activity 缩成一个小窗口)。
+  manifest:`android:supportsPictureInPicture="true"` + `android:resizeableActivity="true"`
+  (activity 的 `android:configChanges` 里**本来就有** `screenSize|smallestScreenSize|screenLayout|orientation`,
+  进 PiP 的配置变化不会被重建)。
+  Java:`PictureInPictureParams.Builder().setAspectRatio(Rational(16,9))` + `enterPictureInPictureMode()`。
+  退出 PiP 没有 API,做法是把 activity 用 `FLAG_ACTIVITY_REORDER_TO_FRONT` 带回前台(系统就会展开它)。
+- **C2 SYSTEM_ALERT_WINDOW 原生小面板(备选)**。设备/ROM 不支持或进不去 PiP 时:
+  没权限 -> `ACTION_MANAGE_OVERLAY_PERMISSION` 打开**这个应用的**设置页,
+  有权限 -> `WindowManager` + `TYPE_APPLICATION_OVERLAY` 建一个**原生面板**
+  (深色 + 强调色描边,可拖动,显示"当前任务 / 进度条 / 回到启动器"),
+  进度由 `MainWindow::syncTray()` 每 tick 刷新(C++ -> JNI -> 面板)。
+- **C3 两条都不成**:InfoBar 说人话(警告色:去开"允许应用在其他应用上显示";
+  错误色:这台设备上没法变成悬浮窗,但最小化退后台仍然可用)。**绝不静默失败**。
+
+#### ⚠ 必须写明的硬事实(不假装)
+
+**Qt 的界面搬不进 overlay 窗口**。启动器的整块界面是 activity 自己的一个 SurfaceView;
+`WindowManager` 的 overlay 窗口只能承载**我们后来加进去的原生 View**。
+所以:
+
+- 走 **C1(PiP)** 时,悬浮窗里看到的是**启动器本体界面**(系统把 activity 缩小);
+- 走 **C2(overlay)** 时,悬浮在别的应用之上的只能是**原生小面板**(任务 + 进度 + 回到启动器),
+  **不是**启动器界面。这一条在设计里就认了,代码注释里也写了。
+
+### 15.3 权限
+
+| 能力 | 需要权限? | 怎么声明 / 怎么查 |
+|---|---|---|
+| 画中画(PiP) | **不需要** | 只要 manifest 的 `android:supportsPictureInPicture="true"`;能不能用由 `PackageManager.FEATURE_PICTURE_IN_PICTURE` 决定 |
+| 悬浮面板(overlay) | **需要"允许应用在其他应用上显示"** | manifest 声明 `SYSTEM_ALERT_WINDOW`;系统设置页 `Settings.ACTION_MANAGE_OVERLAY_PERMISSION`;状态用 `Settings.canDrawOverlays()` 查 |
+| 退到后台 / 真退出 | 不需要 | — |
+| 读共享存储(与三键无关,既有) | 需要"所有文件访问权限" | 见 §14 |
+
+### 15.4 代码位置
+
+| 文件 | 改了什么 |
+|---|---|
+| `android/AndroidManifest.xml` | `supportsPictureInPicture` / `resizeableActivity` / `SYSTEM_ALERT_WINDOW` |
+| `android/java/com/silentstudio/sxcl/SxclActivity.java` | 新增 `moveTaskToBack / isPipSupported / isInFloating / enterFloating / exitFloating / toggleFloating / hasOverlayPermission / requestOverlayPermission / showOverlayPanel / hideOverlayPanel / isOverlayPanelShown`,以及 `onPictureInPictureModeChanged` 的一行日志 |
+| `src/ui/main_window.cpp` | `hideToTray()` / `toggleMaximize()` / `syncTray()` 的 `#ifdef Q_OS_ANDROID` 分支 + 一个安卓专用的 JNI 小工具段(`#if defined(Q_OS_ANDROID)`) |
+
+调用风格与 `src/ui/pages/settings_page.cpp` 里既有的
+`hasAllFilesAccess/requestAllFilesAccess` 完全一致(`QJniObject::callStaticMethod`)。
+
+---
+
+## 16. 三键真机验收(命令 + 原始输出)
+
+设备:G6012BS / Android 16 / arm64-v8a,adb `192.168.200.164:5555`(备用 USB `G6012BS16831003698`)。
+屏幕 1600x2400@320,横屏 2400x1600;App 逻辑坐标 1200x777;
+**输入坐标偏移 48px**:`display = (logical_x*2, logical_y*2 + 48)`(§11.2 标定)。
+uiautomator 在 Qt 上拿不到控件树(整屏渲进一个 SurfaceView),所以只能用像素法/截图法。
+
+### 16.4 打包层进了版本控制(这一条**现在就有**证据,不需要构建)
+
+```powershell
+cd "<仓库>"
+git ls-files android
+```
+
+    (空)
+
+空是因为**本次改动还没被 `git add`**(纪律:本代理不许 `git add/commit`),不是被忽略。
+"没被忽略"这件事用下面两条证明:
+
+```powershell
+git ls-files --others --exclude-standard android
+```
+
+    android/AndroidManifest.xml
+    android/app/CMakeLists.txt
+    android/app/sxcl_android_main.cpp
+    android/deployment-settings.template.json
+    android/gradle/build.gradle
+    android/gradle/gradle-wrapper.properties
+    android/gradle/gradle.properties.template
+    android/gradle/settings.gradle
+    android/icon_512.png
+    android/java/com/silentstudio/sxcl/SxclActivity.java
+    android/res/mipmap-hdpi/ic_launcher.png
+    android/res/mipmap-mdpi/ic_launcher.png
+    android/res/mipmap-xhdpi/ic_launcher.png
+    android/res/mipmap-xxhdpi/ic_launcher.png
+    android/res/mipmap-xxxhdpi/ic_launcher.png
+    android/scripts/build_apk.ps1
+    android/scripts/sync_to_build.ps1
+
+```powershell
+git check-ignore -v android/AndroidManifest.xml                    # rc=1 -> 没被忽略
+git check-ignore -v build/_android/pkg/AndroidManifest.xml         # rc=0 -> 被忽略
+```
+
+    android/AndroidManifest.xml rc=1
+    .gitignore:2:build/	build/_android/pkg/AndroidManifest.xml
+    build/_android/pkg/AndroidManifest.xml rc=0
+
+仓库管理员 `git add android` 之后,`git ls-files android` 就会列出上面那 17 个文件。
+
+### 16.1 / 16.2 / 16.3 最小化 / 最大化 / 关闭(真机)
+
+**状态:未跑。** 这三条要先把打包层与 `src/ui/main_window.cpp` 编进 APK,
+而 APK 构建通道当时被另一个代理占着(gradle `assembleDebug` 正在 `D:\sxcl_local\out` 上跑)。
+本代理**没有**跑过这三条,报告里也不会写"应该可以"。
+
+**Java 侧已经单独编过(不占构建通道的静态检查,原始输出)**:
+
+```powershell
+& 'D:\jdk17\bin\javac.exe' -encoding UTF-8 -Xlint:all -d D:\sxcl_scratch\javac-check `
+  -classpath 'D:\AndroidSdk\platforms\android-36\android.jar;D:\Qt\6.11.2\android_arm64_v8a\jar\Qt6Android.jar' `
+  -sourcepath 'D:\Qt\6.11.2\android_arm64_v8a\src\android\java\src' `
+  "<仓库>\android\java\com\silentstudio\sxcl\SxclActivity.java"
+```
+
+    javac rc=0
+    SxclActivity.class  14587
+    SxclActivity$1.class  629
+    SxclActivity$2.class  1695
+
+(`-Xlint:all` 下 0 error / 0 warning。第一次跑确实抓到一个真错:
+`if (animgtrace != null)` 与声明 `animgtrace` 差一个字母 —— 已按原文件改回。)
+
+**要跑的三条(构建通道空了之后)**:
+
+```powershell
+# 装包
+adb -s 192.168.200.164:5555 install -r D:\sxcl_local\out\build\outputs\apk\debug\sxcl-debug.apk
+adb -s 192.168.200.164:5555 shell am start -n com.silentstudio.sxcl/com.silentstudio.sxcl.SxclActivity
+# 最小化:点标题栏最小化键(逻辑 (1085,16) -> 显示 (2170,80))
+adb -s 192.168.200.164:5555 shell input tap 2170 80
+adb -s 192.168.200.164:5555 shell dumpsys activity activities | Select-String sxcl
+adb -s 192.168.200.164:5555 shell pidof com.silentstudio.sxcl
+# 最大化:逻辑 (1131,16) -> 显示 (2262,80)
+adb -s 192.168.200.164:5555 shell input tap 2262 80
+adb -s 192.168.200.164:5555 shell dumpsys activity activities | Select-String -Pattern 'pipped|PIP|sxcl'
+adb -s 192.168.200.164:5555 exec-out screencap -p > max.png
+# 关闭:逻辑 (1177,16) -> 显示 (2354,80)
+adb -s 192.168.200.164:5555 shell input tap 2354 80
+adb -s 192.168.200.164:5555 shell pidof com.silentstudio.sxcl
+```
 
 ---
 

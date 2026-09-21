@@ -577,11 +577,13 @@ QString manifestCachePath() {
 //   1) 远端拿到了            -> 正常路径,顺手写缓存;
 //   2) 远端不通但有缓存      -> 用缓存,并在状态里说明"用的是本地缓存";
 //   3) 两条路都不通且没缓存  -> 空 + 人话原因(界面走**错误态**,不是空态)。
-QByteArray fetchManifestText(QString *error, bool *fromCache) {
+QByteArray fetchManifestText(QString *error, bool *fromCache, QString *notice) {
     if (error)
         error->clear();
     if (fromCache)
         *fromCache = false;
+    if (notice)
+        notice->clear();
 
     // 1) 环境变量指定的清单文件:验收/离线复现用的显式入口,优先级最高(与老行为一致)
     const QString env = qEnvironmentVariable("SXCL_UI_MANIFEST");
@@ -602,12 +604,36 @@ QByteArray fetchManifestText(QString *error, bool *fromCache) {
         char *text = nullptr;
         size_t len = 0;
         char err[256];
-        const char *urls[2];
         char mirror[512];
-        urls[0] = kManifestOfficialUrl;
-        urls[1] = nullptr;
-        if (sxcl_manifest_mirror_url(kManifestOfficialUrl, nullptr, mirror, sizeof(mirror)) == 0)
-            urls[1] = mirror; // 第二路:官方不通时走镜像
+        mirror[0] = '\0';
+        const bool haveMirror =
+            sxcl_manifest_mirror_url(kManifestOfficialUrl, nullptr, mirror, sizeof(mirror)) == 0;
+
+        // 取证通路:把"官方源"这个位置换成一个**连不上的地址**,用来确定性地复现
+        // "官方超时 -> 自动切 BMCLAPI -> 弹窗告知"这条分支(否则两条 URL 都是真的,
+        // 想让官方不通就得改机器网络,要管理员权限 —— 与 SXCL_UI_MANIFEST_URL 同一族入口)。
+        // 不设时**完全走原路**,生产行为一个字节不变。
+        const QByteArray officialOverride = qEnvironmentVariable("SXCL_UI_MANIFEST_OFFICIAL").toUtf8();
+        const char *const officialUrl =
+            officialOverride.isEmpty() ? kManifestOfficialUrl : officialOverride.constData();
+
+        // ★ 候选顺序**按设置里的下载源排**(用户报过"设置里换了源,刷新还是走 Mojang" ——
+        //   以前这里写死"官方在前镜像在后",download.source 根本没人读,等于设置是个摆设):
+        //     bmclapi(默认) / auto -> BMCLAPI 优先,不通**自动**切回官方
+        //     mojang             -> 官方优先,不通**自动**切回 BMCLAPI
+        //   "自动切"就是这张表的第二条候选:换源由下面这个循环自己完成,不需要开关。
+        const QString source = uiDownloadSource();
+        const bool mirrorFirst = (source != QLatin1String("mojang"));
+        const char *urls[3];
+        int urlCount = 0;
+        if (mirrorFirst && haveMirror)
+            urls[urlCount++] = mirror;
+        urls[urlCount++] = officialUrl;
+        if (!mirrorFirst && haveMirror)
+            urls[urlCount++] = mirror;
+        urls[urlCount] = nullptr;
+        uiTrace(QStringLiteral("versions | 清单源=%1 顺序=%2")
+                    .arg(source, QString::fromUtf8(urls[0])));
 
         // 验收/离线复现:钉死清单地址(SXCL_UI_MANIFEST_URL)。
         // 与上面那个 SXCL_UI_MANIFEST(钉死"文件")是同一族入口,区别只在钉的是"地址":
@@ -623,12 +649,38 @@ QByteArray fetchManifestText(QString *error, bool *fromCache) {
             urls[0] = pinnedUrl.constData();
             urls[1] = nullptr; // 钉住之后不再换镜像:要测的就是"两条路都不通"
         }
-        for (int i = 0; i < 2 && urls[i] != nullptr; ++i) {
+        // 超时按"这条路是谁"分开给(用户要求:选了官方源,超时要等久一点再判超时,
+        // 判超时之后**要弹窗告诉用户已经切到 BMCLAPI**,不能悄悄换):
+        //   官方:piston-meta / launchermeta 在部分地区很慢 -> 20s
+        //   镜像:BMCLAPI 就在国内 -> 8s,不行就赶紧退回去
+        // 这两个数字只影响"等多久算失败",不影响成功路径。
+        const int64_t kOfficialTimeoutMs = 20000;
+        const int64_t kMirrorTimeoutMs = 8000;
+        // ★ 循环条件必须**同时**看 urlCount 与 nullptr:钉地址那次会把 urls[1] 置空,
+        //   只按 urlCount 走会拿着 nullptr 去请求(实测是自己给自己挖的坑)。
+        for (int i = 0; i < urlCount && urls[i] != nullptr; ++i) {
             text = nullptr;
             len = 0;
             err[0] = '\0';
-            const int rc = sxcl_http_get_text(tr, urls[i], nullptr, &text, &len, err, sizeof(err));
+            const bool isOfficial =
+                urls[i] == officialUrl; // 比指针:两个候选就是这两个常量之一
+            sxcl_http_opts hopts;
+            std::memset(&hopts, 0, sizeof(hopts));
+            hopts.timeout_ms = isOfficial ? kOfficialTimeoutMs : kMirrorTimeoutMs;
+            const int rc =
+                sxcl_http_get_text_ex(tr, urls[i], nullptr, &hopts, &text, &len, err, sizeof(err));
             if (rc == SXCL_HTTP_OK && text != nullptr && len > 0) {
+                // ★ 走的是第二条路,而且第一条是**官方** -> 就是"官方源超时,已切 BMCLAPI"
+                //   这一条必须让用户看见(他只会在设置里选了官方源,才期待走官方)。
+                if (i > 0 && notice != nullptr) {
+                    const bool firstWasOfficial = (urls[0] == officialUrl);
+                    if (firstWasOfficial) {
+                        *notice = QStringLiteral(
+                                      "官方源超时（等待 %1 秒未完成），已自动切换到 BMCLAPI 镜像源")
+                                      .arg(kOfficialTimeoutMs / 1000);
+                        uiTrace(QStringLiteral("versions | 官方源超时 -> 已切换 BMCLAPI"));
+                    }
+                }
                 QByteArray body(text, static_cast<int>(len));
                 free(text);
                 // 顺手写缓存(下次断网可用);写不进去不是错误
@@ -873,16 +925,17 @@ private:
             m_instances = scanLocalInstances(gameDirectory(), nullptr);
             // 2) 远端清单:核心库双路(官方 -> BMCLAPI),失败才退缓存
             QString error;
+            QString notice; // "官方源超时,已切 BMCLAPI" 这类要弹给用户看的话
             bool fromCache = false;
-            const QByteArray text = fetchManifestText(&error, &fromCache);
+            const QByteArray text = fetchManifestText(&error, &fromCache, &notice);
             QVector<GameVersion> versions;
             if (!text.isEmpty())
                 versions = parseManifest(text, &error);
             const bool ok = !versions.isEmpty();
             QMetaObject::invokeMethod(
                 this,
-                [this, versions, error, ok, fromCache] {
-                    onLoaded(versions, error, ok, fromCache);
+                [this, versions, error, ok, fromCache, notice] {
+                    onLoaded(versions, error, ok, fromCache, notice);
                 },
                 Qt::QueuedConnection);
         });
@@ -910,7 +963,7 @@ private:
     //   3) 清单拿不到,也没装版本 -> 错误态 + "本地也没有已安装的版本"(空态文案)同时给出,
     //                              两者是两句话,不会互相冒充。
     void onLoaded(const QVector<GameVersion> &versions, const QString &error, bool ok,
-                  bool fromCache) {
+                  bool fromCache, const QString &notice) {
         m_refresh->setEnabled(true);
         m_loading->setVisible(false);
         m_status->setVisible(true);
@@ -922,6 +975,10 @@ private:
             applyFilters();
             setStatusText();
             showVersions(m_filtered);
+            if (!notice.isEmpty())
+                // 用户点名要的那条:"官方源超时,已切换 BMC…" —— 弹出来,不悄悄换源
+                InfoBar::push(InfoBar::Type::Warning, QStringLiteral("已自动切换下载源"), notice,
+                              this, 8000);
             if (fromCache)
                 InfoBar::push(InfoBar::Type::Warning, QStringLiteral("用的是本地缓存清单"),
                               QStringLiteral("远端清单暂时取不到，本次显示的是上次缓存下来的版本清单。"),
@@ -961,10 +1018,12 @@ private:
     // 验收/取证通路(Android 真机也看这条 logcat):一行说清这一页现在的状态 ——
     // 清单从哪儿来、几个版本、本地装了几个、状态行原文。截图看不出文案时靠它。
     void logState(bool ok, int manifestCount, bool fromCache, const QString &error) const {
+        // 源(自动/官方/镜像)也打出来:用户报"换了源还走 Mojang"时,这一行就是判据。
         std::fprintf(stderr,
-                     "[sxcl-ui] 版本页: 清单=%s 版本数=%d 已安装=%d 缓存=%s 原因=%s 状态行=%s\n",
-                     ok ? "OK" : "失败", manifestCount, int(m_instances.size()),
-                     fromCache ? "是" : "否", error.isEmpty() ? "-" : error.toUtf8().constData(),
+                     "[sxcl-ui] 版本页: 源=%s 清单=%s 版本数=%d 已安装=%d 缓存=%s 原因=%s 状态行=%s\n",
+                     uiDownloadSource().toUtf8().constData(), ok ? "OK" : "失败", manifestCount,
+                     int(m_instances.size()), fromCache ? "是" : "否",
+                     error.isEmpty() ? "-" : error.toUtf8().constData(),
                      m_status->text().toUtf8().constData());
         /* 加载器汇总另打一行**纯 ASCII**(kind=数量),免得中文/编码把取证信息糊掉 */
         QString ascii;

@@ -31,6 +31,15 @@ static void check_str(const char *got, const char *want, const char *what) {
     }
 }
 
+static void check_int(long got, long want, const char *what) {
+    if (got == want) {
+        ++g_pass;
+    } else {
+        ++g_fail;
+        printf("  [!!] %s: 实际 %ld 期望 %ld\n", what, got, want);
+    }
+}
+
 static const char *kManifest =
     "{\"latest\":{\"release\":\"1.21.4\",\"snapshot\":\"25w03a\"},"
     "\"versions\":["
@@ -70,6 +79,36 @@ static const char *kVersionJson =
     "   \"sha1\":\"e8\",\"size\":80}}}"
     "]"
     "}";
+
+/* 镜像优先用例的夹具:URL 都是**官方域名**(映射表认得),这样 add_mirror 才补得上第二路;
+ * 最后一条库故意用认不出的域名 -> 它只有一条候选,prefer_mirror 不该动它、也不该造假 URL。 */
+static const char *kMirrorVersionJson =
+    "{"
+    "\"id\":\"1.21.4\","
+    "\"downloads\":{\"client\":{\"url\":\"https://piston-data.mojang.com/v1/objects/aa/client.jar\","
+    "\"sha1\":\"c1\",\"size\":11}},"
+    "\"libraries\":["
+    " {\"name\":\"always:lib:1.0\",\"downloads\":{\"artifact\":{"
+    "   \"path\":\"always/lib/1.0/lib-1.0.jar\","
+    "   \"url\":\"https://libraries.minecraft.net/always/lib/1.0/lib-1.0.jar\","
+    "   \"sha1\":\"c2\",\"size\":12}}},"
+    " {\"name\":\"nolib:lib:1.0\",\"downloads\":{\"artifact\":{"
+    "   \"path\":\"nolib/lib/1.0/lib-1.0.jar\","
+    "   \"url\":\"https://example.invalid/nolib.jar\",\"sha1\":\"c3\",\"size\":13}}}"
+    "]"
+    "}";
+
+/* 按目标路径找任务(找不到返回 NULL) */
+static sxcl_task *plan_task_for(sxcl_version_plan *plan, const char *needle) {
+    const size_t n = sxcl_version_plan_count(plan);
+    for (size_t i = 0; i < n; ++i) {
+        sxcl_task *t = sxcl_version_plan_task(plan, i);
+        if (t && t->dest && strstr(t->dest, needle) != NULL) {
+            return t;
+        }
+    }
+    return NULL;
+}
 
 /* 在计划里找目标路径(以 rel 结尾),返回是否找到 */
 static int plan_has(sxcl_version_plan *plan, const char *needle) {
@@ -296,6 +335,62 @@ int main(void) {
                                        NULL, out, 8) == -1,
               "镜像:缓冲不够返回 -1");
         check_str(out, "", "镜像:缓冲不够时输出为空");
+    }
+
+    /* ── 镜像优先(prefer_mirror):候选顺序对调 ── */
+    {
+        char perr[256];
+        sxcl_json *mdoc =
+            sxcl_json_parse(kMirrorVersionJson, strlen(kMirrorVersionJson), perr, sizeof(perr));
+        check(mdoc != NULL, "镜像优先:解析夹具");
+        if (mdoc) {
+            sxcl_version_plan *p3 = sxcl_version_plan_build(mdoc, "C:/mc", "1.21.4", perr, sizeof(perr));
+            check(p3 != NULL, "镜像优先:建计划");
+            if (p3) {
+                static const char *kOfficialClient =
+                    "https://piston-data.mojang.com/v1/objects/aa/client.jar";
+                static const char *kMirrorClient = "https://mirror.example/v1/objects/aa/client.jar";
+                /* 客户端 jar 的落盘路径是 versions/<id>/<id>.jar,按它找(不是按 URL 的 client.jar) */
+                sxcl_task *client = plan_task_for(p3, "versions/1.21.4/1.21.4.jar");
+                sxcl_task *nolib = plan_task_for(p3, "nolib/lib/1.0/lib-1.0.jar");
+                if (!client || !nolib) {
+                    ++g_fail;
+                    printf("  [!!] 镜像优先:夹具任务没找齐(client=%p nolib=%p)\n", (const void *)client,
+                           (const void *)nolib);
+                } else {
+                    const char *nolib_first = nolib->urls[0];
+
+                    /* (c) 没调 add_mirror 时一个第二候选都没有:换 0 个,不许凭空造 URL */
+                    check_int(sxcl_version_plan_prefer_mirror(p3), 0, "(c) 没有镜像候选时换 0 个任务");
+                    check_str(client->urls[0], kOfficialClient, "(c) 没有镜像候选时官方仍是第一候选");
+                    check(client->urls[1] == NULL, "(c) 没有镜像候选时不会凭空多出第二候选");
+                    check_int(sxcl_version_plan_prefer_mirror(NULL), -1, "plan=NULL 返回 -1");
+
+                    /* 补第二路:两条官方域名能映射,认不出的那条没有 */
+                    check_int(sxcl_version_plan_add_mirror(p3, "https://mirror.example", perr,
+                                                           sizeof(perr)),
+                              2, "补镜像:两条认得出的 URL 各补一条第二路");
+
+                    /* (a) 有两个候选的任务:换序后镜像在前、官方在后 */
+                    check_int(sxcl_version_plan_prefer_mirror(p3), 2, "(a) 有两个候选的任务都被换序");
+                    check_str(client->urls[0], kMirrorClient, "(a) urls[0] 变成镜像");
+                    check_str(client->urls[1], kOfficialClient, "(a) urls[1] 是官方(第二候选,不通用自动切)");
+
+                    /* (b) 只有一条候选的任务:换序前后都不动 */
+                    check(nolib->urls[1] == NULL, "(b) 认不出的 URL 没有第二候选");
+                    check(nolib->urls[0] == nolib_first, "(b) 只有一条候选的任务第一候选没动");
+                    check_str(nolib->urls[0], "https://example.invalid/nolib.jar",
+                              "(b) 只有一条候选的任务 URL 没变");
+
+                    /* 再调一次就换回去 —— 这正是"只应调用一次"的原因,顺手把语义钉住 */
+                    check_int(sxcl_version_plan_prefer_mirror(p3), 2, "再调一次仍然换 2 个");
+                    check_str(client->urls[0], kOfficialClient, "再调一次换回官方在前(所以只能调一次)");
+                    check_str(client->urls[1], kMirrorClient, "再调一次镜像回到第二候选");
+                }
+                sxcl_version_plan_free(p3);
+            }
+            sxcl_json_free(mdoc);
+        }
     }
 
     printf("元数据层测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);

@@ -33,6 +33,11 @@ QString uiJavaPath();
 // 最大内存(MB);<=0 = 交给核心库按位数取默认(与 CLI 不给 --memory 时一致)。
 int uiMemoryMb();
 
+// 下载源(src/core/constants.py 的 DownloadSource):"auto" / "mojang" / "bmclapi"。
+// 默认 **bmclapi** —— 用户明确要求默认走镜像(Python 版"重置设置"落地的也是 bmclapi)。
+// SXCL_UI_DOWNLOAD_SOURCE 可钉死(取证用)。
+QString uiDownloadSource();
+
 // 进度追踪开关(SXCL_UI_TRACE=1)。默认关闭,免得正常使用时把 stderr 刷满。
 bool uiTraceEnabled();
 // 打一行追踪(stderr)。未开启时什么都不做。

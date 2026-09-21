@@ -110,18 +110,25 @@ InstallWorker::InstallWorker(InstallRequest request, QObject *parent)
 InstallWorker::~InstallWorker() {
     // 页面销毁时先请工作线程收工:取消是异步的,join 等它真的退出。
     // 不 detach —— 否则线程会拿着已经析构的 this 去回调,那是崩溃,不是"偶发"
-    // (与 settings_page.cpp:1133-1140 的 JavaSettingCard 同一口径)。
+    // (与 settings_page.cpp 的 JavaSettingCard 同一口径)。
     if (m_thread != nullptr) {
         m_cancel.store(true);
         m_thread->quit();
         m_thread->wait();
+        delete m_thread; // 线程对象归本类所有(没有 parent,也没有 deleteLater)
+        m_thread = nullptr;
     }
 }
 
 void InstallWorker::start() {
     if (m_started.exchange(true))
         return; // 只起一次
-    m_thread = new QThread(this);
+    // ★ QThread 这里**不能**给 parent(this):带 parent 的对象 moveToThread 会被 Qt 拒绝
+    //   ("QObject::moveToThread: Cannot move objects with a parent"),run() 就还在界面线程里跑 ——
+    //   界面会卡住。线程对象的生命周期由本类的析构函数负责(quit + wait + deleteLater)。
+    // 线程对象没有 parent,**由本类析构函数 delete**(不接 finished->deleteLater:
+    // 那样析构里再 delete 会与排队的删除撞成二次释放)。
+    m_thread = new QThread();
     // 工作对象搬到新线程:槽 run() 在那条线程里执行,界面线程的 start() 立刻返回。
     moveToThread(m_thread);
     connect(m_thread, &QThread::started, this, &InstallWorker::run);
@@ -347,6 +354,14 @@ void InstallWorker::run() {
     plan.assets = assetsLevelFrom(m_request.assetsLevel);
     plan.keep_installer = m_request.keepInstaller;
     plan.engine_opts = &opts;
+    // ★ 下载源(src/ui/workers/ui_paths.cpp 的 uiDownloadSource()):设置里选 bmclapi(默认)或 auto
+    //   -> **每个文件都镜像优先**,官方作第二候选;选 mojang -> 官方优先,镜像兜底。
+    //   核心库侧的实现是 sxcl_version_plan_prefer_mirror()(plan 上只应调用一次)。
+    //   mirror_base 留空 = 核心库用 SXCL_MIRROR_BMCLAPI_BASE(资源对象自动走它 + /assets)。
+    plan.prefer_mirror = (uiDownloadSource() != QLatin1String("mojang")) ? 1 : 0;
+    uiTrace(QStringLiteral("install | 下载源=%1 prefer_mirror=%2")
+                .arg(uiDownloadSource())
+                .arg(plan.prefer_mirror));
     if (!mavenMirror.isEmpty())
         plan.loader_mirror_maven = mavenMirror.constData();
 

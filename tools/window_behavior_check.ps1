@@ -126,17 +126,18 @@ function Invoke-Scenario {
     ($err -split "?
 ") | Where-Object { $_ -match "[wincheck]|win |" } | ForEach-Object { Write-Output ("  " + $_.TrimEnd()) }
     Write-Output ("--- 完整 stderr 日志: {0} ---" -f $log)
-    return $err
+    # 注意:**不能** return 任何东西 —— 赋值语句会把函数里所有 Write-Output 一起吞掉
+    # (第一版就是这么把整份场景报告吞成 2 行的)。
 }
 
 # ── 场景 1:最大化 = 最大化 + 置顶;还原 = 取消置顶;关闭 = 进程消失 ──
-$null = Invoke-Scenario -Name "01-max-topmost" -Script "probe;max;wait:1600;probe;normal;wait:1600;probe;quit"
+Invoke-Scenario -Name "01-max-topmost" -Script "probe;max;wait:1600;probe;normal;wait:1600;probe;quit"
 
 # ── 场景 2:缩成小窗口 -> 恢复原尺寸与位置 ──
-$null = Invoke-Scenario -Name "02-mini" -Script "probe;mini;wait:1400;probe;unmini;wait:1400;probe;quit"
+Invoke-Scenario -Name "02-mini" -Script "probe;mini;wait:1400;probe;unmini;wait:1400;probe;quit"
 
 # ── 场景 3:最小化 = 隐藏(进程活、后台任务继续跑)──
-$null = Invoke-Scenario -Name "03-hide-worker" -TimeoutSec 180 -Script ("download:{0};wait:9000;probe;min;wait:5000;probe;wait:5000;probe;show;wait:1500;probe;quit" -f $VersionId)
+Invoke-Scenario -Name "03-hide-worker" -TimeoutSec 180 -Script ("download:{0};wait:9000;probe;min;wait:5000;probe;wait:5000;probe;show;wait:1500;probe;quit" -f $VersionId)
 
 Write-Output ""
 Write-Output ("工作目录(设置文件 / 游戏目录 / 日志): {0}" -f $Work)

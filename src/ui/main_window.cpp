@@ -63,6 +63,15 @@
 
 #include "sxcl/settings.h" // 读写 ui.close_mode(关闭时提示还是直接退)
 
+// 安卓三键(最小化 = 退到后台,最大化 = 全屏 <-> 悬浮窗)的 JNI 出口在打包层的
+// SxclActivity(仓库 android/java/com/silentstudio/sxcl/SxclActivity.java)。
+// 调用风格与 settings_page.cpp 的 hasAllFilesAccess/requestAllFilesAccess 一致。
+// 桌面工具链上没有 QJniObject,所以这个头只在安卓下包含。
+#if defined(Q_OS_ANDROID)
+#include <QJniObject>
+#include <android/log.h> // 安卓上 stderr 不进 logcat(实测),取证行必须显式走这里
+#endif
+
 // 版本号:标题栏显示的文字 = f"{APP_NAME} {APP_VERSION}"(Python src/app/main_window.py:54)。
 // 走相对路径包含 —— include/sxcl/version.h 是版本契约,但 sxcl_ui_core 不链接 sxcl
 // (只用编译期宏,不给 UI 冒烟测试增加链接依赖)。
@@ -224,6 +233,135 @@ bool closeNeedsConfirm() {
     }
     return false;
 }
+
+// ═════════ 安卓:三键的 JNI 出口(**只在 Q_OS_ANDROID 下存在**)═════════
+// 桌面(Windows)那一套一个字没动:这一段在桌面构建里连符号都不生成。
+//
+// 三键在安卓上的语义(用户 2026-09-21 定义,**只针对安卓**;理由与实测见 docs/08):
+//   最小化 -> 退出桌面、退回后台(moveTaskToBack,等同按 Home)。进程、Qt 事件循环、
+//             下载/安装 worker 全部继续跑;恢复入口是底部上滑 / 最近任务。
+//             安卓**没有托盘**,所以这里不走桌面那条 hideToTray 的托盘路。
+//   最大化 -> 全屏 <-> 悬浮窗:C1 画中画(PiP,不需权限,显示的就是启动器界面)
+//             -> C2 SYSTEM_ALERT_WINDOW 原生小面板(设备不支持 PiP 时)
+//             -> C3 两条都不成时 InfoBar 人话提示(绝不静默失败)。
+//   关闭   -> 真退出(与桌面同一条路:closeEvent -> finishAndQuit,未改动)。
+#if defined(Q_OS_ANDROID)
+
+constexpr const char *kAndroidActivity = "com/silentstudio/sxcl/SxclActivity";
+
+// 取证行:安卓上 stderr 不进 logcat(main.cpp 里那条实测注释同一件事),
+// 而 uiTrace() 只写 stderr —— 所以安卓分支的每一行都同时走 logcat(tag "sxcl")。
+// 验收命令:adb logcat -s sxcl (见 docs/08 §16)
+void androidTrace(const QString &line) {
+    uiTrace(line);
+    __android_log_print(ANDROID_LOG_INFO, "sxcl", "win | %s", line.toUtf8().constData());
+}
+
+bool androidMoveTaskToBack() {
+    return QJniObject::callStaticMethod<jboolean>(kAndroidActivity, "moveTaskToBack", "()Z");
+}
+bool androidPipSupported() {
+    return QJniObject::callStaticMethod<jboolean>(kAndroidActivity, "isPipSupported", "()Z");
+}
+bool androidInFloating() {
+    return QJniObject::callStaticMethod<jboolean>(kAndroidActivity, "isInFloating", "()Z");
+}
+bool androidToggleFloating() {
+    return QJniObject::callStaticMethod<jboolean>(kAndroidActivity, "toggleFloating", "()Z");
+}
+bool androidEnterFloating() {
+    return QJniObject::callStaticMethod<jboolean>(kAndroidActivity, "enterFloating", "()Z");
+}
+bool androidHasOverlayPermission() {
+    return QJniObject::callStaticMethod<jboolean>(kAndroidActivity, "hasOverlayPermission", "()Z");
+}
+void androidRequestOverlayPermission() {
+    QJniObject::callStaticMethod<void>(kAndroidActivity, "requestOverlayPermission", "()V");
+}
+bool androidOverlayPanelShown() {
+    return QJniObject::callStaticMethod<jboolean>(kAndroidActivity, "isOverlayPanelShown", "()Z");
+}
+bool androidShowOverlayPanel(const QString &task, int percent) {
+    const QJniObject text = QJniObject::fromString(task);
+    return QJniObject::callStaticMethod<jboolean>(kAndroidActivity, "showOverlayPanel",
+                                                  "(Ljava/lang/String;I)Z", text.object<jstring>(),
+                                                  jint(percent));
+}
+
+// 最大化键(安卓):全屏 -> 悬浮窗;**再点一次** -> 回到全屏。
+// 已在悬浮窗里时不再往下走(C1/C2 只负责"进入")。
+void sxclAndroidToggleMaximize(MainWindow *window, int percent) {
+    if (window == nullptr)
+        return;
+
+    if (androidInFloating()) {
+        const bool back = androidToggleFloating();
+        androidTrace(QStringLiteral("安卓最大化:悬浮窗 -> 全屏(exitFloating=%1)")
+                    .arg(back ? 1 : 0));
+        if (!back) {
+            InfoBar::push(InfoBar::Type::Info, QStringLiteral("回到全屏"),
+                          QStringLiteral("点悬浮窗上的放大图标即可展开成全屏。"), window, 5000);
+        }
+        return;
+    }
+
+    // ---- C1:画中画(首选)------------------------------------------------
+    // PiP 是安卓原生的"应用变悬浮窗浮在别的应用之上",**不需要任何权限**,
+    // 显示的就是启动器自己的界面(系统把 activity 缩成一个小窗口)。
+    if (androidPipSupported()) {
+        if (androidEnterFloating()) {
+            androidTrace(QStringLiteral(
+                "安卓最大化:全屏 -> 画中画悬浮窗(enterPictureInPictureMode=1)"));
+            InfoBar::push(InfoBar::Type::Info, QStringLiteral("已变成悬浮窗"),
+                          QStringLiteral("启动器现在是画中画悬浮窗,浮在别的应用之上,"
+                                         "点它上面的放大图标可以回到全屏。"),
+                          window, 5000);
+            return;
+        }
+        androidTrace(QStringLiteral(
+            "安卓最大化:系统声明支持画中画,但 enterPictureInPictureMode 返回 false"));
+    } else {
+        androidTrace(QStringLiteral(
+            "安卓最大化:本机/本 ROM 不支持画中画"
+            "(hasSystemFeature(FEATURE_PICTURE_IN_PICTURE)=0)"));
+    }
+
+    // ---- C2:用户点名的「允许应用在其他应用上显示」(SYSTEM_ALERT_WINDOW)----
+    // 硬事实(必须说清楚,不假装):Qt 的界面是 activity 自己的整块 SurfaceView,
+    // **搬不进 overlay 窗口**。所以这条路只能承载**原生小面板**(当前任务/进度 +
+    // 「回到启动器」按钮),承载不了启动器本体界面。
+    if (!androidHasOverlayPermission()) {
+        androidRequestOverlayPermission();
+        androidTrace(QStringLiteral(
+            "安卓最大化:画中画不可用 -> 打开「允许应用在其他应用上显示」设置页"));
+        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("需要「允许应用在其他应用上显示」"),
+                      QStringLiteral("这台设备没能进入画中画悬浮窗。请在弹出的设置页里打开"
+                                     "「允许应用在其他应用上显示」,回到启动器后再点一次最大化键,"
+                                     "就会看到一个浮在别的应用上的小面板(当前任务与进度)。"),
+                      window, 15000);
+        return;
+    }
+
+    if (androidShowOverlayPanel(window->currentTaskSummary(), percent)) {
+        androidTrace(QStringLiteral(
+                    "安卓最大化:画中画不可用 -> 已显示原生悬浮面板(overlay,percent=%1)")
+                    .arg(percent));
+        InfoBar::push(InfoBar::Type::Info, QStringLiteral("悬浮面板已显示"),
+                      QStringLiteral("小面板会浮在别的应用之上(可拖动),上面的「回到启动器」"
+                                     "把启动器带回前台。"),
+                      window, 6000);
+        return;
+    }
+
+    // ---- C3:两条路都不成:说人话,不静默失败 ------------------------------
+    androidTrace(QStringLiteral("安卓最大化:画中画与悬浮面板都失败了"));
+    InfoBar::push(InfoBar::Type::Error, QStringLiteral("这台设备上没法变成悬浮窗"),
+                  QStringLiteral("画中画没进去,悬浮面板也没能建起来。启动器会保持全屏运行 —— "
+                                 "最小化键仍然可以把启动器退到后台,任务继续跑。"),
+                  window, 12000);
+}
+
+#endif // Q_OS_ANDROID
 
 } // namespace
 
@@ -890,6 +1028,16 @@ void MainWindow::setWindowMode(WindowMode mode) {
 }
 
 void MainWindow::toggleMaximize() {
+#ifdef Q_OS_ANDROID
+    // ── 安卓:最大化 = 全屏 <-> 悬浮窗 ────────────────────────────────────
+    // 用户原话:"如果是全屏,单击就变成悬浮窗口,就是涉及到安卓的那个
+    // 『允许应用在其他应用上显示』"。桌面那套"最大化 + 置顶"在安卓上没有意义
+    // (applyTopMost 只有 Win32 的实现),所以这里换成悬浮窗语义;实现顺序见
+    // sxclAndroidToggleMaximize():C1 画中画 -> C2 overlay 小面板 -> C3 InfoBar。
+    // 进度取自小窗口面板那条(与托盘菜单同一个取值口),overlay 面板显示它。
+    sxclAndroidToggleMaximize(this, m_miniProgress != nullptr ? m_miniProgress->value() : 0);
+    return;
+#else
     // 小窗口形态下点最大化:先退出小窗口(恢复原 geometry),再按普通规则最大化
     if (m_mode == WindowMode::Mini)
         setMiniMode(false);
@@ -897,6 +1045,7 @@ void MainWindow::toggleMaximize() {
         setWindowMode(WindowMode::Normal);
     else
         setWindowMode(WindowMode::Maximized);
+#endif
 }
 
 // ────────────────────── 缩成小窗口 / 恢复原尺寸 ──────────────────────
@@ -1028,6 +1177,31 @@ void MainWindow::updateChromeForMode() {
 // ──────────────────── 最小化 = 隐藏窗口(进程照跑)────────────────────
 
 void MainWindow::hideToTray() {
+#ifdef Q_OS_ANDROID
+    // ── 安卓:最小化 = 退出桌面、退回后台(**不是**托盘)────────────────────
+    // 用户原话:"退出桌面,不用管托盘,就是关闭窗口,用户从底部滑起来能选进来"。
+    //   * moveTaskToBack() 就是按 Home 的效果:系统把整个 task 送到后台,主界面
+    //     从屏幕上消失(是系统把它送走的,不是我们 hide());
+    //   * 进程、Qt 事件循环、下载/安装 worker 全都继续跑;
+    //   * 恢复入口是**底部上滑 / 最近任务** —— 启动器的 activity 还在返回栈里。
+    //   这里**不能** hide():Qt 窗口一旦 hide(),从最近任务回来时它仍然是不可见的。
+    //   也**不能**走上面那条托盘路:安卓没有托盘,m_tray 恒为空,那条路会直接 return
+    //   什么都不做(这正是这次要修的行为)。
+    const bool ok = androidMoveTaskToBack();
+    persistTaskState(true); // 顺手落一次盘:进程虽然没退,状态已经写在磁盘上了
+    androidTrace(QStringLiteral("安卓最小化=退到后台(moveTaskToBack=%1,进程与后台任务继续跑) %2")
+                .arg(ok ? 1 : 0)
+                .arg(windowStateLine()));
+    if (!ok) {
+        // 系统拒绝(极少见):如实说,不静默失败。
+        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("没能退到后台"),
+                      QStringLiteral("系统拒绝了「最小化」请求,窗口保持原样。"
+                                     "可以直接按设备的主屏幕键,启动器仍然在后台运行,任务不会停。"),
+                      this, 6000);
+    }
+    return;
+#else
+    // ── 桌面(Windows):以下一个字节都没动 ──────────────────────────────
     if (m_tray == nullptr) {
         // 没有托盘就**不能**藏:藏了用户没有任何入口把窗口叫回来,进程会变成不可见的残留。
         // 如实记一行,窗口保持原样 —— 宁可不隐藏,也不能让窗口失踪。
@@ -1044,6 +1218,7 @@ void MainWindow::hideToTray() {
     syncTray();
     uiTrace(QStringLiteral("win | 最小化=隐藏到托盘(进程与后台任务继续跑) %1")
                 .arg(windowStateLine()));
+#endif
 }
 
 void MainWindow::showMainWindow() {
@@ -1196,6 +1371,13 @@ void MainWindow::syncTray() {
         m_miniProgress->setVisible(percent >= 0);
         m_miniProgress->setValue(percent >= 0 ? percent : 0);
     }
+#ifdef Q_OS_ANDROID
+    // 安卓的"悬浮窗"如果走的是 overlay 那条路(C2),面板上的任务/进度必须跟着任务走,
+    // 否则它就是一张过期的快照。面板没显示时这一行只做一次 JNI 查询,不碰任何东西。
+    // (画中画那条路显示的是启动器界面本身,界面自己会刷新,不需要这里。)
+    if (androidOverlayPanelShown())
+        androidShowOverlayPanel(summary, percent >= 0 ? percent : 0);
+#endif
 
     if (m_tray != nullptr) {
         m_tray->setMiniMode(m_mode == WindowMode::Mini);
