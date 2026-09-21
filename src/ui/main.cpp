@@ -14,6 +14,7 @@
 #include <QLocale>
 #include <QPainter>
 #include <QPixmap>
+#include <QPushButton> // 验收钩子:SXCL_UI_JRE_HOSTED 要找并点设置页上的「开始下载」按钮
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QStyleHints>
@@ -520,6 +521,47 @@ int main(int argc, char *argv[]) {
                 }
             }
             std::fprintf(stderr, "[sxcl-ui] 设置页里没找到「登录」按钮\n");
+        });
+    }
+
+    // 验收通路:自托管 JRE(设置页「游戏设置 → Java」组里的「内置 JRE（自托管）」卡片)
+    //   SXCL_UI_JRE_HOSTED=<主版本>(如 17):在设置页里选中该主版本,再**点真正的「开始下载」按钮** ——
+    //   与上面 SXCL_UI_AUTH_DIALOG 同一个口径:走产品路径(点界面),不在这里自己调核心库
+    //   (那样验的就只是核心库,验不到"设置页到底接上没有")。
+    //   来源与落点**本钩子一概不碰**,由环境的设置文件/环境变量决定:
+    //     SXCL_UI_SETTINGS      设置文件(里面放 java.jre_index_url = index.json 地址)
+    //     SXCL_JAVA_JRE_INDEX_URL 环境变量来源(优先级高于设置项)
+    //     SXCL_RUNTIME_DIR      核心库的运行时根覆盖(验收必须指到临时目录)
+    //   核心库回调与界面读数走 stderr(SXCL_UI_TRACE=1);截图用 SXCL_UI_SHOT/SXCL_UI_SHOT_DELAY。
+    const QString hostedMajor = qEnvironmentVariable("SXCL_UI_JRE_HOSTED");
+    if (!hostedMajor.isEmpty()) {
+        QTimer::singleShot(600, &app, [&window, hostedMajor] {
+            QWidget *page = window.sessionPage(QStringLiteral("settings"));
+            if (page == nullptr) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] SXCL_UI_JRE_HOSTED 需要设置页:请加 SXCL_UI_ROUTE=settings\n");
+                return;
+            }
+            const int want = hostedMajor.toInt();
+            if (auto *combo = page->findChild<QComboBox *>(QStringLiteral("hostedJreComponent"))) {
+                for (int i = 0; i < combo->count(); ++i) {
+                    if (combo->itemData(i).toInt() == want) {
+                        combo->setCurrentIndex(i);
+                        break;
+                    }
+                }
+                std::fprintf(stderr, "[sxcl-ui] 内置 JRE:选定 Java %d(下拉第 %d 项)\n", want,
+                             combo->currentIndex());
+            } else {
+                std::fprintf(stderr, "[sxcl-ui] 设置页里没找到「内置 JRE」的组件下拉\n");
+            }
+            if (auto *button = page->findChild<QPushButton *>(QStringLiteral("hostedJreDownloadButton"))) {
+                button->click();
+                std::fprintf(stderr,
+                             "[sxcl-ui] 已点击设置页「Java → 内置 JRE（自托管）→ 开始下载」\n");
+            } else {
+                std::fprintf(stderr, "[sxcl-ui] 设置页里没找到内置 JRE 的「开始下载」按钮\n");
+            }
         });
     }
 

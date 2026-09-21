@@ -304,12 +304,34 @@ OpenJDK launcher(java.c)里 JLI_Launch 的**公开签名**。
    **aarch64 真机未实测** —— 要等 game 那条线的 dlopen 探针在我们自己的目录里真跑一次才算数。
    我这边能提供的是 `sxcl_jvm_selfcheck()`(起一次 JVM 打版本 + 属性,原始输出留证),但**没有设备在环**,
    所以这条只能如实挂着。
-2. **两处自举实现未合并**:android/app 下已有一份 `sxcl_jre_bootstrap.c`(另一路并行改动),
-   我新增的是 `android/jni/sxcl_jvm_bootstrap.c`(复用核心库)。建议收敛为:让那份也调用
-   `sxcl_jvm_build_env()` / `sxcl_jvm_build_args()`,做到"参数与环境只有一份规则"。
-   **本轮没有动他们那份文件**(避免与并行改动冲突)。
-3. **界面入口**:核心接口、进度结构(阶段/百分比/速度/剩余)与错误文案都齐了,但设置页里那一项
-   (填 index.json 地址 + 触发自托管安装)仍需接上 —— 这一层是纯 UI 接线,不阻塞链路。
+2. ~~**两处自举实现未合并**~~ → **已对账,结论:两份不重复,不用合并**(2026-09-21 夜间)。
+   精确说法:
+
+   * `android/app/sxcl_jre_bootstrap.c`(**留在 APK 里的那一份**)—— 由
+     `android/app/CMakeLists.txt:63/70/81` 编进 **两个** 出货目标:`sxclui`(应用域探针,
+     与 `sxcl_jre_probe.c` 同源)与 `sxclgame`(`:game` 游戏独立进程)。
+     它**已经全部走核心库**:env 走 `sxcl_jvm_build_env()`、argv/系统属性/dlopen/JLI 调用走
+     `sxcl_jvm_launch()`,自己只留三件核心库不该管的事 —— 崩溃兜底(pipe + 看门线程 +
+     `_exit(128+sig)`)、日志三出口(文件/通道/logcat)、JVM 收尾(`DestroyJavaVM` 辅助线程)。
+   * `android/jni/sxcl_jvm_bootstrap.c`(**不进 APK 的那一份**)—— 全仓库**没有任何构建脚本
+     引用它**(只在 docs 与本目录里出现),它只按 §9 用 clang 单编,是"起一次 JVM 打
+     `java.version` / `java.home`"的**诊断证据工具**(`sxcl_android_jvm_probe` /
+     `_bootstrap` / `_selfcheck`)。
+   * 两者调的是**同一批核心库函数**(`sxcl_jvm_build_env` / `sxcl_jvm_launch`;jni 那份多用了
+     `sxcl_jvm_probe` / `sxcl_jvm_selfcheck`),所以**没有第二份 env/argv 实现** —— 当初
+     "建议收敛为"要收敛的那件事,在 app 那份上**已经完成了**。
+   * 唯一还留在 jni 那份里的安卓特有步骤是"运行期把 `LD_LIBRARY_PATH` 交给 linker 私有入口"
+     (`android_update_LD_LIBRARY_PATH` / `__loader_android_update_LD_LIBRARY_PATH`);出货那份
+     改用核心库的 `preload_libs`(RTLD_GLOBAL 预加载),见 §7 与 docs/21 §6。
+   * 结论一句话:**两份不重复;jni 那份是诊断用、不随包发布,已在文件头加了标注。**
+     两份文件都**保留,不删**(删掉 jni 那份就等于丢真机上唯一的 JVM 自检入口)。
+3. ~~**界面入口**~~ → **已接上**(2026-09-21 夜间,`src/ui/pages/settings_page.cpp` 的
+   `HostedJreCard`)。设置页「游戏设置 → Java」组里新增一张「内置 JRE（自托管）」卡片:
+   index.json 地址输入框(设置键 `java.jre_index_url`)+ 主版本下拉 + 「开始下载」按钮,
+   同时显示**生效来源**(环境变量 > 设置项 > 编译期默认,优先级由 `sxcl_jre_resolve_index_url`
+   算,界面不另发明顺序)与**已装组件**(逐个读 `<运行时根>/<目录>/jre.json`)。
+   下载全在核心库 `sxcl_jre_install()` 里跑(工作线程),进度(阶段/百分比/速度/剩余)与大字段
+   错误按统一出口 `pushUiError` 给完整上下文并进剪贴板。**真机仍未验**(设备不可用)。
 4. **`notice[]`(290 条许可材料)不下载**:运行不需要;形状与 packages 一样,要做"许可/溯源"页时
    照同一条链路抓即可(清单里已经有 name/size/sha256/sha1/url)。
 5. **xz 的 BCJ 过滤器不支持**:普通 JRE tar.xz 用不到;真遇到会明确报 unsupported。

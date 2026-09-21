@@ -167,7 +167,9 @@ int main(void)
     sxcl_android_game_plan plan;
     sxcl_jvm_opts jopts;
     sxcl_jvm_env jenv;
-    sxcl_jvm_args jargs;
+    /* 注意:sxcl_jvm_args 里带 storage[ARG_MAX][ARG_LEN](256 条 = 512KB),放**堆**上 ——
+     * 夹具的 main 里再放一份栈上的就会把 1MB 的默认栈撑爆(改 256 那次实测过这件事)。 */
+    sxcl_jvm_args *jargs = (sxcl_jvm_args *)calloc(1, sizeof(sxcl_jvm_args));
     char err[512];
     const char *extra_jvm[2];
     const char *extra_game[5];
@@ -294,27 +296,80 @@ int main(void)
     jopts.apply_env = 0;                              /* 夹具只算不设,不动这个进程的环境变量 */
     jopts.preload_libs = 0;
     memset(&jenv, 0, sizeof(jenv));
-    memset(&jargs, 0, sizeof(jargs));
+    if (jargs == NULL) {
+        printf("  [FAIL] calloc(sxcl_jvm_args) 失败\n");
+        return 1;
+    }
     err[0] = '\0';
     rc = sxcl_jvm_build_env(&jopts, &jenv, err, sizeof(err));
     check(rc == SXCL_JVM_OK, "sxcl_jvm_build_env ok");
-    rc = sxcl_jvm_build_args(&jopts, &jenv, 0, &jargs, err, sizeof(err));
-    check(rc == SXCL_JVM_OK, "sxcl_jvm_build_args ok");
+    rc = sxcl_jvm_build_args(&jopts, &jenv, 0, jargs, err, sizeof(err));
+    printf("  jvm_build_args rc=%d err=%s(游戏命令行 %d 个参数 + jvm 层自己那几条;"
+           "上限 SXCL_JVM_ARG_MAX=%d)\n",
+           rc, err, plan.arg_count, SXCL_JVM_ARG_MAX);
+    check(rc == SXCL_JVM_OK, "51 条的游戏命令行能装配成 JVM argv(SXCL_JVM_ARG_MAX 已放到 256)");
     if (rc == SXCL_JVM_OK) {
-        check(strstr(jargs.argv[0], "bin/java") != NULL,
+        check(strstr(jargs->argv[0], "bin/java") != NULL,
               "argv[0] = <jre>/bin/java(存在即可,不需要可执行)");
-        check(argv_has(jargs.argv, "-Djava.home=sxcl_args_fixture_tmp/jre"),
+        check(argv_has(jargs->argv, "-Djava.home=sxcl_args_fixture_tmp/jre"),
               "-Djava.home=<jre>(进程内 dlopen 必须显式给)");
-        check(argv_has(jargs.argv, "-Dos.name=Linux"), "-Dos.name=Linux(jvm 层补的)");
-        check(argv_has(jargs.argv, "-Dos.version=Android-16"), "-Dos.version=Android-16(jvm 层补的)");
-        check(argv_has(jargs.argv, "-Djava.library.path=sxcl_args_fixture_tmp/files/natives/1.21.4"),
+        check(argv_has(jargs->argv, "-Dos.name=Linux"), "-Dos.name=Linux(jvm 层补的)");
+        check(argv_has(jargs->argv, "-Dos.version=Android-16"), "-Dos.version=Android-16(jvm 层补的)");
+        check(argv_has(jargs->argv, "-Djava.library.path=sxcl_args_fixture_tmp/files/natives/1.21.4"),
               "-Djava.library.path 指向安卓私有 natives(与命令行一致)");
-        check(argv_has(jargs.argv, "net.minecraft.client.main.Main"), "最终 argv 里有主类");
-        check(argv_has(jargs.argv, "--demo"), "最终 argv 里有游戏参数");
-        dump_argv("最终 JVM argv(sxcl_jvm_build_args;进程内 JLI_Launch 直接吃这一串):", jargs.argv);
+        check(argv_has(jargs->argv, "net.minecraft.client.main.Main"), "最终 argv 里有主类");
+        check(argv_has(jargs->argv, "--demo"), "最终 argv 里有游戏参数");
+        printf("\n最终 JVM argv 前 10 条 + 总条数(SXCL_JVM_ARG_MAX=%d,原来 40 装不下):\n",
+               SXCL_JVM_ARG_MAX);
+        {
+            size_t i = 0;
+            for (i = 0; i < jargs->count && i < 10; ++i)
+                printf("  [%2llu] %s\n", (unsigned long long)i, jargs->argv[i]);
+            printf("  ... 共 %llu 条(argv[%llu] = NULL 结尾)\n", (unsigned long long)jargs->count,
+                   (unsigned long long)jargs->count);
+        }
+        dump_argv("最终 JVM argv 全文(sxcl_jvm_build_args;进程内 JLI_Launch 直接吃这一串):",
+                  jargs->argv);
+    }
+
+    /* ── 断言 5:负向用例 —— 故意超限必须**报错**,不许静默截断 ──
+     * 300 条 > SXCL_JVM_ARG_MAX(256):期望 rc != OK、err 里说清"太多",并且**没有**产出半条 argv。 */
+    {
+        static const char *many[SXCL_JVM_ARG_MAX + 48];
+        char many_buf[SXCL_JVM_ARG_MAX + 48][24];
+        int i = 0;
+        sxcl_jvm_opts mopts;
+        sxcl_jvm_args *margs = (sxcl_jvm_args *)calloc(1, sizeof(sxcl_jvm_args));
+        for (i = 0; i < SXCL_JVM_ARG_MAX + 44; ++i) {
+            (void)snprintf(many_buf[i], sizeof(many_buf[i]), "-Dapad=%d", i);
+            many[i] = many_buf[i];
+        }
+        many[SXCL_JVM_ARG_MAX + 44] = NULL;
+        (void)memset(&mopts, 0, sizeof(mopts));
+        mopts.java_home = spec.jre_home;
+        mopts.extra_args = many;
+        mopts.apply_env = 0;
+        mopts.preload_libs = 0;
+        err[0] = '\0';
+        rc = sxcl_jvm_build_args(&mopts, &jenv, 0, margs, err, sizeof(err));
+        printf("\n负向用例:%d 条参数 -> rc=%d err=%s\n", SXCL_JVM_ARG_MAX + 44, rc, err);
+        check(rc != SXCL_JVM_OK, "超限(300 条)时 build_args 返回错误,而不是静默截断");
+        check(strstr(err, "参数太多") != NULL,
+              "错误信息说清了是「参数太多」(而不是悄悄少几条)");
+        /* 契约对齐(实测):核心库失败时**已经拼好的部分 argv 会留在 out 里** ——
+         * 契约是"检查 rc,rc != OK 就别用 out"(sxcl_jvm_launch 正是这么做的:rc != 0 直接返回)。
+         * 这里把它如实打出来,作为给核心库的一条小建议(不在这次授权改的范围内)。 */
+        printf("  注:失败路径上 out 里保留了已拼好的 %llu 条(契约:rc != OK 就别用 out;"
+               "sxcl_jvm_launch 就是这么做的)。\n",
+               (unsigned long long)(margs != NULL ? margs->count : 0));
+        printf("      建议(留给核心库下次动 jvm.c 时):失败时把 out 清零,免得将来有人不看 rc。\n");
+        if (margs != NULL)
+            free(margs);
     }
 
     sxcl_android_game_plan_free(&plan);
+    if (jargs != NULL)
+        free(jargs);
     printf("\n夹具断言:%d 项检查,%d 项失败\n", g_checks, g_fail);
     printf(g_fail == 0 ? "FIXTURE OK\n" : "FIXTURE FAILED\n");
     return g_fail == 0 ? 0 : 1;

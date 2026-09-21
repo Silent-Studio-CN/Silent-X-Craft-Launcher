@@ -37,4 +37,10 @@ target_include_directories(sxcl_android_args_fixture PRIVATE
   ${SXCL_REPO_ROOT}/include
   ${SXCL_REPO_ROOT}/android/app)
 target_link_libraries(sxcl_android_args_fixture PRIVATE sxcl)
+
+# 源码含中文注释与中文字符串:/utf-8 必须显式给(否则 MSVC 按 936 代码页读 UTF-8 字节,
+# 会出现"字符串字面量中的换行符"这种假错 —— 源文件本身的字节完全正确)。
+if(MSVC)
+  target_compile_options(sxcl_android_args_fixture PRIVATE /utf-8)
+endif()
 add_test(NAME sxcl_android_args_fixture COMMAND sxcl_android_args_fixture)

@@ -196,6 +196,16 @@ void sxcl_jre_install_guard(const int *signals, int count, int clear_all)
 int sxcl_jre_was_started(void) { return (int)g_jli_started; }
 int sxcl_jre_has_returned(void) { return (int)g_jli_returned; }
 
+int sxcl_jre_wait_returned(int timeout_ms)
+{
+    int waited = 0;
+    while (!g_jli_returned && waited < timeout_ms) {
+        (void)usleep(50 * 1000);
+        waited += 50;
+    }
+    return (int)g_jli_returned;
+}
+
 static void *sxcl_jre_shutdown_thread(void *arg)
 {
     typedef jint (*get_vms_t)(JavaVM **, jsize, jsize *);
@@ -283,7 +293,8 @@ int sxcl_jre_launch(const sxcl_jre_launch_opts *opts)
                    ? opts->native_lib_dir : NULL;
     extra[1] = NULL;
 
-    for_version = (opts->main_class == NULL || opts->main_class[0] == '\0') &&
+    for_version = opts->game_argv == NULL &&
+                  (opts->main_class == NULL || opts->main_class[0] == '\0') &&
                   opts->arg_count == 0 && opts->app_arg_count == 0;
 
     /* 系统版本串(ro.build.version.release,与 Java 的 Build.VERSION.RELEASE 同一个属性):
@@ -309,6 +320,13 @@ int sxcl_jre_launch(const sxcl_jre_launch_opts *opts)
                                                                              : "(无)",
                   opts->arg_count, opts->app_arg_count,
                   android_version[0] != '\0' ? android_version : "(空)", for_version);
+    if (opts->game_argv != NULL) {
+        int n = 0;
+        while (opts->game_argv[n] != NULL)
+            ++n;
+        sxcl_jre_logf("游戏命令行:核心库拼好的 %d 个参数原样交给 jvm 层(classpath/主类/游戏参数都在里面)",
+                      n);
+    }
 
     /* 崩溃兜底必须在起 JVM **之前**装好:进程内 JVM 崩了要留下信号号再退 */
     sxcl_jre_install_guard(opts->fatal_signals, opts->fatal_signal_count, 1);
@@ -319,10 +337,13 @@ int sxcl_jre_launch(const sxcl_jre_launch_opts *opts)
     jo.java_home = opts->java_home;
     jo.extra_lib_dirs = extra;
     jo.android_version = android_version[0] != '\0' ? android_version : NULL;
-    jo.class_path = opts->class_path;
-    jo.main_class = opts->main_class;
-    jo.extra_args = (const char *const *)jvm_args;
-    jo.app_args = (const char *const *)app_args;
+    /* 有整条游戏命令行时(classpath/主类/游戏参数都在里面):原样传给 jvm 层当 extra_args,
+     * 不再单独设 class_path/main_class/app_args —— 同一件事不许拼两遍。 */
+    jo.class_path = opts->game_argv != NULL ? NULL : opts->class_path;
+    jo.main_class = opts->game_argv != NULL ? NULL : opts->main_class;
+    jo.extra_args = opts->game_argv != NULL ? opts->game_argv : (const char *const *)jvm_args;
+    jo.app_args = opts->game_argv != NULL ? NULL : (const char *const *)app_args;
+    jo.java_library_path = opts->java_library_path;
     jo.apply_env = 1;
     jo.preload_libs = 1;
     jo.capture_path = NULL; /* 日志统一走本层的三个出口(游戏进程:文件 + 通道 + logcat) */

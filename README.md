@@ -134,6 +134,13 @@ UI 需要 Qt 6.11.2（WS2025 已装，含 4 套安卓套件）与 `libqf`；纯�
 3. macOS 的 `struct stat` 与 Linux 不同：顶部定义 `_POSIX_C_SOURCE` 会让 macOS SDK 把 `st_mtim` 与 `st_mtimespec` **一起收窄掉**，去掉该宏即可（CMake 用 `-std=gnu11`，不需要它）。
 4. Android 的 pthread 在 libc 里，`find_package(Threads REQUIRED)` 必然失败，要单独分支。
 5. 不带 Qt 构建时，CLI 里 `#else` 分支的 `return` 让后续代码变成 unreachable，MSVC `C4702` 在 `/WX` 下直接打挂（本机装了 Qt，走的是另一个分支，看不出来）。
+   > 2026-09-21 夜**已修**（`tools/sxcl-dl/main.c`，改动口径：**配置相关**，不是 pragma 静音）：
+   > `cmd_java_list/plan/preset` 与其专用辅助函数（`java_cli_ctx` / `java_cli_progress` / `java_human_mb`）
+   > 整体挪进 `#if defined(SXCL_HAVE_QT_TRANSPORT)` —— 无 Qt 配置里**整个 java 下载子系统都不编**，
+   > 所以不存在"return 之后的不可达代码"（顺带解决那些辅助函数在无 Qt 下没人引用、会被 `C4505` 打挂的问题）；
+   > 三个子命令在两种配置下都保留同名壳子（调用点一行不用改），无 Qt 时只回一条如实的错误。
+   > 复现：`build-norm` 口径（`-DSXCL_BUILD_QT_TRANSPORT=OFF`）与 Qt 口径各跑一次
+   > `cmake --build <dir> --target sxcl-dl --config Release`，两边 `rc=0`。
 
 另有一条是测试自身的跨平台缺陷：元数据层测试的"期望总字节"写死成 windows/linux 两种，漏了 macOS 的 `natives-osx` 大小不同，现已改成按平台分别计算。
 

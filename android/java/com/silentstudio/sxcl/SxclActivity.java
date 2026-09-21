@@ -134,8 +134,9 @@ public class SxclActivity extends QtActivity {
             return;
         if ("gamestart".equals(action)) {
             final String st = GameHost.requestStart(intent.getStringExtra("gamejre"),
-                    intent.getStringExtra("gamemain"), intent.getStringExtra("gameargs"),
-                    intent.getStringExtra("gamecrash"), "onNewIntent");
+                    intent.getStringExtra("gameinstance"), intent.getStringExtra("gamemain"),
+                    intent.getStringExtra("gameargs"), intent.getStringExtra("gamecrash"),
+                    "onNewIntent");
             Log.i(TAG, "onNewIntent: 起游戏会话 -> " + st);
             /* 画中画不在这里进:见 GameHost 类头注释(docs/21 §2.2)。游戏窗口就绪后会经通道
              * 请求 PIP?,那时启动器回前台、在 onResume 里 enterFloating()(复用已有实现)。 */
@@ -203,11 +204,13 @@ public class SxclActivity extends QtActivity {
         }
     }
 
-    /* ---- 游戏会话的主进程出口(Qt 侧用 QJniObject 调这三个) ---------------- */
-    public static String startGameSession(String jreHome, String mainClass, String gameArgs,
-                                          String crashMode) {
+    /* ---- 游戏会话的主进程出口(Qt 侧用 QJniObject 调这三个) ----------------
+     * instanceId 非空 = 让**游戏进程**用核心库按版本 JSON 拼游戏命令行(起游戏主类那条路);
+     * 为空 = 老口径(只起 JVM 打版本 / 用显式给的 classpath+主类)。 */
+    public static String startGameSession(String jreHome, String instanceId, String mainClass,
+                                          String gameArgs, String crashMode) {
         final String pip = isInFloating() ? "already-in-pip" : "will-enter-pip";
-        return GameHost.requestStart(jreHome, mainClass, gameArgs, crashMode, pip);
+        return GameHost.requestStart(jreHome, instanceId, mainClass, gameArgs, crashMode, pip);
     }
 
     public static boolean endGameSession() {
@@ -598,12 +601,14 @@ public class SxclActivity extends QtActivity {
         /* 游戏独立进程(本轮架构)的验收开关:native 入口按 boot 文件驱动时序 ——
          * 建会话(本地 socket 先监听)-> 启动器进画中画 -> 画中画回调里才拉 GameActivity
          * (独立 task、android:process=":game")。
-         *   am start ... --es gamestart 1 [--es gamejre <jre home>] [--es gamemain <class>]
-         *               [--es gameargs "<args>"] [--es gamecrash abort|term|kill]
-         *               [--es gamedelay <ms>]
+         *   am start ... --es gamestart 1 [--es gamejre <jre home>] [--es gameinstance <版本 id>]
+         *               [--es gamemain <class>] [--es gameargs "<args>"]
+         *               [--es gamecrash abort|term|kill] [--es gamedelay <ms>]
          * 不写 gamestart 时一行都不会跑(与 jreprobe 同一纪律)。 */
         String gamestart = it != null ? it.getStringExtra("gamestart") : null;
         String gamejre = it != null ? it.getStringExtra("gamejre") : null;
+        /* 版本/实例 id:给了就由游戏进程用核心库按版本 JSON 拼游戏命令行(起游戏主类)。 */
+        String gameinstance = it != null ? it.getStringExtra("gameinstance") : null;
         String gamemain = it != null ? it.getStringExtra("gamemain") : null;
         String gameargs = it != null ? it.getStringExtra("gameargs") : null;
         String gamecrash = it != null ? it.getStringExtra("gamecrash") : null;
@@ -649,6 +654,7 @@ public class SxclActivity extends QtActivity {
             sb.append("nativelib=").append(getApplicationInfo().nativeLibraryDir).append('\n');
         }
         if (gamejre != null) sb.append("gamejre=").append(gamejre).append('\n');
+        if (gameinstance != null) sb.append("gameinstance=").append(gameinstance).append('\n');
         if (gamemain != null) sb.append("gamemain=").append(gamemain).append('\n');
         if (gameargs != null) sb.append("gameargs=").append(gameargs).append('\n');
         if (gamecrash != null) sb.append("gamecrash=").append(gamecrash).append('\n');

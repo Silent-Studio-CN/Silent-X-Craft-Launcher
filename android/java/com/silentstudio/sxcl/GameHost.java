@@ -100,6 +100,7 @@ public final class GameHost {
         static final String KEY_JVM_ARGS = "sxcl.jvmArgs";
         static final String KEY_GAME_ARGS = "sxcl.gameArgs";
         static final String KEY_RENDERER = "sxcl.renderer";
+        static final String KEY_INSTANCE = "sxcl.instanceId";
         static final String KEY_CRASH = "sxcl.crashMode";
         static final String KEY_LAUNCHER_PIP = "sxcl.launcherPip";
 
@@ -110,6 +111,9 @@ public final class GameHost {
         public String classpath = "";
         public String nativesDir = "";
         public String gameDir = "";
+        /** 要启动的版本/实例 id(versions/<id>)。非空时,**游戏命令行由游戏进程用核心库
+         *  按版本 JSON 拼**(instance/natives/launch 三层),classpath/mainClass 这些字段就不用填了。 */
+        public String instanceId = "";
         public String mainClass = "";
         public String jvmArgs = "";
         public String gameArgs = "";
@@ -133,6 +137,7 @@ public final class GameHost {
             b.putString(KEY_JVM_ARGS, nz(jvmArgs));
             b.putString(KEY_GAME_ARGS, nz(gameArgs));
             b.putString(KEY_RENDERER, nz(renderer));
+            b.putString(KEY_INSTANCE, nz(instanceId));
             b.putInt(KEY_CRASH, crashMode);
             b.putBoolean(KEY_LAUNCHER_PIP, launcherPip);
             return b;
@@ -153,6 +158,7 @@ public final class GameHost {
             s.jvmArgs = b.getString(KEY_JVM_ARGS, "");
             s.gameArgs = b.getString(KEY_GAME_ARGS, "");
             s.renderer = b.getString(KEY_RENDERER, "");
+            s.instanceId = b.getString(KEY_INSTANCE, "");
             s.crashMode = b.getInt(KEY_CRASH, 0);
             s.launcherPip = b.getBoolean(KEY_LAUNCHER_PIP, true);
             return s;
@@ -164,7 +170,8 @@ public final class GameHost {
                     + nz(sessionDir) + " jre=" + orNone(jreHome) + " cp=" + orNone(classpath)
                     + " natives=" + orNone(nativesDir) + " gameDir=" + orNone(gameDir) + " main="
                     + orNone(mainClass) + " jvmArgs=[" + nz(jvmArgs) + "] gameArgs=[" + nz(gameArgs)
-                    + "] renderer=" + orNone(renderer) + " crash=" + crashMode + " launcherPip="
+                    + " instance=" + orNone(instanceId) + "] renderer=" + orNone(renderer) + " crash="
+                    + crashMode + " launcherPip="
                     + (launcherPip ? 1 : 0);
         }
 
@@ -686,11 +693,14 @@ public final class GameHost {
         return status;
     }
 
-    /** 便捷重载:boot 文件 / `am start --es action gamestart` 那条路(本轮验收用) */
-    public static String requestStart(String jreHome, String mainClass, String gameArgs,
-                                      String crashMode, String pipState) {
+    /** 便捷重载:boot 文件 / `am start --es action gamestart` 那条路(本轮验收用)。
+     *  instanceId 非空时,游戏命令行由**游戏进程**用核心库按版本 JSON 拼(见 GameLaunchSpec.instanceId);
+     *  这时 mainClass 一般留空。 */
+    public static String requestStart(String jreHome, String instanceId, String mainClass,
+                                      String gameArgs, String crashMode, String pipState) {
         GameLaunchSpec s = new GameLaunchSpec();
         s.jreHome = jreHome != null ? jreHome : "";
+        s.instanceId = instanceId != null ? instanceId : "";
         s.mainClass = mainClass != null ? mainClass : "";
         s.gameArgs = gameArgs != null ? gameArgs : "";
         s.crashMode = parseCrashMode(crashMode);

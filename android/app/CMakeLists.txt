@@ -78,12 +78,19 @@ set_target_properties(sxclui PROPERTIES OUTPUT_NAME "sxclui_${ANDROID_ABI}")
 # 它**不链接 Qt、也不链接 sxcl_ui_core**:游戏进程只做四件事 —— 起本进程的 JVM、
 # 走本地 socket 与主进程通信、把 stdout/stderr 接成日志、崩溃/结束时留退出记录。
 # 详见 android/app/sxcl_game.c 与 docs/21-安卓游戏独立进程与画中画共存.md。
-add_library(sxclgame SHARED sxcl_game.c ${SXCL_JRE_BOOTSTRAP_C})
+# sxcl_android_game_args.c:安卓上的"起游戏主类"参数装配(版本 JSON -> 游戏命令行)。
+# 规则全在核心库(instance/natives/launch),它只补安卓布局与 -D;桌面离线夹具也编这一份
+# (android/app/tests/,见 docs/21 §10)。
+add_library(sxclgame SHARED sxcl_game.c ${SXCL_JRE_BOOTSTRAP_C}
+  ${CMAKE_CURRENT_SOURCE_DIR}/sxcl_android_game_args.c)
 target_include_directories(sxclgame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${SXCL_SRC_DIR}/include)
 # sxcl = 核心库静态库:环境变量与 JVM 参数的拼法只有它那一份(include/sxcl/jvm.h),
 #        安卓这层只做"信号兜底 + 日志出口 + 收尾"(见 sxcl_jre_bootstrap.h 的分工说明)。
-# log = __android_log_print;dl = dlopen/dlsym(NDK 上 dl 并在 libc 里,CMAKE_DL_LIBS 求出来就是 dl)
-target_link_libraries(sxclgame PRIVATE sxcl log ${CMAKE_DL_LIBS})
+# log     = __android_log_print
+# android = ANativeWindow_fromSurface / ANativeWindow_release(渲染器桥:Surface -> ANativeWindow);
+#           少了它链接会报 "undefined symbol: ANativeWindow_fromSurface"(实测踩过一次)
+# dl      = dlopen/dlsym(NDK 上 dl 并在 libc 里,CMAKE_DL_LIBS 求出来就是 dl)
+target_link_libraries(sxclgame PRIVATE sxcl log android ${CMAKE_DL_LIBS})
 set_property(TARGET sxclgame PROPERTY C_STANDARD 11)
 set_target_properties(sxclgame PROPERTIES OUTPUT_NAME "sxclgame")
 

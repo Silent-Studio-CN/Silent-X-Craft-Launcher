@@ -33,9 +33,12 @@
  *     日志照旧写文件、logcat 照旧,游戏继续跑 —— **通道不是游戏的前提**。
  */
 
+#include "sxcl_android_game_args.h"
 #include "sxcl_jre_bootstrap.h"
 
 #include <android/log.h>
+#include <android/native_window.h>
+#include <android/native_window_jni.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
@@ -43,6 +46,7 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +61,11 @@
 #define SXCL_GAME_PATH 512
 #define SXCL_GAME_LINE 2048
 #define SXCL_GAME_ARG_MAX 64
+/* 有序收尾里等 JVM 返回的上限:够了(正常 DestroyJavaVM 是毫秒级),超时也如实记一行。 */
+#define SXCL_GAME_JVM_EXIT_WAIT_MS 15000
+/* 游戏主体线程的栈:核心库的 sxcl_jvm_launch() 在栈上放 sxcl_jvm_args(256*2048 = 512KB), 
+ * 再加 JLI_Launch 自己的帧 —— 给足 6MB,别在这个地方省内存。 */
+#define SXCL_GAME_BODY_STACK (6 * 1024 * 1024)
 
 /* ═════════ 传输层(可整段搬走:只依赖 libc,零 UI 依赖) ═════════
  *
@@ -222,6 +231,8 @@ typedef struct {
     char jvmargs[1024];
     char gameargs[1024];
     char renderer[64];
+    char instance_id[128];       /* 要启动的版本/实例 id:非空 = 由核心库读 JSON 拼游戏命令行 */
+    char files_dir[512];         /* 应用私有目录:natives 落它下面(安卓布局) */
     int launcher_pip;            /* spec.launcherPip:窗口就绪后是否允许请启动器进画中画 */
     int crash_mode;              /* 0=无 1=abort(SIGABRT) 2=SIGTERM 3=SIGKILL */
     pid_t pid;
@@ -246,6 +257,29 @@ static JavaVM *g_vm = NULL;
 static jclass g_activity_cls = NULL;
 static jmethodID g_mid_stopped = NULL;
 static jmethodID g_mid_launcher_pip = NULL;
+static jmethodID g_mid_window_changed = NULL;
+
+/* ── 渲染器桥:SurfaceView 的 Surface -> ANativeWindow ──────────────────────────
+ *
+ * 谁负责 setNativeWindow、什么时候 set、Surface 变化时怎么重传(写给将来的 LWJGL 后端看):
+ *   * **Java 侧(GameActivity)** 在 SurfaceHolder 的三个回调里调 nativeSetSurface():
+ *       surfaceCreated  -> set(新 Surface)
+ *       surfaceChanged  -> set(同一个 Surface 再传一次:尺寸/格式变了,窗口要重建 EGLSurface)
+ *       surfaceDestroyed-> set(null)(窗口已经无效,持有它会在下次绘制时崩)
+ *   * **原生侧(本文件)** 用 ANativeWindow_fromSurface 取引用并**持有**(旧的 release),
+ *     同时回调 GameActivity.onNativeWindowChanged(handle),让游戏侧的桥知道"换窗口了"。
+ *   * **游戏侧(LWJGL 的 Android 后端)** 取窗口只有两条路(都在 GameActivity 上):
+ *       long GameActivity.nativeWindowHandle()   —— 现在这个 ANativeWindow* 的值(0 = 没有);
+ *       static void GameActivity.onNativeWindowChanged(long h) —— 变化通知(主动重传)。
+ *     约定:**每次要(重新)创建 EGL/GL 表面之前都重新取一次 handle**,不要在启动时缓存一份用到底。
+ *     这个句柄只在 surfaceCreated..surfaceDestroyed 之间有效。
+ *   * JVM 侧拿到的是一个**类名**(启动时写进 -Dsxcl.android.windowBridge=com.silentstudio.sxcl.GameActivity),
+ *     不是句柄的数值 —— 句柄会变,JVM 系统属性不会变,所以只能靠"问类"而不是"记数值"。
+ */
+static ANativeWindow *g_window = NULL;
+static pthread_mutex_t g_window_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void call_java_window_changed(long long handle);
 
 /* ── 底层写:一律裸 write/send(write 是 async-signal-safe 的,崩溃路径也用它) ── */
 
@@ -440,11 +474,25 @@ static void game_request_stop(const char *why)
     if (g.stop)
         return;
     g.stop = 1;
-    sxcl_jre_logf("收到结束请求(%s):开始有序收尾(先 JVM,再 flush 日志,最后写退出记录)",
+    sxcl_jre_logf("收到结束请求(%s):开始有序收尾(先让 JVM 收尾,再 flush 日志,最后写退出记录)",
                   why != NULL ? why : "");
-    /* ① JVM:有 JVM 才需要(本轮真机没有 JRE -> 返回 0,直接走 flush 路径) */
-    if (sxcl_jre_request_shutdown() == 0)
+    /* ① JVM:有 JVM 才需要(没有 JRE 时返回 0,直接走 flush 路径)。
+     * 有 JVM 时**必须等它真的收完再往下走**:请求 DestroyJavaVM(辅助线程)后等 JLI_Launch
+     * 返回(主类退出/VM 销毁完成)。**绝不在 JVM 还没收尾时 _exit** —— 那样存档/日志都可能半截;
+     * 崩溃兜底那条走的是另一条路(_exit(128+sig)),那里是例外。 */
+    if (sxcl_jre_request_shutdown() == 0) {
         sxcl_jre_logf("JVM 收尾:本进程没有活着的 JVM(或拿不到 JVM 句柄),按 flush 路径收尾");
+    } else {
+        sxcl_jre_logf("JVM 收尾:已请求 DestroyJavaVM,等 JLI_Launch 返回(最多 %d ms)",
+                      SXCL_GAME_JVM_EXIT_WAIT_MS);
+        if (sxcl_jre_wait_returned(SXCL_GAME_JVM_EXIT_WAIT_MS)) {
+            sxcl_jre_logf("JVM 收尾:JLI_Launch 已返回(主类结束 / VM 已销毁),可以安全收尾了");
+        } else {
+            sxcl_jre_logf("JVM 收尾:%dms 内没有返回(如实记录:JVM 可能还卡在非守护线程里);"
+                          "仍然按 flush 路径收尾,不 _exit 掉它",
+                          SXCL_GAME_JVM_EXIT_WAIT_MS);
+        }
+    }
     /* ② flush 日志(有序收尾的最低要求:一行都不能丢) */
     game_flush_log();
     /* ③ 退出记录:通道 + 文件各一份,并通知 Java 侧真正把进程结束掉 */
@@ -599,6 +647,90 @@ static void *crash_thread(void *arg)
 static void *game_body(void *arg)
 {
     (void)arg;
+    if (g.jre[0] != '\0' && g.instance_id[0] != '\0') {
+        /* 主类这条路:classpath / natives / 主类 / 游戏参数 / JVM 参数**全部由核心库**
+         * (instance.h + natives.h + launch.h)按版本 JSON 拼出来,我们只补安卓特有的布局与 -D。
+         * 详见 android/app/sxcl_android_game_args.h 的头注。 */
+        static sxcl_android_game_plan plan;
+        sxcl_android_game_spec gspec;
+        static const char *xjvm[6];
+        static char renderer_opt[160];
+        int xn = 0;
+        char gerr[512];
+        int prc = 0;
+        sxcl_jre_launch_opts popts;
+        int jrc = 0;
+
+        /* 我们这层补的安卓 -D(核心库补的是 java.home / tmpdir / user.home / os.name /
+         * os.version / java.library.path):
+         *   file/stdout/stderr.encoding=UTF-8 —— 安卓 logcat 与 MC 控制台都是 UTF-8;
+         *   sxcl.android.windowBridge         —— 渲染桥问哪个类要 ANativeWindow(见上面那段注释);
+         *   sxcl.android.renderer             —— 渲染器选择(只传下去,渲染层还没接)。 */
+        xjvm[xn++] = "-Dfile.encoding=UTF-8";
+        xjvm[xn++] = "-Dstdout.encoding=UTF-8";
+        xjvm[xn++] = "-Dstderr.encoding=UTF-8";
+        xjvm[xn++] = "-Dsxcl.android.windowBridge=com.silentstudio.sxcl.GameActivity";
+        if (g.renderer[0] != '\0') {
+            (void)snprintf(renderer_opt, sizeof(renderer_opt), "-Dsxcl.android.renderer=%s",
+                           g.renderer);
+            xjvm[xn++] = renderer_opt;
+        }
+        xjvm[xn] = NULL;
+
+        (void)memset(&plan, 0, sizeof(plan));
+        (void)memset(&gspec, 0, sizeof(gspec));
+        gspec.files_dir = g.files_dir[0] != '\0' ? g.files_dir : NULL;
+        gspec.game_dir = g.gamedir[0] != '\0' ? g.gamedir : NULL;
+        gspec.instance_id = g.instance_id;
+        gspec.jre_home = g.jre;
+        gspec.player_name = "Player";
+        gspec.uuid = "00000000-0000-0000-0000-000000000000";
+        gspec.access_token = "0";
+        gspec.user_type = "legacy";
+        gspec.memory_mb = 0;   /* 0 = 核心库默认档位(以后由启动器按实例设置传进来) */
+        gspec.java_major = 0;  /* 0 = 未知(核心库按最保守处理) */
+        gspec.is_64bit = -1;
+        gspec.android_version = NULL; /* 适配层自己读 ro.build.version.release */
+        gspec.renderer = g.renderer[0] != '\0' ? g.renderer : NULL;
+        gspec.extra_jvm_args = (const char *const *)xjvm;
+        gerr[0] = '\0';
+        prc = sxcl_android_game_plan_build(&gspec, &plan, gerr, sizeof(gerr));
+        if (prc != 0) {
+            sxcl_jre_logf("装配游戏命令行失败(rc=%d):%s", prc, gerr);
+            chan_send("STATE game-args=failed");
+            sxcl_android_game_plan_free(&plan);
+            /* **不退回"探针参数"**:那会起一个"打版本就退"的 JVM,用户看到的是游戏秒退。
+             * 如实待命(通道/收尾/结束游戏都照常),等主进程处理(界面给提示或换参数重来)。 */
+            while (!g.stop)
+                (void)usleep(200 * 1000);
+            return NULL;
+        }
+        {
+            sxcl_jre_logf("游戏命令行就绪:main=%s classpath=%d 字符 natives=%s(%d 个文件)",
+                          plan.main_class[0] != '\0' ? plan.main_class : "(JSON 里没写)",
+                          (int)strlen(plan.classpath), plan.natives_dir, plan.natives_count);
+            if (plan.note[0] != '\0')
+                sxcl_jre_logf("注意:%s", plan.note);
+            (void)memset(&popts, 0, sizeof(popts));
+            popts.java_home = g.jre;
+            popts.native_lib_dir = g.nativelib;
+            popts.game_argv = plan.argv;              /* 整条命令行原样交给 jvm 层 */
+            popts.java_library_path = plan.java_library_path;
+            popts.android_version = NULL;
+            popts.report_path = NULL;
+            popts.log_prefix = "[sxcl-game]";
+            popts.fatal_signals = kGameSignals;
+            popts.fatal_signal_count = kGameSignalCount;
+            jrc = sxcl_jre_launch(&popts);
+            sxcl_jre_logf("JLI_Launch 返回 rc=%d(主类结束或启动失败)", jrc);
+            sxcl_android_game_plan_free(&plan);
+            if (game_exit_record(jrc, 0, "jvm-returned")) {
+                chan_send("BYE");
+                call_java_stopped(jrc, 0, "jvm-returned");
+            }
+            return NULL;
+        }
+    }
     if (g.jre[0] != '\0') {
         static char *jvm_argv[SXCL_GAME_ARG_MAX];
         static char *app_argv[SXCL_GAME_ARG_MAX];
@@ -689,10 +821,70 @@ static void jstr_dup(JNIEnv *env, jstring s, char *dst, size_t dst_len)
     (*env)->ReleaseStringUTFChars(env, s, utf);
 }
 
+/* ── 渲染器桥的 JNI 入口 ── */
+
+static void call_java_window_changed(long long handle)
+{
+    JNIEnv *env = NULL;
+    int attached = 0;
+    if (g_vm == NULL || g_activity_cls == NULL || g_mid_window_changed == NULL)
+        return;
+    if ((*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK)
+            return;
+        attached = 1;
+    }
+    (*env)->CallStaticVoidMethod(env, g_activity_cls, g_mid_window_changed, (jlong)handle);
+    if ((*env)->ExceptionCheck(env))
+        (*env)->ExceptionClear(env);
+    if (attached)
+        (*g_vm)->DetachCurrentThread(g_vm);
+}
+
+/** GameActivity 在 SurfaceHolder 回调里调:created/changed 传 Surface,destroyed 传 null。 */
+JNIEXPORT void JNICALL Java_com_silentstudio_sxcl_GameActivity_nativeSetSurface(JNIEnv *env,
+                                                                                jclass cls,
+                                                                                jobject surface)
+{
+    ANativeWindow *next = NULL;
+    ANativeWindow *old = NULL;
+    (void)cls;
+
+    if (surface != NULL) {
+        next = ANativeWindow_fromSurface(env, surface); /* 返回的是**一个新的引用**,由我们持有 */
+        if (next == NULL) {
+            __android_log_print(ANDROID_LOG_WARN, SXCL_GAME_TAG,
+                                "ANativeWindow_fromSurface 返回 NULL(Surface 还没就绪?)");
+        }
+    }
+    (void)pthread_mutex_lock(&g_window_lock);
+    old = g_window;
+    g_window = next;
+    (void)pthread_mutex_unlock(&g_window_lock);
+    if (old != NULL)
+        ANativeWindow_release(old);
+    sxcl_jre_logf("渲染器桥:Surface -> ANativeWindow %s(handle=%p)",
+                  next != NULL ? "已持有" : "已清空", (void *)next);
+    call_java_window_changed((long long)(intptr_t)next);
+}
+
+/** 游戏侧的桥用这个取当前窗口(0 = 还没有);每次要重建 GL 表面之前都重新取一次。 */
+JNIEXPORT jlong JNICALL Java_com_silentstudio_sxcl_GameActivity_nativeWindowHandle(JNIEnv *env,
+                                                                                  jclass cls)
+{
+    long long handle = 0;
+    (void)env;
+    (void)cls;
+    (void)pthread_mutex_lock(&g_window_lock);
+    handle = (long long)(intptr_t)g_window;
+    (void)pthread_mutex_unlock(&g_window_lock);
+    return (jlong)handle;
+}
+
 JNIEXPORT jint JNICALL Java_com_silentstudio_sxcl_GameActivity_nativeStart(
     JNIEnv *env, jclass cls, jstring jdir, jstring jsocket, jstring jjre, jstring jnativelib,
     jstring jclasspath, jstring jgamedir, jstring jmainclass, jstring jjvmargs, jstring jgameargs,
-    jstring jrenderer, jint crash_mode)
+    jstring jrenderer, jstring jinstanceid, jstring jfilesdir, jint crash_mode)
 {
     pthread_t tid;
     char socket_name[160];
@@ -718,6 +910,8 @@ JNIEXPORT jint JNICALL Java_com_silentstudio_sxcl_GameActivity_nativeStart(
     jstr_dup(env, jjvmargs, g.jvmargs, sizeof(g.jvmargs));
     jstr_dup(env, jgameargs, g.gameargs, sizeof(g.gameargs));
     jstr_dup(env, jrenderer, g.renderer, sizeof(g.renderer));
+    jstr_dup(env, jinstanceid, g.instance_id, sizeof(g.instance_id));
+    jstr_dup(env, jfilesdir, g.files_dir, sizeof(g.files_dir));
     g.launcher_pip = 1; /* spec 里 launcherPip 的默认值;需要在 Intent 里关掉时见 GameActivity */
     (void)snprintf(g.session, sizeof(g.session), "%s", "unknown");
 
@@ -803,8 +997,30 @@ JNIEXPORT jint JNICALL Java_com_silentstudio_sxcl_GameActivity_nativeStart(
             (void)pthread_detach(tid);
     }
 
-    /* 7) 游戏主体(没有 JRE 时它会一直待命到 stop;有 JRE 时 JLI_Launch 的生命周期
-     *    就是游戏的生命周期 —— 这个 JNI 调用会一直阻塞,Java 侧是拿独立线程调它的) */
+    /* 7) 游戏主体跑在**我们自己建的线程**上,并且给它一个大栈。
+     *
+     * 为什么必须这样(不是洁癖,是实测约束):
+     *   * 核心库的 sxcl_jvm_launch() 把 sxcl_jvm_args 放在**栈上**,而它带
+     *     storage[SXCL_JVM_ARG_MAX][SXCL_JVM_ARG_LEN] —— SXCL_JVM_ARG_MAX 抬到 256 之后
+     *     这一份就是 **512KB**;Java 线程的栈(ART 默认约 1MB)塞不下"512KB + JLI 自己的帧";
+     *   * 所以这里用 pthread_attr_setstacksize 显式给 6MB,再跑 game_body。
+     * 顺带的好处:nativeStart 可以立刻返回(Java 那边的 starter 线程不必一直挂着),
+     * 游戏生命周期只由这个线程决定。 */
+    {
+        pthread_attr_t attr;
+        pthread_t body_tid;
+        int ok = 0;
+        if (pthread_attr_init(&attr) == 0) {
+            if (pthread_attr_setstacksize(&attr, SXCL_GAME_BODY_STACK) == 0)
+                ok = (pthread_create(&body_tid, &attr, game_body, NULL) == 0);
+            (void)pthread_attr_destroy(&attr);
+        }
+        if (ok) {
+            (void)pthread_detach(body_tid);
+            return 0; /* 原生层交给那条线程,Java 侧可以收工 */
+        }
+        sxcl_jre_logf("大栈线程起不来(attr/stack=%d),退回当前线程跑游戏主体", SXCL_GAME_BODY_STACK);
+    }
     game_body(NULL);
 
     /* 8) 主体退出:确保退出记录一定写了(重复调用是空操作) */
@@ -855,6 +1071,12 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved)
         (*env)->ExceptionClear(env);
         __android_log_print(ANDROID_LOG_WARN, SXCL_GAME_TAG,
                             "JNI_OnLoad:找不到 onLauncherPipNeeded");
+    }
+    g_mid_window_changed = (*env)->GetStaticMethodID(env, cls, "onNativeWindowChanged", "(J)V");
+    if (g_mid_window_changed == NULL) {
+        (*env)->ExceptionClear(env);
+        __android_log_print(ANDROID_LOG_WARN, SXCL_GAME_TAG,
+                            "JNI_OnLoad:找不到 onNativeWindowChanged");
     }
     return JNI_VERSION_1_6;
 }

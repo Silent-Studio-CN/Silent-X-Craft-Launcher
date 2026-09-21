@@ -1711,6 +1711,20 @@ static int cmd_auth(int argc, char **argv)
 
 /* ══════════════════════ java:官方 JRE 运行时(预置/一次装齐) ══════════════════════ */
 
+/* ── 传输后端是**编译期**定的:没有 Qt,整个 java 下载子系统就整体不编 ──
+ *
+ * 以前这里是"函数体照编、中途 #else 里 return 1",于是 return 之后的每一行都成了
+ * 不可达代码 —— MSVC 在 /W4 /WX 下用 C4702 把 sxcl-dl 直接打挂
+ * (README「CI 一次就抓出 5 个本机 MSVC 完全掩盖的真实缺陷」第 5 条记的就是它)。
+ *
+ * 改成"整体 #if 掉"之后:
+ *   * 无 Qt 配置里**不存在**那条不可达分支 —— C4702 是从根上没有了,不是靠 pragma 静音;
+ *   * java_cli_ctx / java_cli_progress / java_human_mb 这几个只服务于下载的辅助函数
+ *     也一起不编:否则它们会变成"没人引用的 static 函数",被 C4505 同样在 /WX 下打挂;
+ *   * 三个子命令在两种配置下**都存在**(调用点一行都不用改),无 Qt 时只回一条如实的错误。
+ */
+#if defined(SXCL_HAVE_QT_TRANSPORT)
+
 /* 进度:每个组件单独一行,组件内原地刷新(百分比/速度/字节/当前文件)。
  * 回调可能来自引擎的多个工作线程,所以只 echo 不做重活。 */
 typedef struct java_cli_ctx {
@@ -1753,19 +1767,12 @@ static const char *java_human_mb(int64_t bytes, char *buf, size_t buf_len)
 
 static int cmd_java_list(const cli_opts *o, const char *platform)
 {
-#if defined(SXCL_HAVE_QT_TRANSPORT)
     sxcl_transport_qt_bootstrap();
-#endif
     sxcl_java_runtime_query q;
     memset(&q, 0, sizeof(q));
     q.platform = platform;
     q.manifest_relaxed_mirror = 1;
-#if defined(SXCL_HAVE_QT_TRANSPORT)
     q.transport_factory = make_qt_transport;
-#else
-    fprintf(stderr, "本产物没有传输后端(需要 Qt6::Network),取不了清单\n");
-    return 1;
-#endif
     sxcl_java_runtime_component list[32];
     char err[SXCL_JAVA_RUNTIME_ERROR_MAX];
     err[0] = '\0';
@@ -1788,9 +1795,7 @@ static int cmd_java_list(const cli_opts *o, const char *platform)
 static int cmd_java_plan(const cli_opts *o, const char *platform, const char *root,
                          const char *const *mc_versions, size_t mc_count, int include_newest)
 {
-#if defined(SXCL_HAVE_QT_TRANSPORT)
     sxcl_transport_qt_bootstrap();
-#endif
     sxcl_java_runtime_plan_request req;
     memset(&req, 0, sizeof(req));
     req.platform = platform;
@@ -1800,12 +1805,7 @@ static int cmd_java_plan(const cli_opts *o, const char *platform, const char *ro
     req.include_newest = include_newest;
     req.measure = 1;
     req.skip_installed = 0;
-#if defined(SXCL_HAVE_QT_TRANSPORT)
     req.transport_factory = make_qt_transport;
-#else
-    fprintf(stderr, "本产物没有传输后端(需要 Qt6::Network),取不了清单\n");
-    return 1;
-#endif
     sxcl_java_runtime_plan_item items[SXCL_JAVA_RUNTIME_PRESET_MAX];
     char err[SXCL_JAVA_RUNTIME_ERROR_MAX];
     err[0] = '\0';
@@ -1864,14 +1864,9 @@ static int cmd_java_preset(const cli_opts *o, const char *platform, const char *
     opts.rate_bps = o->rate;
     opts.retry_per_source = 2;
     opts.cache_path = o->cache;
-#if defined(SXCL_HAVE_QT_TRANSPORT)
     sxcl_transport_qt_bootstrap();
     opts.transport_factory = make_qt_transport;
     req.transport_factory = make_qt_transport;
-#else
-    fprintf(stderr, "本产物没有传输后端(需要 Qt6::Network),装不了运行时\n");
-    return 1;
-#endif
     req.engine_opts = &opts;
 
     const double t0 = (double)clock() / CLOCKS_PER_SEC;
@@ -1924,6 +1919,52 @@ static int cmd_java_preset(const cli_opts *o, const char *platform, const char *
     printf("java preset 完成\n");
     return 0;
 }
+
+#else /* !SXCL_HAVE_QT_TRANSPORT:没有传输后端,java 的下载类子命令只如实报错 */
+
+/* 这三个壳子存在的唯一理由:让 cmd_java 的调用点在两种配置下**一模一样**。
+ * 真正的实现整体在上面的 #if 里,不会编进这个产物 —— 也就没有不可达代码可报。 */
+static int cmd_java_no_transport(const char *what)
+{
+    fprintf(stderr, "本产物没有传输后端(需要 Qt6::Network),%s\n", what);
+    fprintf(stderr, "  —— 这是编译期决定的:重新配置时打开 -DSXCL_BUILD_QT_TRANSPORT=ON\n");
+    return 1;
+}
+
+static int cmd_java_list(const cli_opts *o, const char *platform)
+{
+    (void)o;
+    (void)platform;
+    return cmd_java_no_transport("取不了清单");
+}
+
+static int cmd_java_plan(const cli_opts *o, const char *platform, const char *root,
+                         const char *const *mc_versions, size_t mc_count, int include_newest)
+{
+    (void)o;
+    (void)platform;
+    (void)root;
+    (void)mc_versions;
+    (void)mc_count;
+    (void)include_newest;
+    return cmd_java_no_transport("取不了清单");
+}
+
+static int cmd_java_preset(const cli_opts *o, const char *platform, const char *root,
+                           const char *const *mc_versions, size_t mc_count, int include_newest,
+                           int force)
+{
+    (void)o;
+    (void)platform;
+    (void)root;
+    (void)mc_versions;
+    (void)mc_count;
+    (void)include_newest;
+    (void)force;
+    return cmd_java_no_transport("装不了运行时");
+}
+
+#endif /* SXCL_HAVE_QT_TRANSPORT */
 
 /* java <list|plan|preset> [--root DIR] [--mc 版本]... [--no-newest] [--force] */
 static int cmd_java(int argc, char **argv, const cli_opts *o)

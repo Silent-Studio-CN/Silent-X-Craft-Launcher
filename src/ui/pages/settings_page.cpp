@@ -14,6 +14,7 @@
 #include <QFileDialog>
 #include <QGuiApplication>
 #include <QInputDialog>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QStringList>
@@ -74,6 +75,8 @@
 #include "sxcl/android.h"       // Android:"能不能读"的分类(沙箱拒绝/noexec)
 #include "sxcl/fs.h"            // sxcl_fs_mkdirs(哈希缓存目录)/ sxcl_fs_exists
 #include "sxcl/java_runtime.h"  // 官方 JRE 安装(替代 Python services/java/mojang_runtime.py)
+#include "sxcl/jre_hosted.h"    // **自托管 JRE**(我们自己的 index.json;安卓那一档官方清单里没有)
+#include "sxcl/json.h"          // 读 <运行时目录>/jre.json 标记(拿组件名,别拿目录名当权威)
 #include "sxcl/lang.h"          // 语言表(键 -> 文案;.lang 与 Python 版逐字段兼容)
 #include "sxcl/net.h"           // sxcl_transport_qt_create(JRE 下载的传输后端)
 #include "sxcl/paths.h"         // 平台默认游戏目录 + 安卓候选扫描
@@ -1188,6 +1191,515 @@ private:
     std::atomic<bool> m_cancelRequested{false};
 };
 
+// ─────────────── 卡片:HostedJreCard(自托管 JRE;核心接口 include/sxcl/jre_hosted.h)───────────────
+//
+// 与上面 JavaSettingCard 的**官方 JRE** 是两条来源完全不同的链路,不能混:
+//   * 官方(java_runtime.h):Mojang all.json 的**桌面**构建(安卓 arm64 那一档清单里根本没有),
+//     逐文件走 downloads.raw.sha1;
+//   * 自托管(jre_hosted.h):**我们自己的** index.json(用户自己托管,SXCL/jre 落位已定),
+//     包是 .tar.xz,逐文件 sha256,装完写 <目录>/jre.json(见 docs/19 §2.1/§3)。
+//
+// 这一层是**纯 UI 接线**(用户要求):取清单 / 下载 / 校验 / 解包 / 落标记全在核心库
+// sxcl_jre_install(),界面一行下载逻辑都不重写。界面只做三件事:
+//   1) 显示**来源**(三级可配,优先级由核心库 sxcl_jre_resolve_index_url 定,界面不另发明顺序);
+//   2) 显示**已装组件**(逐个读 <运行时根>/<目录>/jre.json 标记);
+//   3) 在工作线程里跑安装,把阶段/百分比/速度/剩余与错误搬回界面线程。
+//
+// 来源三级(高 -> 低),卡片上把"设置里存的"与"这次真正会用的"分开显示,两者不同时一眼可见:
+//   1) 环境变量 SXCL_JAVA_JRE_INDEX_URL        (打包层 / 运维)
+//   2) 设置键   java.jre_index_url             (就是下面这个输入框)
+//   3) 编译期默认 SXCL_JRE_INDEX_URL_DEFAULT    (GitHub raw)
+// 注意:安装请求传的是 **index_setting**,不是 index_url(explicit)。显式值优先级**高于**环境变量,
+// 那样子命令行的"照着界面走"会盖掉运维注入的来源 —— 与 §来源三级 的口径不符。
+namespace {
+
+// 组件候选:index.json 的组件名是 jre<主版本>(见 docs/19 §2.1 的真清单:jre17/jre21/jre25)。
+// 这里只列**主版本**,由核心库去清单里精确挑(找不到直接报错,不"顺手换一个")。
+const int kHostedMajors[] = {8, 17, 21, 25};
+const int kHostedMajorCount = static_cast<int>(sizeof(kHostedMajors) / sizeof(kHostedMajors[0]));
+
+QString humanBytes(int64_t bytes) {
+    const double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
+    if (mb >= 1.0)
+        return QStringLiteral("%1 MB").arg(mb, 0, 'f', 2);
+    return QStringLiteral("%1 KB").arg(static_cast<double>(bytes) / 1024.0, 0, 'f', 1);
+}
+
+// 剩余时间:算不出来就明说"算不出来",不编一个数字(与核心库 eta_seconds < 0 的口径一致)。
+QString humanEta(int64_t seconds) {
+    if (seconds < 0)
+        return QStringLiteral("剩余 算不出");
+    if (seconds < 60)
+        return QStringLiteral("剩余 %1 秒").arg(seconds);
+    return QStringLiteral("剩余 %1 分 %2 秒").arg(seconds / 60).arg(seconds % 60);
+}
+
+struct HostedJre {
+    QString dir;
+    QString component; // <dir>/jre.json 里的 component(index 的 id 才是权威;读不到才用目录名)
+    QString version;
+};
+
+/** 一个装好的自托管运行时:读它目录里的 jre.json 补出组件名与版本。 */
+HostedJre readHostedJre(const QDir &dir) {
+    HostedJre item;
+    item.dir = QDir::fromNativeSeparators(dir.absolutePath());
+    item.component = dir.dirName();
+    const QByteArray native = QDir::toNativeSeparators(item.dir).toUtf8();
+    char version[SXCL_JRE_VERSION_MAX];
+    version[0] = '\0';
+    (void)sxcl_jre_read_marker(native.constData(), version, sizeof(version), nullptr, 0);
+    item.version = QString::fromUtf8(version);
+    char jerr[160];
+    jerr[0] = '\0';
+    const QString marker = dir.absoluteFilePath(QString::fromUtf8(SXCL_JRE_MARKER));
+    if (sxcl_json *doc = sxcl_json_parse_file(marker.toUtf8().constData(), jerr, sizeof(jerr))) {
+        // 注意:文档句柄(sxcl_json*)与节点(sxcl_json_value*)是**两个类型**,
+        // 取字段要先过 sxcl_json_root()(json.h:39/72)。
+        const char *component = sxcl_json_get_string(sxcl_json_root(doc), "component", nullptr);
+        if (component != nullptr && component[0] != '\0')
+            item.component = QString::fromUtf8(component);
+        sxcl_json_free(doc);
+    }
+    return item;
+}
+
+/** 递归找"已经装好的自托管运行时"。
+ *  **必须递归**:装到哪由清单里的 dir_key 定,而它是 <组件>/<版本>/<ABI>
+ *  三段(jre_hosted.c:655 -> install 用 dir_key 落盘,见 jre_hosted.c:1676)——
+ *  只扫一层是**找不到**的(验收真跑时当场踩到)。判据始终是核心库的
+ *  sxcl_jre_is_installed(<dir>/bin/java + <dir>/jre.json 都在),界面不自己拍一个规则。 */
+void collectHostedJres(const QDir &dir, int depth, QVector<HostedJre> *out) {
+    if (out == nullptr || depth > 4)
+        return;
+    const QStringList names = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const QString &name : names) {
+        const QDir sub(dir.absoluteFilePath(name));
+        const QByteArray native = QDir::toNativeSeparators(sub.absolutePath()).toUtf8();
+        if (sxcl_jre_is_installed(native.constData(), nullptr) == 1) {
+            out->append(readHostedJre(sub));
+            continue; // 这一层已经是一份运行时,不再往里走(里面还有 bin/ lib/ 等)
+        }
+        collectHostedJres(sub, depth + 1, out);
+    }
+}
+
+QVector<HostedJre> scanHostedJres(const QString &root) {
+    QVector<HostedJre> out;
+    const QDir dir(root);
+    if (root.isEmpty() || !dir.exists())
+        return out;
+    collectHostedJres(dir, 0, &out);
+    return out;
+}
+
+} // namespace
+
+class HostedJreCard : public SettingCard {
+public:
+    explicit HostedJreCard(QWidget *parent = nullptr)
+        : SettingCard(FluentIcon::qicon(FluentIcon::DEVELOPER_TOOLS),
+                      QStringLiteral("内置 JRE（自托管）"),
+                      QStringLiteral("从我们自己的 index.json 下载随包分发的运行时"), parent) {
+        setFixedHeight(132); // 四行:来源输入 / 生效来源 / 已装组件 / 状态
+
+        m_urlEdit = new QLineEdit(this);
+        m_urlEdit->setMinimumWidth(330);
+        m_urlEdit->setPlaceholderText(
+            QStringLiteral("index.json 地址（留空 = 用环境变量或编译期默认）"));
+        m_urlEdit->setToolTip(QStringLiteral("设置键：%1\n留空表示不覆盖——环境变量 %2 优先，"
+                                             "其次是编译期默认的 GitHub raw 地址。")
+                                  .arg(QString::fromUtf8(SXCL_JRE_INDEX_URL_SETTING),
+                                       QString::fromUtf8(SXCL_JRE_INDEX_URL_ENV)));
+
+        m_component = new ComboBox(this);
+        for (int i = 0; i < kHostedMajorCount; ++i) {
+            m_component->addItem(QStringLiteral("Java %1").arg(kHostedMajors[i]), kHostedMajors[i]);
+        }
+        m_component->setCurrentIndex(1); // 默认 Java 17(与"装 1.17+ 用 17"的口径一致)
+        m_component->setToolTip(QStringLiteral("要装哪一个主版本（清单里的组件名是 jre<主版本>）"));
+
+        m_downloadButton = new PushButton(QStringLiteral("开始下载"), this);
+        // 稳定的 objectName:验收钩子(SXCL_UI_JRE_HOSTED)靠它**点真的按钮**走产品路径,
+        // 而不是在 main.cpp 里另起一条"自己调核心库"的旁路(那样验不到接线本身)。
+        m_downloadButton->setObjectName(QStringLiteral("hostedJreDownloadButton"));
+        m_component->setObjectName(QStringLiteral("hostedJreComponent"));
+        m_urlEdit->setObjectName(QStringLiteral("hostedJreSourceUrl"));
+        m_statusLabel = new CaptionLabel(QString(), this);
+        m_sourceLabel = new CaptionLabel(QString(), this);
+        m_installedLabel = new CaptionLabel(QString(), this);
+
+        auto *rightLayout = new QVBoxLayout();
+        rightLayout->setSpacing(4);
+        rightLayout->setContentsMargins(0, 0, 0, 0);
+
+        auto *topRow = new QHBoxLayout();
+        topRow->setSpacing(8);
+        topRow->addWidget(m_urlEdit);
+        topRow->addWidget(m_component);
+        topRow->addWidget(m_downloadButton);
+        topRow->setAlignment(Qt::AlignRight);
+
+        rightLayout->addLayout(topRow);
+        rightLayout->addWidget(m_sourceLabel, 0, Qt::AlignRight);
+        rightLayout->addWidget(m_installedLabel, 0, Qt::AlignRight);
+        rightLayout->addWidget(m_statusLabel, 0, Qt::AlignRight);
+
+        hBox()->addLayout(rightLayout, 0);
+        hBox()->addSpacing(16);
+
+        connect(m_urlEdit, &QLineEdit::editingFinished, this, [this] { saveSourceUrl(); });
+        connect(m_downloadButton, &QPushButton::clicked, this, [this] {
+            // 下载中再点一次 = 取消(核心库在文件边界上停,已装好的组件保留)
+            if (m_worker.joinable()) {
+                cancelDownload();
+                return;
+            }
+            startDownload();
+        });
+
+        refresh();
+    }
+
+    ~HostedJreCard() override {
+        // 页面销毁时先请工作线程收工:取消是异步的,join 等它真的退出
+        // (不 detach —— 否则线程会拿着已经析构的 this 回调,那是崩溃不是"偶发")
+        if (m_worker.joinable()) {
+            m_cancelRequested.store(true);
+            m_worker.join();
+        }
+    }
+
+    /** 初始值由页面从设置里读好传进来(卡片不自己开第二份设置句柄去读,免得两份读数分叉)。 */
+    void setStoredSource(const QString &value) {
+        m_sourceSaved = value;
+        refresh();
+    }
+
+    /** 落盘出口由页面给(设置页的 ConfigStore 才是设置的唯一写入口)。 */
+    void setSaveHandler(std::function<void(const QString &)> handler) {
+        m_onSave = std::move(handler);
+    }
+
+    /** 刷新"来源"与"已装组件"两块读数(装完、切页、设置变更后都调它)。 */
+    void refresh() {
+        refreshSource();
+        refreshInstalled();
+        traceState();
+    }
+
+    bool installing() const { return m_worker.joinable(); }
+    /** 供验收钩子直接读(界面读数):卡片上三行的原文。 */
+    QString sourceText() const { return m_sourceLabel->text(); }
+    QString installedText() const { return m_installedLabel->text(); }
+    QString statusText() const { return m_statusLabel->text(); }
+
+private:
+    // ── 来源:设置里存的(可编辑)与这次真正会用的,分开显示 ──
+    QString storedSourceUrl() const { return m_urlEdit->text().trimmed(); }
+
+    void saveSourceUrl() {
+        const QString text = storedSourceUrl();
+        // 空 = 不覆盖(回落环境变量/默认)。写空串而不是 remove():语义一致,
+        // 而且后台线程读同一份文件时不会出现"键一会儿在、一会儿不在"。
+        m_sourceSaved = text;
+        if (m_onSave)
+            m_onSave(text);
+        refreshSource();
+        traceState();
+    }
+
+    void refreshSource() {
+        m_urlEdit->setText(m_sourceSaved);
+        const QByteArray env = qgetenv(SXCL_JRE_INDEX_URL_ENV);
+        const QByteArray setting = m_sourceSaved.toUtf8();
+        char resolved[SXCL_JRE_URL_MAX];
+        resolved[0] = '\0';
+        const int rc = sxcl_jre_resolve_index_url(nullptr, setting.isEmpty() ? nullptr : setting.constData(),
+                                                  env.isEmpty() ? nullptr : env.constData(), resolved,
+                                                  sizeof(resolved));
+        QString level;
+        if (!env.isEmpty())
+            level = QStringLiteral("环境变量 %1").arg(QString::fromUtf8(SXCL_JRE_INDEX_URL_ENV));
+        else if (!setting.isEmpty())
+            level = QStringLiteral("设置项");
+        else
+            level = QStringLiteral("编译期默认");
+
+        if (rc != SXCL_JRE_OK) {
+            m_sourceLabel->setText(QStringLiteral("生效来源：没有可用的 index.json 地址"));
+            m_sourceLabel->setTextColor(QColor(0xff, 0x4d, 0x4f), QColor(0xff, 0x78, 0x75));
+            m_sourceLabel->setToolTip(QStringLiteral(
+                "三级来源都为空,且编译期默认地址是 <REPO> 占位 —— 请在上面填一个 index.json 地址。"));
+            return;
+        }
+        const QString url = QString::fromUtf8(resolved);
+        m_sourceLabel->setText(QStringLiteral("生效来源（%1）：%2").arg(level, url));
+        m_sourceLabel->setTextColor(QColor(0x60, 0x60, 0x60), QColor(0xa0, 0xa0, 0xa0));
+        m_sourceLabel->setToolTip(url);
+    }
+
+    void refreshInstalled() {
+        const QString root = runtimeRoot();
+        m_installed = root.isEmpty() ? QVector<HostedJre>() : scanHostedJres(root);
+        if (m_installed.isEmpty()) {
+            m_installedLabel->setText(QStringLiteral("已装组件：无"));
+            m_installedLabel->setTextColor(QColor(0x60, 0x60, 0x60), QColor(0xa0, 0xa0, 0xa0));
+            m_installedLabel->setToolTip(root.isEmpty() ? QString()
+                                                        : QStringLiteral("运行时根目录：%1").arg(root));
+            return;
+        }
+        QStringList parts;
+        QStringList tips;
+        for (const HostedJre &item : m_installed) {
+            parts << QStringLiteral("%1 %2").arg(item.component,
+                                                 item.version.isEmpty() ? QStringLiteral("(版本未知)")
+                                                                        : item.version);
+            tips << item.dir;
+        }
+        m_installedLabel->setText(QStringLiteral("已装 %1 个：%2").arg(m_installed.size())
+                                      .arg(parts.join(QStringLiteral(" · "))));
+        m_installedLabel->setTextColor(QColor(0x52, 0xc4, 0x1a), QColor(0x73, 0xd1, 0x3d));
+        m_installedLabel->setToolTip(tips.join(QStringLiteral("\n")));
+    }
+
+    QString runtimeRoot() const {
+        char root[SXCL_JAVA_RUNTIME_PATH_MAX];
+        char err[SXCL_JAVA_RUNTIME_ERROR_MAX];
+        err[0] = '\0';
+        if (sxcl_java_runtime_default_root(root, sizeof(root), err, sizeof(err)) !=
+            SXCL_JAVA_RUNTIME_OK) {
+            return QString();
+        }
+        return QDir::fromNativeSeparators(QString::fromUtf8(root));
+    }
+
+    // 验收用的机器可读读数(与版本页/Java 那两行同一个套路;只在 SXCL_UI_TRACE=1 时进 stderr)
+    void traceState() {
+        QStringList parts;
+        for (const HostedJre &item : m_installed)
+            parts << QStringLiteral("%1=%2").arg(item.component, item.version);
+        uiTrace(QStringLiteral("jre-hosted | 来源=%1 设置值=%2 已装=%3 [%4] 根=%5")
+                    .arg(m_sourceLabel->text(), m_sourceSaved.isEmpty() ? QStringLiteral("(空)")
+                                                                        : m_sourceSaved)
+                    .arg(m_installed.size())
+                    .arg(parts.join(QStringLiteral(",")), runtimeRoot()));
+    }
+
+    // ── 安装:工作线程 + 核心库 sxcl_jre_install() ──
+    void startDownload() {
+        if (m_worker.joinable())
+            return;
+#if !defined(SXCL_UI_HAVE_QT_TRANSPORT)
+        // 没有传输后端就如实说 —— 不做"假进度条"这种事(界面层不许假装成功)
+        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("下载内置 JRE 需要网络后端"),
+                      QStringLiteral("本次构建没有链接 Qt Network 传输后端(sxcl_net_qt)，"
+                                     "无法下载自托管 JRE。"),
+                      window(), 6000);
+#else
+        const QString root = runtimeRoot();
+        if (root.isEmpty()) {
+            UiErrorContext ctx;
+            ctx.page = QStringLiteral("设置页 / settings");
+            ctx.action = QStringLiteral("下载内置 JRE（自托管）");
+            ctx.reason = QStringLiteral("拿不到运行时根目录(sxcl_java_runtime_default_root 失败)");
+            ctx.title = QStringLiteral("找不到运行时目录");
+            pushUiError(window(), ctx, 8000);
+            return;
+        }
+        saveSourceUrl(); // 保证这次跑的就是界面上看到的那个地址
+        const QByteArray rootUtf8 = root.toUtf8();
+        const int major = m_component->currentData().toInt();
+
+        m_cancelRequested.store(false);
+        m_downloadButton->setText(QStringLiteral("取消下载"));
+        m_statusLabel->setText(QStringLiteral("正在取 index.json…"));
+        m_statusLabel->setTextColor(QColor(0x00, 0x78, 0xd4), QColor(0x00, 0xbc, 0xf2));
+
+        m_worker = std::thread([this, rootUtf8, major] {
+            // 来源从**同一份设置文件**读(与设置页写的是同一个;见 settingsFilePath 的说明)。
+            // 传 index_setting 而不是 index_url:显式值的优先级高于环境变量,会把运维注入的
+            // 来源盖掉 —— 与"环境变量 > 设置项 > 默认"的三级口径不符(核心库按这个顺序解析)。
+            QByteArray settingValue;
+            {
+                const QByteArray cfg = settingsFilePath().toUtf8();
+                if (!cfg.isEmpty()) {
+                    if (sxcl_settings *handle = sxcl_settings_open(cfg.constData())) {
+                        const char *value = sxcl_settings_get(handle, SXCL_JRE_INDEX_URL_SETTING, nullptr);
+                        if (value != nullptr)
+                            settingValue = QByteArray(value);
+                        sxcl_settings_free(handle);
+                    }
+                }
+            }
+
+            // 下载参数从设置读(环境变量优先:SXCL_DL_*),与官方 JRE / CLI 同一口径
+            sxcl_settings_download dl;
+            memset(&dl, 0, sizeof(dl));
+            const QByteArray cfg = settingsFilePath().toUtf8();
+            if (!cfg.isEmpty()) {
+                if (sxcl_settings *handle = sxcl_settings_open(cfg.constData())) {
+                    sxcl_settings_resolve_download(handle, &dl);
+                    sxcl_settings_free(handle);
+                }
+            }
+            char cacheFile[600];
+            cacheFile[0] = '\0';
+            if (dl.cache_dir[0] != '\0' && sxcl_fs_mkdirs(dl.cache_dir) == 0) {
+                snprintf(cacheFile, sizeof(cacheFile), "%s/hashes.txt", dl.cache_dir);
+            }
+
+            sxcl_engine_opts opts;
+            memset(&opts, 0, sizeof(opts));
+            opts.workers = dl.workers;
+            opts.rate_bps = dl.rate_bps;
+            opts.max_conn_per_file = dl.max_conn_per_file;
+            opts.cache_path = cacheFile[0] ? cacheFile : nullptr;
+
+            sxcl_jre_request request;
+            memset(&request, 0, sizeof(request));
+            request.java_major = major;   // >0 且没给 component_id = 按主版本从清单里挑
+            request.component_id = nullptr;
+            request.target_root = rootUtf8.constData();
+            request.index_setting = settingValue.isEmpty() ? nullptr : settingValue.constData();
+            request.skip_if_installed = 1; // 同 version 已装好 -> 立刻成功返回(不联网、不算哈希)
+            request.transport_factory = [](void *) -> sxcl_transport * {
+                return sxcl_transport_qt_create();
+            };
+            request.engine_opts = &opts;
+            request.on_progress = &HostedJreCard::progressTrampoline;
+            request.is_cancelled = &HostedJreCard::cancelTrampoline;
+            request.ud = this;
+
+            sxcl_jre_result result;
+            const int rc = sxcl_jre_install(&request, &result);
+
+            const bool ok = (rc == SXCL_JRE_OK);
+            const bool cancelled = (rc == SXCL_JRE_ERR_CANCELLED);
+            const QString detail = ok ? QString::fromUtf8(result.version)
+                                      : QString::fromUtf8(result.error);
+            const QString home =
+                ok ? QDir::fromNativeSeparators(QString::fromUtf8(result.java_home)) : QString();
+            const QString stage = QString::fromUtf8(
+                result.fail_stage_id != nullptr ? result.fail_stage_id : sxcl_jre_code_name(rc));
+            const QString indexUrl = QString::fromUtf8(result.index_url);
+            QMetaObject::invokeMethod(
+                this,
+                [this, ok, cancelled, detail, home, stage, indexUrl, rc] {
+                    onInstallFinished(ok, cancelled, detail, home, stage, indexUrl, rc);
+                },
+                Qt::QueuedConnection);
+        });
+#endif
+    }
+
+    void cancelDownload() {
+        m_cancelRequested.store(true);
+        m_statusLabel->setText(QStringLiteral("正在取消…"));
+    }
+
+    bool cancelRequested() const { return m_cancelRequested.load(); }
+
+    // 工作线程 -> 界面线程的进度投递(核心库的进度回调在**工作线程**里)
+    void postProgress(const sxcl_jre_progress &p) {
+        // 量不出来就写"未知",不编数字(与核心库 bytes_total=0 / speed_bps=0 / eta<0 的口径一致)
+        const QString totalText =
+            p.bytes_total > 0 ? humanBytes(p.bytes_total) : QStringLiteral("总量未知");
+        const QString speedText =
+            p.speed_bps > 0.0
+                ? QStringLiteral("%1/s").arg(humanBytes(static_cast<int64_t>(p.speed_bps)))
+                : QStringLiteral("速度未知");
+        const QString line = QStringLiteral("%1 %2%  %3/%4  %5  %6")
+                                 .arg(QString::fromUtf8(p.stage_name != nullptr ? p.stage_name : "?"))
+                                 .arg(p.percent)
+                                 .arg(humanBytes(p.bytes_done), totalText, speedText,
+                                      humanEta(p.eta_seconds));
+        const QString trace =
+            QStringLiteral("progress stage=%1 percent=%2 bytes=%3/%4 speed=%5 eta=%6 files=%7/%8 "
+                           "skipped=%9 failed=%10 component=%11 version=%12 current=%13 msg=%14")
+                .arg(QString::fromUtf8(p.stage_id != nullptr ? p.stage_id : "?"))
+                .arg(p.percent)
+                .arg(p.bytes_done)
+                .arg(p.bytes_total)
+                .arg(static_cast<int64_t>(p.speed_bps))
+                .arg(p.eta_seconds)
+                .arg(p.files_done)
+                .arg(p.files_total)
+                .arg(p.files_skipped)
+                .arg(p.files_failed)
+                .arg(QString::fromUtf8(p.component != nullptr ? p.component : ""),
+                     QString::fromUtf8(p.version != nullptr ? p.version : ""),
+                     QString::fromUtf8(p.current != nullptr ? p.current : ""),
+                     QString::fromUtf8(p.message));
+        QMetaObject::invokeMethod(
+            this,
+            [this, line, trace] {
+                m_statusLabel->setText(line);
+                m_statusLabel->setTextColor(QColor(0x00, 0x78, 0xd4), QColor(0x00, 0xbc, 0xf2));
+                // 核心库回调逐条留痕:验收直接拿这一段核对阶段/百分比/速度/剩余
+                uiTrace(QStringLiteral("jre-hosted | ") + trace);
+            },
+            Qt::QueuedConnection);
+    }
+
+    // 核心库的进度回调(**工作线程**):只做投递,不碰控件
+    static void progressTrampoline(void *ud, const sxcl_jre_progress *progress) {
+        if (ud == nullptr || progress == nullptr)
+            return;
+        static_cast<HostedJreCard *>(ud)->postProgress(*progress);
+    }
+    static int cancelTrampoline(void *ud) {
+        return (ud != nullptr && static_cast<HostedJreCard *>(ud)->cancelRequested()) ? 1 : 0;
+    }
+
+    // 界面线程:收尾(成功 / 取消 / 失败)
+    void onInstallFinished(bool ok, bool cancelled, const QString &detail, const QString &home,
+                           const QString &stage, const QString &indexUrl, int code) {
+        m_downloadButton->setText(QStringLiteral("开始下载"));
+        if (ok) {
+            m_statusLabel->setText(QStringLiteral("✅ 已装好：%1").arg(home));
+            m_statusLabel->setTextColor(QColor(0x52, 0xc4, 0x1a), QColor(0x73, 0xd1, 0x3d));
+            InfoBar::push(InfoBar::Type::Success, QStringLiteral("内置 JRE 安装完成"),
+                          QStringLiteral("%1（版本 %2）").arg(home, detail), window(), 6000);
+        } else if (cancelled) {
+            m_statusLabel->setText(QStringLiteral("已取消下载"));
+            m_statusLabel->setTextColor(QColor(0xfa, 0x8c, 0x16), QColor(0xff, 0xa9, 0x40));
+        } else {
+            m_statusLabel->setText(QStringLiteral("❌ %1").arg(detail.left(80)));
+            m_statusLabel->setTextColor(QColor(0xff, 0x4d, 0x4f), QColor(0xff, 0x78, 0x75));
+            // 统一错误出口:完整上下文进剪贴板 + 进运行日志(界面只显示原因的前 300 字)
+            UiErrorContext ctx;
+            ctx.page = QStringLiteral("设置页 / settings");
+            ctx.action = QStringLiteral("下载内置 JRE（自托管）");
+            ctx.reason = detail; // 核心库给的真实原因(状态码/校验/解包),原样进剪贴板
+            ctx.detail = QStringLiteral("阶段=%1 返回码=%2(%3) index=%4 运行时根=%5")
+                             .arg(stage, QString::number(code),
+                                  QString::fromUtf8(sxcl_jre_code_name(code)), indexUrl,
+                                  runtimeRoot());
+            ctx.title = QStringLiteral("内置 JRE 安装失败");
+            pushUiError(window(), ctx, 10000);
+        }
+        refresh();
+        uiTrace(QStringLiteral("jre-hosted | 结果 ok=%1 cancelled=%2 code=%3 阶段=%4 版本=%5 家=%6")
+                    .arg(ok ? 1 : 0)
+                    .arg(cancelled ? 1 : 0)
+                    .arg(code)
+                    .arg(stage, detail, home));
+    }
+
+    QLineEdit *m_urlEdit = nullptr;
+    ComboBox *m_component = nullptr;
+    PushButton *m_downloadButton = nullptr;
+    CaptionLabel *m_statusLabel = nullptr;
+    CaptionLabel *m_sourceLabel = nullptr;
+    CaptionLabel *m_installedLabel = nullptr;
+    QVector<HostedJre> m_installed;
+    QString m_sourceSaved;
+    std::function<void(const QString &)> m_onSave;
+    std::thread m_worker;
+    std::atomic<bool> m_cancelRequested{false};
+};
+
 // ─────────────── 内存范围(settings_page.py:288-307 的整数运算,逐行照抄)───────────────
 
 struct MemoryRange {
@@ -1356,6 +1868,7 @@ private:
 
     SwitchSettingCard *m_isolationCard = nullptr;
     JavaSettingCard *m_javaCard = nullptr;
+    HostedJreCard *m_hostedJreCard = nullptr; // 自托管 JRE(新增;官方 JRE 之外的**第二条来源**)
     MemorySettingCard *m_memoryCard = nullptr;
     ComboBoxSettingCard *m_windowCard = nullptr;
     PushSettingCard *m_gameDirCard = nullptr;
@@ -1465,6 +1978,8 @@ SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
                     m_gameDirCard->setContent(gameDirectory());
                 if (m_javaCard)
                     m_javaCard->refresh();
+                if (m_hostedJreCard)
+                    m_hostedJreCard->refresh();
             });
 
     buildContent();
@@ -1621,6 +2136,17 @@ void SettingsPage::buildContent() {
 
     m_javaCard = new JavaSettingCard(gameGroup); // :285
     gameGroup->addSettingCard(m_javaCard);       // :286
+
+    // 自托管 JRE(**新增**;Python 版没有这条来源,见 docs/19 §2.1)。
+    // 紧跟在"Java 运行路径"之后:两条来源是同一件事的两个答案(官方桌面构建 / 我们自己的安卓包)。
+    m_hostedJreCard = new HostedJreCard(gameGroup);
+    m_hostedJreCard->setSaveHandler([this](const QString &value) {
+        // 空 = 不覆盖(回落环境变量/编译期默认):写空串而不是 remove(),
+        // 语义一样,但后台线程读同一份文件时不会看到"键一会儿在、一会儿不在"。
+        m_store.set(SXCL_JRE_INDEX_URL_SETTING, value);
+    });
+    m_hostedJreCard->setStoredSource(m_store.text(SXCL_JRE_INDEX_URL_SETTING));
+    gameGroup->addSettingCard(m_hostedJreCard);
 
     m_memoryRange = computeMemoryRange(); // :289-301
 
@@ -2126,6 +2652,7 @@ void SettingsPage::resetSettings() {
 
     m_gameDirCard->setContent(gameDirectory());      // :486
     m_javaCard->refresh();                           // :487
+    m_hostedJreCard->setStoredSource(m_store.text(SXCL_JRE_INDEX_URL_SETTING)); // 来源也被重置了
     m_themeCard->comboBox()->setCurrentIndex(2);     // :488 themeMode = AUTO(索引 2)
     m_languageCard->comboBox()->setCurrentIndex(0);  // :489 语言 = ZH_CN
     m_sourceCard->comboBox()->setCurrentIndex(2);    // :490 下载源 = BMCLAPI

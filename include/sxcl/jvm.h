@@ -59,7 +59,17 @@ extern "C" {
 
 #define SXCL_JVM_PATH_MAX  1024
 #define SXCL_JVM_LDPATH_MAX 3072
-#define SXCL_JVM_ARG_MAX     40
+/* argv 容量。**为什么是 256(2026-09-21 改,原来是 40)**:
+ *   * MC 的真实命令行由 sxcl_launch_build_args() 拼出来 —— 一个"最小版本 JSON"夹具实测就有
+ *     **51 条**(内存/GC 那 11 条 + 编码与 launcher 属性 + -cp + 主类 + 十几个 --xxx),
+ *     模组/加载器(Forge/Fabric/OptiFine)与启动器还会再追加;
+ *   * 40 条装不下,后果是 sxcl_jvm_launch() 直接报"参数太多了"而**起不了游戏主类** ——
+ *     自检只跑 -version(几条)所以这个上限以前一直没暴露;
+ *   * 256 = 实测 51 + 我们安卓这层补的 6 条 -D + 足够余量(不按"刚好够"留,免得下次又撞墙)。
+ * 代价要写清楚:sxcl_jvm_args 里带 storage[ARG_MAX][ARG_LEN],256 条 = 512KB,而
+ * sxcl_jvm_launch() 是把它放在**栈上**的 —— 所以调用它的线程要有足够栈:
+ * 安卓侧(:game 进程)我们专门用一个 6MB 栈的 pthread 跑 JLI_Launch(见 sxcl_game.c)。 */
+#define SXCL_JVM_ARG_MAX    256
 #define SXCL_JVM_ARG_LEN   2048
 #define SXCL_JVM_ERROR_MAX   512
 #define SXCL_JVM_VALUE_MAX   512

@@ -56,11 +56,36 @@ public class GameActivity extends Activity {
     private static native int nativeStart(String dir, String socket, String jre, String nativelib,
                                           String classpath, String gamedir, String mainclass,
                                           String jvmargs, String gameargs, String renderer,
-                                          int crashMode);
+                                          String instanceId, String filesDir, int crashMode);
 
     private static native int nativeRequestStop();
 
     private static native int nativeHasJvm();
+
+    /* ---- 渲染器桥(Surface -> ANativeWindow;实现见 android/app/sxcl_game.c 的"渲染器桥"那段) ----
+     * 谁负责 set:本类在 SurfaceHolder 的三个回调里调 nativeSetSurface();
+     * 什么时候 set:created / changed 都传(尺寸变了要重建 GL 表面),destroyed 传 null;
+     * 游戏侧怎么拿:windowHandle()(或 onNativeWindowChanged 的通知)——**每次重建表面前重新取一次**,
+     * 不要缓存一份用到底:句柄只在 created..destroyed 之间有效。 */
+    private static native void nativeSetSurface(android.view.Surface surface);
+
+    private static native long nativeWindowHandle();
+
+    /** 游戏侧(LWJGL 的 Android 后端)取当前 ANativeWindow 的值;0 = 还没有。 */
+    public static long windowHandle() {
+        return nativeWindowHandle();
+    }
+
+    /** 原生层在 Surface 变化时回调(handle=0 表示窗口已失效)。 */
+    private static void onNativeWindowChanged(final long handle) {
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override
+            public void run() {
+                Log.i(TAG, "game-process: ANativeWindow 变化 handle=0x" + Long.toHexString(handle)
+                        + "(游戏侧应当据此重建 GL 表面)");
+            }
+        });
+    }
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -84,16 +109,38 @@ public class GameActivity extends Activity {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
                 Log.i(TAG, "game-process: 游戏自己的 SurfaceView 已创建(本进程独立窗口)");
+                if (libReady) {
+                    try {
+                        nativeSetSurface(holder.getSurface());
+                    } catch (Throwable t) {
+                        Log.w(TAG, "game-process: nativeSetSurface(created) 失败:" + t);
+                    }
+                }
             }
 
             @Override
             public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) {
                 Log.i(TAG, "game-process: surface 尺寸 " + w + "x" + h);
+                /* 尺寸/格式变了 = 之前的 GL 表面作废:再传一次,让游戏侧重建 */
+                if (libReady) {
+                    try {
+                        nativeSetSurface(holder.getSurface());
+                    } catch (Throwable t) {
+                        Log.w(TAG, "game-process: nativeSetSurface(changed) 失败:" + t);
+                    }
+                }
             }
 
             @Override
             public void surfaceDestroyed(SurfaceHolder holder) {
-                Log.i(TAG, "game-process: surface 已销毁");
+                Log.i(TAG, "game-process: surface 已销毁 -> 交还 ANativeWindow(null)");
+                if (libReady) {
+                    try {
+                        nativeSetSurface(null);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "game-process: nativeSetSurface(null) 失败:" + t);
+                    }
+                }
             }
         });
         setContentView(surface);
@@ -111,6 +158,10 @@ public class GameActivity extends Activity {
             return;
         }
 
+        /* 安卓布局的 natives 落在应用私有目录(nativeStart 会把它拼成 <files>/natives/<instance>):
+         * /storage 是 noexec 挂载,原生库放那儿一定加载不了。 */
+        final String filesDir = getFilesDir() != null ? getFilesDir().getAbsolutePath() : "";
+
         /* nativeStart 会一直阻塞到游戏结束(JVM 的生命周期就是它的生命周期),
          * 所以必须离开 UI 线程 —— 界面线程要留着跑窗口与 surface。 */
         Thread starter = new Thread(new Runnable() {
@@ -118,7 +169,7 @@ public class GameActivity extends Activity {
             public void run() {
                 final int rc = nativeStart(spec.sessionDir, spec.socketName, spec.jreHome,
                         spec.nativesDir, spec.classpath, spec.gameDir, spec.mainClass, spec.jvmArgs,
-                        spec.gameArgs, spec.renderer, spec.crashMode);
+                        spec.gameArgs, spec.renderer, spec.instanceId, filesDir, spec.crashMode);
                 Log.i(TAG, "game-process: nativeStart 返回 rc=" + rc + " (hasJvm=" + nativeHasJvm()
                         + ")");
             }

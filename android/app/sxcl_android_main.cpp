@@ -574,6 +574,9 @@ constexpr const char *kAndroidSxclActivity = "com/silentstudio/sxcl/SxclActivity
 struct GameLaunchRequest {
     bool requested = false;
     QString jre;    /* gamejre=<jre home>;空 = 本轮"只验架构"模式 */
+    /* gameinstance=<版本/实例 id>:非空 = 让**游戏进程**用核心库按版本 JSON 拼游戏命令行
+     * (instance/natives/launch 三层),这是"起游戏主类"那条路;为空则退回显式 main/args。 */
+    QString instance;
     QString main;   /* gamemain=<主类> */
     QString args;   /* gameargs=<JVM 参数,空格分隔> */
     QString crash;  /* gamecrash=abort|term|kill(验收用的崩溃注入) */
@@ -602,20 +605,22 @@ void sxclAndroidGameStop(const char *why) {
 
 void sxclAndroidGameStartNow() {
     const QJniObject jre = QJniObject::fromString(g_gameLaunch.jre);
+    const QJniObject instance = QJniObject::fromString(g_gameLaunch.instance);
     const QJniObject main = QJniObject::fromString(g_gameLaunch.main);
     const QJniObject args = QJniObject::fromString(g_gameLaunch.args);
     const QJniObject crash = QJniObject::fromString(g_gameLaunch.crash);
 
-    SXCL_LOGI("game: 起游戏请求 jre=%s main=%s crash=%s(空 jre = 本轮只验架构)",
+    SXCL_LOGI("game: 起游戏请求 jre=%s instance=%s main=%s crash=%s(空 jre = 本轮只验架构)",
               g_gameLaunch.jre.toUtf8().constData(),
+              g_gameLaunch.instance.toUtf8().constData(),
               g_gameLaunch.main.toUtf8().constData(),
               g_gameLaunch.crash.toUtf8().constData());
     const QJniObject status = QJniObject::callStaticObjectMethod(
         kAndroidSxclActivity, "startGameSession",
-        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)"
-        "Ljava/lang/String;",
-        jre.object<jstring>(), main.object<jstring>(), args.object<jstring>(),
-        crash.object<jstring>());
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
+        "Ljava/lang/String;)Ljava/lang/String;",
+        jre.object<jstring>(), instance.object<jstring>(), main.object<jstring>(),
+        args.object<jstring>(), crash.object<jstring>());
     const QString line = status.isValid() ? status.toString() : QStringLiteral("(null)");
     SXCL_LOGI("game: 会话 -> %s", line.toUtf8().constData());
     SXCL_LOG_I("startup", "游戏独立进程:会话=%s jre=%s", line.toUtf8().constData(),
@@ -695,6 +700,7 @@ struct Boot {
      * 结束游戏"打通,JRE 由 gamejre 显式给(等用户上传的包,代码里没有任何写死路径) */
     QString gamestart;
     QString gamejre;
+    QString gameinstance;  /* gameinstance=<版本/实例 id>:非空则游戏命令行由核心库按 JSON 拼 */
     QString gamemain;
     QString gameargs;
     QString gamecrash;
@@ -735,6 +741,7 @@ Boot readBootFile(const QString &filesDir) {
         else if (k == QLatin1String("nativelib")) b.nativelib = v;
         else if (k == QLatin1String("gamestart")) b.gamestart = v;
         else if (k == QLatin1String("gamejre"))   b.gamejre = v;
+        else if (k == QLatin1String("gameinstance")) b.gameinstance = v;
         else if (k == QLatin1String("gamemain"))  b.gamemain = v;
         else if (k == QLatin1String("gameargs"))  b.gameargs = v;
         else if (k == QLatin1String("gamecrash")) b.gamecrash = v;
@@ -914,6 +921,7 @@ int main(int argc, char **argv) {
         if (!boot.gamestart.isEmpty() && boot.gamestart != QLatin1String("0")) {
             g_gameLaunch.requested = true;
             g_gameLaunch.jre = boot.gamejre;
+            g_gameLaunch.instance = boot.gameinstance;
             g_gameLaunch.main = boot.gamemain;
             g_gameLaunch.args = boot.gameargs;
             g_gameLaunch.crash = boot.gamecrash;

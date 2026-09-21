@@ -6,6 +6,19 @@
 
 /* sxcl_jvm_bootstrap.c - 安卓侧的进程内 JVM 自举(Android only;对核心库 sxcl/jvm.h 的薄封装)。
  *
+ * ┌─ 标注:**诊断用 —— 不进任何 APK 构建目标,不随包发布**(2026-09-21 夜间对账,见 docs/19 §8.2)┐
+ * │ * 出货的是 android/app/sxcl_jre_bootstrap.c:android/app/CMakeLists.txt 把它编进            │
+ * │   sxclui(应用域探针)与 sxclgame(:game 游戏进程)两个 .so;                                  │
+ * │ * **本文件没有任何构建脚本引用** —— 只按 docs/19 §9 用 clang 单编,做"起一次 JVM 打         │
+ * │   java.version / java.home"的证据工具。                                                    │
+ * │ * 两份**不是重复实现**:env / -D 属性 / argv / dlopen / 自检的规则都只有核心库                │
+ * │   src/services/launch/jvm.c 那一份,本文件与 app 那份都只是薄壳(都调 sxcl_jvm_build_env)。    │
+ * │   本文件独有的是"把 LD_LIBRARY_PATH 交给 linker 私有入口"这一步;出货那份改用核心库的          │
+ * │   RTLD_GLOBAL 预加载(见 docs/21 §6)。                                                      │
+ * │ * **有意保留**:真机上它是不依赖其它层就能给出 java.version 的唯一入口,删掉等于丢掉取证工具。  │
+ * │   不要为了"统一"删这个文件。                                                                │
+ * └───────────────────────────────────────────────────────────────────────────────────────┘
+ *
  * 为什么需要它:真机实测(2026-09-21,docs/18 §4.2)证明应用自己的 untrusted_app 域**不能**
  * exec 私有目录里的文件(SELinux avc denied { execute_no_trans },permissive=0),
  * 所以 fork+exec <jre>/bin/java 这条路是死的。剩下的活路是**进程内**:

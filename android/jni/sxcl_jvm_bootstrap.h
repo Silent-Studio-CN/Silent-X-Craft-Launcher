@@ -15,6 +15,11 @@ extern "C" {
 
 /* ── 安卓侧的进程内 JVM 自举(对 include/sxcl/jvm.h 的一层薄封装) ──
  *
+ * **标注:诊断用,不进 APK 构建目标、不随包发布**(对账结论见 docs/19 §8.2)。
+ * 出货的自举层是 android/app/sxcl_jre_bootstrap.h → android/app/sxcl_jre_bootstrap.c
+ * (被 sxclui 与 sxclgame 两个 .so 编进去);本文件只供 clang 单编的取证工具使用。
+ * 两者不重复:env/argv/dlopen 的规则只有核心库 src/services/launch/jvm.c 那一份。
+ *
  * 分工:
  *   * 核心库(include/sxcl/jvm.h + src/services/launch/jvm.c)**跨平台**:算环境变量、
  *     拼 argv、dlopen(libjli) -> JLI_Launch、重定向输出留证。桌面单测能覆盖它。
