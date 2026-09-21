@@ -35,6 +35,16 @@ if(SXCL_BUILD_TESTS)
   add_test(NAME sxcl_android_test COMMAND sxcl_android_test)
   set_tests_properties(sxcl_android_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
+  # 游戏目录候选表 / 判定 / 排序:不联网。候选表是**纯字符串 + 可注入 env**,
+  # 所以一台 Windows 机器上也能验 Linux/macOS/安卓三套规则;实例家族的 instances/ 展开
+  # 与"像不像 MC 目录"的判据用夹具目录实测(夹具建在构建目录下,仓库里不留东西)。
+  add_executable(sxcl_paths_roots_test tests/paths_roots_test.c)
+  target_include_directories(sxcl_paths_roots_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(sxcl_paths_roots_test PRIVATE sxcl)
+  sxcl_warnings(sxcl_paths_roots_test)
+  add_test(NAME sxcl_paths_roots_test COMMAND sxcl_paths_roots_test)
+  set_tests_properties(sxcl_paths_roots_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
   # 国际化:不联网。夹具直接用 Python 版那份真实语言包(config/lang/*.lang)逐条对拍,
   # 证明"格式逐字段兼容";那个目录不存在(只 checkout 了 C 版)时测试自动跳过那一节。
   add_executable(sxcl_lang_test ${CMAKE_SOURCE_DIR}/tests/lang_test.c)

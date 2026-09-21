@@ -239,6 +239,61 @@ int main(void) {
     sxcl_version_list_free(list);
     sxcl_json_free(doc);
 
+    /* ── 镜像映射(第二路来源):纯字符串,不联网 ── */
+    {
+        char out[512];
+        (void)memset(out, 0, sizeof(out));
+        check(sxcl_manifest_mirror_url(
+                  "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json", NULL, out,
+                  sizeof(out)) == 0,
+              "镜像:清单 URL 能映射");
+        check_str(out, "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json",
+                  "镜像:清单映射到镜像根");
+        check(sxcl_manifest_mirror_url("https://piston-meta.mojang.com/v1/packages/ab/1.21.json",
+                                       NULL, out, sizeof(out)) == 0,
+              "镜像:版本 JSON 能映射");
+        check_str(out, "https://bmclapi2.bangbang93.com/v1/packages/ab/1.21.json",
+                  "镜像:版本 JSON 映射路径不变");
+        check(sxcl_manifest_mirror_url(
+                  "https://piston-data.mojang.com/v1/objects/aa/bb/client.jar", NULL, out,
+                  sizeof(out)) == 0,
+              "镜像:客户端 jar 能映射");
+        check_str(out, "https://bmclapi2.bangbang93.com/v1/objects/aa/bb/client.jar",
+                  "镜像:客户端 jar 映射路径不变");
+        check(sxcl_manifest_mirror_url(
+                  "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1.jar", NULL,
+                  out, sizeof(out)) == 0,
+              "镜像:依赖库能映射");
+        check_str(out,
+                  "https://bmclapi2.bangbang93.com/maven/org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1.jar",
+                  "镜像:依赖库走 /maven");
+        check(sxcl_manifest_mirror_url(
+                  "https://resources.download.minecraft.net/11/1111111111111111111111111111111111111111",
+                  NULL, out, sizeof(out)) == 0,
+              "镜像:资源对象能映射");
+        check_str(out,
+                  "https://bmclapi2.bangbang93.com/assets/11/"
+                  "1111111111111111111111111111111111111111",
+                  "镜像:资源对象走 /assets");
+        /* 自定义镜像根(设置里可以填别的站) */
+        check(sxcl_manifest_mirror_url("https://piston-meta.mojang.com/mc/a.json",
+                                       "https://my.mirror.example", out, sizeof(out)) == 0,
+              "镜像:自定义根能生效");
+        check_str(out, "https://my.mirror.example/mc/a.json", "镜像:自定义根拼对了");
+        /* 认不出的 URL:返回 -1 且不留半截结果(调用方就当没有第二路) */
+        check(sxcl_manifest_mirror_url("https://example.com/whatever", NULL, out, sizeof(out)) == -1,
+              "镜像:非官方 URL 返回 -1");
+        check_str(out, "", "镜像:失败时输出为空(不留半截)");
+        check(sxcl_manifest_mirror_url(NULL, NULL, out, sizeof(out)) == -1, "镜像:NULL 返回 -1");
+        check(sxcl_manifest_mirror_url("https://piston-meta.mojang.com/x", NULL, NULL, 0) == -1,
+              "镜像:out=NULL 返回 -1");
+        /* 缓冲不够:同样必须干净失败 */
+        check(sxcl_manifest_mirror_url("https://piston-meta.mojang.com/aaaaaaaaaaaaaaaaaaaa",
+                                       NULL, out, 8) == -1,
+              "镜像:缓冲不够返回 -1");
+        check_str(out, "", "镜像:缓冲不够时输出为空");
+    }
+
     printf("元数据层测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);
     if (g_fail == 0) {
         printf("[PASS] 版本清单/rules 过滤/natives/下载计划 全部符合预期\n");

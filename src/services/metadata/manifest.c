@@ -92,6 +92,75 @@ int sxcl_rules_allow(const sxcl_json_value *rules, const char *os_name, const ch
     return allowed;
 }
 
+/* ── 镜像映射 ── */
+
+/** 前缀匹配(不区分大小写);匹配上返回剩余部分(指向 url 内部),否则 NULL。 */
+static const char *prefix_after(const char *url, const char *prefix)
+{
+    const size_t n = strlen(prefix);
+    size_t i = 0;
+    if (url == NULL || prefix == NULL) {
+        return NULL;
+    }
+    for (i = 0; i < n; ++i) {
+        char a = url[i];
+        char b = prefix[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (char)(a - 'A' + 'a');
+        }
+        if (b >= 'A' && b <= 'Z') {
+            b = (char)(b - 'A' + 'a');
+        }
+        if (a != b) {
+            return NULL;
+        }
+    }
+    return url + n;
+}
+
+static const char *mirror_join(const char *base, const char *sub, const char *rest, char *out,
+                               size_t out_len)
+{
+    const int n = snprintf(out, out_len, "%s%s%s", base, sub ? sub : "", rest ? rest : "");
+    if (n < 0 || (size_t)n >= out_len) {
+        out[0] = '\0';
+        return NULL;
+    }
+    return out;
+}
+
+int sxcl_manifest_mirror_url(const char *url, const char *mirror_base, char *out, size_t out_len)
+{
+    const char *base = (mirror_base && *mirror_base) ? mirror_base : SXCL_MIRROR_BMCLAPI_BASE;
+    const char *rest = NULL;
+    if (out == NULL || out_len == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    if (url == NULL || url[0] == '\0') {
+        return -1;
+    }
+    /* 先长后短:launchermeta 与 piston-meta 是并列的两条前缀,不互相包含,顺序无所谓;
+     * 但 libraries / resources 必须排在它们后面判(前缀不重叠,这里只是写明意图)。 */
+    if ((rest = prefix_after(url, "https://launchermeta.mojang.com")) != NULL ||
+        (rest = prefix_after(url, "https://piston-meta.mojang.com")) != NULL ||
+        (rest = prefix_after(url, "https://piston-data.mojang.com")) != NULL ||
+        (rest = prefix_after(url, "http://launchermeta.mojang.com")) != NULL ||
+        (rest = prefix_after(url, "http://piston-meta.mojang.com")) != NULL ||
+        (rest = prefix_after(url, "http://piston-data.mojang.com")) != NULL) {
+        return mirror_join(base, NULL, rest, out, out_len) ? 0 : -1;
+    }
+    if ((rest = prefix_after(url, "https://libraries.minecraft.net")) != NULL ||
+        (rest = prefix_after(url, "http://libraries.minecraft.net")) != NULL) {
+        return mirror_join(base, "/maven", rest, out, out_len) ? 0 : -1;
+    }
+    if ((rest = prefix_after(url, "https://resources.download.minecraft.net")) != NULL ||
+        (rest = prefix_after(url, "http://resources.download.minecraft.net")) != NULL) {
+        return mirror_join(base, "/assets", rest, out, out_len) ? 0 : -1;
+    }
+    return -1;
+}
+
 /* ── 版本清单 ── */
 
 struct sxcl_version_list {
@@ -205,13 +274,54 @@ const sxcl_version_entry *sxcl_version_list_find(const sxcl_version_list *list, 
 /* 任务逐个 malloc:计划是"边下边扩"的(先版本 JSON,后资源索引展开 5000+ 条),
  * 而引擎提交后持有的是任务指针 —— 若用连续数组 + realloc,扩容会把地址搬走,
  * 引擎手里的指针立刻变野指针(实测崩在 0xC0000005)。地址稳定是硬要求。 */
+static uint64_t fnv1a64(const char *s); /* 定义在资源对象那一节,这里先声明 */
+
 struct sxcl_version_plan {
     sxcl_task **tasks;
     size_t count;
     size_t capacity;
     char **owned; /* 每个任务持有的字符串(路径/URL/摘要/label),释放时统一 free */
     size_t owned_count;
+    /* 目标路径去重集(开放寻址,键是指向 tasks[i]->dest 的指针数组)。
+     * 为什么必须去重:官方版本 JSON 里**同一个文件可以被列两次**(实测 1.0 的
+     * net.java.jinput:jinput-platform:2.0.5 就出现了两遍),于是计划里出现两个 target 完全相同
+     * 的任务,两个工作线程同时开同一个 <dest>.part —— 第二个拿到的是共享冲突,
+     * 报"无法写入 ...part",于是"13 个成功 1 个失败"(实测就是这个)。
+     * 装不下(理论不会)时退化成不去重:行为与老版本一致,不会错,只是可能重复下载。 */
+    char **dest_keys;
+    size_t dest_cap;
+    size_t dest_used;
 };
+
+/* 目标路径集合:FNV-1a + 开放寻址。返回 1 = 新插入,0 = 已存在,-1 = 装不下。 */
+static int plan_dest_seen(sxcl_version_plan *plan, const char *dest)
+{
+    if (plan->dest_keys == NULL) {
+        /* 16384 槽:一次全量安装的普通文件(jar/库/版本 JSON)远小于它;资源对象走另一条路
+         * (按哈希去重),所以这个尺寸够用。 */
+        plan->dest_cap = 16384;
+        plan->dest_keys = (char **)calloc(plan->dest_cap, sizeof(char *));
+        plan->dest_used = 0;
+        if (plan->dest_keys == NULL) {
+            plan->dest_cap = 0;
+            return -1;
+        }
+    }
+    if (plan->dest_cap == 0 || plan->dest_used * 10 >= plan->dest_cap * 7) {
+        return -1;
+    }
+    uint64_t hash = fnv1a64(dest);
+    size_t i = (size_t)(hash & (uint64_t)(plan->dest_cap - 1));
+    while (plan->dest_keys[i] != NULL) {
+        if (strcmp(plan->dest_keys[i], dest) == 0) {
+            return 0;
+        }
+        i = (i + 1) & (plan->dest_cap - 1);
+    }
+    plan->dest_keys[i] = (char *)dest;
+    ++plan->dest_used;
+    return 1;
+}
 
 static char *plan_intern(sxcl_version_plan *plan, const char *s)
 {
@@ -234,6 +344,9 @@ static int plan_add(sxcl_version_plan *plan, const char *url, const char *dest, 
 {
     if (!url || !*url || !dest) {
         return 0; /* 缺 URL 的条目直接跳过(元数据里偶有空条目) */
+    }
+    if (plan_dest_seen(plan, dest) == 0) {
+        return 0; /* 同一个目标路径已经排过队:再排一次只会让两个线程抢同一个 .part */
     }
     if (plan->count == plan->capacity) {
         const size_t next = plan->capacity ? plan->capacity * 2 : 64;
@@ -387,6 +500,41 @@ sxcl_version_plan *sxcl_version_plan_build(const sxcl_json *version_json, const 
     return plan;
 }
 
+int sxcl_version_plan_add_mirror(sxcl_version_plan *plan, const char *mirror_base, char *err,
+                                 size_t err_len)
+{
+    int added = 0;
+    if (err && err_len) {
+        err[0] = '\0';
+    }
+    if (!plan) {
+        if (err) {
+            snprintf(err, err_len, "计划为空");
+        }
+        return -1;
+    }
+    for (size_t i = 0; i < plan->count; ++i) {
+        sxcl_task *t = plan->tasks[i];
+        char mirror[1024];
+        if (!t || !t->urls[0] || t->urls[1] != NULL) {
+            continue; /* 已经有第二候选(例如资源对象展开时给过)就不动它 */
+        }
+        if (sxcl_manifest_mirror_url(t->urls[0], mirror_base, mirror, sizeof(mirror)) != 0) {
+            continue; /* 认不出的 URL:没有对应的镜像路,跳过(不是错误) */
+        }
+        char *owned = plan_intern(plan, mirror);
+        if (!owned) {
+            if (err) {
+                snprintf(err, err_len, "内存不足(镜像 URL 太长或候选太多)");
+            }
+            return -1;
+        }
+        t->urls[1] = owned;
+        ++added;
+    }
+    return added;
+}
+
 /* ── 资源对象展开(assets/objects) ── */
 
 static uint64_t fnv1a64(const char *s)
@@ -519,6 +667,7 @@ void sxcl_version_plan_free(sxcl_version_plan *plan)
         free(plan->tasks[i]);
     }
     free(plan->owned);
+    free(plan->dest_keys);
     free(plan->tasks);
     free(plan);
 }

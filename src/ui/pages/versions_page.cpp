@@ -69,6 +69,18 @@
 #include "fluent_theme.h"
 #include "sxcl_icons.h"
 
+// ── 核心库(纯 C)—— 版本页的取数链全部走这里,界面层不再自己解析清单 ──
+// 以前这一页只能读本地缓存/环境变量里的清单文件,拿不到就退化成"把本地已安装的实例
+// 当成版本清单显示" —— 那是两种不同的东西互相冒充。现在:
+//   远端清单:核心库双路(官方 piston-meta -> BMCLAPI 镜像)+ sxcl_json + sxcl_version_list_build
+//   本地已安装:sxcl_instance_scan(带加载器标签与 problem 人话)
+//   两者分开呈现;清单失败(网络/解析)与"没安装任何版本"是两种状态。
+#include "sxcl/http.h"      // sxcl_http_get_text(双路取清单文本)
+#include "sxcl/instance.h"  // sxcl_instance_scan(本地已安装实例)
+#include "sxcl/json.h"      // sxcl_json_parse_file / sxcl_json_parse
+#include "sxcl/manifest.h"  // sxcl_version_list_build + sxcl_manifest_mirror_url
+#include "sxcl/net.h"       // sxcl_transport_qt_create(Qt 传输后端)
+
 // 注意:sxcl_ui_core 目前没有源码树 include/ 目录的搜索路径(include/ 只挂在可执行目标
 // sxcl-ui 上),所以这里**够不着** sxcl/instance.h。等主代理把那行 include 目录补进
 // sxcl_ui_core(或让 sxcl_ui_core 链 sxcl)之后,把 scanLocalInstances() 换成
@@ -504,44 +516,50 @@ QString gameDirectory() {
     return QDir::homePath() + QStringLiteral("/.minecraft");
 }
 
-// ── 本地已安装实例(最小实现)──
+// ── 本地已安装实例:走核心库 sxcl_instance_scan ──
 // Python scan_installed():versions/<id>/ 下只要有版本 JSON 就算"装好了"
-// (Forge 1.13+/Fabric 的实例没有自己的 jar,按 jar+json 判会全漏)。
-// 这里只做界面需要的那点:目录名 + version_type + releaseTime。
+// (Forge 1.13+/Fabric 的实例没有自己的 jar,按 jar+json 判会全漏);
+// C 版核心库那份还多给了加载器标签(Forge/Fabric/…)与 problem 人话,
+// 以前界面层自己读 JSON 是拿不到这些的(文件头那条 TODO 就是这件事)。
 struct LocalInstance {
     QString id;
     QString type;
     QString releaseTime;
+    QString summary;  // "原版" / "Forge 47.2.0 + OptiFine I6"
+    QString problem;  // 不能启动时的原因(空 = 没问题)
+    bool launchable = true;
 };
 
-QVector<LocalInstance> scanLocalInstances(const QString &gameDir) {
+QVector<LocalInstance> scanLocalInstances(const QString &gameDir, QString *errorOut) {
     QVector<LocalInstance> out;
-    const QDir versionsDir(gameDir + QStringLiteral("/versions"));
-    if (!versionsDir.exists())
+    if (errorOut)
+        errorOut->clear();
+    sxcl_instance_list list;
+    std::memset(&list, 0, sizeof(list));
+    char err[SXCL_INSTANCE_ERROR_MAX];
+    err[0] = '\0';
+    const int rc = sxcl_instance_scan(gameDir.toUtf8().constData(), nullptr, &list, err, sizeof(err));
+    if (rc != SXCL_INSTANCE_OK) {
+        if (errorOut)
+            *errorOut = QString::fromUtf8(err[0] ? err : "扫描本地实例失败");
         return out;
-    const QStringList names =
-        versionsDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
-    for (const QString &name : names) {
-        const QDir dir(versionsDir.filePath(name));
-        QStringList jsons = dir.entryList({name + QStringLiteral(".json")}, QDir::Files);
-        if (jsons.isEmpty())
-            jsons = dir.entryList({QStringLiteral("*.json")}, QDir::Files);
-        if (jsons.isEmpty())
-            continue; // 没有版本 JSON 的目录不算实例(PCL 也跳过)
-        LocalInstance inst;
-        inst.id = name;
-        QFile f(dir.filePath(jsons.first()));
-        if (f.open(QIODevice::ReadOnly)) {
-            const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
-            inst.type = o.value(QStringLiteral("type")).toString();
-            inst.releaseTime = o.value(QStringLiteral("releaseTime")).toString();
-        }
-        if (inst.type.isEmpty())
-            inst.type = QStringLiteral("release");
-        out.append(inst);
     }
+    out.reserve(static_cast<int>(list.count));
+    for (size_t i = 0; i < list.count; ++i) {
+        const sxcl_instance &inst = list.items[i];
+        LocalInstance item;
+        item.id = QString::fromUtf8(inst.id);
+        item.type = QString::fromUtf8(inst.version_type[0] ? inst.version_type : "release");
+        item.summary = QString::fromUtf8(inst.summary);
+        item.problem = QString::fromUtf8(inst.problem);
+        item.launchable = inst.launchable != 0;
+        out.append(item);
+    }
+    sxcl_instance_list_free(&list);
     return out;
 }
+
+const char *kManifestOfficialUrl = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
 QString manifestCachePath() {
     const QByteArray appData = qgetenv("APPDATA");
@@ -551,49 +569,135 @@ QString manifestCachePath() {
            QStringLiteral("/SilentXCraftLauncher/cache/version_manifest_v2.json");
 }
 
-// 清单文本(失败时 error 非空)。第 1/2 条路径见文件头说明。
-QByteArray fetchManifestText(QString *error) {
-    QStringList tried;
+// 清单文本:**远端双路**(官方 -> BMCLAPI 镜像),失败才退回本地缓存。
+// 返回空 = 连缓存都没有;error 里是真实原因(网络/状态码/解析),界面照实显示。
+// 明确区分三件事(这是之前踩过的坑,别再退回去):
+//   1) 远端拿到了            -> 正常路径,顺手写缓存;
+//   2) 远端不通但有缓存      -> 用缓存,并在状态里说明"用的是本地缓存";
+//   3) 两条路都不通且没缓存  -> 空 + 人话原因(界面走**错误态**,不是空态)。
+QByteArray fetchManifestText(QString *error, bool *fromCache) {
+    if (error)
+        error->clear();
+    if (fromCache)
+        *fromCache = false;
+
+    // 1) 环境变量指定的清单文件:验收/离线复现用的显式入口,优先级最高(与老行为一致)
     const QString env = qEnvironmentVariable("SXCL_UI_MANIFEST");
-    if (!env.isEmpty())
-        tried << env;
-    tried << manifestCachePath();
-    for (const QString &path : tried) {
-        if (path.isEmpty())
-            continue;
-        QFile f(path);
+    if (!env.isEmpty()) {
+        QFile f(env);
         if (f.open(QIODevice::ReadOnly))
             return f.readAll();
+        if (error)
+            *error = QStringLiteral("SXCL_UI_MANIFEST 指定的文件打不开: ") + env;
+        return {};
+    }
+
+    // 2) 远端双路。transport 拿不到(没编进 Qt 传输后端)时如实说明,不假装成功。
+    QStringList failures;
+#if defined(SXCL_UI_HAVE_QT_TRANSPORT)
+    sxcl_transport *tr = sxcl_transport_qt_create();
+    if (tr != nullptr) {
+        char *text = nullptr;
+        size_t len = 0;
+        char err[256];
+        const char *urls[2];
+        char mirror[512];
+        urls[0] = kManifestOfficialUrl;
+        urls[1] = nullptr;
+        if (sxcl_manifest_mirror_url(kManifestOfficialUrl, nullptr, mirror, sizeof(mirror)) == 0)
+            urls[1] = mirror; // 第二路:官方不通时走镜像
+        for (int i = 0; i < 2 && urls[i] != nullptr; ++i) {
+            text = nullptr;
+            len = 0;
+            err[0] = '\0';
+            const int rc = sxcl_http_get_text(tr, urls[i], nullptr, &text, &len, err, sizeof(err));
+            if (rc == SXCL_HTTP_OK && text != nullptr && len > 0) {
+                QByteArray body(text, static_cast<int>(len));
+                free(text);
+                // 顺手写缓存(下次断网可用);写不进去不是错误
+                const QString cache = manifestCachePath();
+                if (!cache.isEmpty()) {
+                    QFile cf(cache);
+                    if (cf.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                        cf.write(body);
+                }
+                return body;
+            }
+            if (text)
+                free(text);
+            failures << QStringLiteral("%1: %2")
+                            .arg(QString::fromUtf8(urls[i]),
+                                 QString::fromUtf8(err[0] ? err : "没有内容"));
+        }
+    } else if (error) {
+        failures << QStringLiteral("没有可用的网络后端(sxcl_net_qt 未链接)");
+    }
+#else
+    failures << QStringLiteral("本产物没有编译进 Qt 传输后端(sxcl_net_qt)");
+#endif
+
+    // 3) 本地缓存:只在远端不通时用,而且要告诉用户"这是旧数据"
+    const QString cache = manifestCachePath();
+    if (!cache.isEmpty()) {
+        QFile f(cache);
+        if (f.open(QIODevice::ReadOnly)) {
+            if (fromCache)
+                *fromCache = true;
+            return f.readAll();
+        }
     }
     if (error)
-        *error = QStringLiteral("UI 层未链接传输后端(sxcl_net_qt),且本地没有清单缓存");
+        *error = failures.isEmpty() ? QStringLiteral("取不到版本清单")
+                                    : failures.join(QStringLiteral("; "));
     return {};
 }
 
-// 清单 JSON -> GameVersion 列表(versions_page.py:99-137 的解析部分)
+// 清单 JSON -> GameVersion 列表。解析走核心库(sxcl_json + sxcl_version_list_build),
+// 界面层不再自己认字段 —— 清单结构一旦变,只有核心库一处要改。
+// 解析失败会填 error(给界面显示真实原因),并且**返回空列表**(调用方走错误态)。
 QVector<GameVersion> parseManifest(const QByteArray &text, QString *error) {
     QVector<GameVersion> out;
-    QJsonParseError perr{};
-    const QJsonDocument doc = QJsonDocument::fromJson(text, &perr);
-    if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
+    if (error)
+        error->clear();
+    if (text.isEmpty()) {
         if (error)
-            *error = perr.errorString();
+            *error = QStringLiteral("清单内容是空的");
         return out;
     }
-    const QJsonArray versions = doc.object().value(QStringLiteral("versions")).toArray();
-    out.reserve(versions.size());
-    for (const QJsonValue &item : versions) {
-        const QJsonObject o = item.toObject();
-        GameVersion v;
-        v.id = o.value(QStringLiteral("id")).toString();
-        v.type = o.value(QStringLiteral("type")).toString();
-        v.url = o.value(QStringLiteral("url")).toString();
-        v.releaseTime = o.value(QStringLiteral("releaseTime")).toString();
-        v.sha1 = o.value(QStringLiteral("sha1")).toString();
-        v.size = qint64(o.value(QStringLiteral("size")).toDouble());
-        if (!v.id.isEmpty())
-            out.append(v);
+    char err[256];
+    err[0] = '\0';
+    sxcl_json *doc = sxcl_json_parse(text.constData(), static_cast<size_t>(text.size()), err,
+                                      sizeof(err));
+    if (doc == nullptr) {
+        if (error)
+            *error = QStringLiteral("清单不是合法 JSON: ") + QString::fromUtf8(err);
+        return out;
     }
+    sxcl_version_list *list = sxcl_version_list_build(doc);
+    if (list == nullptr) {
+        if (error)
+            *error = QStringLiteral("清单里没有 versions 数组(结构不对)");
+        sxcl_json_free(doc);
+        return out;
+    }
+    const size_t count = sxcl_version_list_count(list);
+    out.reserve(static_cast<int>(count));
+    for (size_t i = 0; i < count; ++i) {
+        const sxcl_version_entry *e = sxcl_version_list_at(list, i);
+        if (e == nullptr || e->id == nullptr || e->id[0] == '\0')
+            continue;
+        GameVersion v;
+        v.id = QString::fromUtf8(e->id);
+        v.type = QString::fromUtf8(e->type ? e->type : "release");
+        v.url = QString::fromUtf8(e->url ? e->url : "");
+        v.sha1 = QString::fromUtf8(e->sha1 ? e->sha1 : "");
+        v.size = static_cast<qint64>(e->size);
+        out.append(v);
+    }
+    sxcl_version_list_free(list);
+    sxcl_json_free(doc);
+    if (out.isEmpty() && error)
+        *error = QStringLiteral("清单解析成功但一个版本都没有");
     return out;
 }
 

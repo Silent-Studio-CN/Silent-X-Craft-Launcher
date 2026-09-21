@@ -34,7 +34,9 @@ extern "C" {
 #define SXCL_PATHS_ERR_EMPTY      (-5)  /* 一个候选都没有(连默认路径都拼不出来) */
 
 /* ── 尺寸上限 ── */
-#define SXCL_PATHS_MAX_CANDIDATES 16    /* 一次探测最多列出几个候选(安卓候选多,8 不够用) */
+#define SXCL_PATHS_MAX_CANDIDATES 32    /* 一次探测最多列出几个候选(安装器家族一种就能出好几个实例目录) */
+#define SXCL_PATHS_MAX_ROOTS      96    /* 一次最多产出多少个候选**根**(纯字符串表的上限) */
+#define SXCL_PATHS_SOURCE_MAX     24    /* 候选来源的稳定英文键("HMCL"/"Prism"/"CurseForge"…) */
 #define SXCL_PATHS_PATH_MAX       640   /* 单个路径的字节数上限(UTF-8,中文一个 3 字节) */
 #define SXCL_PATHS_LABEL_MAX      64    /* "官方启动器(APPDATA)" 这类来源标签 */
 #define SXCL_PATHS_OWNER_MAX      64    /* 这份目录是谁的:"本应用"/"FCL"/"HMCL"/"共享存储" */
@@ -53,6 +55,10 @@ typedef struct sxcl_game_folder {
     int has_launcher_profiles;            /**< 有 launcher_profiles.json */
     int exists;                           /**< 1 = 这个路径确实是目录 */
     int score;                            /**< 排序用:有版本 > 有资源 > 有 profiles;不存在为 -1 */
+    int priority;                         /**< 候选来源的优先级(见 SXCL_PATHS_PRIORITY_*);
+                                               排序时**先看它**,同优先级才比 score。
+                                               已配置目录最高,保证"用户指定的那个"永远排在第一位。 */
+    char source[SXCL_PATHS_SOURCE_MAX];   /**< 来源的稳定英文键,给日志/测试断言用 */
 } sxcl_game_folder;
 
 /** 一次探测的结果。**零分配**:固定大小数组,调用方可以放栈上。 */
@@ -121,6 +127,112 @@ int sxcl_paths_is_game_dir(const char *path);
  *  成功返回 SXCL_PATHS_OK;连平台默认都拼不出来返回 SXCL_PATHS_ERR_EMPTY。 */
 int sxcl_paths_resolve_game_dir(const char *configured_dir, char *out, size_t out_len,
                                 char *err, size_t err_len);
+
+/* ══════════════════════ 候选根表(纯字符串,三个平台 + 安卓) ══════════════════════
+ *
+ * 为什么要把"候选表"从 sxcl_paths_detect 里拆出来:
+ *   1) 桌面路原来只有 Python folders.py 的 5 条(便携/APPDATA/HOME/桌面/当前配置),
+ *      而机器上真正在玩的数据常常在**别的启动器**留下的目录里 —— HMCL、MultiMC/Prism
+ *      这一家族(instances/<名字>/minecraft)、CurseForge、ATLauncher、FCL、PojavLauncher…
+ *      实测(本机 Windows)就有一份在 %APPDATA%\.minecraft 之外,用户反馈"明明有游戏却扫不到"。
+ *   2) 候选表要能**注入环境变量**,否则单测只能测本机那一个平台,Linux/macOS/安卓三套
+ *      规则永远没人验证(与 sxcl_java_candidate_paths / sxcl_java_scan_roots 同一个理由)。
+ *   3) 候选根**不代表存在**:存在性、能不能读、像不像 MC 目录,由探测层实测后如实标注。
+ *
+ * 排序口径(与"已配置目录最高优先"一致):priority 降序 -> score 降序 -> 保持候选表原有先后。
+ */
+
+/** 目标平台。paths.h 不依赖 launch.h(那边拖着 json/engine 一大串),所以自带一份枚举。 */
+typedef enum sxcl_paths_os {
+    SXCL_PATHS_OS_WINDOWS = 0,
+    SXCL_PATHS_OS_LINUX,
+    SXCL_PATHS_OS_MACOS,
+    SXCL_PATHS_OS_ANDROID
+} sxcl_paths_os;
+
+/** 候选来源优先级(数值越大越优先;排序先看它)。 */
+#define SXCL_PATHS_PRIORITY_CONFIGURED  100 /**< 已配置目录:用户明确指定的,永远第一 */
+#define SXCL_PATHS_PRIORITY_PORTABLE     80 /**< 启动器自己旁边的 .minecraft(便携版) */
+#define SXCL_PATHS_PRIORITY_OFFICIAL     60 /**< 官方启动器(%APPDATA% / Application Support) */
+#define SXCL_PATHS_PRIORITY_ANDROID      50 /**< 安卓:本应用私有目录 + 共享存储已知位置 */
+#define SXCL_PATHS_PRIORITY_THIRD_PARTY  40 /**< HMCL/MultiMC/Prism/CurseForge/ATLauncher… */
+#define SXCL_PATHS_PRIORITY_USER_HOME    30 /**< 用户主目录 / Flatpak 沙箱 */
+#define SXCL_PATHS_PRIORITY_DESKTOP      20 /**< 桌面(真的有用户这么放) */
+
+/** 探测用的环境变量集合(值都是 UTF-8,可空)。 */
+typedef struct sxcl_paths_env {
+    const char *app_data;       /**< %APPDATA%(Windows/macOS 的习惯位置靠它) */
+    const char *local_app_data; /**< %LOCALAPPDATA% */
+    const char *user_home;      /**< $HOME / %USERPROFILE% */
+    const char *program_dir;    /**< 启动器自己所在目录(便携版判据);可空 */
+    const char *xdg_data_home;  /**< $XDG_DATA_HOME;空 = <home>/.local/share */
+    const char *android_files;  /**< Android:本应用私有 files 目录 */
+    const char *android_shared; /**< Android:共享存储根;空 = /storage/emulated/0 */
+} sxcl_paths_env;
+
+/** 环境变量 + 背后的存储(字段被 env 引用,别当成可随意拷贝的值)。 */
+typedef struct sxcl_paths_env_store {
+    sxcl_paths_env env;
+    char app_data[SXCL_PATHS_PATH_MAX];
+    char local_app_data[SXCL_PATHS_PATH_MAX];
+    char user_home[SXCL_PATHS_PATH_MAX];
+    char program_dir[SXCL_PATHS_PATH_MAX];
+    char xdg_data_home[SXCL_PATHS_PATH_MAX];
+    char android_files[SXCL_PATHS_PATH_MAX];
+    char android_shared[SXCL_PATHS_PATH_MAX];
+} sxcl_paths_env_store;
+
+/** 一个候选**根**:路径 + 谁留下的 + 优先级。
+ *  expand=1 表示"这是个容器目录(installer 家族的数据目录),要往下展开一层 instances/"。 */
+typedef struct sxcl_paths_root {
+    char path[SXCL_PATHS_PATH_MAX];
+    char label[SXCL_PATHS_LABEL_MAX];   /**< 直接给界面用:"Prism Launcher 实例" */
+    char owner[SXCL_PATHS_OWNER_MAX];   /**< "本应用"/"HMCL"/"Prism"/"共享存储"…;桌面通用目录留空 */
+    char source[SXCL_PATHS_SOURCE_MAX]; /**< 稳定英文键:"APPDATA"/"HMCL"/"Prism"/… */
+    int priority;
+    int expand;                         /**< 1 = 还要展开实例(见 sxcl_paths_expand_roots) */
+} sxcl_paths_root;
+
+/** 本机平台。 */
+sxcl_paths_os sxcl_paths_current_os(void);
+/** 平台名("windows"/"linux"/"macos"/"android"),日志用。 */
+const char *sxcl_paths_os_name(sxcl_paths_os os);
+
+/** 从真实环境变量抓一份(UTF-8)。 */
+void sxcl_paths_env_capture(sxcl_paths_env_store *store);
+
+/** 平台候选根表(**纯字符串,不碰文件系统**;与 Python folders.py 的候选顺序同源)。
+ *  覆盖:便携目录 -> 官方启动器 -> HMCL -> MultiMC/Prism 家族 -> CurseForge -> ATLauncher
+ *        -> 用户主目录 / Flatpak -> 桌面 -> 安卓本应用私有目录 + 共享存储已知位置。
+ *  已配置目录不在这里(由 sxcl_paths_detect_ex 以最高优先级插到最前面)。
+ *  返回写入 out 的条数(≤ cap)。 */
+size_t sxcl_paths_roots(const sxcl_paths_env *env, sxcl_paths_os os, sxcl_paths_root *out,
+                        size_t cap);
+
+/** 把 expand=1 的容器根展开一层(installer 家族的 instances/<名字>/{.minecraft,minecraft,<名字>})。
+ *  只读文件系统;不是容器/不存在就原样保留。返回写入 out 的条数。 */
+size_t sxcl_paths_expand_roots(const sxcl_paths_root *roots, size_t count, sxcl_paths_root *out,
+                               size_t cap);
+
+/** 探测全部候选(可注入 env/os 的版本,夹具测试走这个):
+ *  候选根(平台表 + 展开实例 + 最高优先的 configured_dir)逐个实测 -> 只留**真实存在**的目录
+ *  -> 去重(Windows 大小写不敏感)-> 按 priority/score 降序。语义与 sxcl_paths_detect 一致。 */
+int sxcl_paths_detect_ex(const sxcl_paths_env *env, sxcl_paths_os os, sxcl_game_folders *folders,
+                         const char *configured_dir, char *err, size_t err_len);
+
+/** 一个候选根"像不像 MC 目录"的判据(借用 PCL/官方启动器的常识,全部实测):
+ *  versions/ 里数出来的版本数、libraries/、assets/、launcher_profiles.json、logs/ 之类。
+ *  返回判据位掩码(见 SXCL_PATHS_MARK_*)。 */
+#define SXCL_PATHS_MARK_VERSIONS   1 /**< 有 versions/ 且至少一个版本(最硬的证据) */
+#define SXCL_PATHS_MARK_LIBRARIES  2 /**< 有 libraries/ */
+#define SXCL_PATHS_MARK_ASSETS     4 /**< 有 assets/ */
+#define SXCL_PATHS_MARK_PROFILES   8 /**< 有 launcher_profiles.json(官方启动器留下的) */
+#define SXCL_PATHS_MARK_LOGS      16 /**< 有 logs/(跑过一次就有) */
+int sxcl_paths_marks(const char *path);
+
+/** 判据位掩码 -> 人话("有 versions/(3 个版本)、有 libraries/" ;空目录给"空目录")。
+ *  写不进返回 SXCL_PATHS_ERR_SPACE。 */
+int sxcl_paths_marks_text(int marks, int versions, char *out, size_t out_len);
 
 /* ══════════════════════ Android:自动扫描(第 5 条候选之外) ══════════════════════
  *

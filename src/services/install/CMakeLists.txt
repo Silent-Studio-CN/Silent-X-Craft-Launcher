@@ -34,4 +34,18 @@ if(SXCL_BUILD_TESTS)
   sxcl_warnings(sxcl_java_runtime_test)
   add_test(NAME sxcl_java_runtime_test COMMAND sxcl_java_runtime_test)
   set_tests_properties(sxcl_java_runtime_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+  # Java 检测(②:候选表 -> **真的执行** java -version -> 分类)。
+  # 为什么注册在这里:被测代码在 src/services/launch/java.c,而 src/services/launch 还没有
+  # 自己的 CMakeLists(与 java_runtime.c 放在本目录同一个理由),根 CMakeLists 不归本轮改。
+  # 夹具是一个"冒充 java"的极小可执行文件(按自己的文件名决定打什么),所以单测既不联网、
+  # 也不要求机器上装了 JDK —— 但**真的起了进程**,这正是这一轮要证明的事。
+  add_executable(sxcl_fake_java ${CMAKE_SOURCE_DIR}/tests/java_finder_fixture.c)
+  sxcl_warnings(sxcl_fake_java)
+  add_executable(sxcl_java_finder_test ${CMAKE_SOURCE_DIR}/tests/java_finder_test.c)
+  target_link_libraries(sxcl_java_finder_test PRIVATE sxcl)
+  sxcl_warnings(sxcl_java_finder_test)
+  add_test(NAME sxcl_java_finder_test
+           COMMAND sxcl_java_finder_test "$<TARGET_FILE:sxcl_fake_java>")
+  set_tests_properties(sxcl_java_finder_test PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endif()

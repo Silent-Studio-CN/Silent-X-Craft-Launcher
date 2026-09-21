@@ -16,6 +16,8 @@
 #include "sxcl/launch.h"
 
 #include "sxcl/android.h" /* 安卓:路径"能不能读/能不能执行"的分类 */
+#include "sxcl/fs.h"       /* sxcl_fs_fopen(读可执行文件头判架构;Windows 侧走宽字符) */
+#include "sxcl/process.h"  /* sxcl_process_run:真的起一次 <java> -version(见 1c 节) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1575,4 +1577,602 @@ size_t sxcl_java_probe_android(const char *files_dir, const char *shared_root,
     }
     return out->count;
 }
+
+/* ══════════════ 1c. 真实执行 `java -version`(②"不能只看目录名") ══════════════
+ *
+ * 上面那一层(sxcl_java_inspect / sxcl_java_discover)读的是 <home>/release 这份**文本**;
+ * 文本可以是从别处拷来的、可以是 32 位换成 64 位忘了改的、也可能目录名写着 jdk-21 而里面
+ * 是另一个版本。要回答"这个二进制在这台机器上到底能不能跑、跑起来是哪个版本",唯一的办法
+ * 就是**真的起一次进程**。本节做这件事,并把"起不来"的原因分类带出来(不静默丢弃):
+ *   沙箱拒绝 / 共享存储 noexec / 没有执行位 / 跑不起来 / 不是 Java / 架构不符。
+ *
+ * 架构不符**靠读文件头判**(ELF/PE/Mach-O),不等进程起不来才发现 —— 起不来的错误信息在
+ * 安卓上往往只是一句 "can't execute",看不出是架构问题。
+ */
+
+const char *sxcl_java_host_arch(void)
+{
+#if defined(_WIN32)
+#  if defined(_M_ARM64) || defined(__aarch64__)
+    return "arm64";
+#  elif defined(_M_IX86) || defined(__i386__)
+    return "x86";
+#  else
+    return "x64";
+#  endif
+#elif defined(__aarch64__) || defined(__arm64__)
+    return "arm64";
+#elif defined(__arm__)
+    return "arm32";
+#elif defined(__i386__)
+    return "x86";
+#else
+    return "x64";
+#endif
+}
+
+/** 某个架构能不能在这台机器上跑(向后兼容:64 位机器能跑同族的 32 位)。
+ *  返回 1 = 能,0 = 不能(架构不符),-1 = 信息不足(不判)。 */
+static int host_arch_accepts(const char *arch)
+{
+    const char *host = sxcl_java_host_arch();
+    if (arch == NULL || arch[0] == '\0') {
+        return -1;
+    }
+    if (strcmp(arch, host) == 0) {
+        return 1;
+    }
+    if (strcmp(host, "x64") == 0 && strcmp(arch, "x86") == 0) {
+        return 1;
+    }
+    if (strcmp(host, "arm64") == 0 && strcmp(arch, "arm32") == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+int sxcl_java_binary_arch(const char *path, char *out, size_t out_len)
+{
+    /* 512 字节:PE 的 IMAGE_NT_HEADERS 在 e_lfanew 处,真实文件的 e_lfanew 常在 0x80~0x100,
+     * 只读 64 字节会判不出 PE 的机器码(实测踩过)。 */
+    unsigned char head[512];
+    FILE *fh = NULL;
+    size_t got = 0;
+    if (out != NULL && out_len > 0) {
+        out[0] = '\0';
+    }
+    if (path == NULL || path[0] == '\0' || out == NULL || out_len == 0) {
+        return -1;
+    }
+    fh = sxcl_fs_fopen(path, "rb");
+    if (fh == NULL) {
+        return -1;
+    }
+    got = fread(head, 1, sizeof(head), fh);
+    (void)fclose(fh);
+    if (got < 20) {
+        return -1;
+    }
+    if (head[0] == 0x7Fu && head[1] == 'E' && head[2] == 'L' && head[3] == 'F') {
+        /* ELF:e_machine 在 0x12,字节序由 EI_DATA(head[5])决定 */
+        const int le = (head[5] == 1);
+        const unsigned int machine = le ? ((unsigned int)head[18] | ((unsigned int)head[19] << 8))
+                                        : ((unsigned int)head[19] | ((unsigned int)head[18] << 8));
+        switch (machine) {
+        case 0x3E: copy_str(out, out_len, "x64"); return 0;
+        case 0x03: copy_str(out, out_len, "x86"); return 0;
+        case 0xB7: copy_str(out, out_len, "arm64"); return 0;
+        case 0x28: copy_str(out, out_len, "arm32"); return 0;
+        default: return -1; /* 别的机器码:认不出就不判 */
+        }
+    }
+    if (head[0] == 'M' && head[1] == 'Z' && got >= 64) {
+        /* PE:"PE\0\0" 之后 2 字节是 Machine;e_lfanew 在偏移 0x3C */
+        const unsigned long off = (unsigned long)head[60] | ((unsigned long)head[61] << 8) |
+                                  ((unsigned long)head[62] << 16) | ((unsigned long)head[63] << 24);
+        if (off + 6 > got) {
+            return -1; /* 头不在读到的这一小段里:交给执行结果判,别猜 */
+        }
+        const unsigned int machine =
+            (unsigned int)head[off + 4] | ((unsigned int)head[off + 5] << 8);
+        switch (machine) {
+        case 0x8664: copy_str(out, out_len, "x64"); return 0;
+        case 0x014C: copy_str(out, out_len, "x86"); return 0;
+        case 0xAA64: copy_str(out, out_len, "arm64"); return 0;
+        case 0x01C4: copy_str(out, out_len, "arm32"); return 0;
+        default: return -1;
+        }
+    }
+    /* Mach-O:64 位小端(0xFEEDFACF)/ 64 位大端(arm64);universal(fat)认不出 -> -1(不判不符) */
+    if (head[0] == 0xCF && head[1] == 0xFA && head[2] == 0xED && head[3] == 0xFE) {
+        copy_str(out, out_len, "x64");
+        return 0;
+    }
+    if (head[0] == 0xFE && head[1] == 0xED && head[2] == 0xFA && head[3] == 0xCF) {
+        copy_str(out, out_len, "arm64");
+        return 0;
+    }
+    return -1;
+}
+
+/* ── 执行并收集输出(java -version 打在 stderr 上,两条都收) ── */
+
+typedef struct java_version_capture {
+    char text[8192];
+    size_t len;
+    int lines;
+} java_version_capture;
+
+static int java_version_on_line(void *userdata, int is_stderr, const char *line)
+{
+    java_version_capture *cap = (java_version_capture *)userdata;
+    (void)is_stderr;
+    if (cap == NULL || line == NULL) {
+        return 0;
+    }
+    ++cap->lines;
+    const size_t n = strlen(line);
+    if (cap->len + n + 2 <= sizeof(cap->text)) {
+        (void)memcpy(cap->text + cap->len, line, n);
+        cap->len += n;
+        cap->text[cap->len++] = '\n';
+        cap->text[cap->len] = '\0';
+    }
+    return 0; /* 永远不中断:java -version 就那么几行 */
+}
+
+int sxcl_java_exec_version(const char *java_exe, int timeout_ms, sxcl_java_info *out)
+{
+    sxcl_java_os host;
+    char exe[SXCL_JAVA_PATH_MAX];
+    char parent[SXCL_JAVA_PATH_MAX];
+    char home[SXCL_JAVA_PATH_MAX];
+    java_version_capture cap;
+    sxcl_process_opts opts;
+    sxcl_process_result res;
+    const char *args[2];
+    int rc = 0;
+
+    if (out == NULL) {
+        return -1;
+    }
+    (void)memset(out, 0, sizeof(*out));
+    out->is_64bit = -1;
+    out->is_jre = -1;
+    copy_str(out->vendor, sizeof(out->vendor), "Unknown");
+    if (java_exe == NULL || java_exe[0] == '\0') {
+        copy_str(out->error, sizeof(out->error), "路径为空");
+        return -1;
+    }
+    host = sxcl_java_current_os();
+
+    /* 允许直接给 JAVA_HOME:目录 -> <home>/bin/java[.exe] */
+    if (path_is_dir(java_exe)) {
+        char bin[SXCL_JAVA_PATH_MAX];
+        join_path(bin, sizeof(bin), java_exe, "bin", os_sep(host));
+        join_path(exe, sizeof(exe), bin, sxcl_java_exe_name(host), os_sep(host));
+        copy_str(home, sizeof(home), java_exe);
+    } else {
+        copy_str(exe, sizeof(exe), java_exe);
+        path_parent(exe, parent, sizeof(parent));
+        if (ieq(path_base(parent), "bin")) {
+            path_parent(parent, home, sizeof(home));
+        } else {
+            copy_str(home, sizeof(home), parent);
+        }
+    }
+    if (!path_is_file(exe)) {
+        copy_str(out->path, sizeof(out->path), exe);
+        copy_str(out->home, sizeof(out->home), home);
+        copy_str(out->error, sizeof(out->error), "找不到这个可执行文件");
+        return -1;
+    }
+
+    (void)memset(&cap, 0, sizeof(cap));
+    (void)memset(&opts, 0, sizeof(opts));
+    (void)memset(&res, 0, sizeof(res));
+    args[0] = "-version";
+    args[1] = NULL;
+    opts.program = exe;
+    opts.args = args;
+    opts.timeout_ms = (timeout_ms > 0) ? timeout_ms : 8000;
+    opts.on_line = java_version_on_line;
+    opts.userdata = &cap;
+    rc = sxcl_process_run(&opts, &res);
+
+    copy_str(out->path, sizeof(out->path), exe);
+    copy_str(out->home, sizeof(out->home), home);
+    if (rc != 0) {
+        (void)snprintf(out->error, sizeof(out->error), "起不了进程: %s",
+                       (res.error[0] != '\0') ? res.error : "未知原因");
+        return -1;
+    }
+    if (res.timed_out) {
+        (void)snprintf(out->error, sizeof(out->error), "执行超时(%.1f 秒)",
+                       (double)opts.timeout_ms / 1000.0);
+        return -1;
+    }
+    if (cap.len == 0) {
+        if (res.exit_code == 127) {
+            copy_str(out->error, sizeof(out->error),
+                     "进程起不来(退出码 127:多半是没有执行位、noexec 挂载或架构不符)");
+        } else {
+            (void)snprintf(out->error, sizeof(out->error), "没有输出(退出码 %d)", res.exit_code);
+        }
+        return -1;
+    }
+    if (sxcl_java_parse_version_output(cap.text, cap.len, out) != 0) {
+        return -1;
+    }
+    copy_str(out->path, sizeof(out->path), exe);
+    copy_str(out->home, sizeof(out->home), home);
+    if (out->arch[0] == '\0') {
+        char arch[16];
+        if (sxcl_java_binary_arch(exe, arch, sizeof(arch)) == 0 && arch[0] != '\0') {
+            copy_str(out->arch, sizeof(out->arch), arch);
+        }
+    }
+    /* 执行成功 = 真的能跑:JRE 判定用 bin/javac 在不在(release 文本只作提示) */
+    {
+        char bin[SXCL_JAVA_PATH_MAX];
+        char javac[SXCL_JAVA_PATH_MAX];
+        join_path(bin, sizeof(bin), home, "bin", os_sep(host));
+        join_path(javac, sizeof(javac), bin, (host == SXCL_JAVA_OS_WINDOWS) ? "javac.exe" : "javac",
+                  os_sep(host));
+        out->is_jre = path_is_file(javac) ? 0 : 1;
+    }
+    return 0;
+}
+
+/* ── 候选收集(候选表 + 扫描根,带来源与归属)── */
+
+#define SXCL_JAVA_PRIO_OWN       60 /* 本应用私有目录(安卓上唯一能用的一类)或 Runtime */
+#define SXCL_JAVA_PRIO_RUNTIME   55 /* 官方运行时(我们自己下到配置目录里的 JRE) */
+#define SXCL_JAVA_PRIO_JAVA_HOME 50
+#define SXCL_JAVA_PRIO_PATH      40
+#define SXCL_JAVA_PRIO_SCAN      20
+
+typedef struct java_exe_list {
+    sxcl_java_candidate items[80];
+    size_t count;
+} java_exe_list;
+
+static void java_exe_push(java_exe_list *list, const char *path, const char *home,
+                          const char *source, const char *owner)
+{
+    if (list == NULL || list->count >= sizeof(list->items) / sizeof(list->items[0])) {
+        return;
+    }
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    {
+        sxcl_java_candidate *slot = &list->items[list->count];
+        (void)memset(slot, 0, sizeof(*slot));
+        copy_str(slot->path, sizeof(slot->path), path);
+        copy_str(slot->home, sizeof(slot->home), home ? home : "");
+        copy_str(slot->source, sizeof(slot->source), source ? source : "");
+        copy_str(slot->owner, sizeof(slot->owner), owner ? owner : "");
+        ++list->count;
+    }
+}
+
+typedef struct java_exe_scan {
+    java_exe_list *list;
+    sxcl_java_os os;
+    const char *source;
+    const char *owner;
+} java_exe_scan;
+
+static void java_exe_walk(java_exe_scan *sc, int depth, const char *dir);
+
+/* dir_visit 只给"名字",所以每次递归都新起一个上下文 —— 与上面的 walk_root/walk_cb
+ * 是同一套写法。 */
+typedef struct java_exe_wctx {
+    java_exe_scan *sc;
+    const char *dir;
+    int depth;
+} java_exe_wctx;
+
+static int java_exe_wcb(void *user, const char *name, int is_dir)
+{
+    java_exe_wctx *ctx = (java_exe_wctx *)user;
+    char full[SXCL_JAVA_PATH_MAX];
+    if (!is_dir) {
+        return 0;
+    }
+    join_path(full, sizeof(full), ctx->dir, name, os_sep(ctx->sc->os));
+    java_exe_walk(ctx->sc, ctx->depth, full);
+    return 0;
+}
+
+/** 在 <dir> 下最多 depth 层找 bin/java;找到就收下(不再往它里面找,与 try_java_home 同口径)。 */
+static void java_exe_walk(java_exe_scan *sc, int depth, const char *dir)
+{
+    char bin[SXCL_JAVA_PATH_MAX];
+    char exe[SXCL_JAVA_PATH_MAX];
+    java_exe_wctx ctx;
+    if (!path_is_dir(dir) || sc->list->count >= 80) {
+        return;
+    }
+    join_path(bin, sizeof(bin), dir, "bin", os_sep(sc->os));
+    join_path(exe, sizeof(exe), bin, sxcl_java_exe_name(sc->os), os_sep(sc->os));
+    if (path_is_file(exe)) {
+        java_exe_push(sc->list, exe, dir, sc->source, sc->owner);
+        return;
+    }
+    if (depth <= 0) {
+        return;
+    }
+    ctx.sc = sc;
+    ctx.dir = dir;
+    ctx.depth = depth - 1;
+    (void)dir_visit(dir, java_exe_wcb, &ctx);
+}
+
+static void java_collect_candidates(const sxcl_java_env *env, sxcl_java_os os, java_exe_list *list)
+{
+    sxcl_java_candidate cands[64];
+    scan_root roots[48];
+    size_t n = 0;
+    size_t rn = 0;
+    size_t i = 0;
+    (void)memset(list, 0, sizeof(*list));
+
+    n = sxcl_java_candidate_paths(env, os, cands, 64);
+    for (i = 0; i < n; ++i) {
+        java_exe_push(list, cands[i].path, cands[i].home, cands[i].source, cands[i].owner);
+    }
+
+    rn = collect_scan_roots(env, os, roots, 48);
+    for (i = 0; i < rn; ++i) {
+        java_exe_scan sc;
+        sc.list = list;
+        sc.os = os;
+        sc.source = roots[i].source;
+        sc.owner = (strcmp(roots[i].source, "AndroidPrivate") == 0) ? "本应用" : "";
+        java_exe_walk(&sc, 3, roots[i].path);
+    }
+}
+
+static int java_source_priority(const char *source)
+{
+    if (source == NULL) {
+        return SXCL_JAVA_PRIO_SCAN;
+    }
+    if (strcmp(source, "AndroidPrivate") == 0 || strcmp(source, "Runtime") == 0) {
+        return SXCL_JAVA_PRIO_OWN;
+    }
+    if (strcmp(source, "MojangRuntime") == 0) {
+        return SXCL_JAVA_PRIO_RUNTIME;
+    }
+    if (strcmp(source, "JAVA_HOME") == 0) {
+        return SXCL_JAVA_PRIO_JAVA_HOME;
+    }
+    if (strcmp(source, "PATH") == 0) {
+        return SXCL_JAVA_PRIO_PATH;
+    }
+    return SXCL_JAVA_PRIO_SCAN;
+}
+
+/* ── 结论文案 ── */
+
+static const char *const kJavaRunNames[] = {
+    "可用", "不在", "沙箱拒绝", "共享存储不能执行", "没有执行位", "跑不起来", "不是 Java", "架构不符",
+};
+
+static const char *const kJavaRunKeys[] = {
+    "ok", "missing", "denied", "noexec", "not_executable", "exec_failed", "not_a_jre",
+    "arch_mismatch",
+};
+
+const char *sxcl_java_run_verdict_name(sxcl_java_run_verdict verdict)
+{
+    const int i = (int)verdict;
+    if (i < 0 || (size_t)i >= sizeof(kJavaRunNames) / sizeof(kJavaRunNames[0])) {
+        return "未知";
+    }
+    return kJavaRunNames[i];
+}
+
+const char *sxcl_java_run_verdict_key(sxcl_java_run_verdict verdict)
+{
+    const int i = (int)verdict;
+    if (i < 0 || (size_t)i >= sizeof(kJavaRunKeys) / sizeof(kJavaRunKeys[0])) {
+        return "unknown";
+    }
+    return kJavaRunKeys[i];
+}
+
+const char *sxcl_java_run_verdict_hint(sxcl_java_run_verdict verdict)
+{
+    switch (verdict) {
+    case SXCL_JAVA_RUN_OK:
+        return "这份 Java 已经实测跑起来过,可以直接用来启动游戏。";
+    case SXCL_JAVA_RUN_MISSING:
+        return "这个位置没有 Java;如果刚装过,请确认装到了这里。";
+    case SXCL_JAVA_RUN_DENIED:
+        return "这是别的启动器(HMCL/FCL/PojavLauncher)装在它自己私有目录里的 Java。"
+               "安卓不允许一个应用读另一个应用的私有目录,所以检测得到也用不了。"
+               "请在本应用里装一份自己的 Java(设置 - Java - 下载 Java)。";
+    case SXCL_JAVA_RUN_NOEXEC:
+        return "这份 Java 在共享存储(内部存储 /sdcard)上,而共享存储是 noexec 挂载,"
+               "里面的程序起不来。请用「下载 Java」装到应用私有目录。";
+    case SXCL_JAVA_RUN_NOT_EXECUTABLE:
+        return "文件在,但没有执行位(解压/拷贝时丢了 x 权限);用「下载 Java」重装一份即可。";
+    case SXCL_JAVA_RUN_EXEC_FAILED:
+        return "这份 Java 没能跑起来(进程起不来或超时)。请改用「下载 Java」装一份匹配本机"
+               "架构的运行时。";
+    case SXCL_JAVA_RUN_NOT_A_JRE:
+        return "这个文件能执行,但输出里没有 Java 版本 —— 它不是一个 Java 运行时"
+               "(可能是别的程序,或者文件损坏)。";
+    case SXCL_JAVA_RUN_ARCH_MISMATCH:
+        return "这份 Java 的机器码与本机架构不符(例如 arm64 设备上放了 x86 的 java),起不来。"
+               "请下载与本机架构匹配的运行时。";
+    case SXCL_JAVA_RUN_COUNT:
+    default:
+        return "未知情况。";
+    }
+}
+
+static sxcl_java_run_verdict run_verdict_of_access(sxcl_android_access access)
+{
+    switch (access) {
+    case SXCL_ANDROID_OK:             return SXCL_JAVA_RUN_OK;
+    case SXCL_ANDROID_MISSING:        return SXCL_JAVA_RUN_MISSING;
+    case SXCL_ANDROID_DENIED:         return SXCL_JAVA_RUN_DENIED;
+    case SXCL_ANDROID_NOEXEC:         return SXCL_JAVA_RUN_NOEXEC;
+    case SXCL_ANDROID_NOT_EXECUTABLE: return SXCL_JAVA_RUN_NOT_EXECUTABLE;
+    case SXCL_ANDROID_NOT_READABLE:   return SXCL_JAVA_RUN_EXEC_FAILED;
+    case SXCL_ANDROID_ACCESS_COUNT:
+    default:                          return SXCL_JAVA_RUN_MISSING;
+    }
+}
+
+static int java_install_dup(const sxcl_java_installations *out, const char *exe, const char *home)
+{
+    size_t i = 0;
+    for (i = 0; i < out->count; ++i) {
+        if (out->items[i].info.path[0] != '\0' && same_path(out->items[i].info.path, exe)) {
+            return 1;
+        }
+        if (home != NULL && home[0] != '\0' && out->items[i].info.home[0] != '\0' &&
+            same_path(out->items[i].info.home, home)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+size_t sxcl_java_detect(const sxcl_java_env *env, sxcl_java_os os, int timeout_ms,
+                        sxcl_java_installations *out)
+{
+    sxcl_java_env_store store;
+    java_exe_list *list = NULL;
+    size_t i = 0;
+    if (out == NULL) {
+        return 0;
+    }
+    (void)memset(out, 0, sizeof(*out));
+    if (!env) {
+        sxcl_java_env_capture(&store);
+        env = &store.env;
+    }
+    if (timeout_ms <= 0) {
+        timeout_ms = 8000;
+    }
+    list = (java_exe_list *)calloc(1, sizeof(*list));
+    if (!list) {
+        return 0;
+    }
+    java_collect_candidates(env, os, list);
+
+    for (i = 0; i < list->count && out->count < SXCL_JAVA_MAX_INSTALLS; ++i) {
+        const sxcl_java_candidate *cand = &list->items[i];
+        sxcl_java_installation *item = &out->items[out->count];
+        char detail[192];
+        char arch[16];
+        sxcl_android_access access;
+        (void)memset(item, 0, sizeof(*item));
+        item->info.is_64bit = -1;
+        item->info.is_jre = -1;
+        copy_str(item->info.vendor, sizeof(item->info.vendor), "Unknown");
+        item->priority = java_source_priority(cand->source);
+        copy_str(item->source, sizeof(item->source), cand->source);
+        copy_str(item->owner, sizeof(item->owner), cand->owner);
+
+        if (java_install_dup(out, cand->path, cand->home)) {
+            continue;
+        }
+
+        detail[0] = '\0';
+        access = sxcl_android_probe_path(cand->path, 1, detail, sizeof(detail));
+        item->verdict = run_verdict_of_access(access);
+        if (item->verdict != SXCL_JAVA_RUN_OK) {
+            /* 只读体检就判"用不了":别去起进程(安卓上那会是一个注定失败的 200ms) */
+            copy_str(item->info.path, sizeof(item->info.path), cand->path);
+            copy_str(item->info.home, sizeof(item->info.home), cand->home);
+            (void)snprintf(item->reason, sizeof(item->reason), "%s", detail);
+            ++out->count;
+            continue;
+        }
+
+        /* 架构预判:读文件头,不等进程起不来才发现 */
+        arch[0] = '\0';
+        (void)sxcl_java_binary_arch(cand->path, arch, sizeof(arch));
+        if (arch[0] != '\0' && host_arch_accepts(arch) == 0) {
+            item->verdict = SXCL_JAVA_RUN_ARCH_MISMATCH;
+            copy_str(item->info.path, sizeof(item->info.path), cand->path);
+            copy_str(item->info.home, sizeof(item->info.home), cand->home);
+            copy_str(item->info.arch, sizeof(item->info.arch), arch);
+            (void)snprintf(item->reason, sizeof(item->reason),
+                           "可执行文件的机器码是 %s,本机是 %s:%s", arch, sxcl_java_host_arch(),
+                           cand->path);
+            ++out->count;
+            ++out->broken;
+            continue;
+        }
+
+        /* 真的执行一次 */
+        {
+            sxcl_java_info info;
+            (void)memset(&info, 0, sizeof(info));
+            if (sxcl_java_exec_version(cand->path, timeout_ms, &info) == 0 && info.major > 0) {
+                item->verdict = SXCL_JAVA_RUN_OK;
+                item->executed = 1;
+                item->info = info;
+                copy_str(item->info.source, sizeof(item->info.source), cand->source);
+                if (item->info.home[0] == '\0') {
+                    copy_str(item->info.home, sizeof(item->info.home), cand->home);
+                }
+                (void)snprintf(item->reason, sizeof(item->reason),
+                               "实测 java -version 成功:Java %s(%s,%s 位)%s", info.version,
+                               info.vendor,
+                               (info.is_64bit == 1) ? "64" : (info.is_64bit == 0 ? "32" : "?"),
+                               (info.is_jre == 1) ? ",JRE" : (info.is_jre == 0 ? ",JDK" : ""));
+                ++out->usable;
+            } else {
+                item->verdict = SXCL_JAVA_RUN_EXEC_FAILED;
+                if (info.error[0] != '\0' && strstr(info.error, "没找到 version") != NULL) {
+                    item->verdict = SXCL_JAVA_RUN_NOT_A_JRE;
+                }
+                copy_str(item->info.path, sizeof(item->info.path), cand->path);
+                copy_str(item->info.home, sizeof(item->info.home),
+                         (info.home[0] != '\0') ? info.home : cand->home);
+                (void)snprintf(item->reason, sizeof(item->reason), "%s:%s",
+                               (info.error[0] != '\0') ? info.error : "实测失败", cand->path);
+                ++out->broken;
+            }
+        }
+        ++out->count;
+    }
+    free(list);
+
+    /* 排序:来源优先级 -> 主版本(降序)-> 路径(升序),结果稳定可复现 */
+    for (i = 1; i < out->count; ++i) {
+        sxcl_java_installation key = out->items[i];
+        size_t j = i;
+        while (j > 0) {
+            const sxcl_java_installation *prev = &out->items[j - 1];
+            int swap = 0;
+            if (prev->priority < key.priority) {
+                swap = 1;
+            } else if (prev->priority == key.priority && prev->info.major < key.info.major) {
+                swap = 1;
+            } else if (prev->priority == key.priority && prev->info.major == key.info.major &&
+                       strcmp(prev->info.path, key.info.path) > 0) {
+                swap = 1;
+            }
+            if (!swap) {
+                break;
+            }
+            out->items[j] = *prev;
+            --j;
+        }
+        out->items[j] = key;
+    }
+    return out->count;
+}
+
+
 

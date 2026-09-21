@@ -37,6 +37,10 @@
 #include "sxcl/options.h"
 
 static const char *kManifestUrl = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+/* 第二路(BMCLAPI,实测与官方同路径透传)。清单、版本 JSON、客户端 jar、依赖库、
+ * 资源对象都有对应的镜像路径 —— 没接上就等于"配了镜像也不生效"。 */
+static const char *kManifestMirrorUrl =
+    "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json";
 
 typedef struct cli_state {
     int verbose;
@@ -176,6 +180,8 @@ static int usage(void)
            "  sxcl-dl get <url> <dest> [--sha1 HEX] [--size N] [--rate 5MB] [--workers N] [--mirror URL]\n"
            "  sxcl-dl manifest <dest> [--rate 5MB]\n"
            "  sxcl-dl version <版本号|latest> <游戏目录> [--rate 5MB] [--workers N] [--verbose]\n"
+           "      [--mirror URL] [--skip-assets] [--asset-mirror URL]\n"
+           "      └ 清单/版本 JSON/客户端 jar/依赖库:官方为第一路,镜像(默认 BMCLAPI)自动作第二路\n"
            "  sxcl-dl list [--limit N]\n"
            "  sxcl-dl options <options.txt> [--get KEY] [--set KEY=VALUE] [--remove KEY] [--dump]\n"
            "  sxcl-dl loader <forge|neoforge|fabric|quilt|optifine> <加载器版本> <MC 版本> <游戏目录>\n"
@@ -293,12 +299,12 @@ static sxcl_json *fetch_manifest(sxcl_engine *engine, const char *path, size_t p
     memset(&task, 0, sizeof(task));
     task.dest = path;
     task.urls[0] = kManifestUrl;
-    task.urls[1] = NULL;
+    task.urls[1] = kManifestMirrorUrl;
     task.algo = SXCL_HASH_SHA1;
     task.priority = 0;
     task.label = "version_manifest_v2.json";
     if (run_one(engine, &task) != SXCL_TASK_DONE) {
-        fprintf(stderr, "下载版本清单失败: %s\n", task.error);
+        fprintf(stderr, "下载版本清单失败(官方与镜像两条路都不通): %s\n", task.error);
         return NULL;
     }
     (void)path_len;
@@ -494,9 +500,15 @@ static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
     snprintf(vjson_path, sizeof(vjson_path), "%s/%s.json", cache_dir, entry->id);
     sxcl_task vjson;
     memset(&vjson, 0, sizeof(vjson));
+    /* 版本 JSON 的第二路:同一个 URL 的镜像(认不出就没有第二路,不影响官方那条) */
+    char vjson_mirror[1024];
+    vjson_mirror[0] = '\0';
+    if (sxcl_manifest_mirror_url(entry->url, o->mirror, vjson_mirror, sizeof(vjson_mirror)) != 0) {
+        vjson_mirror[0] = '\0';
+    }
     vjson.dest = vjson_path;
     vjson.urls[0] = entry->url;
-    vjson.urls[1] = NULL;
+    vjson.urls[1] = (vjson_mirror[0] != '\0') ? vjson_mirror : NULL;
     vjson.sha1 = entry->sha1;
     vjson.algo = SXCL_HASH_SHA1;
     vjson.size = entry->size;
@@ -544,6 +556,20 @@ static int cmd_version(int argc, char **argv, const cli_opts *opts_in)
     }
 
     /* 4) 第一批:客户端 jar + 资源索引 + 依赖库(优先级已保证索引先下完) */
+    /* 每个文件都补一条镜像路(官方不通时引擎会自己换) —— 只配了清单镜像是没用的。 */
+    {
+        char merr[256];
+        merr[0] = '\0';
+        const int mirrored = sxcl_version_plan_add_mirror(plan, o->mirror, merr, sizeof(merr));
+        if (mirrored < 0) {
+            fprintf(stderr, "补镜像路失败: %s\n", merr);
+        } else {
+            printf("下载镜像: %s(%d 个文件已备好第二路)\n",
+                   (o->mirror != NULL && o->mirror[0] != '\0') ? o->mirror
+                                                                : SXCL_MIRROR_BMCLAPI_BASE,
+                   mirrored);
+        }
+    }
     size_t total = sxcl_version_plan_count(plan);
     printf("第一批计划: %zu 个文件, 共 %.2f MB\n", total,
            (double)sxcl_version_plan_total_bytes(plan) / (1024.0 * 1024.0));

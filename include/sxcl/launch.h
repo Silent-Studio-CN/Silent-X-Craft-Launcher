@@ -196,6 +196,79 @@ size_t sxcl_java_probe_candidates(const sxcl_java_candidate *cands, size_t cand_
 size_t sxcl_java_probe_android(const char *files_dir, const char *shared_root,
                                sxcl_java_report *out);
 
+/* ═══════════════ 1c. 真实执行 `java -version`(不能只看目录名) ═══════════════
+ *
+ * 为什么必须真的起进程:
+ *   * `release` 文件只是**文本**,可以是从别处拷来的、可以是 32 位被换成 64 位的,
+ *     更常见的是"目录名写着 jdk-21,里面其实是另一个版本";
+ *   * 只有 java 自己打印的那一行,才是"这个二进制在这台机器上真的能跑、跑起来是这个版本"。
+ * 所以本节的函数会**真的执行** <path> -version,再把输出解析成画像(major/vendor/arch)。
+ *
+ * 起不来的情形必须**分类**告诉用户,不能静默丢弃:
+ *   * 沙箱拒绝(别的应用私有目录)/ 共享存储 noexec(安卓实测)/ 没有执行位;
+ *   * 能读但读不出 Java 版本(不是 JRE);
+ *   * 架构不符(arm64 设备上放了个 x86 的 java)—— 靠读文件头判,不靠猜。
+ */
+
+/** 一次"实测"的结论(比只读体检的 sxcl_java_verdict 多一层:执行失败/架构不符)。 */
+typedef enum sxcl_java_run_verdict {
+    SXCL_JAVA_RUN_OK = 0,         /**< 真的执行成功,解析出 Java 版本 —— 能用 */
+    SXCL_JAVA_RUN_MISSING,        /**< 这个位置没有东西 */
+    SXCL_JAVA_RUN_DENIED,         /**< 沙箱拒绝(通常是别的应用的私有目录) */
+    SXCL_JAVA_RUN_NOEXEC,         /**< 在 noexec 文件系统上(共享存储),起不了进程 */
+    SXCL_JAVA_RUN_NOT_EXECUTABLE, /**< 有文件,但没有执行位 */
+    SXCL_JAVA_RUN_EXEC_FAILED,    /**< 进程起不来(退出码 127 且无输出)/ 超时 */
+    SXCL_JAVA_RUN_NOT_A_JRE,      /**< 能执行,但输出里认不出 Java 版本 */
+    SXCL_JAVA_RUN_ARCH_MISMATCH,  /**< 可执行文件的机器码与本机不符 */
+    SXCL_JAVA_RUN_COUNT           /**< 枚举计数(不是结论) */
+} sxcl_java_run_verdict;
+
+/** 结论的中文短名("可用"/"不在"/"沙箱拒绝"/"共享存储不能执行"/"没有执行位"/"跑不起来"/"不是 Java"/"架构不符")。 */
+const char *sxcl_java_run_verdict_name(sxcl_java_run_verdict verdict);
+/** 结论的稳定英文键("ok"/"missing"/"denied"/"noexec"/"not_executable"/"exec_failed"/"not_a_jre"/"arch_mismatch")。 */
+const char *sxcl_java_run_verdict_key(sxcl_java_run_verdict verdict);
+/** 一条人话建议(为什么 + 下一步)。永远返回非空串。 */
+const char *sxcl_java_run_verdict_hint(sxcl_java_run_verdict verdict);
+
+/** 一个候选 Java 的实测结果。 */
+typedef struct sxcl_java_installation {
+    sxcl_java_info info;              /**< 画像;实测成功时才有 major/version/vendor/arch */
+    sxcl_java_run_verdict verdict;
+    int executed;                     /**< 1 = 真的执行过 java -version(不是只读了 release) */
+    char source[24];                  /**< 来源键:"JAVA_HOME"/"PATH"/"ProgramFiles"/"AndroidPrivate"… */
+    char owner[64];                   /**< "本应用"/"FCL"/"HMCL"…;桌面通用位置留空 */
+    int priority;                     /**< 排序用:越大越优先(本应用私有目录 > JAVA_HOME > PATH > 扫描) */
+    char reason[192];                 /**< 原始原因(带退出码/errno 原话/路径) */
+} sxcl_java_installation;
+
+#define SXCL_JAVA_MAX_INSTALLS 24
+
+typedef struct sxcl_java_installations {
+    sxcl_java_installation items[SXCL_JAVA_MAX_INSTALLS];
+    size_t count;    /**< 全部条目(含不可用的 —— 用户有权知道为什么没检出来) */
+    size_t usable;   /**< verdict == OK 的条数 */
+    size_t broken;   /**< verdict == ARCH_MISMATCH / NOT_A_JRE / EXEC_FAILED 的条数 */
+} sxcl_java_installations;
+
+/** 真实执行 `<java_exe> -version` 并解析。java_exe 可以是可执行文件,也可以是 JAVA_HOME。
+ *  timeout_ms <= 0 用默认(8 秒)。返回 0 成功(major > 0),-1 失败(out->error 有人话原因)。 */
+int sxcl_java_exec_version(const char *java_exe, int timeout_ms, sxcl_java_info *out);
+
+/** 本机 CPU 架构的归一化名("x64"/"x86"/"arm64"/"arm32")。 */
+const char *sxcl_java_host_arch(void);
+
+/** 读可执行文件的机器码(ELF / PE / Mach-O 文件头),归一化成 "x64"/"x86"/"arm64"/"arm32"。
+ *  **只读文件头,不执行**。认不出(不是可执行文件/读不了)返回 -1 并把 out 置空。 */
+int sxcl_java_binary_arch(const char *path, char *out, size_t out_len);
+
+/** 全链路检测(②的主入口):候选(JAVA_HOME/PATH/各家安装目录/官方 runtime/安卓私有目录,
+ *  与 sxcl_java_discover 同一张表)-> 逐个**真的执行** java -version -> 分类。
+ *  env 传 NULL = 现场抓一份真实环境;timeout_ms <= 0 = 每个候选 8 秒。
+ *  不可用的候选**照样进列表**(带 verdict 与 reason),usable 只数能用的。
+ *  按 priority 降序 -> 主版本降序 -> 路径升序排列。返回 out->count。 */
+size_t sxcl_java_detect(const sxcl_java_env *env, sxcl_java_os os, int timeout_ms,
+                        sxcl_java_installations *out);
+
 /** 版本 JSON 要求的 Java 主版本(javaVersion.majorVersion)。
  *  字段缺失返回 8 —— 官方启动器的行为:1.13 之前一律 Java 8。 */
 int sxcl_java_required_major(const sxcl_json *version_json);

@@ -80,6 +80,28 @@ int sxcl_version_plan_add_asset_objects(sxcl_version_plan *plan, const sxcl_json
                                         const char *game_dir, const char *base_url,
                                         const char *mirror_base, char *err, size_t err_len);
 
+/* ── 镜像(第二路来源)── */
+
+/** BMCLAPI 镜像根。官方清单/版本 JSON/客户端 jar/依赖库/资源对象它都透传。 */
+#define SXCL_MIRROR_BMCLAPI_BASE "https://bmclapi2.bangbang93.com"
+
+/** 把官方 URL 映射成镜像 URL(纯字符串,不联网)。
+ *  前缀映射(认不出的返回 -1,out 置空 —— 调用方就当"这条路没有"):
+ *    launchermeta.mojang.com / piston-meta.mojang.com / piston-data.mojang.com -> <base>
+ *    libraries.minecraft.net                                                  -> <base>/maven
+ *    resources.download.minecraft.net                                         -> <base>/assets
+ *  mirror_base 为空则用 SXCL_MIRROR_BMCLAPI_BASE。
+ *  为什么要有这个:清单与每一个下载文件都要有"官方不通时走镜像"的第二条路,
+ *  否则镜像站配了也只是摆设(用户报过"设了镜像还是下不动")。 */
+int sxcl_manifest_mirror_url(const char *url, const char *mirror_base, char *out, size_t out_len);
+
+/** 给计划里**还没有第二候选**的任务补一条镜像 URL(用 sxcl_manifest_mirror_url 映射)。
+ *  官方不通时引擎会自己换到这条路。返回补上的条数,<0 表示失败(err 有原因)。
+ *  理由:清单里每个文件的 URL 都是官方域名;用户配了镜像却只作用于清单本身,等于没生效
+ *  (用户报过"设了镜像还是下不动")。plan 会接管这些字符串的生命周期(与其它任务字段一致)。 */
+int sxcl_version_plan_add_mirror(sxcl_version_plan *plan, const char *mirror_base, char *err,
+                                 size_t err_len);
+
 /** 本机平台名,与 Mojang rules 里的 os.name 一致:"windows" / "linux" / "osx"。 */
 const char *sxcl_platform_os_name(void);
 
