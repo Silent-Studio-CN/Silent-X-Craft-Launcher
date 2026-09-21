@@ -1563,15 +1563,9 @@ void SettingsPage::buildContent() {
 
     QStringList sourceTexts = textList(kSourceTexts, 3); // :252
     QStringList sourceValues = stringList(kSourceValues, 3);
-    // 验收夹具:仅当环境变量 SXCL_UI_TALLMENU=N(N>0)时,给「版本下载源」下拉追加 N 个测试项,
-    // 用来在真机上验证「弹层内部可拖动滚动」。默认(变量未设)完全不生效,不影响任何正常路径。
-    {
-        const int extra = qEnvironmentVariableIntValue("SXCL_UI_TALLMENU");
-        for (int i = 0; i < extra; ++i) {
-            sourceTexts << QStringLiteral("测试源 %1").arg(i + 1);
-            sourceValues << QStringLiteral("testsrc%1").arg(i + 1);
-        }
-    }
+    // 这里原来有一个验收夹具:设 SXCL_UI_TALLMENU=N 就给「版本下载源」追加 N 个"测试源"。
+    // 用户明确要求删掉("把测试源删掉")—— 一个用户看得见的设置项里混进测试条目,
+    // 不管开关默认关不关,都是不该留的东西。弹层内部滚动的验收另有别的通路(超高弹层用例)。
     m_sourceCard = new ComboBoxSettingCard( // :246-253
         FluentIcon::qicon(FluentIcon::DOWNLOAD), QStringLiteral("版本下载源"),
         QStringLiteral("选择版本清单与资源文件的下载源"), sourceTexts, sourceValues,

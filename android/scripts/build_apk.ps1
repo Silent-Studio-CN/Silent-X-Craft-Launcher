@@ -122,6 +122,40 @@ if (-not $NoGradleOverlay) {
 robocopy (Join-Path $Stage 'pkg\assets') (Join-Path $OUT 'assets') /E /NFL /NDL /NJH /NJS /NP | Out-Null
 L ('assets in gradle project: ' + (Get-ChildItem (Join-Path $OUT 'assets') -Recurse -File).Count)
 
+# ---- TLS self-check -------------------------------------------------------
+# Measured defect (2026-09-21): the APK contained libQt6Network but NO tls
+# backend and no OpenSSL, so EVERY https request failed on the device
+# ("network request failed" from both the official source and BMCLAPI).
+# Three files have to end up in libs/arm64-v8a/ (= APK lib/arm64-v8a/).
+# android-extra-libs in deployment-settings.json normally does the last two;
+# this loop verifies it and copies them itself if it did not, so the APK can
+# never silently ship without TLS again.
+$tlsNeeded = @(
+  'libplugins_tls_qopensslbackend_arm64-v8a.so',
+  'libssl_3.so',
+  'libcrypto_3.so')
+$libDir = Join-Path $OUT 'libs\arm64-v8a'
+New-Item -ItemType Directory -Force -Path $libDir | Out-Null
+foreach ($n in $tlsNeeded) {
+  $dst = Join-Path $libDir $n
+  if (Test-Path $dst) {
+    L ('tls ok        : ' + $n + '  ' + (Get-Item $dst).Length)
+    continue
+  }
+  $srcQt  = Join-Path $QtAndroid ('plugins\tls\' + $n)
+  $srcPre = Join-Path $Repo ('android\prebuilt\arm64-v8a\' + $n)
+  if (Test-Path $srcQt) {
+    Copy-Item $srcQt $dst -Force
+    L ('tls FALLBACK  : copied from the Qt kit -> ' + $n)
+  } elseif (Test-Path $srcPre) {
+    Copy-Item $srcPre $dst -Force
+    L ('tls FALLBACK  : copied from android/prebuilt -> ' + $n)
+  } else {
+    L ('tls MISSING   : ' + $n + ' (no source found) -- aborting, https would break silently')
+    exit 3
+  }
+}
+
 $gradle = (Get-ChildItem (Join-Path $GradleHome 'wrapper\dists') -Recurse -Filter 'gradle.bat' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
 L ('gradle          : ' + $gradle)
 & $gradle --project-dir $OUT assembleDebug

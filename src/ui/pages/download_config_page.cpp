@@ -7,10 +7,13 @@
 #include "page_factory.h"
 
 #include <QAbstractButton>
+#include <QByteArray>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -18,18 +21,23 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMetaObject>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPointer>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QStringList>
 #include <QStyle>
 #include <QStyledItemDelegate>
+#include <QThread>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include <functional>
 #include <optional>
+#include <vector>
 
 #if defined(_MSC_VER)
 #pragma warning(push, 0) // libqf 是外部依赖,头文件在 /W4 下不干净(见 libqf.h 的说明)
@@ -47,7 +55,11 @@
 #include "sxcl_icons.h"
 
 #include "workers/ui_error.h"  // 统一错误出口(完整上下文 + 自动复制剪贴板)
-#include "workers/ui_paths.h" // 游戏目录的唯一一份解析(与安装 worker 同口径)
+#include "workers/ui_paths.h" // 游戏目录/下载源/追踪的唯一一份口径(与安装 worker 同口径)
+
+// ── 核心库(纯 C)—— 加载器版本目录的取数/解析全走这里,界面层不自己认格式 ──
+#include "sxcl/loader_catalog.h" // sxcl_catalog_fetch/url/format_of + sxcl_loader_kind
+#include "sxcl/net.h"            // sxcl_transport_qt_create(Qt 传输后端,工作线程里建/释放)
 
 namespace sxcl::ui {
 namespace {
@@ -222,6 +234,180 @@ struct LoaderVersionItem {
     bool recommended = false;
     bool beta = false;
 };
+
+// ───────────── 加载器版本目录的取数层(include/sxcl/loader_catalog.h)─────────────
+//
+// 这一页以前只有"显示层":LoaderRow 有 setLoading/setVersions/setError,但**没有任何**
+// 取数代码,四个加载器行于是永远停在"加载中…"(用户报过两次)。取数/解析一律交给核心库的
+// 目录服务,界面层只做三件事:按设置排候选源、在工作线程里取、把结果原样回填。
+//
+// 线程口径(与 versions_page.cpp 的 loadVersions 同款):工作线程里
+// sxcl_transport_qt_create() -> sxcl_catalog_fetch() -> QMetaObject::invokeMethod 回主线程;
+// **主线程绝不联网、绝不阻塞**。传输后端有线程亲和性,所以谁建的谁释放(见下面 tr->destroy)。
+
+// 与下载引擎(engine.c 的 SXCL_DEFAULT_UA)同一份 UA:OptiFine 官网对没有 UA 的请求不客气。
+const char *const kCatalogUserAgent =
+    "User-Agent: SilentXCraftLauncher/1.0 (+https://github.com/Silent-Studio-CN)";
+
+// 每行最多收多少条。实测:Forge 1.20.1 有 130+ 条、Fabric 对 1.20.1 有 250+ 条、
+// NeoForge 的 21.1.x 有 240+ 条;512 条 × 412 字节 ≈ 211 KB,在工作线程的堆上分配。
+constexpr size_t kCatalogMaxEntries = 512;
+
+// 一个来源的取数结论 —— **缓存的最小单位**,键 = (加载器, MC 版本, 来源)。
+struct LoaderCatalogSourceResult {
+    bool ok = false;                     // 取到了并且解析出至少一条
+    QString error;                       // 失败原因(人话:网络/状态码/一条都没解析出来)
+    QVector<LoaderVersionItem> versions; // 成功时的候选(顺序与"最新/推荐/Beta"标记都由核心库给)
+};
+
+// 工作线程带回来的一次尝试(纯数据;怎么用由主线程决定)。
+struct LoaderCatalogAttempt {
+    sxcl_catalog_source source = SXCL_CATALOG_SRC_OFFICIAL;
+    bool ok = false;
+    QString error;
+    QVector<LoaderVersionItem> versions;
+};
+
+QString catalogSourceName(sxcl_catalog_source source) {
+    return source == SXCL_CATALOG_SRC_MIRROR ? QStringLiteral("mirror")
+                                             : QStringLiteral("official");
+}
+
+QString catalogFormatName(sxcl_catalog_format format) {
+    switch (format) {
+    case SXCL_CATALOG_FMT_MAVEN_XML:
+        return QStringLiteral("maven-xml");
+    case SXCL_CATALOG_FMT_META_JSON:
+        return QStringLiteral("meta-json");
+    case SXCL_CATALOG_FMT_OPTIFINE_JSON:
+        return QStringLiteral("optifine-json");
+    case SXCL_CATALOG_FMT_OPTIFINE_HTML:
+        return QStringLiteral("optifine-html");
+    case SXCL_CATALOG_FMT_NONE:
+    default:
+        return QStringLiteral("none");
+    }
+}
+
+// 源按设置走(workers/ui_paths.h 的 uiDownloadSource(),默认 "bmclapi"):
+//   bmclapi / auto -> 先 MIRROR,不通再 OFFICIAL
+//   mojang         -> 先 OFFICIAL,不通再 MIRROR
+// 两条都试,只是顺序不同 —— 换源由这个顺序决定,不需要开关。
+QVector<int> catalogSourceOrder(const QString &setting) {
+    QVector<int> order;
+    if (setting.compare(QLatin1String("mojang"), Qt::CaseInsensitive) == 0) {
+        order << SXCL_CATALOG_SRC_OFFICIAL << SXCL_CATALOG_SRC_MIRROR;
+    } else {
+        order << SXCL_CATALOG_SRC_MIRROR << SXCL_CATALOG_SRC_OFFICIAL;
+    }
+    return order;
+}
+
+// 核心库的条目 -> 界面行的数据结构。只搬运:**不排序、不重排标记**
+// (顺序、最新/推荐/Beta 都是 sxcl_catalog_prepare 给的,界面里再排一遍就会两边不一致)。
+QVector<LoaderVersionItem> catalogToItems(const std::vector<sxcl_catalog_entry> &entries,
+                                          size_t count) {
+    QVector<LoaderVersionItem> items;
+    items.reserve(static_cast<int>(count));
+    for (size_t i = 0; i < count; ++i) {
+        const sxcl_catalog_entry &entry = entries[i];
+        if (entry.version[0] == '\0')
+            continue;
+        LoaderVersionItem item;
+        item.version = QString::fromUtf8(entry.version);
+        QStringList detail;
+        if (entry.released[0] != '\0')
+            detail << QString::fromUtf8(entry.released);
+        if (entry.forge[0] != '\0') // OptiFine:配套的 Forge 版本
+            detail << QStringLiteral("Forge %1").arg(QString::fromUtf8(entry.forge));
+        item.detail = detail.join(QStringLiteral(" · "));
+        item.recommended = entry.is_recommended != 0;
+        item.beta = entry.is_beta != 0;
+        items.append(item);
+    }
+    return items;
+}
+
+// 一条来源的取数:**在工作线程里跑**,不碰任何界面对象。
+// 用 sxcl_catalog_format_of() 先问清"这个源给的是哪种格式"(两家格式不一样:
+// Forge/NeoForge 是 maven-metadata.xml、Fabric 是 meta JSON、OptiFine 官方是网页/镜像是 JSON),
+// FMT_NONE = 这个源压根没有这个加载器的接口 —— 如实报,不去猜格式。
+LoaderCatalogAttempt fetchCatalogSource(sxcl_transport *tr, sxcl_loader_kind kind,
+                                        const QString &kindId, const QString &mc,
+                                        sxcl_catalog_source source) {
+    LoaderCatalogAttempt attempt;
+    attempt.source = source;
+    const QString sourceName = catalogSourceName(source);
+    const sxcl_catalog_format format = sxcl_catalog_format_of(kind, source);
+    const QString formatName = catalogFormatName(format);
+    QElapsedTimer timer;
+    timer.start();
+    size_t count = 0;
+    QString failure;
+    std::vector<sxcl_catalog_entry> entries(kCatalogMaxEntries);
+    if (format == SXCL_CATALOG_FMT_NONE) {
+        failure = QStringLiteral("这个来源没有该加载器的版本接口");
+    } else {
+        const char *const headers[2] = {kCatalogUserAgent, nullptr};
+        char err[SXCL_HTTP_ERROR_MAX] = {0};
+        sxcl_catalog_doc_info info{};
+        const QByteArray mcUtf8 = mc.toUtf8();
+        const int rc = sxcl_catalog_fetch(tr, kind, source, mcUtf8.constData(), headers, &info,
+                                          entries.data(), kCatalogMaxEntries, &count, err,
+                                          sizeof(err));
+        if (rc == SXCL_CATALOG_OK && count > 0) {
+            attempt.ok = true;
+            attempt.versions = catalogToItems(entries, count);
+        } else {
+            failure = QString::fromUtf8(err[0] != '\0' ? err : "列表是空的");
+        }
+    }
+    attempt.error = failure;
+    // 验收通路(Android 上看 logcat 也是这一行):count=0 与失败都要打,失败带真实原因。
+    uiTrace(QStringLiteral("【loader | kind=%1 mc=%2 source=%3 count=%4 ms=%5 format=%6%7】")
+                .arg(kindId, mc, sourceName, QString::number(static_cast<qulonglong>(count)),
+                     QString::number(timer.elapsed()), formatName,
+                     failure.isEmpty() ? QString() : QStringLiteral(" error=") + failure));
+    return attempt;
+}
+
+// 工作线程入口:把"这一轮要试的源"跑完,结果整包带回去(成功与否由主线程按缓存决定)。
+QVector<LoaderCatalogAttempt> fetchCatalogAttempts(const QString &kindId, const QString &mc,
+                                                   const QVector<int> &sources) {
+    QVector<LoaderCatalogAttempt> attempts;
+    attempts.reserve(sources.size());
+#if defined(SXCL_UI_HAVE_QT_TRANSPORT)
+    const sxcl_loader_kind kind = sxcl_loader_kind_from_id(kindId.toUtf8().constData());
+    sxcl_transport *tr = sxcl_transport_qt_create();
+    if (tr != nullptr) {
+        for (int value : sources) {
+            attempts.append(fetchCatalogSource(tr, kind, kindId, mc,
+                                               static_cast<sxcl_catalog_source>(value)));
+        }
+        tr->destroy(tr->ctx); // 传输后端有线程亲和性:谁建的谁在这个线程里释放
+        return attempts;
+    }
+    // 后端都建不出来:**如实说**,绝不用空列表假装成功
+    for (int value : sources) {
+        LoaderCatalogAttempt attempt;
+        attempt.source = static_cast<sxcl_catalog_source>(value);
+        attempt.error = QStringLiteral("没有可用的网络后端(sxcl_net_qt 未链接)");
+        uiTrace(QStringLiteral("【loader | kind=%1 mc=%2 source=%3 count=0 ms=0 error=%4】")
+                    .arg(kindId, mc, catalogSourceName(attempt.source), attempt.error));
+        attempts.append(attempt);
+    }
+#else
+    for (int value : sources) {
+        LoaderCatalogAttempt attempt;
+        attempt.source = static_cast<sxcl_catalog_source>(value);
+        attempt.error = QStringLiteral("本产物没有编译进 Qt 传输后端(sxcl_net_qt)");
+        uiTrace(QStringLiteral("【loader | kind=%1 mc=%2 source=%3 count=0 ms=0 error=%4】")
+                    .arg(kindId, mc, catalogSourceName(attempt.source), attempt.error));
+        attempts.append(attempt);
+    }
+#endif
+    return attempts;
+}
 
 // loader_row.py:51-129 LoaderVersionDelegate:一行 = 主信息(加粗)+ 次要信息(右对齐)
 // + 右起的小胶囊标签;选中用 accent 描边 + 半透明底,悬停用 hover 令牌色。
@@ -420,6 +606,10 @@ public:
         }
     }
 
+    // 取证用的只读访问(页面把"界面真的拿到了"写进追踪时要读这两个值)。不改任何状态。
+    QString summaryText() const { return m_summary->text(); }
+    int listCount() const { return m_list->count(); }
+
     void setLoading(bool loading) {                                   // :266-271
         m_loading = loading;
         if (loading) {
@@ -595,6 +785,14 @@ private:
 
 // ───────────────────────── 页面本体(download_config_page.py:121-550)─────────────────────
 
+// 一行加载器的取数状态(只在主线程读写)。
+struct LoaderRowFetchState {
+    bool busy = false;    // 这一行正在取数(工作线程还没回来)
+    bool hasData = false; // 拿到过非 0 条
+    bool failed = false;  // 上一次取数失败 —— 用户再展开这一行就是"重试"
+    QString mc;           // 界面上这份数据属于哪个 MC 版本(证据行里要打出来)
+};
+
 class DownloadConfigPage : public ScrollArea {
 public:
     DownloadConfigPage(const VersionRef &version, QWidget *parent)
@@ -625,8 +823,14 @@ public:
         // :125 subtitle="" 且**没有** hide()(与另外两个临时页不同)
         m_vBox->addWidget(new SubtitleLabel(QString(), m_view));
 
+        // 下载源只读一次(与其它页同口径:改设置要重开页面才生效)—— 取数层按它排候选顺序。
+        m_sourceSetting = uiDownloadSource();
         buildContent();                                        // :143
         styleNameInput(QStringLiteral("normal"));              // :144
+        // 取数:(b) 当前选中的 MC 版本 = m_versionId,页面就是按它建出来的;
+        // 四行各自取一次(工作线程)。缓存键里带 mc,所以换了版本(新页面/新实例)时
+        // 旧版本的数据绝不会被顶上来。已拿到的不会重复联网(见 requestLoaderVersions)。
+        preloadLoaderCatalogs();
 
         connect(&FluentTheme::instance(), &FluentTheme::changed, this, [this] {
             // :149-151 主题切换时把"按状态重算"的样式再套一遍
@@ -730,6 +934,11 @@ private:
             if (other != row && other->isExpanded())
                 other->setExpanded(false);
         }
+        // (a) 用户展开这一行 -> 取数:已经拿到的**不重复取**;上一次失败的按"再点一次"重试
+        // (Python 的 expanded 信号 -> _load_versions 就是这条)。
+        if (row != nullptr)
+            requestLoaderVersions(row->loaderType(),
+                                  m_catalogState.value(row->loaderType()).failed);
     }
 
     // :304-310 选中一个加载器后,别的行里已选的清掉
@@ -875,6 +1084,154 @@ private:
         pushUiError(this, ctx, 8000);
     }
 
+    // ───────────────────── 加载器版本目录:界面侧的取数/回填 ─────────────────────
+    //
+    // 三件事分开清楚(以前是整条缺失,所以四行永远"加载中…"):
+    //   1) 什么时候取:(a) 用户展开那一行;(b) 页面为当前选中的 MC 版本建出来(构造后统一预取)。
+    //   2) 取什么/怎么取:工作线程 + 核心库目录服务(取数层在文件上半部分)。
+    //   3) 什么时候不取:同一个 (加载器, MC, 来源) 已经有结论就**不重复联网**;
+    //      失败过的只有"用户再点开这一行"才重试(不是无限重试)。
+    // 缓存与状态都**只在主线程**读写(工作线程只带回结果),不共享、不加锁。
+
+    LoaderRow *rowForKind(const QString &kindId) const {
+        for (LoaderRow *row : m_loaderRows) {
+            if (row->loaderType() == kindId)
+                return row;
+        }
+        return nullptr;
+    }
+
+    // 缓存键:(加载器, MC 版本, 来源)。换 MC 版本 = 键变了 = 自动重取。
+    QString catalogCacheKey(const QString &kindId, int source) const {
+        return QStringLiteral("%1|%2|%3").arg(kindId, m_versionId, QString::number(source));
+    }
+
+    // 页面构造后:四行各取一次(缓存里已有结论的会直接回填,不联网)。
+    void preloadLoaderCatalogs() {
+        for (LoaderRow *row : m_loaderRows)
+            requestLoaderVersions(row->loaderType(), false);
+    }
+
+    // 取数的唯一入口。retry 只由"用户又点开这一行"带进来。
+    void requestLoaderVersions(const QString &kindId, bool retry) {
+        LoaderRowFetchState &state = m_catalogState[kindId];
+        if (state.busy)
+            return; // 正在取:不重复取
+        // 这一行已经有**当前 MC 版本**的数据:既不再联网,也不重建列表
+        // (重建会把用户已经选中的版本重置成第一条)。
+        if (state.hasData && state.mc == m_versionId && !retry)
+            return;
+        const QVector<int> order = catalogSourceOrder(m_sourceSetting);
+        QVector<int> pending;
+        for (int source : order) {
+            const auto it = m_catalogCache.constFind(catalogCacheKey(kindId, source));
+            if (it == m_catalogCache.constEnd()) {
+                pending.append(source); // 这一路没取过 -> 联网
+                continue;
+            }
+            if (it->ok)
+                continue; // 已经拿到 -> 不重复取
+            if (retry)
+                pending.append(source); // 失败过 + 用户又点开这一行 -> 重试
+        }
+        if (pending.isEmpty()) {
+            fillLoaderRow(kindId); // 缓存里已经有结论:直接回填,一个字节都不联网
+            return;
+        }
+        if (LoaderRow *row = rowForKind(kindId))
+            row->setLoading(true); // 取数期间如实显示"加载中…"
+        state.busy = true;
+
+        const QString mc = m_versionId;
+        // 页面可能在取数期间被销毁(会话池淘汰临时页)。QPointer + 以页面为 context 的
+        // invokeMethod:页面没了就不回填,绝不拿悬空指针去碰界面。
+        QPointer<DownloadConfigPage> guard(this);
+        auto *thread = QThread::create([guard, kindId, mc, pending] {
+            const QVector<LoaderCatalogAttempt> attempts = fetchCatalogAttempts(kindId, mc, pending);
+            if (guard.isNull())
+                return;
+            QMetaObject::invokeMethod(
+                guard.data(),
+                [guard, kindId, mc, attempts] {
+                    if (!guard.isNull())
+                        guard->onLoaderCatalogLoaded(kindId, mc, attempts);
+                },
+                Qt::QueuedConnection);
+        });
+        connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
+    }
+
+    // 工作线程回来(主线程):先把每一路的结果记进缓存,再回填界面。
+    void onLoaderCatalogLoaded(const QString &kindId, const QString &mc,
+                               const QVector<LoaderCatalogAttempt> &attempts) {
+        for (const LoaderCatalogAttempt &attempt : attempts) {
+            LoaderCatalogSourceResult entry;
+            entry.ok = attempt.ok;
+            entry.error = attempt.error;
+            entry.versions = attempt.versions;
+            m_catalogCache.insert(catalogCacheKey(kindId, static_cast<int>(attempt.source)), entry);
+        }
+        LoaderRowFetchState &state = m_catalogState[kindId];
+        state.busy = false;
+        state.mc = mc;
+        fillLoaderRow(kindId);
+    }
+
+    // 用缓存里的结论回填一行(**不联网**)。源顺序按设置走:第一条能用的就用它;
+    // 两条都不行 -> setError 写**两路的真实原因**(不是"加载失败"这种空话)。
+    void fillLoaderRow(const QString &kindId) {
+        LoaderRow *row = rowForKind(kindId);
+        if (row == nullptr)
+            return;
+        LoaderRowFetchState &state = m_catalogState[kindId];
+        const QVector<int> order = catalogSourceOrder(m_sourceSetting);
+        QStringList failures;
+        for (int source : order) {
+            const auto it = m_catalogCache.constFind(catalogCacheKey(kindId, source));
+            if (it == m_catalogCache.constEnd())
+                continue; // 这一路还没取过(排在成功那一路后面,或本轮没轮上)
+            if (it->ok) {
+                state.hasData = true;
+                state.failed = false;
+                state.mc = m_versionId;
+                row->setVersions(it->versions); // 顺序/标记都是核心库给的,这里不再排一遍
+                uiTrace(QStringLiteral("【loader-ui | kind=%1 mc=%2 source=%3 rows=%4 summary=%5】")
+                            .arg(kindId, m_versionId,
+                                 catalogSourceName(static_cast<sxcl_catalog_source>(source)),
+                                 QString::number(row->listCount()), row->summaryText()));
+                if (kindId == QLatin1String("optifine"))
+                    updateOptifineStatus(true, static_cast<int>(it->versions.size()));
+                return;
+            }
+            failures << QStringLiteral("%1: %2")
+                            .arg(catalogSourceName(static_cast<sxcl_catalog_source>(source)),
+                                 it->error);
+        }
+        state.hasData = false;
+        state.failed = true;
+        const QString reason = failures.isEmpty() ? QStringLiteral("取不到加载器版本列表")
+                                                  : failures.join(QStringLiteral("; "));
+        row->setError(reason);
+        uiTrace(QStringLiteral("【loader-ui | kind=%1 mc=%2 rows=0 summary=%3】")
+                    .arg(kindId, m_versionId, reason));
+        if (kindId == QLatin1String("optifine"))
+            updateOptifineStatus(false, 0);
+    }
+
+    // OptiFine 状态行(docs/04-页面规格.md §2.7):初始"检测中…" -> 有数据 "✅ 支持"(success)
+    // / 无数据 "—"(tertiary)。它以前永远停在"检测中…",因为没人给它结论。
+    void updateOptifineStatus(bool ok, int count) {
+        if (m_optifineStatus == nullptr)
+            return;
+        const bool supported = ok && count > 0;
+        const ThemeTokens &tokens = FluentTheme::instance().tokens();
+        m_optifineStatus->setText(supported ? QStringLiteral("✅ 支持") : QStringLiteral("—"));
+        m_optifineStatus->setTextColor(supported ? tokens.success : tokens.textTertiary);
+        uiTrace(QStringLiteral("【loader-ui | kind=optifine mc=%1 count=%2 status=%3】")
+                    .arg(m_versionId, QString::number(count), m_optifineStatus->text()));
+    }
+
     QString m_versionId;
     QWidget *m_view = nullptr;
     QVBoxLayout *m_vBox = nullptr;
@@ -890,6 +1247,11 @@ private:
     QString m_selectedLoaderVersion;
     bool m_nameTaken = false;      // :138
     bool m_userEditedName = false; // :139
+
+    // 加载器取数层(文件上半部分 fetchCatalogAttempts 的调用方)
+    QString m_sourceSetting;                               // 页面打开时的下载源(uiDownloadSource)
+    QHash<QString, LoaderCatalogSourceResult> m_catalogCache; // 键 = (加载器, MC, 来源)
+    QHash<QString, LoaderRowFetchState> m_catalogState;      // 每一行的取数状态
 };
 
 } // namespace

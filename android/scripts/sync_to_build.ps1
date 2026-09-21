@@ -68,6 +68,11 @@ $cand = @(
   'plugins/platforms/libplugins_platforms_qtforandroid_arm64-v8a.so',
   'plugins/platforms/libplugins_platforms_qoffscreen_arm64-v8a.so',
   'plugins/styles/libplugins_styles_qandroidstyle_arm64-v8a.so',
+  # TLS: WITHOUT this plugin Android has NO https backend at all (measured on the
+  # device: the APK had libQt6Network but no tls plugin, so every https request
+  # failed). The plugin loads libssl_3.so / libcrypto_3.so at runtime via dlopen,
+  # and those two are NOT in the Android NDK, hence android-extra-libs below.
+  'plugins/tls/libplugins_tls_qopensslbackend_arm64-v8a.so',
   'plugins/imageformats/libplugins_imageformats_qsvg_arm64-v8a.so',
   'plugins/imageformats/libplugins_imageformats_qjpeg_arm64-v8a.so',
   'plugins/imageformats/libplugins_imageformats_qgif_arm64-v8a.so',
@@ -92,6 +97,12 @@ $ds = $ds -replace '@QT_ANDROID@', $qtAndroidFwd
 $ds = $ds -replace '@SDK@', $Sdk
 $ds = $ds -replace '@BUILD_TOOLS@', $BuildTools
 $ds = $ds -replace '@DEPLOYMENT_DEPENDENCIES@', ([string]::Join(',', $keep))
+# OpenSSL 3 for Android (libssl_3.so / libcrypto_3.so) is NOT in the NDK and NOT in the
+# Qt kit: it is the prebuilt pair committed under android/prebuilt/arm64-v8a/.
+# Order matters: libcrypto BEFORE libssl (androiddeployqt's docs: a library listed
+# before its dependencies fails to load on some devices).
+$prebuilt = (Join-Path $And 'prebuilt\arm64-v8a') -replace '\\','/'
+$ds = $ds -replace '@ANDROID_EXTRA_LIBS@', ($prebuilt + '/libcrypto_3.so,' + $prebuilt + '/libssl_3.so')
 Set-Content -Path (Join-Path $Pkg 'deployment-settings.json') -Value $ds -Encoding ASCII -NoNewline
 L ('deployment-settings.json written (deps=' + $keep.Count + ')')
 
