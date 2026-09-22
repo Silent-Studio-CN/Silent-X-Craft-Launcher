@@ -61,6 +61,39 @@ sxcl_task *sxcl_version_plan_task(sxcl_version_plan *plan, size_t index);
 /** 计划里所有任务的期望字节总数(进度显示用)。 */
 int64_t sxcl_version_plan_total_bytes(const sxcl_version_plan *plan);
 
+/* ── 把计划跑一遍(启动前"补全文件"的核心) ── */
+
+#define SXCL_FETCH_OK        0   /**< 全部就绪(含"本来就都在",一个字节都没下) */
+#define SXCL_FETCH_PARTIAL   1   /**< 有文件没下成(调用方通常只报告,不拦流程) */
+#define SXCL_FETCH_CANCELLED 2   /**< 被回调叫停 */
+#define SXCL_FETCH_ERR_ARG  (-1) /**< 参数不合法(典型:没有传输后端) */
+#define SXCL_FETCH_ERR_IO   (-2) /**< 引擎建不起来 / 任务入不了队 */
+
+/** 跑完一遍之后的统计 —— **全是结构化字段**,不要去比 error 里的中文文案
+ *  (改一次文案就会静默把统计打回 0,这是引擎层已经踩过的坑)。 */
+typedef struct sxcl_fetch_stats {
+    int total;          /**< 计划里的文件数 */
+    int downloaded;     /**< 真的下下来的 */
+    int failed;         /**< 下失败的 */
+    int skipped;        /**< 命中"已存在且校验通过"、一个字节都没下的 */
+    int64_t bytes_done; /**< 这次真的写下去的字节数(命中的不算) */
+} sxcl_fetch_stats;
+
+/** 把计划里的所有任务交给下载引擎跑一遍。
+ *
+ *  为什么要有它:PCL 的"补全文件"就是"把需要哪些文件算出来交给下载器";而我们的下载器
+ *  (engine.h)已经在安装流程里跑了很久 —— 镜像候选 / 多路重试 / 分片 / 限速 / 断点续传 /
+ *  哈希缓存都在里面。启动前补全只是**同一套东西跑另一份计划**,不该再写第二份实现。
+ *  "齐了一个字节都不下"这条性质由引擎的"已存在且校验通过"快路径保证,统计看 skipped。
+ *
+ *  opts 必须有 transport_factory(见 engine.h:75-92);opts->on_progress 会被**转发**
+ *  (调用方靠它显示进度;从工作线程调用,实现里别做重活)。
+ *  is_cancelled 可空:每落定一个文件问一次,非 0 → 叫停引擎并返回 SXCL_FETCH_CANCELLED。
+ *  返回 SXCL_FETCH_*;人话原因写 err(可空);stats 可空。 */
+int sxcl_version_plan_fetch(sxcl_version_plan *plan, const sxcl_engine_opts *opts,
+                            int (*is_cancelled)(void *ud), void *cancel_ud, sxcl_fetch_stats *stats,
+                            char *err, size_t err_len);
+
 /* ── 资源对象(assets/objects) ── */
 
 /** 官方资源对象 CDN:路径规则 <base>/<哈希前2位>/<哈希>。

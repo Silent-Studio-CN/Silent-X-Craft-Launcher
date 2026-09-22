@@ -10,6 +10,7 @@
 
 #include "sxcl/manifest.h"
 
+#include "sxcl/engine.h" /* sxcl_version_plan_fetch:启动前"补全文件"要跑下载引擎 */
 #include "sxcl/fs.h"
 
 #include <stdio.h>
@@ -719,3 +720,137 @@ int64_t sxcl_version_plan_total_bytes(const sxcl_version_plan *plan)
     }
     return total;
 }
+
+/* ══════════════════════ 把计划跑一遍(启动前"补全文件") ══════════════════════ */
+
+/** 进度/取消的桥:调用方的 on_progress 要转发(它靠这个显示进度),取消要从这里叫停引擎。 */
+typedef struct fetch_bridge {
+    const sxcl_engine_opts *opts; /**< 调用方原始 opts:进度回调从这儿转发 */
+    sxcl_engine *engine;
+    int (*is_cancelled)(void *ud);
+    void *cancel_ud;
+    int stop;
+} fetch_bridge;
+
+/** 传输后端工厂的**转发**:引擎会用 opts->userdata 去调工厂(见 engine.h 的说明),
+ *  而我们为了进度桥必须把 userdata 换成 fetch_bridge —— 那样工厂就拿不到调用方自己的
+ *  userdata 了(调用方可能在里面放了服务器/连接池;本次实测就是"假后端把 bridge 当自己
+ *  的结构体写 → 直接崩")。所以这里显式转发回**调用方那一份**。 */
+static sxcl_transport *fetch_transport_factory(void *userdata)
+{
+    fetch_bridge *b = (fetch_bridge *)userdata;
+    return b->opts->transport_factory(b->opts->userdata);
+}
+
+static void fetch_on_progress(void *userdata, const sxcl_task *task)
+{
+    fetch_bridge *b = (fetch_bridge *)userdata;
+    if (b->opts->on_progress) {
+        b->opts->on_progress(b->opts->userdata, task); /**< 原样转发 */
+    }
+    if (b->stop) {
+        return;
+    }
+    if (b->is_cancelled && b->is_cancelled(b->cancel_ud)) {
+        b->stop = 1;
+        sxcl_engine_cancel(b->engine);
+    }
+}
+
+int sxcl_version_plan_fetch(sxcl_version_plan *plan, const sxcl_engine_opts *opts,
+                            int (*is_cancelled)(void *ud), void *cancel_ud, sxcl_fetch_stats *stats,
+                            char *err, size_t err_len)
+{
+    if (err && err_len) {
+        err[0] = '\0';
+    }
+    if (stats) {
+        memset(stats, 0, sizeof(*stats));
+    }
+    if (!plan || !opts || !opts->transport_factory) {
+        if (err && err_len) {
+            (void)snprintf(err, err_len, "没有配置传输后端(engine_opts.transport_factory 为空)");
+        }
+        return SXCL_FETCH_ERR_ARG;
+    }
+
+    const size_t count = sxcl_version_plan_count(plan);
+    if (stats) {
+        stats->total = (int)count;
+    }
+    if (count == 0) {
+        return SXCL_FETCH_OK;
+    }
+
+    fetch_bridge bridge;
+    memset(&bridge, 0, sizeof(bridge));
+    bridge.opts = opts;
+    bridge.is_cancelled = is_cancelled;
+    bridge.cancel_ud = cancel_ud;
+
+    sxcl_engine_opts local = *opts;
+    local.on_progress = fetch_on_progress;
+    local.transport_factory = fetch_transport_factory; /* 见上面的转发理由 */
+    local.userdata = &bridge;
+
+    sxcl_engine *engine = sxcl_engine_create(&local);
+    if (!engine) {
+        if (err && err_len) {
+            (void)snprintf(err, err_len, "创建下载引擎失败");
+        }
+        return SXCL_FETCH_ERR_IO;
+    }
+    bridge.engine = engine;
+    for (size_t i = 0; i < count; ++i) {
+        sxcl_task *task = sxcl_version_plan_task(plan, i);
+        if (task && sxcl_engine_submit(engine, task) != 0) {
+            sxcl_engine_destroy(engine);
+            if (err && err_len) {
+                (void)snprintf(err, err_len, "任务入队失败(第 %d 个)", (int)i);
+            }
+            return SXCL_FETCH_ERR_IO;
+        }
+    }
+    const int run_failed = sxcl_engine_run(engine);
+    const int stopped = bridge.stop;
+    sxcl_engine_destroy(engine); /* 任务归计划所有,引擎必须在返回前放掉 */
+
+    /* 统计与第一句人话原因:逐个任务读**结构化字段**(skipped_existing / state / error),
+     * 不去比 error 里的中文文案 —— 文案一改统计就会静默归零。 */
+    int have_error = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const sxcl_task *task = sxcl_version_plan_task(plan, i);
+        if (!task || !stats) {
+            continue;
+        }
+        if (task->skipped_existing) {
+            ++stats->skipped;
+            continue;
+        }
+        if (task->state == SXCL_TASK_DONE) {
+            ++stats->downloaded;
+            stats->bytes_done += task->bytes_done;
+        } else if (task->state == SXCL_TASK_FAILED) {
+            ++stats->failed;
+            if (!have_error && task->error[0] && err && err_len) {
+                (void)snprintf(err, err_len, "%s", task->error);
+                have_error = 1;
+            }
+        }
+    }
+
+    if (stopped) {
+        if (err && err_len) {
+            (void)snprintf(err, err_len, "已取消(补全到一半)");
+        }
+        return SXCL_FETCH_CANCELLED;
+    }
+    if ((stats && stats->failed > 0) || run_failed > 0) {
+        if (!have_error && err && err_len) {
+            (void)snprintf(err, err_len, "有 %d 个文件没补上", stats ? stats->failed : run_failed);
+        }
+        return SXCL_FETCH_PARTIAL;
+    }
+    return SXCL_FETCH_OK;
+}
+

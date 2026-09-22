@@ -965,11 +965,48 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
     req.dry_run = lo.dry_run;
     req.on_line = lo.verbose ? launch_echo_line : NULL;
 
+    /* 启动前"补全文件"(PCL 启动链第 3 步;dry-run 也补 —— 补全在"拼参数/解压 natives"之前,
+     * 不补的话自检出来的命令行指着一堆不存在的路径)。引擎参数与其它下载子命令同一个口径:
+     * --workers/--rate/哈希缓存 + 现成的传输后端;没有 Qt 后端时自动退化成"只报告"。 */
+    sxcl_engine_opts lopts;
+    memset(&lopts, 0, sizeof(lopts));
+    lopts.workers = o->workers;
+    lopts.rate_bps = o->rate;
+    lopts.retry_per_source = 2;
+    lopts.cache_path = o->cache;
+    /* 与 get/version 同一套进度打印(verbose 时逐文件,否则一行计数)。本子命令没有共享的
+     * cli_state,就地建一个 —— 它只用 done/failed/verbose 三个计数。 */
+    cli_state lst;
+    memset(&lst, 0, sizeof(lst));
+    lst.verbose = o->verbose;
+    lopts.on_progress = on_progress;
+    lopts.userdata = &lst;
+    int can_complete = 0;
+#if defined(SXCL_HAVE_QT_TRANSPORT)
+    sxcl_transport_qt_bootstrap();
+    lopts.transport_factory = make_qt_transport;
+    can_complete = 1;
+#endif
+    req.complete_files = can_complete;
+    req.engine_opts = can_complete ? &lopts : NULL;
+    req.prefer_mirror = o->prefer_mirror; /* --source 的同一口径 */
+
     sxcl_launch_result res;
     char err[256];
     const int rc = sxcl_launch_run(&req, &res, err, sizeof(err));
 
     printf("版本: %s   实例: %s\n", req.version_name, lo.instance ? lo.instance : req.version_name);
+    if (res.complete_ran) {
+        /* 补全的账要看得见:**命中已有**那几个就是一个字节都没下的(这才是"齐了不重下"的证据)*/
+        printf("启动前补全: 共 %d 件,命中已有 %d 件,下载 %d 件(失败 %d 件),写了 %lld 字节",
+               res.complete.files_total, res.complete.files_skipped,
+               res.complete.files_downloaded, res.complete.files_failed,
+               (long long)res.complete.bytes_done);
+        if (res.complete.error[0]) {
+            printf("  [!] %s", res.complete.error);
+        }
+        printf("\n");
+    }
     if (res.java_path[0]) {
         if (res.java_version[0]) {
             printf("Java: %s (Java %s)\n", res.java_path, res.java_version);

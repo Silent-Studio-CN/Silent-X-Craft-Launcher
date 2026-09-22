@@ -416,6 +416,66 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
     copy_str(out->java_path, sizeof(out->java_path), java.path);
     copy_str(out->java_version, sizeof(out->java_version), java.version);
 
+    /* ── 2b. 启动前补全文件(PCL 启动链的第 3 步"补全文件";用户点名要学) ──
+     * 必须在**解压 natives 之前**:natives 就是从库列表里的 jar 解出来的,缺库时先解压
+     * 只会解出半个目录,拼出来的命令行也会指着一堆不存在的路径(旧行为:只报告、不补,
+     * 而且那份"缺什么"是从**游戏自己的日志**里读出来的 —— 也就是游戏已经崩了才知道)。
+     *
+     * 分工:这里只算"这个版本要哪些文件"(纯函数 sxcl_version_plan_build),真正的下载
+     * 交给注入进来的执行器 —— 它手上有下载引擎(多候选路重试/分片/限速/断点续传/哈希缓存),
+     * 启动层不该自己再写一套网络代码。
+     * **补不齐不拦启动**(与 PCL 一致):如实记进结果,用户看到的是"缺 N 个文件",
+     * 而不是"启动器崩了"。 */
+    if (req->complete_files != 0 && req->engine_opts != NULL &&
+        req->engine_opts->transport_factory != NULL) {
+        char perr[192];
+        perr[0] = '\0';
+        sxcl_version_plan *plan =
+            sxcl_version_plan_build(doc, req->game_dir, req->version_name, perr, sizeof(perr));
+        if (!plan) {
+            (void)snprintf(out->complete.error, sizeof(out->complete.error),
+                           "列不出这个版本要哪些文件（%s）", perr[0] ? perr : "原因不明");
+            SXCL_LOG_W("launch", "启动前补全:列不出文件清单(%s)", perr[0] ? perr : "原因不明");
+        } else {
+            /* 镜像第二路:认得出官方域名的补一条镜像候选,再按设置决定谁排第一
+             * (与安装同一个口径;只调一次 prefer_mirror,见 manifest.h)。 */
+            if (req->prefer_mirror) {
+                char merr[192];
+                merr[0] = '\0';
+                if (sxcl_version_plan_add_mirror(plan, req->mirror_base, merr, sizeof(merr)) < 0) {
+                    SXCL_LOG_W("launch", "启动前补全:补镜像候选失败(%s)",
+                               merr[0] ? merr : "认不出这些 URL");
+                }
+                (void)sxcl_version_plan_prefer_mirror(plan);
+            }
+            sxcl_fetch_stats fstats;
+            const int frc = sxcl_version_plan_fetch(plan, req->engine_opts,
+                                                    req->complete_is_cancelled,
+                                                    req->complete_cancel_ud, &fstats, perr,
+                                                    sizeof(perr));
+            out->complete.files_total = fstats.total;
+            out->complete.files_downloaded = fstats.downloaded;
+            out->complete.files_failed = fstats.failed;
+            out->complete.files_skipped = fstats.skipped;
+            out->complete.bytes_done = fstats.bytes_done;
+            if (perr[0]) {
+                (void)snprintf(out->complete.error, sizeof(out->complete.error), "%s", perr);
+            } else if (frc != SXCL_FETCH_OK) {
+                (void)snprintf(out->complete.error, sizeof(out->complete.error),
+                               "补全没跑成(返回码 %d)", frc);
+            }
+            out->complete_ran = 1;
+            SXCL_LOG_I("launch",
+                       "启动前补全:共 %d 个文件,命中已有 %d 个,下载 %d 个(失败 %d 个),写了 %lld 字节%s%s",
+                       out->complete.files_total, out->complete.files_skipped,
+                       out->complete.files_downloaded, out->complete.files_failed,
+                       (long long)out->complete.bytes_done,
+                       out->complete.error[0] ? " · " : "",
+                       out->complete.error[0] ? out->complete.error : "");
+            sxcl_version_plan_free(plan);
+        }
+    }
+
     /* ── 3. 渲染后端:实例设置(或显式覆盖)-> 启动前写进 options.txt ── */
     instance = (req->instance && *req->instance) ? req->instance : req->version_name;
     if (req->settings_path && *req->settings_path) {

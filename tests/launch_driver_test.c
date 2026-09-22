@@ -91,6 +91,10 @@ static char g_fake_vk[1200];
 static char g_fake_sleep[1200];
 
 static int write_text(const char *path, const char *text) {
+    /* 位置写(offset 0)**不截断**:内容一次比一次短时,旧文件的尾巴会留在后面,
+     * 夹具就成了一份"合法 JSON + 多余内容"(实测:解析报"根值之后还有多余内容")。
+     * 先删掉再写,夹具就永远是这次的这一份。 */
+    (void)sxcl_fs_remove(path);
     sxcl_file *f = sxcl_file_open_write(path, -1);
     int64_t n = 0;
     if (!f) {
@@ -219,14 +223,20 @@ static const char *kVersionJson =
     "\"type\":\"release\","
     "\"mainClass\":\"net.minecraft.client.main.Main\","
     "\"javaVersion\":{\"component\":\"java-runtime-delta\",\"majorVersion\":21},"
-    "\"assetIndex\":{\"id\":\"17\"},"
+    "\"assetIndex\":{\"id\":\"17\","
+    "\"size\":64,\"url\":\"https://piston-meta.mojang.com/v1/packages/ff/17.json\"},"
     "\"arguments\":{"
     "  \"jvm\":[\"-Djava.library.path=${natives_directory}\",\"-cp\",\"${classpath}\"],"
     "  \"game\":[\"--username\",\"${auth_player_name}\",\"--version\",\"${version_name}\","
     "            \"--gameDir\",\"${game_directory}\"]"
     "},"
+    /* downloads.client:启动前"补全文件"要拿它去补 <实例>.jar(少了它清单里就没有 jar 那一条) */
+    "\"downloads\":{\"client\":{"
+    "\"size\":64,\"url\":\"https://piston-data.mojang.com/v1/objects/aa/client.jar\"}},"
     "\"libraries\":[{\"name\":\"com.example:demo:1.0\","
-    "\"downloads\":{\"artifact\":{\"path\":\"com/example/demo/1.0/demo-1.0.jar\"}}}]"
+    "\"downloads\":{\"artifact\":{\"path\":\"com/example/demo/1.0/demo-1.0.jar\","
+    "\"size\":64,"
+    "\"url\":\"https://libraries.minecraft.net/com/example/demo/1.0/demo-1.0.jar\"}}}]"
     "}";
 
 static int setup(void) {
@@ -508,6 +518,219 @@ static void case_f_errors(void) {
     check_int(sxcl_launch_run(NULL, &res, err, sizeof(err)), -1, "request=NULL 不炸");
 }
 
+
+/* ── 启动前补全文件(PCL 启动链第 3 步):清单 + "齐了一个字节都不下" + 补不齐不拦启动 ──
+ *
+ * 这里连**假传输后端**一起造 —— 补全最要紧的性质就是那两个计数:
+ *   文件都在 → **一次 HTTP 都不该发**;缺文件 → 恰好把缺的下回来。
+ * (校验本身是引擎的活,verify_test / hashcache_test 已经盯得很细。)
+ * 夹具里那三个文件都是 64 字节、不带 sha1 → 校验等级是"只比大小",假后端回 64 字节就过。 */
+
+typedef struct fake_http {
+    int requests;      /* 收到几次请求(0 = 一个字节都没下) */
+    int fail_all;      /* 1 = 一律 404(验"补不上也要照常启动") */
+    char last_url[512];
+    unsigned char payload[64];
+} fake_http;
+
+typedef struct fake_body {
+    const unsigned char *data;
+    size_t len;
+    size_t pos;
+} fake_body;
+
+static int fake_request(void *ctx, const sxcl_http_request *req, sxcl_http_response *resp,
+                        sxcl_http_body **body) {
+    fake_http *s = (fake_http *)ctx;
+    fake_body *b = (fake_body *)calloc(1, sizeof(fake_body));
+    if (!b) {
+        return SXCL_NET_ERR_IO;
+    }
+    ++s->requests;
+    if (req && req->url) {
+        snprintf(s->last_url, sizeof(s->last_url), "%s", req->url);
+    }
+    memset(resp, 0, sizeof(*resp));
+    if (s->fail_all) {
+        resp->status = 404;
+        b->data = (const unsigned char *)"";
+        b->len = 0;
+    } else {
+        resp->status = 200;
+        resp->content_length = (int64_t)sizeof(s->payload);
+        resp->total_length = (int64_t)sizeof(s->payload);
+        resp->accept_ranges = 1;
+        b->data = s->payload;
+        b->len = sizeof(s->payload);
+    }
+    *body = (sxcl_http_body *)b;
+    return SXCL_NET_OK;
+}
+
+static int64_t fake_read(void *ctx, sxcl_http_body *body, void *buf, size_t len) {
+    (void)ctx;
+    fake_body *b = (fake_body *)body;
+    if (!b || b->pos >= b->len) {
+        return 0;
+    }
+    size_t n = b->len - b->pos;
+    if (n > len) {
+        n = len;
+    }
+    memcpy(buf, b->data + b->pos, n);
+    b->pos += n;
+    return (int64_t)n;
+}
+
+static void fake_close_body(void *ctx, sxcl_http_body *body) {
+    (void)ctx;
+    free(body);
+}
+
+static void fake_cancel_all(void *ctx) { (void)ctx; }
+static void fake_destroy(void *ctx) { (void)ctx; }
+
+static sxcl_transport *fake_factory(void *ud) {
+    sxcl_transport *t = (sxcl_transport *)calloc(1, sizeof(sxcl_transport));
+    if (!t) {
+        return NULL;
+    }
+    t->ctx = ud;
+    t->request = fake_request;
+    t->read = fake_read;
+    t->close_body = fake_close_body;
+    t->cancel_all = fake_cancel_all;
+    t->destroy = fake_destroy;
+    return t;
+}
+
+/* 三个文件的落盘位置:与版本 JSON 里的 downloads.client / 那条库 / assetIndex 一一对应。 */
+#define CJAR   VERSION_DIR "/1.21.4.jar"
+#define CLIB   GAME_DIR "/libraries/com/example/demo/1.0/demo-1.0.jar"
+#define CINDEX GAME_DIR "/assets/indexes/17.json"
+
+static int write_sized(const char *path, size_t size) {
+    char *buf = (char *)malloc(size + 1);
+    if (!buf) {
+        return -1;
+    }
+    memset(buf, 'x', size);
+    buf[size] = '\0';
+    (void)sxcl_fs_mkdirs_for_file(path); /* 库/资源那两条的父目录还不存在 */
+    const int rc = write_text(path, buf);
+    free(buf);
+    return rc;
+}
+
+static void remove_if_there(const char *path) {
+    if (sxcl_fs_exists(path)) {
+        (void)sxcl_fs_remove(path);
+    }
+}
+
+static int g_cancel_hits = 0;
+static int cancel_right_away(void *ud) {
+    (void)ud;
+    ++g_cancel_hits;
+    return 1; /* 立刻喊停 */
+}
+
+static void case_g_complete(void) {
+    fake_http server;
+    sxcl_engine_opts opts;
+    sxcl_launch_request req;
+    sxcl_launch_result res;
+    char err[256];
+
+    printf("[g] 启动前补全文件(清单 / dry-run 也补 / 齐了一字节不下 / 补不齐不拦启动)\n");
+    memset(&server, 0, sizeof(server));
+    memset(&opts, 0, sizeof(opts));
+    opts.workers = 2;
+    opts.transport_factory = fake_factory;
+    opts.userdata = &server;
+    memset(server.payload, 'y', sizeof(server.payload));
+
+    memset(&req, 0, sizeof(req));
+    req.game_dir = GAME_DIR;
+    req.version_name = "1.21.4";
+    req.java_path = g_fake_ok;
+    req.instance = "case-g";
+    req.settings_path = SETTINGS;
+    req.dry_run = 1;
+    req.complete_files = 1;
+    req.engine_opts = &opts;
+
+    /* g1) 三个文件都在(大小对得上)→ 一次 HTTP 都不该发 */
+    check_int(write_sized(CJAR, 64), 0, "摆好客户端 jar(64 字节)");
+    check_int(write_sized(CLIB, 64), 0, "摆好依赖库(64 字节)");
+    check_int(write_sized(CINDEX, 64), 0, "摆好资源索引(64 字节)");
+    memset(&res, 0, sizeof(res));
+    err[0] = '\0';
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "dry-run 成功");
+    check_int(res.complete_ran, 1, "补全这一步跑了");
+    check_int(server.requests, 0, "**文件都在:一次 HTTP 都没发**");
+    check_int(res.complete.files_total, 3, "清单三件:客户端 jar + 依赖库 + 资源索引");
+    check_int(res.complete.files_skipped, 3, "三件全部命中已有");
+    check_int(res.complete.files_downloaded, 0, "没有下载");
+    check_int((long)res.complete.bytes_done, 0, "没有写字节");
+
+    /* g2) 删掉两件 → 恰好把缺的下回来,第三件不重下 */
+    remove_if_there(CLIB);
+    remove_if_there(CINDEX);
+    server.requests = 0;
+    memset(&res, 0, sizeof(res));
+    err[0] = '\0';
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "缺文件时启动照常");
+    check_int(server.requests > 0, 1, "真的去下了");
+    check_int(res.complete.files_downloaded, 2, "补回两件");
+    check_int(res.complete.files_skipped, 1, "第三件仍然命中已有(不重下)");
+    check_int((long)res.complete.bytes_done, 128, "写下去的字节数 = 2 x 64");
+    check(sxcl_fs_exists(CLIB), "依赖库补回来了");
+    check(sxcl_fs_exists(CINDEX), "资源索引补回来了");
+
+    /* g3) 后端一律 404 → 补不上,但**不拦启动**(与 PCL 一致) */
+    remove_if_there(CLIB);
+    server.fail_all = 1;
+    memset(&res, 0, sizeof(res));
+    err[0] = '\0';
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "补不齐也不拦启动");
+    check_int(res.complete_ran, 1, "这一步跑了");
+    check_int(res.complete.files_failed, 1, "如实记下失败件数");
+    check(res.complete.error[0] != '\0', "错误原因留下来了(不是空的)");
+    server.fail_all = 0;
+
+    /* g4) 没给 engine_opts → 保持旧行为:不补全 */
+    memset(&res, 0, sizeof(res));
+    req.engine_opts = NULL;
+    err[0] = '\0';
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "没有引擎配置也能启动");
+    check_int(res.complete_ran, 0, "没给引擎配置就不补全(旧行为)");
+    req.engine_opts = &opts;
+
+    /* g5) 开关关掉 → 不补全 */
+    memset(&res, 0, sizeof(res));
+    req.complete_files = 0;
+    err[0] = '\0';
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "关掉补全也能启动");
+    check_int(res.complete_ran, 0, "关掉就不补全");
+    req.complete_files = 1;
+
+    /* g6) 取消:回调立刻喊停 → 如实记"已取消",启动继续 */
+    remove_if_there(CLIB);
+    g_cancel_hits = 0;
+    req.complete_is_cancelled = cancel_right_away;
+    memset(&res, 0, sizeof(res));
+    err[0] = '\0';
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "取消补全也不拦启动");
+    check_int(res.complete_ran, 1, "这一步跑了");
+    check(g_cancel_hits > 0, "取消回调被问过");
+    check(strstr(res.complete.error, "取消") != NULL, "结果里说了是取消");
+    req.complete_is_cancelled = NULL;
+
+    /* 复原 */
+    (void)write_sized(CLIB, 64);
+}
+
 int main(void) {
     if (setup() != 0) {
         printf("夹具准备失败(写不了 %s?)\n", TMP_DIR);
@@ -526,6 +749,7 @@ int main(void) {
     case_d_dry_run();
     case_e_timeout();
     case_f_errors();
+    case_g_complete();
     printf("launch_driver 测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

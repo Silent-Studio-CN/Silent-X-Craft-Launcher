@@ -10,7 +10,9 @@
 #include <stddef.h>
 
 #include "sxcl/crash.h" /* 崩溃取证:退出后读 crash-report/latest.log(sxcl_launch_result 里有它) */
+#include "sxcl/engine.h"   /* sxcl_engine_opts:启动前"补全文件"用现成的下载引擎 */
 #include "sxcl/json.h"
+#include "sxcl/manifest.h" /* sxcl_version_plan:启动前"补全文件"要拿它算"这版本要哪些文件" */
 
 #ifdef __cplusplus
 extern "C" {
@@ -598,6 +600,24 @@ long long sxcl_launch_scan_artifacts(const char *game_dir, sxcl_log_summary *sum
 #define SXCL_LAUNCH_BACKEND_VULKAN  "vulkan"
 #define SXCL_LAUNCH_BACKEND_OPENGL  "opengl"
 
+/* ── 启动前"补全文件"(用户点名:PCL 启动前有这一步,我们以前只报告不补) ──
+ *
+ * 参照(PCL 的 ModLaunch.vb:113-124 第 3 步 "补全文件" = DlClientFix):
+ *   把"这个版本运行需要哪些文件"翻译成一张带 (大小, SHA1) 的清单交给下载器 ——
+ *   缺失的下来、**已存在且校验通过的一个字节都不下**;它跑在"拼参数/解压 natives"之前。
+ * 我们的做法与 PCL 有一处不同、也是更强的地方:检查与下载都在**同一个下载引擎**里
+ * (engine.h:多候选路重试 / 分片 / 限速 / 断点续传 / 哈希缓存),所以"分析"这一步很便宜。 */
+
+/** 一次补全的统计。回调写,driver 只读并回填到 sxcl_launch_result。 */
+typedef struct sxcl_launch_complete {
+    int files_total;       /**< 版本 JSON 里这个版本要用的文件总数(依赖库 + 客户端 jar) */
+    int files_downloaded;  /**< 真的下下来的文件数 */
+    int files_failed;      /**< 下失败的 */
+    int files_skipped;     /**< 命中"已存在且校验通过"、一个字节都没下的 */
+    int64_t bytes_done;    /**< 这次真的写下去的字节数(命中的不算) */
+    char error[192];       /**< 非空 = 有文件没补上(人话;driver **不把它当致命**) */
+} sxcl_launch_complete;
+
 /** 一次启动请求。字符串一律 UTF-8,生命周期由调用方保证。 */
 typedef struct sxcl_launch_request {
     const char *game_dir;       /**< 必填:游戏根目录(内含 versions/ libraries/ assets/) */
@@ -621,7 +641,24 @@ typedef struct sxcl_launch_request {
     const char *launcher_name;  /**< 可空:覆盖 launcher_name 占位符 */
     const char *launcher_version; /**< 可空:覆盖 launcher_version 占位符 */
     int timeout_ms;             /**< <=0 = 不限时;超时会被终止并置 timed_out */
-    int dry_run;                /**< 非 0 = 只准备(选 Java / 写 options.txt / 拼 argv),不起进程 */
+    int dry_run;                /**< 非 0 = 只准备(选 Java / 写 options.txt / 拼 argv),不起进程。
+                                 *   **注意:dry-run 也会补全文件**(与 PCL 一致 —— 补全在"拼参数"之前,
+                                 *   不补的话拼出来的命令行指着一堆不存在的文件,自检就没意义了)。 */
+    /* ── 启动前"补全文件"(见 manifest.h 的 sxcl_version_plan_fetch) ──
+     * 两样都要给才算数:complete_files 非 0 且 engine_opts 里有 transport_factory。
+     * 不给就保持旧行为:**缺什么只报告** —— 而且那份"缺什么"是从**游戏自己的日志**里
+     * 读出来的(游戏已经崩了才知道)。 */
+    int complete_files;
+    /** 下载引擎配置(workers / 限速 / 分片 / 哈希缓存 / **传输后端工厂**);可空 = 不补全。
+     *  与 install.h 的 engine_opts 同一个口径:核心库只认这张表,不自己造后端。 */
+    const sxcl_engine_opts *engine_opts;
+    /** 非 0 = 镜像优先(与安装同一个口径:download.source=bmclapi/auto 时置位)。 */
+    int prefer_mirror;
+    /** 镜像根;空 = 核心默认(BMCLAPI)。只有 prefer_mirror 非 0 时才用得上。 */
+    const char *mirror_base;
+    /** 每落定一个文件问一次;非 0 = 取消(可空)。**从工作线程调用**,实现里别做重活。 */
+    int (*complete_is_cancelled)(void *ud);
+    void *complete_cancel_ud;
     /** 每读到一行输出调用一次(stdout 与 stderr 都走这里,**原始行**未加工)。
      *  返回非 0 = 请求终止进程 —— 取消与"看到完成标记就收工"都走这条路(与 process.h 一致)。 */
     int (*on_line)(void *userdata, int is_stderr, const char *line);
@@ -654,7 +691,10 @@ typedef struct sxcl_launch_result {
     int natives_count;          /**< 原生库目录里就绪的文件数;0 = 这个版本没有原生库 */
     char game_dir[SXCL_JAVA_PATH_MAX];
     char error[256];            /**< 人话失败原因;空 = 没失败 */
-    char missing[160];          /**< 从日志里原样带出来的"缺什么"(不做补全,只报告) */
+    char missing[160];          /**< 从日志里原样带出来的"缺什么"(游戏已经崩了才知道的那一种) */
+    /* ── 启动前补全文件的结果(见 sxcl_launch_complete) ── */
+    int complete_ran;           /**< 1 = 这一步真的跑过(注入了执行器且没被 no_complete_files 关掉) */
+    sxcl_launch_complete complete; /**< 补全统计:共几个 / 下了几个 / 跳过几个 / 失败几个 */
     sxcl_log_conclusion conclusion; /**< 汇总结论 */
     char conclusion_text[256];  /**< 一条人话结论(UI 直接显示这一条) */
     sxcl_log_summary log;       /**< 完整日志汇总:想深入到"缺哪个类/多少行"就用它 */

@@ -14,9 +14,12 @@
 #include <utility>
 #include <vector>
 
+#include "sxcl/fs.h"       // sxcl_fs_mkdirs:哈希缓存的目录要先建出来
 #include "sxcl/launch.h"
 #include "sxcl/log.h"
-#include "sxcl/process.h" // sxcl_process_kill_pid(按 PID 单独结束游戏进程)
+#include "sxcl/net.h"      // 补全文件用的是**同一个** Qt 传输后端(engine.h 的 transport_factory)
+#include "sxcl/process.h"  // sxcl_process_kill_pid(按 PID 单独结束游戏进程)
+#include "sxcl/settings.h" // 下载参数(workers/限速/分片/哈希缓存)从设置文件读
 
 #include "ui_paths.h"
 
@@ -29,6 +32,52 @@ QByteArray utf8OrNull(const QString &text) {
     return text.trimmed().isEmpty() ? QByteArray() : text.toUtf8();
 }
 
+
+// ── 启动前"补全文件"的下载配置(PCL 启动链第 3 步) ──
+// 与安装、命令行前端**同一个口径**(设置文件 > 默认)。哈希缓存很关键:第二次启动要核对
+// 几千个文件,没有缓存就得把几百 MB 重新读一遍(engine.h 的 cache_path 就是为它准备的)。
+struct CompleteOpts {
+    sxcl_engine_opts opts{};
+    char cacheFile[600]{};
+    int ready = 0;         // 1 = 有 Qt 传输后端,可以补;0 = 退化成"只报告"
+    int preferMirror = 0;  // bmclapi/auto = 镜像优先;mojang = 官方优先
+};
+
+void buildCompleteOpts(const QString &settingsFile, CompleteOpts *out) {
+    sxcl_settings_download dl;
+    std::memset(&dl, 0, sizeof(dl));
+    const QByteArray settingsUtf8 = settingsFile.toUtf8();
+    char cfg[1024];
+    char cfgErr[128];
+    const char *path = nullptr;
+    if (!settingsUtf8.isEmpty()) {
+        path = settingsUtf8.constData();
+    } else if (sxcl_settings_default_path(cfg, sizeof(cfg), cfgErr, sizeof(cfgErr)) ==
+               SXCL_SETTINGS_OK) {
+        path = cfg;
+    }
+    if (path != nullptr) {
+        if (sxcl_settings *settings = sxcl_settings_open(path)) {
+            sxcl_settings_resolve_download(settings, &dl);
+            sxcl_settings_free(settings);
+        }
+    }
+    out->opts.workers = dl.workers;
+    out->opts.rate_bps = dl.rate_bps;
+    out->opts.max_conn_per_file = dl.max_conn_per_file;
+    if (dl.cache_dir[0] != '\0' && sxcl_fs_mkdirs(dl.cache_dir) == 0) {
+        // 与安装、命令行前端同口径:<缓存目录>/hashes.txt
+        std::snprintf(out->cacheFile, sizeof(out->cacheFile), "%s/hashes.txt", dl.cache_dir);
+        out->opts.cache_path = out->cacheFile;
+    }
+    out->preferMirror = (uiDownloadSource() != QLatin1String("mojang")) ? 1 : 0;
+#if defined(SXCL_UI_HAVE_QT_TRANSPORT)
+    // Qt 后端有线程亲和性,引擎按需**每线程**建一个(engine.h 的说明);这里只给工厂。
+    sxcl_transport_qt_bootstrap();
+    out->opts.transport_factory = [](void *) -> sxcl_transport * { return sxcl_transport_qt_create(); };
+    out->ready = 1;
+#endif
+}
 } // namespace
 
 QStringList LaunchWorker::phaseNames() {
@@ -184,6 +233,10 @@ void LaunchWorker::run() {
     // 否则一律空着让核心库退回离线默认值 —— 不"假装"用账户启动。
     const bool online = !accessToken.isEmpty();
 
+    // 启动前补全文件(要在 sxcl_launch_run **返回之后**才析构:引擎全程持有它)
+    CompleteOpts complete;
+    buildCompleteOpts(m_request.settingsFile, &complete);
+
     sxcl_launch_request req;
     std::memset(&req, 0, sizeof(req));
     req.game_dir = gameDir.constData();
@@ -206,6 +259,11 @@ void LaunchWorker::run() {
     // 进程真起来时把 PID 交出来(界面显示 + 按 PID 结束;见文件头"取消"一节)
     req.on_started = &LaunchWorker::cbStarted;
     req.userdata = this;
+    // 准备那一遍把缺的文件补齐(与 PCL 一致:补全在"拼参数/解压 natives"之前)。
+    // 没有 Qt 传输后端时它自动退化成"只报告",不会拦住启动。
+    req.complete_files = complete.ready;
+    req.engine_opts = complete.ready ? &complete.opts : nullptr;
+    req.prefer_mirror = complete.preferMirror;
 
     char err[256];
     err[0] = '\0';
@@ -229,6 +287,26 @@ void LaunchWorker::run() {
     const int prepRc = sxcl_launch_run(&req, &prep, err, sizeof(err));
 
     m_collectingCommand.store(false); // 准备跑完:后面的回调都是真进程输出
+    if (prep.complete_ran) {
+        SXCL_LOG_I("launch",
+                   "启动前补全:共 %d 件,命中已有 %d,下载 %d(失败 %d),写了 %lld 字节%s%s",
+                   prep.complete.files_total, prep.complete.files_skipped,
+                   prep.complete.files_downloaded, prep.complete.files_failed,
+                   (long long)prep.complete.bytes_done, prep.complete.error[0] ? " · " : "",
+                   prep.complete.error);
+        if (prep.complete.files_failed > 0 || prep.complete.error[0] != '\0') {
+            // 与 PCL 一致:**补不齐不拦启动**,只在日志/界面里说清楚缺了多少
+            emit logLine(QStringLiteral("启动前补全没补齐(%1 件没下成):%2")
+                             .arg(prep.complete.files_failed)
+                             .arg(QString::fromUtf8(prep.complete.error)),
+                         QStringLiteral("launch"), 1, 0);
+        } else if (prep.complete.files_downloaded > 0) {
+            emit logLine(QStringLiteral("启动前补全:下载 %1 件(命中已有 %2 件,一个字节都没动)")
+                             .arg(prep.complete.files_downloaded)
+                             .arg(prep.complete.files_skipped),
+                         QStringLiteral("launch"), 2, 0);
+        }
+    }
     emit javaInfo(QString::fromUtf8(prep.java_path), prep.java_major,
                   QString::fromUtf8(prep.java_version), prep.java_is_64bit);
     emit commandLine(m_pendingCommand);
@@ -300,6 +378,8 @@ void LaunchWorker::run() {
     // ── 阶段 2:启动游戏进程(第二遍 dry_run=0,真的起)──
     emit phaseChanged(2, total, names.value(2));
     req.dry_run = 0;
+    // 准备那一遍刚补过:同一秒再核对几千个文件纯属白烧 IO(引擎的"已存在"快路径也要读盘)
+    req.complete_files = 0;
     m_sawProcessOutput.store(false);
     sxcl_launch_result res;
     std::memset(&res, 0, sizeof(res));
