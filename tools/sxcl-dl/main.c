@@ -25,6 +25,7 @@
 #include "sxcl/install.h" /* 版本 JSON 落盘 sxcl_install_write_version_json;缺它会 C4013 -> C2220 */
 #include "sxcl/limiter.h"
 #include "sxcl/loader.h"
+#include "sxcl/mods.h"   /* mods 子命令:模组资源来源层(Modrinth)的端到端验收入口 */
 #include "sxcl/manifest.h"
 #include "sxcl/net.h"
 #include "sxcl/options.h"
@@ -197,6 +198,10 @@ static int usage(void)
            "      [--dry-run] [--verbose]\n"
            "      └ 读版本 JSON -> 选 Java -> 按实例设置写 options.txt(渲染后端)-> 起进程\n"
            "        -> 每行归类 -> 出一条人话结论(发现 Vulkan 回退会写回 lastGraphicsApi)\n"
+           "  sxcl-dl mods search <关键词> [--mc 1.20.1] [--loader fabric] [--limit N]\n"
+           "  sxcl-dl mods files <工程 id|短名> [--mc 1.20.1] [--loader fabric]\n"
+           "      └ 模组资源层(docs/22 的 A1):搜索走服务端 facets;挑文件要求版本+加载器都对得上,\n"
+           "        不自动换加载器;取 JSON 走我们自己的引擎(候选/UA/缓存)\n"
            "  sxcl-dl crash <游戏目录> [--lang en-us] [--no-debug]\n"
            "      └ 崩溃取证:读 crash-reports 里最近的非空报告 + logs/latest.log(必要时 debug.log),\n"
            "        自动探测编码(UTF-8/UTF-16/GBK),出**原因键**(out_of_memory / mod_duplicate …)\n"
@@ -2393,6 +2398,173 @@ static void cli_log_atexit(void)
     sxcl_log_shutdown();
 }
 
+/* ── mods:模组资源来源层(Modrinth)的端到端验收入口（docs/22 的 A1） ──
+ *
+ *   sxcl-dl mods search <关键词> [--mc 1.20.1] [--loader fabric] [--limit N]
+ *   sxcl-dl mods files <工程 id|短名> [--mc 1.20.1] [--loader fabric]
+ *
+ * 取 JSON 走**我们自己的引擎**（官方/镜像候选、UA、缓存都在里面），解析走 sxcl/mods.h ——
+ * 与界面点"搜索/安装"是同一条路,所以这个命令就是这一层的真机验收。
+ */
+static int cmd_mods(int argc, char **argv, const cli_opts *o) {
+    if (argc < 3) {
+        return usage();
+    }
+    const char *sub = argv[2];
+    const char *text = NULL;
+    const char *project = NULL;
+    const char *mc = NULL;
+    const char *loader = NULL;
+    int limit = 20;
+    if (strcmp(sub, "search") == 0) {
+        if (argc < 4) {
+            return usage();
+        }
+        text = argv[3];
+    } else if (strcmp(sub, "files") == 0) {
+        if (argc < 4) {
+            return usage();
+        }
+        project = argv[3];
+    } else {
+        return usage();
+    }
+    for (int i = 4; i < argc; ++i) {
+        const char *a = argv[i];
+        const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
+        if (strcmp(a, "--mc") == 0 && v) {
+            mc = v;
+            ++i;
+        } else if (strcmp(a, "--loader") == 0 && v) {
+            loader = v;
+            ++i;
+        } else if (strcmp(a, "--limit") == 0 && v) {
+            limit = atoi(v);
+            ++i;
+        } else if (strcmp(a, "--rate") == 0 || strcmp(a, "--workers") == 0 ||
+                   strcmp(a, "--conn") == 0 || strcmp(a, "--cache") == 0 ||
+                   strcmp(a, "--mirror") == 0 || strcmp(a, "--source") == 0) {
+            ++i;
+        } else if (strcmp(a, "--no-cache") == 0 || strcmp(a, "--verbose") == 0) {
+            /* 无值参数 */
+        } else {
+            fprintf(stderr, "未知参数: %s\n", a);
+            return usage();
+        }
+    }
+    char url[1200];
+    int is_files = 0;
+    if (project != NULL) {
+        if (sxcl_mods_modrinth_versions_url(project, mc, loader, url, sizeof(url)) != 1) {
+            fprintf(stderr, "版本列表 URL 拼不出来(工程 id 或筛选太长?)\n");
+            return 2;
+        }
+        is_files = 1;
+    } else {
+        sxcl_mods_query q;
+        memset(&q, 0, sizeof(q));
+        q.text = text;
+        q.game_version = mc;
+        q.loader = loader;
+        q.limit = limit;
+        if (sxcl_mods_modrinth_search_url(&q, url, sizeof(url)) != 0) {
+            fprintf(stderr, "搜索 URL 拼不出来(条件太长?)\n");
+            return 2;
+        }
+    }
+    printf("请求: %s\n", url);
+    fflush(stdout);
+    /* 用引擎取文本(与版本清单同一条路) */
+    char tmp[1200];
+    snprintf(tmp, sizeof(tmp), "%s/sxcl-mods-%ld.json", o->cache ? o->cache : ".", (long)time(NULL));
+    cli_state st;
+    memset(&st, 0, sizeof(st));
+    st.verbose = o->verbose;
+    sxcl_engine *engine = NULL;
+    if (make_engine(o, &st, &engine) != 0) {
+        fprintf(stderr, "下载引擎起不来\n");
+        return 1;
+    }
+    sxcl_task task;
+    memset(&task, 0, sizeof(task));
+    task.dest = tmp;
+    task.urls[0] = url;
+    task.priority = 0;
+    task.label = "mods.json";
+    const int state = run_one(engine, &task);
+    sxcl_engine_destroy(engine);
+    if (state != SXCL_TASK_DONE) {
+        fprintf(stderr, "取 Modrinth 响应失败: %s\n", task.error);
+        return 1;
+    }
+    /* 读回响应(CLI 里没有"整份读文本"的现成助手,这儿自己读) */
+    char *body = NULL;
+    {
+        FILE *fh = fopen(tmp, "rb");
+        if (fh != NULL) {
+            (void)fseek(fh, 0, SEEK_END);
+            const long n = ftell(fh);
+            (void)fseek(fh, 0, SEEK_SET);
+            if (n > 0 && n < (long)(64L * 1024L * 1024L)) {
+                body = (char *)malloc((size_t)n + 1);
+                if (body != NULL) {
+                    const size_t got = fread(body, 1, (size_t)n, fh);
+                    body[got] = '\0';
+                }
+            }
+            (void)fclose(fh);
+        }
+    }
+    remove(tmp);
+    if (body == NULL) {
+        fprintf(stderr, "读不回刚才下的响应\n");
+        return 1;
+    }
+    char err[192];
+    err[0] = '\0';
+    if (is_files) {
+        sxcl_mod_file files[32];
+        size_t count = 0;
+        if (sxcl_mods_modrinth_versions_parse(body, strlen(body), files, 32, &count, err,
+                                              sizeof(err)) != 0) {
+            fprintf(stderr, "解析版本列表失败: %s\n", err);
+            free(body);
+            return 1;
+        }
+        printf("共 %d 个版本:\n", (int)count);
+        for (size_t i = 0; i < count; ++i) {
+            printf("  [%d] %s | %s | %s | %lld 字节\n", (int)i + 1, files[i].version_number,
+                   files[i].loaders, files[i].filename, (long long)files[i].size);
+        }
+        sxcl_mod_file picked;
+        memset(&picked, 0, sizeof(picked));
+        if (count > 0 && sxcl_mods_pick_file(files, count, mc, loader, &picked) == 0) {
+            printf("挑中(装这个): %s\n  URL: %s\n", picked.filename, picked.url);
+            if (picked.required_deps[0] != '\0') {
+                printf("  依赖(只展示不装): %s\n", picked.required_deps);
+            }
+        } else {
+            printf("没有适合这个实例的版本（版本/加载器对不上，PCL 口径不自动换加载器）\n");
+        }
+    } else {
+        sxcl_mod_page page;
+        if (sxcl_mods_modrinth_search_parse(body, strlen(body), &page, err, sizeof(err)) != 0) {
+            fprintf(stderr, "解析搜索结果失败: %s\n", err);
+            free(body);
+            return 1;
+        }
+        printf("共命中 %d 条(这一页 %d 条):\n", (int)page.total, (int)page.count);
+        for (size_t i = 0; i < page.count; ++i) {
+            const sxcl_mod_hit *h = &page.items[i];
+            printf("  [%d] %s（%s） 下载 %lld | %s\n      id=%s | 支持 %s\n", (int)i + 1, h->title,
+                   h->author, (long long)h->downloads, h->description, h->id, h->versions);
+        }
+        sxcl_mods_page_free(&page);
+    }
+    free(body);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     /* 无缓冲输出:崩溃时不会把最后一段输出留在缓冲区里丢掉(排查跨平台崩溃吃过这个亏) */
@@ -2485,6 +2657,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "launch") == 0) {
         return cmd_launch(argc, argv, &o);
+    }
+    if (strcmp(argv[1], "mods") == 0) {
+        return cmd_mods(argc, argv, &o);
     }
     if (strcmp(argv[1], "crash") == 0) {
         if (argc < 3) {

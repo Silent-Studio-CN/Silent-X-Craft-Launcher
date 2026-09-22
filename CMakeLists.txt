@@ -227,6 +227,7 @@ add_library(sxcl STATIC
   src/services/modloader/compat.c
   src/services/modloader/profiles.c
   src/services/modloader/installer.c
+  src/services/mods/mods.c
 )
 target_include_directories(sxcl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -328,6 +329,7 @@ if(SXCL_BUILD_TESTS)
     natives_test tests/natives_test.c
     loader_test  tests/loader_test.c
     processor_test tests/processor_test.c
+    mods_test    tests/mods_test.c
   )
   list(LENGTH SXCL_TESTS _n)
   math(EXPR _last "${_n} - 1")
