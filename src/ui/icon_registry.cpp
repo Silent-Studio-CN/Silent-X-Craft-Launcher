@@ -58,6 +58,10 @@ const MapRow kMap[] = {
      "index.tsv: 原名称「刷新」(PageDownloadLeft.xaml)—— 语义直给"},
     {IconRegistry::Search, "搜索", "search", "icon_01389e71.svg",
      "index.tsv: 来源 MySearchBox.xaml(搜索框里的放大镜),原表未给名"},
+    {IconRegistry::Mod, "模组", "mod", "mod.svg",
+     "index.tsv:15 原名称「Mod」(PageDownloadLeft.xaml)—— PCL 下载页左栏的「模组」位"},
+    {IconRegistry::Shader, "光影", "shader", "shader.svg",
+     "index.tsv:19 原名称「光影包」(PageDownloadLeft.xaml)—— 同一栏第三格的「光影」位"},
 };
 
 const MapRow &row(IconRegistry::Semantic s) { return kMap[int(s)]; }

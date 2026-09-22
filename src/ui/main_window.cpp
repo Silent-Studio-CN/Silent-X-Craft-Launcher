@@ -94,12 +94,19 @@ namespace {
 //   addSubInterface(keymap, FIF.LAYOUT, "按键映射")
 //   addSubInterface(multiplayer, FIF.GLOBE, "联机")
 //   addSubInterface(settings, FIF.SETTING, "设置", BOTTOM)
+// **2026-09-22 用户点名重构**(docs/25 §1):主页 / 下载 / 团队 / 联机 / 更多 | 设置。
+// 与 Python 版那一份(上面引的 main_window.py:105-119)**故意不同** —— 这是用户要求的偏离,
+// 1:1 那套规格降级成内容参考。原"版本/任务/按键映射"三个页面不在这里了:
+//   版本  -> 进"下载"的第一格(草方块)
+//   任务  -> 进"更多"
+//   按键映射 -> 进"更多"(用户原话:手机键位归到更多)
+// 团队图标暂用 IconRegistry 的"个性化"位(docs/25 §5:语义待用户定义,定义后再换)。
 const NavItem kNavSpec[] = {
     {QStringLiteral("home"), QStringLiteral("Home"), QString(), QStringLiteral("主页"), false},
-    {QStringLiteral("versions"), QString(), QStringLiteral("vanilla"), QStringLiteral("版本"), false},
-    {QStringLiteral("tasks"), QStringLiteral("Update"), QString(), QStringLiteral("任务"), false},
-    {QStringLiteral("keymap"), QStringLiteral("Layout"), QString(), QStringLiteral("按键映射"), false},
+    {QStringLiteral("download"), QStringLiteral("Download"), QString(), QStringLiteral("下载"), false},
+    {QStringLiteral("team"), QStringLiteral("Personalize"), QString(), QStringLiteral("团队"), false},
     {QStringLiteral("multiplayer"), QStringLiteral("Globe"), QString(), QStringLiteral("联机"), false},
+    {QStringLiteral("more"), QStringLiteral("More"), QString(), QStringLiteral("更多"), false},
     {QStringLiteral("settings"), QStringLiteral("Setting"), QString(), QStringLiteral("设置"), true},
 };
 

@@ -18,6 +18,10 @@ QWidget *createTasksPage(QWidget *parent);
 QWidget *createKeymapPage(QWidget *parent);
 QWidget *createMultiplayerPage(QWidget *parent);
 QWidget *createSettingsPage(QWidget *parent);
+// 2026-09-22 界面重构(docs/25)新增的三个页面
+QWidget *createDownloadPage(QWidget *parent);
+QWidget *createTeamPage(QWidget *parent);
+QWidget *createMorePage(QWidget *parent);
 
 // 路由 -> 页面对象(nullptr = 未移植)
 QWidget *createPageForRoute(const QString &routeKey, QWidget *parent);

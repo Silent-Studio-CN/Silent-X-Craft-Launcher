@@ -29,6 +29,9 @@ set(SXCL_UI_SOURCES
   pages/multiplayer_page.cpp pages/settings_page.cpp
   # 三个临时页(会话页;不进导航,由 main_window 的会话机制按需创建)
   pages/download_config_page.cpp pages/download_progress_page.cpp pages/launch_page.cpp
+  # 2026-09-22 界面重构(docs/25):下载 / 团队 / 更多 + 新页面共用的外壳
+  pages/page_shell.h
+  pages/download_page.cpp   pages/team_page.cpp   pages/more_page.cpp
   # 工作线程层(阶段 7:下载->安装->启动 的界面接线)
   #   ui_paths.*       界面层共用的运行期取值(游戏目录/设置文件/内存/进度追踪)
   #   install_worker.* 把阻塞的 sxcl_install_run 放工作线程,阶段/进度/速度/取消回填 UI

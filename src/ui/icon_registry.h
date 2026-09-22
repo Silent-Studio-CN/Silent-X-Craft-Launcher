@@ -29,6 +29,8 @@ public:
         Launch,      // 启动
         Refresh,     // 刷新
         Search,      // 搜索
+        Mod,         // 模组(下载页左栏第二格,见 docs/25 §4)
+        Shader,      // 光影(同栏第三格)
         Count
     };
 

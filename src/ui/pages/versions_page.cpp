@@ -800,8 +800,10 @@ QVector<GameVersion> filterVersions(const QVector<GameVersion> &all, const QStri
 class VersionsPage : public PageScaffold {
 public:
     explicit VersionsPage(QWidget *parent = nullptr)
-        : PageScaffold(QStringLiteral("游戏版本"),
-                       QStringLiteral("选择要启动的 Minecraft 版本"), parent) {
+        // 标题按用户 2026-09-22 的要求改成"Minecraft 版本"(以前叫"游戏版本");
+        // 这一页现在住在"下载"的第一格(草方块),见 docs/25 §4。
+        : PageScaffold(QStringLiteral("Minecraft 版本"),
+                       QStringLiteral("要装哪个版本 · 官方 / 镜像双路"), parent) {
         setObjectName(QStringLiteral("VersionsPage"));
         buildContent();
         loadVersions();
