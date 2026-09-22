@@ -15,6 +15,7 @@
 #include <QVBoxLayout>
 
 #include "fluent_theme.h"
+#include "icon_registry.h" // 第三套图标来源(NavItem.semantic,见 nav.h)
 #include "sxcl_icons.h"
 #include "theme_bridge.h"
 
@@ -232,6 +233,9 @@ NavigationPushButton *NavPanel::addItem(const NavItem &item) {
         icon = SxclIcons::instance().blockIcon(item.blockKind, 24); // Python: grass_block_icon(24)
     } else if (!item.qfIcon.isEmpty()) {
         icon = fluent::icon(item.qfIcon, FluentTheme::instance().isDark()); // 深色取 _white.svg
+    } else if (item.semantic >= 0 && item.semantic < IconRegistry::Count) {
+        // 第三套:IconRegistry 语义名(mod.svg / shader.svg 这类 PCL 图标,见 nav.h 的说明)
+        icon = IconRegistry::instance().themedIcon(static_cast<IconRegistry::Semantic>(item.semantic));
     }
     auto *btn = new NavButton(icon, item.qfIcon, item.blockKind, item.title, this);
     btn->setObjectName(QStringLiteral("nav_") + item.routeKey);

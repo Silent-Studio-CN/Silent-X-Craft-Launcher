@@ -232,8 +232,11 @@ int runCase(int n) {
         window.show();
         pump(300);
         check(!hasRoute(window, key), QStringLiteral("没有建下载进度页(没自动续跑)"));
-        check(window.pageStack()->count() == 6, QStringLiteral("页面栈还是 6 页(没多出临时页)"),
+        check(window.pageStack()->count() == 9,
+              QStringLiteral("页面栈还是 9 页(6 侧边栏 + 3 隐藏常驻,没多出临时页)"),
               QStringLiteral("%1").arg(window.pageStack()->count()));
+        // 重构后任务页在"更多"里,不再是侧边栏的一项:先切到它的路由,页面才会被建出来。
+        window.switchToRoute(QStringLiteral("tasks"));
         QWidget *tasks = tasksPage(window);
         check(tasks != nullptr, QStringLiteral("任务页在"));
         check(taskCount(tasks) == 1, QStringLiteral("任务页登记了 1 条(上次未完成)"),
@@ -254,6 +257,8 @@ int runCase(int n) {
         window.show();
         pump(300);
         check(!hasRoute(window, key), QStringLiteral("目录不一致 = 没自动续跑"));
+        // 重构后任务页在"更多"里,不再是侧边栏的一项:先切到它的路由,页面才会被建出来。
+        window.switchToRoute(QStringLiteral("tasks"));
         QWidget *tasks = tasksPage(window);
         check(taskCount(tasks) == 1, QStringLiteral("仍然登记一条(让用户看见)"));
         const QStringList texts = allTexts(tasks);
@@ -267,6 +272,8 @@ int runCase(int n) {
         window.show();
         pump(300);
         check(!hasRoute(window, key), QStringLiteral("旧记录没有目录 = 没自动续跑"));
+        // 重构后任务页在"更多"里,不再是侧边栏的一项:先切到它的路由,页面才会被建出来。
+        window.switchToRoute(QStringLiteral("tasks"));
         QWidget *tasks = tasksPage(window);
         check(taskCount(tasks) == 1, QStringLiteral("旧记录也登记了(兼容读得懂)"));
         check(hasText(allTexts(tasks), QStringLiteral("没有目标目录")), QStringLiteral("卡片说清为什么不能恢复"));
@@ -295,7 +302,8 @@ int runCase(int n) {
         window.show();
         pump(400);
         check(hasRoute(window, key), QStringLiteral("钉子=1 时自动恢复(建出了下载进度页)"));
-        check(window.pageStack()->count() == 7, QStringLiteral("页面栈多了一个临时页"),
+        // 9(6 侧边栏 + 3 隐藏常驻) + 1(临时页) = 10
+        check(window.pageStack()->count() == 10, QStringLiteral("页面栈多了一个临时页"),
               QStringLiteral("%1").arg(window.pageStack()->count()));
         check(!QFileInfo::exists(pendingFile()), QStringLiteral("恢复过一次就消费掉状态文件(不重复恢复)"));
         pump(3000); // 让安装 worker 跑到"被引擎拒装"为止(核心库预检在网络之前,很快就结束)

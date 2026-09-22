@@ -209,15 +209,16 @@ int main(int argc, char **argv) {
 
     // =================================================================
     section(QStringLiteral("② 导航:5 项主导航 + 底部设置 1 项"));
-    // 口径 = Python src/app/main_window.py:105-119(逐条对应,不是我们自创):
-    //   Home / grass_block(版本) / Update(任务) / Layout(按键映射) / Globe(联机) / Setting(设置,底部)
-    // 老的"下载/更多"是 C 版早期自创项,已按 Python 口径替换 —— 本测试就是这条口径的守卫。
-    const QStringList wantKeys{QStringLiteral("home"), QStringLiteral("versions"),
-                               QStringLiteral("tasks"), QStringLiteral("keymap"),
-                               QStringLiteral("multiplayer"), QStringLiteral("settings")};
-    const QStringList wantTitles{QStringLiteral("主页"), QStringLiteral("版本"),
-                                 QStringLiteral("任务"), QStringLiteral("按键映射"),
-                                 QStringLiteral("联机"), QStringLiteral("设置")};
+    // **口径 = 用户 2026-09-22 点名的重构**(docs/25 §1),与 Python 版那一份**故意不同**:
+    //   主页 / 下载 / 团队 / 联机 / 更多 | 设置(底部)
+    // 原来的"版本/任务/按键映射"不占侧边栏了:版本进"下载"第一格、任务与按键映射进"更多"。
+    // 本测试就是这条新口径的守卫(旧口径的守卫在 1:1 那份规格里,连同它的偏离清单一并归档)。
+    const QStringList wantKeys{QStringLiteral("home"), QStringLiteral("download"),
+                               QStringLiteral("team"), QStringLiteral("multiplayer"),
+                               QStringLiteral("more"), QStringLiteral("settings")};
+    const QStringList wantTitles{QStringLiteral("主页"), QStringLiteral("下载"),
+                                 QStringLiteral("团队"), QStringLiteral("联机"),
+                                 QStringLiteral("更多"), QStringLiteral("设置")};
     const QVector<NavItem> &items = window.navItems();
     check(items.size() == 6, QStringLiteral("导航项数 = 6"),
           QStringLiteral("实际 %1").arg(items.size()));
@@ -233,11 +234,25 @@ int main(int argc, char **argv) {
           QStringLiteral("顶部 5 项 / 底部 1 项(设置)"),
           QStringLiteral("top=%1 bottom=%2").arg(topCount).arg(bottomCount));
 
-    // 真控件断言:libqf 的 NavigationPushButton 必须真的有 6 个,文字对得上
+    // 真控件断言:libqf 的 NavigationPushButton 必须真的有 6 个,文字对得上。
+    // **按面板算**:下载页那层"双层侧边栏"里还有 3 个同类按钮(见下面那条断言),整窗口数会多出来。
     const QList<NavigationPushButton *> buttons =
-        window.findChildren<NavigationPushButton *>();
-    check(buttons.size() == 6, QStringLiteral("窗口内 libqf 导航按钮数 = 6"),
+        window.navPanel()->findChildren<NavigationPushButton *>();
+    check(buttons.size() == 6, QStringLiteral("主侧边栏 libqf 导航按钮数 = 6"),
           QStringLiteral("实际 %1").arg(buttons.size()));
+    // 双层侧边栏(docs/25 §4,用户同日澄清):下载页里那一层也是 NavPanel,三个入口。
+    {
+        int innerPanels = 0, innerButtons = 0;
+        for (NavPanel *panel : window.findChildren<NavPanel *>()) {
+            if (panel == window.navPanel())
+                continue;
+            ++innerPanels;
+            innerButtons += panel->items().size();
+        }
+        check(innerPanels == 1 && innerButtons == 3,
+              QStringLiteral("下载页里那层侧边栏 = 1 层 3 项(Minecraft 版本 / MOD / 光影)"),
+              QStringLiteral("层=%1 项=%2").arg(innerPanels).arg(innerButtons));
+    }
     for (int i = 0; i < wantKeys.size(); ++i) {
         NavigationPushButton *b = window.navPanel()->button(wantKeys[i]);
         check(b != nullptr && b->text() == wantTitles[i],
@@ -260,7 +275,10 @@ int main(int argc, char **argv) {
                   .arg(maxTopY));
     check(window.currentRouteKey() == QStringLiteral("home"),
           QStringLiteral("默认选中主页"), window.currentRouteKey());
-    check(window.pageStack()->count() == 6, QStringLiteral("页面栈 6 页"),
+    // 页面栈 = 侧边栏 6 页 + **不在侧边栏但构造期就建好的 3 页**(版本/任务/按键映射,
+    // 见 main_window 的 kHiddenRoutes 与它的注释:任务页必须在构造期存在,否则接不住
+    // "上次未完成"记录)。
+    check(window.pageStack()->count() == 9, QStringLiteral("页面栈 9 页(6 侧边栏 + 3 隐藏常驻)"),
           QStringLiteral("实际 %1").arg(window.pageStack()->count()));
 
     // =================================================================

@@ -29,6 +29,11 @@ struct NavItem {
     QString blockKind; // 方块种类(BLOCK_FILES 的键,如 "vanilla")
     QString title;
     bool bottom = false;
+    // 第三套图标来源(2026-09-22 加):IconRegistry 的语义名。
+    // 为什么需要:下载页那层"双层侧边栏"要用的 PCL 图标(mod.svg / shader.svg)既不是方块 PNG、
+    // 也不是 qf 内置图标 —— 它们走 IconRegistry(语义名 -> assets/icons/pcl/*.svg)。
+    // -1 = 不用它(qfIcon / blockKind 优先)。
+    int semantic = -1;
 };
 
 // 纯图标工具按钮(qf python NavigationToolButton):

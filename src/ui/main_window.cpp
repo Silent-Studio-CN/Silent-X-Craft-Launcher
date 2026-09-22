@@ -560,7 +560,7 @@ void MainWindow::buildUi() {
     // 根布局是 qf 的 1:1 摆法(导航 + 内容列),不动它一个小数点。
     buildMiniPanel();
 
-    // ---- 六个页面(占位:只证明路由与栈是对的) ----
+    // ---- 侧边栏那 6 页 ----
     for (const NavItem &item : kNavSpec) {
         QWidget *page = createPageForRoute(item.routeKey, nullptr);
         if (!page)
@@ -568,6 +568,21 @@ void MainWindow::buildUi() {
         m_pages.insert(item.routeKey, page);
         m_stack->addWidget(page);
         m_nav->addItem(item);
+    }
+    // ---- 不在侧边栏、但**必须和侧边栏一样早就存在**的 3 页(2026-09-22 重构) ----
+    // 版本 -> 下载第一格;任务 / 按键映射 -> 更多。
+    // 为什么不能"点进去再建"(试过,踩到了):任务页是**构造期**接住"上次未完成"记录的
+    // (MainWindow 在构造里读 pending_tasks.json → 登记到任务页)。按需建页会让登记发生在
+    // 页面存在之前,记录就丢了(实测:任务页 0 条、卡片文案全空)。
+    // 所以这里和上面一样**构造期建好**,只是不往导航里加按钮。
+    static const char *const kHiddenRoutes[] = {"versions", "tasks", "keymap"};
+    for (const char *route : kHiddenRoutes) {
+        const QString key = QString::fromLatin1(route);
+        QWidget *page = createPageForRoute(key, nullptr);
+        if (!page)
+            continue;
+        m_pages.insert(key, page);
+        m_stack->addWidget(page);
     }
     connect(m_nav, &NavPanel::routeChanged, this, &MainWindow::switchToRoute);
     switchToRoute(QStringLiteral("home"));
@@ -640,8 +655,19 @@ void MainWindow::switchToRoute(const QString &routeKey) {
     }
 
     QWidget *page = m_pages.value(routeKey, nullptr);
-    if (!page)
-        return;
+    if (!page) {
+        // 界面重构(docs/25)之后有几个路由**不在侧边栏**了(版本 / 任务 / 按键映射):
+        // 它们是"下载"和"更多"里的入口,第一次进来时按需建页并挂进内容栈 ——
+        // 否则点"更多 → 按键映射"会什么都打不开(以前只认构造期建好的那几页)。
+        page = createPageForRoute(routeKey, nullptr);
+        if (!page)
+            return;
+        // **不要**改写 objectName:每一页的构造函数已经把自己那份设好了(TasksPage / KeymapPage …),
+        // 而按需建页是"页面自己的身份"最要紧的时候(测试与调试都靠它找页面)。
+        // 只有占位页(makePlaceholderPage)才需要按路由拼一个名字。
+        m_pages.insert(routeKey, page);
+        m_stack->addWidget(page);
+    }
 
     // Python main_window.py:127-147 _onCurrentInterfaceChanged(挂在 FluentWindow 的
     // stackedWidget.currentChanged 上):切到"版本"且会话没结束时,**恢复活动临时页**并把
@@ -696,8 +722,12 @@ void MainWindow::hideTempPage(bool endSession) { // :168-182
 void MainWindow::registerSessionPage(const QString &key, QWidget *page) { // :245-264
     m_pages.insert(key, page);
     // 常驻页不参与淘汰
-    static const QSet<QString> persistent{QStringLiteral("home"), QStringLiteral("versions"),
-                                          QStringLiteral("tasks"), QStringLiteral("settings")};
+    // 常驻页 = 侧边栏那 6 项 + 重构后不占侧边栏、但从"下载/更多"进的 3 页(docs/25)。
+    // 淘汰只该落到真正的会话页(download_config / download_progress / launch)身上。
+    static const QSet<QString> persistent{
+        QStringLiteral("home"),   QStringLiteral("download"), QStringLiteral("team"),
+        QStringLiteral("multiplayer"), QStringLiteral("more"), QStringLiteral("settings"),
+        QStringLiteral("versions"), QStringLiteral("tasks"),   QStringLiteral("keymap")};
     if (m_pages.size() <= kMaxSessionPages)
         return;
     for (auto it = m_pages.begin(); it != m_pages.end(); ++it) {
