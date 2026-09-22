@@ -68,6 +68,17 @@ static const char *kVersionsJson =
     "\"dependencies\":[]}"
     "]";
 
+/* 真机踩到的那个坑的夹具:一个光影文件支持一长串游戏版本（真响应里是 **76** 个,这里缩成 12 个）,
+ * 目标版本 1.20.1 排在第 8 位 —— 字段被截断成前 6 个的话,pick_file 会对着一屏能装的包
+ * 判"没有能用的文件"（2026-09-22 晚用 Complementary Shaders 真机复现）。 */
+static const char *kManyVersionsJson =
+    "[{\"id\":\"sh-1\",\"name\":\"Complementary Reimagined r5.9.3\",\"version_number\":\"r5.9.3\","
+    "\"game_versions\":[\"1.7.10\",\"1.8\",\"1.8.1\",\"1.8.2\",\"1.8.3\",\"1.8.4\",\"1.8.5\","
+    "\"1.20.1\",\"1.20.2\",\"1.20.3\",\"1.20.4\",\"1.20.5\"],\"loaders\":[\"iris\",\"optifine\"],"
+    "\"files\":[{\"hashes\":{\"sha1\":\"4444444444444444444444444444444444444444\"},"
+    "\"url\":\"https://cdn.modrinth.com/data/HVnmMxH1/versions/sh-1/x.zip\","
+    "\"filename\":\"ComplementaryReimagined_r5.9.3.zip\",\"primary\":true,\"size\":553397}]}]";
+
 static void test_search_url(void) {
     sxcl_mods_query q;
     memset(&q, 0, sizeof(q));
@@ -195,6 +206,31 @@ static void test_versions_and_pick(void) {
     check_int(sxcl_mods_pick_file(files, count, NULL, NULL, &picked), 0, "不筛时挑第一个能下的");
 }
 
+/* 支持一长串游戏版本的文件也必须挑得出来（匹配字段不许被截断成"前几个"）。 */
+static void test_many_versions(void) {
+    sxcl_mod_file files[4];
+    size_t count = 0;
+    char err[160];
+    err[0] = '\0';
+    check_int(sxcl_mods_modrinth_versions_parse(kManyVersionsJson, strlen(kManyVersionsJson), files, 4,
+                                                &count, err, sizeof(err)),
+              0, "长版本列表解析成功");
+    check_int((long)count, 1, "  一条");
+    check(strstr(files[0].game_versions, "1.7.10") != NULL, "  第一个版本在（匹配字段是完整列表,不是后 6 个）");
+    check(strstr(files[0].game_versions, "1.20.1") != NULL, "  第 8 位的目标版本也在");
+    check(strstr(files[0].game_versions, "1.20.5") != NULL, "  最后一个版本也在");
+    check_str(files[0].loaders, "iris optifine", "  加载器全在");
+
+    sxcl_mod_file picked;
+    memset(&picked, 0, sizeof(picked));
+    check_int(sxcl_mods_pick_file(files, count, "1.20.1", "iris", &picked), 0,
+              "挑得出来（回归:前 6 个里没有 1.20.1 时不许判「没有能用的文件」）");
+    check_str(picked.filename, "ComplementaryReimagined_r5.9.3.zip", "  挑对了");
+    check_int(sxcl_mods_pick_file(files, count, "1.7.10", "optifine", &picked), 0, "第一个版本也能挑");
+    check_int(sxcl_mods_pick_file(files, count, "1.20.1", "fabric", &picked), -1,
+              "加载器不对还是不挑（口径没被放松）");
+}
+
 static void test_mods_dir(void) {
     char out[512];
     check_int(sxcl_mods_dir("D:/mc", "1.20.1-fabric", "mods", 1, out, sizeof(out)), 0, "隔离时拼得出来");
@@ -296,7 +332,12 @@ static const char *kCfFilesJson =
     "\"downloadUrl\":\"https://edge.forgecdn.net/files/4321/2/jei-1.19.2-forge.jar\","
     "\"fileLength\":100,\"gameVersions\":[\"1.19.2\",\"Forge\"],\"hashes\":[],\"dependencies\":[]},"
     "{\"id\":4321003,\"displayName\":\"没有直链的文件\",\"fileName\":\"no-link.jar\","
-    "\"downloadUrl\":null,\"fileLength\":0,\"gameVersions\":[\"1.20.1\"],\"hashes\":[],\"dependencies\":[]}"
+    "\"downloadUrl\":null,\"fileLength\":0,\"gameVersions\":[\"1.20.1\"],\"hashes\":[],\"dependencies\":[]},"
+    /* 第三条:一长串游戏版本 + 加载器名排在**最后** —— 不分堆的话 "Forge" 会被挤出缓冲 */
+    "{\"id\":4321004,\"displayName\":\"many.jar\",\"fileName\":\"many.jar\","
+    "\"downloadUrl\":\"https://edge.forgecdn.net/files/4321/4/many.jar\",\"fileLength\":50,"
+    "\"gameVersions\":[\"1.16.5\",\"1.17\",\"1.17.1\",\"1.18\",\"1.18.1\",\"1.18.2\",\"1.19\","
+    "\"1.19.1\",\"1.19.2\",\"1.20\",\"1.20.1\",\"Forge\"],\"hashes\":[],\"dependencies\":[]}"
     "] }";
 
 static void test_curseforge_files(void) {
@@ -316,7 +357,7 @@ static void test_curseforge_files(void) {
     check_int(sxcl_mods_curseforge_versions_parse(kCfFilesJson, strlen(kCfFilesJson), files, 8,
                                                  &count, err, sizeof(err)),
               0, "CF 文件列表解析成功");
-    check_int((long)count, 2, "  两条**有直链**的(没有直链的那条被跳过)");
+    check_int((long)count, 3, "  三条**有直链**的(没有直链的那条被跳过)");
     check_str(files[0].filename, "jei-1.20.1-forge-15.2.0.27.jar", "  文件名");
     check_str(files[0].version_id, "4321001", "  文件 id 转字符串");
     check_str(files[0].sha1, "3333333333333333333333333333333333333333",
@@ -332,12 +373,22 @@ static void test_curseforge_files(void) {
     check_str(picked.filename, "jei-1.20.1-forge-15.2.0.27.jar", "  挑对了");
     check_int(sxcl_mods_pick_file(files, count, "1.19.2", "fabric", &picked), -1,
               "加载器对不上 -> 不挑(与 Modrinth 同一口径)");
+
+    /* 第三条:12 个游戏版本 + "Forge" 排在最后。分堆之后,加载器那堆只有加载器名,
+     * 版本那堆只有版本号 —— 谁都不会把谁挤掉。 */
+    check_str(files[2].loaders, "Forge", "CF:加载器堆里只有加载器名(没有版本号)");
+    check_str(files[2].game_versions, "1.16.5 1.17 1.17.1 1.18 1.18.1 1.18.2 1.19 1.19.1 1.19.2 1.20 1.20.1",
+              "CF:版本堆里只有版本号(没有加载器名)");
+    check_int(sxcl_mods_pick_file(&files[2], 1, "1.20.1", "forge", &picked), 0,
+              "CF:游戏版本再多也挑得出来（回归:Forge 不许被挤出缓冲）");
+    check_str(picked.filename, "many.jar", "  挑对了");
 }
 
 int main(void) {
     test_search_url();
     test_search_parse();
     test_versions_and_pick();
+    test_many_versions();
     test_mods_dir();
     test_curseforge();
     test_curseforge_files();

@@ -88,8 +88,12 @@ typedef struct sxcl_mod_file {
     char sha1[48];
     int64_t size;
     int primary;                  /**< 1 = 上游标记的主文件 */
-    char game_versions[192];      /**< 空格分隔 */
-    char loaders[128];            /**< 空格分隔 */
+    /* 下面两个是**匹配用**字段，不是显示用的 —— 必须尽量装全。
+     * 真实踩到过（2026-09-22 晚，真机）:Complementary Shaders 的一个文件支持 **76** 个游戏版本,
+     * 前 6 个里没有 1.20.1;字段只留 6 个的话 pick_file 会对着一屏能装的包判"没有能用的文件"。
+     * 界面要截断显示就在界面层截,别在这里截 —— 截了就等于把能装的包判成不能装。 */
+    char game_versions[1024];     /**< 空格分隔的**完整**游戏版本列表（CF 的是纯版本号） */
+    char loaders[256];            /**< 空格分隔的**完整**加载器列表 */
     char required_deps[192];      /**< 空格分隔的 required 依赖的版本 id（**只展示不装**） */
 } sxcl_mod_file;
 

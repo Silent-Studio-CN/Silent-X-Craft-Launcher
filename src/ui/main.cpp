@@ -14,6 +14,8 @@
 #include <QLocale>
 #include <QPainter>
 #include <QPixmap>
+#include <QAbstractButton> // 验收钩子:点模组页的搜索按钮(可能是 PrimaryPushButton)
+#include <QLineEdit>       // 验收钩子:SXCL_UI_MODS_QUERY 往搜索框里写字
 #include <QPushButton> // 验收钩子:SXCL_UI_JRE_HOSTED 要找并点设置页上的「开始下载」按钮
 #include <QScrollArea>
 #include <QScrollBar>
@@ -39,6 +41,7 @@
 
 #include "icon_registry.h"
 #include "main_window.h"
+#include "nav.h" // 验收钩子:SXCL_UI_NAV 要点侧二栏上那一条(NavPanel::button)
 #include "fluent_theme.h"
 #include "theme_bridge.h"
 
@@ -562,6 +565,88 @@ int main(int argc, char *argv[]) {
             } else {
                 std::fprintf(stderr, "[sxcl-ui] 设置页里没找到内置 JRE 的「开始下载」按钮\n");
             }
+        });
+    }
+
+    // 验收通路:进**子栏**(下载页左侧那三个:Minecraft 版本 / MOD / 光影;版本选择页的文件夹也是)。
+    //   SXCL_UI_NAV=<routeKey>(如 download_mod):窗口起来后**点那一条** ——
+    //   走产品路径(按钮 clicked -> NavPanel::setCurrent -> routeChanged -> 切 stack),
+    //   不在这里自己去 setCurrentIndex(那样验不到接线本身,与 SXCL_UI_JRE_HOSTED 同一个口径)。
+    const QString navKey = qEnvironmentVariable("SXCL_UI_NAV");
+    if (!navKey.isEmpty()) {
+        QTimer::singleShot(400, &app, [&window, navKey]() {
+            const QList<sxcl::ui::NavPanel *> panels = window.findChildren<sxcl::ui::NavPanel *>();
+            for (sxcl::ui::NavPanel *panel : panels) {
+                if (NavigationPushButton *btn = panel->button(navKey)) {
+                    btn->click();
+                    std::fprintf(stderr, "[sxcl-ui] 子栏 %s 已点(SXCL_UI_NAV)\n",
+                                 navKey.toUtf8().constData());
+                    return;
+                }
+            }
+            std::fprintf(stderr, "[sxcl-ui] 找不到子栏条目 %s(SXCL_UI_NAV)\n",
+                         navKey.toUtf8().constData());
+        });
+    }
+
+    // 验收通路:模组页真的搜一次(SXCL_UI_MODS_QUERY=<关键词>)。
+    //   往**真控件**里写字、点**真的搜索按钮** —— 走产品路径(工作线程取 JSON -> 解析 -> 出卡片),
+    //   与 SXCL_UI_JRE_HOSTED 同一个口径:验的是接线,不是"main.cpp 里自己调核心库"。
+    const QString modsQuery = qEnvironmentVariable("SXCL_UI_MODS_QUERY");
+    if (!modsQuery.isEmpty()) {
+        QTimer::singleShot(600, &app, [&window, modsQuery]() {
+            /* 模组页在下载页的 stack 里有**两份**(MOD 那一栏与光影那一栏),
+             * 两份的搜索框同名 —— 必须挑**看得见的那一份**(用户眼前那个),
+             * 否则会往隐藏的那一页里打字(实测踩到:dump 里中招的是隐藏页,可见页毫无反应)。 */
+            QLineEdit *box = nullptr;
+            const QList<QLineEdit *> boxes =
+                window.findChildren<QLineEdit *>(QStringLiteral("modsSearchBox"));
+            for (QLineEdit *candidate : boxes) {
+                if (candidate->isVisible()) {
+                    box = candidate;
+                    break;
+                }
+            }
+            QAbstractButton *btn = nullptr;
+            if (box != nullptr && box->parentWidget() != nullptr) {
+                btn = box->parentWidget()->findChild<QAbstractButton *>(
+                    QStringLiteral("modsSearchButton"));
+            }
+            if (box == nullptr || btn == nullptr) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] 找不到模组页的搜索框/按钮(SXCL_UI_MODS_QUERY 需要 "
+                             "SXCL_UI_ROUTE=download + SXCL_UI_NAV=download_mod|download_shader)\n");
+                return;
+            }
+            box->setText(modsQuery);
+            btn->click();
+            std::fprintf(stderr, "[sxcl-ui] 模组页已点搜索(可见页):%s\n",
+                         modsQuery.toUtf8().constData());
+        });
+    }
+
+    // 验收通路:点模组页第 N 个「装」(SXCL_UI_MODS_INSTALL=N,1 起;0/不设 = 不点)。
+    //   搜索结果是异步回来的,所以这一步**排在搜索之后**(默认等 7s,可用
+    //   SXCL_UI_MODS_INSTALL_DELAY 调);点的是卡片上真的那个按钮。
+    const int installIndex = qEnvironmentVariableIntValue("SXCL_UI_MODS_INSTALL");
+    if (installIndex > 0) {
+        const int installDelay = qEnvironmentVariableIntValue("SXCL_UI_MODS_INSTALL_DELAY");
+        QTimer::singleShot(installDelay > 0 ? installDelay : 7000, &app, [&window, installIndex]() {
+            QList<QAbstractButton *> visible;
+            const QList<QAbstractButton *> all =
+                window.findChildren<QAbstractButton *>(QStringLiteral("modsInstallButton"));
+            for (QAbstractButton *candidate : all) {
+                if (candidate->isVisible()) {
+                    visible.append(candidate);
+                }
+            }
+            if (visible.size() < installIndex) {
+                std::fprintf(stderr, "[sxcl-ui] 第 %d 个「装」不存在(当前可见 %d 个)\n", installIndex,
+                             static_cast<int>(visible.size()));
+                return;
+            }
+            visible.at(installIndex - 1)->click();
+            std::fprintf(stderr, "[sxcl-ui] 模组页已点第 %d 个「装」\n", installIndex);
         });
     }
 

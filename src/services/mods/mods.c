@@ -84,6 +84,40 @@ static void join_strings(const sxcl_json_value *array, char *out, size_t cap, si
     }
 }
 
+/** CurseForge 的 gameVersions[] 把**游戏版本和加载器名混在一个数组里**（"1.20.1" 与 "Forge"）。
+ *  按"第一个字符是不是数字"分成两堆:版本号进 versions（pick_file 拿它比游戏版本),
+ *  其余（Forge/Fabric/Quilt/NeoForge…）进 loaders（比加载器）。
+ *  不分堆的话,支持十几个游戏版本的模组会把 "Forge" 挤出缓冲 —— 那等于把能装的判成不能装。 */
+static void split_cf_game_versions(const sxcl_json_value *array, char *versions, size_t versions_cap,
+                                   char *loaders, size_t loaders_cap)
+{
+    versions[0] = '\0';
+    loaders[0] = '\0';
+    size_t vu = 0;
+    size_t lu = 0;
+    const size_t n = sxcl_json_size(array);
+    for (size_t i = 0; i < n; ++i) {
+        const char *text = sxcl_json_string(sxcl_json_at(array, i));
+        if (text == NULL || text[0] == '\0') {
+            continue;
+        }
+        const int is_version = (text[0] >= '0' && text[0] <= '9');
+        char *buf = is_version ? versions : loaders;
+        size_t *used = is_version ? &vu : &lu;
+        const size_t cap = is_version ? versions_cap : loaders_cap;
+        const size_t len = strlen(text);
+        if (*used + len + 2 >= cap) {
+            continue;   /* 这一堆装不下了:跳过这一条,不挤掉后面别的（后面还会继续装） */
+        }
+        if (*used > 0) {
+            buf[(*used)++] = ' ';
+        }
+        memcpy(buf + *used, text, len);
+        *used += len;
+        buf[*used] = '\0';
+    }
+}
+
 /** 数组里有没有这个值（大小写不敏感）。 */
 static int list_has(const sxcl_json_value *array, const char *want)
 {
@@ -397,9 +431,11 @@ int sxcl_mods_modrinth_versions_parse(const char *json, size_t len, sxcl_mod_fil
         dst->primary = sxcl_json_get_bool(chosen, "primary", 0);
         copy_cap(dst->sha1, sizeof(dst->sha1),
                  sxcl_json_get_string(sxcl_json_get(chosen, "hashes"), "sha1", ""));
+        /* keep 给大值 = "装到缓冲满为止":这两个字段是匹配用的,少装一个就可能把能装的包判成不能装
+         * (见 mods.h 里那段说明)。显示要截断是界面的事。 */
         join_strings(sxcl_json_get(ver, "game_versions"), dst->game_versions,
-                     sizeof(dst->game_versions), 6);
-        join_strings(sxcl_json_get(ver, "loaders"), dst->loaders, sizeof(dst->loaders), 4);
+                     sizeof(dst->game_versions), 512);
+        join_strings(sxcl_json_get(ver, "loaders"), dst->loaders, sizeof(dst->loaders), 32);
         /* 依赖只展示不装（PCL 口径）：把 required 的 project_id 列出来 */
         {
             const sxcl_json_value *deps = sxcl_json_get(ver, "dependencies");
@@ -689,11 +725,10 @@ int sxcl_mods_curseforge_versions_parse(const char *json, size_t len, sxcl_mod_f
                 }
             }
         }
-        /* gameVersions[] 里既有游戏版本也有加载器名(Forge/Fabric…),统一塞进去 ——
-         * sxcl_mods_pick_file 的匹配是"列表里有这个词" */
-        join_strings(sxcl_json_get(file, "gameVersions"), dst->game_versions,
-                     sizeof(dst->game_versions), 8);
-        copy_cap(dst->loaders, sizeof(dst->loaders), dst->game_versions);
+        /* gameVersions[] 里既有游戏版本也有加载器名(Forge/Fabric…):按"是不是数字开头"分堆,
+         * 版本比版本、加载器比加载器（见 split_cf_game_versions 的说明） */
+        split_cf_game_versions(sxcl_json_get(file, "gameVersions"), dst->game_versions,
+                               sizeof(dst->game_versions), dst->loaders, sizeof(dst->loaders));
         /* dependencies[]:relationType=3 是 RequiredDependency */
         {
             const sxcl_json_value *deps = sxcl_json_get(file, "dependencies");

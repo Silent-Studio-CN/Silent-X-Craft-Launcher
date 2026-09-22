@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <vector>
 
 #include "sxcl/engine.h"
 #include "sxcl/fs.h"
@@ -19,7 +20,8 @@
 #include "sxcl/log.h"
 #include "sxcl/settings.h"
 
-#include "sxcl/net.h" // sxcl_transport_qt_create / sxcl_transport_qt_bootstrap
+#include "sxcl/http.h"  // sxcl_http_get_text(带自定义请求头的那条路)
+#include "sxcl/net.h"   // sxcl_transport_qt_create / sxcl_transport_qt_bootstrap
 
 namespace sxcl::ui {
 
@@ -94,7 +96,38 @@ void ModsWorker::run() {
         char err[256];
         err[0] = '\0';
         const QByteArray url = m_request.url.toUtf8();
-        const int rc = sxcl_install_http_get_text(&opts, url.constData(), &text, err, sizeof(err));
+        int rc = 0;
+        if (m_request.headers.isEmpty()) {
+            rc = sxcl_install_http_get_text(&opts, url.constData(), &text, err, sizeof(err));
+        } else {
+            /* 要带自定义头(CurseForge 的 x-api-key)就得手工建传输走 sxcl_http_get_text:
+             * 引擎那条路的取文本没有"加一个头"的位置,而给引擎塞一个全局头会污染所有下载。
+             * bootstrap 已经在上面调过了(不调它 HTTPS 会报 "No functional TLS backend")。 */
+            sxcl_transport *tr = sxcl_transport_qt_create();
+            if (tr == nullptr) {
+                emit finished(false, QStringLiteral("传输后端起不来"), QString(), 0);
+                return;
+            }
+            /* 注:这里用 std::vector 而不是 QVarLengthArray —— 后者会实例化 Qt 内部的
+             * qAddOverflow/qMulOverflow 模板,MSVC 在 /W4 下对它们报 C4702(而本工程把警告当错误)。 */
+            std::vector<QByteArray> raw;
+            raw.reserve((size_t)m_request.headers.size());
+            for (const QString &one : m_request.headers) {
+                raw.push_back(one.toUtf8());
+            }
+            std::vector<const char *> ptrs;
+            ptrs.reserve(raw.size() + 1);
+            for (const QByteArray &one : raw) {
+                ptrs.push_back(one.constData());
+            }
+            ptrs.push_back(nullptr);
+            size_t len = 0;
+            rc = sxcl_http_get_text(tr, url.constData(), ptrs.data(), &text, &len, err,
+                                    sizeof(err));
+            if (tr->destroy != nullptr) {
+                tr->destroy(tr->ctx);
+            }
+        }
         if (rc != 0 || text == nullptr) {
             emit finished(false, QString::fromUtf8(err[0] ? err : "取不到数据"), QString(), 0);
             return;

@@ -15,6 +15,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
 class QThread;
 
@@ -32,6 +33,10 @@ public:
         QString sha1;         // 可空:官方摘要(有就强校验)
         qint64 size = 0;      // 0 = 不知道
         QString settingsFile; // 从它读下载参数(workers/限速/分片/缓存);空 = 默认
+        // 额外请求头("名字: 值"),只对 FetchText 有意义。
+        // **CurseForge 的 key 只走这里** —— 它必须放在 x-api-key 头里,绝不进 URL
+        // (URL 会被写进日志/历史/错误消息,key 一旦进去就等于泄露)。
+        QStringList headers;
     };
 
     explicit ModsWorker(Request request, QObject *parent = nullptr);
