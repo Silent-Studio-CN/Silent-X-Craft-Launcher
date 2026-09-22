@@ -166,6 +166,19 @@ int sxcl_manifest_mirror_url(const char *url, const char *mirror_base, char *out
         (rest = prefix_after(url, "http://resources.download.minecraft.net")) != NULL) {
         return mirror_join(base, "/assets", rest, out, out_len) ? 0 : -1;
     }
+    /* 三个**加载器 maven**（docs/22 的 A4「镜像三前缀」）：BMCLAPI 都在 /maven/ 下镜像它。
+     * 实测（2026-09-22 晚逐个 HEAD）：forge 安装器 / fabric-loader / neoforge 安装器 /
+     * Maven Central 的 gson 全是 200 —— 以前这三家**一条镜像都没有**，
+     * 于是"方式 A 的安装器自己下几百 MB"这条路完全绕开镜像。
+     * Quilt 的 maven **故意不映射**:BMCLAPI 对它 404,映射了只会多一条必死的候选。 */
+    if ((rest = prefix_after(url, "https://maven.minecraftforge.net")) != NULL ||
+        (rest = prefix_after(url, "http://maven.minecraftforge.net")) != NULL ||
+        (rest = prefix_after(url, "https://maven.neoforged.net/releases")) != NULL ||
+        (rest = prefix_after(url, "http://maven.neoforged.net/releases")) != NULL ||
+        (rest = prefix_after(url, "https://maven.fabricmc.net")) != NULL ||
+        (rest = prefix_after(url, "http://maven.fabricmc.net")) != NULL) {
+        return mirror_join(base, "/maven", rest, out, out_len) ? 0 : -1;
+    }
     return -1;
 }
 

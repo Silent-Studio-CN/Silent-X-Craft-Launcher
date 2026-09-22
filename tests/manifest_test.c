@@ -318,6 +318,42 @@ int main(void) {
                   "https://bmclapi2.bangbang93.com/assets/11/"
                   "1111111111111111111111111111111111111111",
                   "镜像:资源对象走 /assets");
+        /* 三个加载器 maven（docs/22 的 A4「镜像三前缀」）——都走 /maven。
+         * 实测 BMCLAPI 对 forge 安装器 / fabric-loader / neoforge 安装器 / Maven Central 的 gson
+         * 都是 200；Quilt 的 maven 故意不映射（BMCLAPI 对它 404）。 */
+        check(sxcl_manifest_mirror_url(
+                  "https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.1-47.2.0/"
+                  "forge-1.20.1-47.2.0-installer.jar",
+                  NULL, out, sizeof(out)) == 0,
+              "镜像:Forge maven 能映射");
+        check_str(out,
+                  "https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/1.20.1-47.2.0/"
+                  "forge-1.20.1-47.2.0-installer.jar",
+                  "镜像:Forge 安装器走 /maven");
+        check(sxcl_manifest_mirror_url(
+                  "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.15.11/"
+                  "fabric-loader-0.15.11.jar",
+                  NULL, out, sizeof(out)) == 0,
+              "镜像:Fabric maven 能映射");
+        check_str(out,
+                  "https://bmclapi2.bangbang93.com/maven/net/fabricmc/fabric-loader/0.15.11/"
+                  "fabric-loader-0.15.11.jar",
+                  "镜像:Fabric 库走 /maven");
+        check(sxcl_manifest_mirror_url(
+                  "https://maven.neoforged.net/releases/net/neoforged/neoforge/21.1.72/"
+                  "neoforge-21.1.72-installer.jar",
+                  NULL, out, sizeof(out)) == 0,
+              "镜像:NeoForge maven 能映射");
+        check_str(out,
+                  "https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/21.1.72/"
+                  "neoforge-21.1.72-installer.jar",
+                  "镜像:NeoForge 安装器走 /maven（/releases 前缀去掉）");
+        check(sxcl_manifest_mirror_url(
+                  "https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-installer/0.15.1/"
+                  "quilt-installer-0.15.1.jar",
+                  NULL, out, sizeof(out)) == -1,
+              "镜像:Quilt maven 不映射（BMCLAPI 对它 404,映射只会多一条必死的候选）");
+
         /* 自定义镜像根(设置里可以填别的站) */
         check(sxcl_manifest_mirror_url("https://piston-meta.mojang.com/mc/a.json",
                                        "https://my.mirror.example", out, sizeof(out)) == 0,

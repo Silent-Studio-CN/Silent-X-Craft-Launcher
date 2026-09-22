@@ -11,6 +11,7 @@
 
 #include "sxcl/fs.h"
 #include "sxcl/install.h"
+#include "sxcl/log.h"   /* SXCL_LOG_I:安装器拿到官方 SHA-1 时在日志里说一声 */
 #include "sxcl/json.h"
 #include "sxcl/manifest.h"
 #include "sxcl/natives.h"
@@ -1106,7 +1107,53 @@ static int stage_loader_installer(install_run *r) {
         task.urls[1] = installer_mirror_url;
     }
     task.algo = SXCL_HASH_SHA1;
-    task.size = 0; /* 安装器没有官方哈希:只校验"下下来了且非空" */
+    task.size = 0; /* 大小等侧车拿到 sha1 之后再定(见下) */
+    /* ── 安装器的**官方哈希**（docs/22 的 A4）──
+     * 各家 maven 都发布 <jar>.sha1 侧车(Forge/NeoForge/Fabric 实测都有;Quilt 那家当时连不上,
+     * 拿不到就退回老口径)。有哈希就**强校验**,顺带白拿"已存在且校验通过 -> 一个字节都不下"的快路径;
+     * 侧车本身也走同一条候选路(镜像优先时先问镜像)。拿不到**不是错误**:如实退回"只校验非空"。 */
+    char want_sha1[48];
+    want_sha1[0] = '\0';
+    {
+        const char *side_candidates[2];
+        size_t side_count = 0;
+        if (r->plan->prefer_mirror && installer_mirror_url) {
+            side_candidates[side_count++] = installer_mirror_url;
+        }
+        side_candidates[side_count++] = r->plan->installer_url;
+        for (size_t si = 0; si < side_count && want_sha1[0] == '\0'; ++si) {
+            char sha_url[1200];
+            if (snprintf(sha_url, sizeof(sha_url), "%s.sha1", side_candidates[si]) <= 0) {
+                continue;
+            }
+            char *text = NULL;
+            char ferr[SXCL_INSTALL_ERROR_MAX];
+            ferr[0] = '\0';
+            if (r->io->fetch_text(r->io->userdata, sha_url, &text, ferr, sizeof(ferr)) != 0 ||
+                text == NULL) {
+                continue;
+            }
+            size_t n = 0;
+            for (const char *p = text; *p != '\0' && n < 40; ++p) {
+                const int hex = (*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') ||
+                                (*p >= 'A' && *p <= 'F');
+                if (hex) {
+                    want_sha1[n++] = (char)((*p >= 'A' && *p <= 'F') ? (*p - 'A' + 'a') : *p);
+                } else if (n > 0) {
+                    break;   /* 前 40 个十六进制字符就是摘要;后面的(换行/文件名)不要 */
+                }
+            }
+            want_sha1[n] = '\0';
+            if (n != 40) {
+                want_sha1[0] = '\0';
+            }
+            free(text);
+        }
+        if (want_sha1[0] != '\0') {
+            task.sha1 = want_sha1;
+            SXCL_LOG_I("install", "加载器安装器带官方 SHA-1 校验: %s", want_sha1);
+        }
+    }
     task.priority = 0;
     task.label = "加载器安装器";
 
