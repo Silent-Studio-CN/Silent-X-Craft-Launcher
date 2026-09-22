@@ -455,6 +455,12 @@ private:
                 });
         connect(m_worker, &LaunchWorker::commandLine, this,
                 [this](const QStringList &lines) { onCommandLine(lines); });
+        // 启动前「补全文件」的实时读数(docs/24 §8):以前这一段是黑盒 ——
+        // 几千个文件只在跑完之后报一行,用户看到的就是"卡住了"。
+        connect(m_worker, &LaunchWorker::completeProgress, this,
+                [this](int finished, int failed, const QString &label, qint64 done, qint64 total) {
+                    onCompleteProgress(finished, failed, label, done, total);
+                });
         connect(m_worker, &LaunchWorker::logLine, this,
                 [this](const QString &text, const QString &kind, int severity, int isStderr) {
                     onLogLine(text, kind, severity, isStderr);
@@ -494,6 +500,26 @@ private:
         m_statusBadge->setText(QStringLiteral("● 进行中"));
         applyThemeStyles();
         updateTaskCard(percent, QStringLiteral("%1%").arg(percent), name);
+    }
+
+    /** 补全文件的实时读数:写进那张任务卡(状态 + 详情),不抢阶段行(阶段行归核心的 5 段)。
+     *  取消中就不再刷了 —— 用户已经点过取消,继续报"正在补 xxx"只会让人以为没理他。 */
+    void onCompleteProgress(int finished, int failed, const QString &label, qint64 done,
+                            qint64 total) {
+        if (m_worker == nullptr || m_worker->cancelRequested()) {
+            return;
+        }
+        QString detail = QStringLiteral("正在补全文件:%1 件已落定").arg(finished);
+        if (failed > 0) {
+            detail += QStringLiteral("（失败 %1）").arg(failed);
+        }
+        if (!label.isEmpty()) {
+            detail += QStringLiteral(" · %1").arg(QFileInfo(label).fileName());
+        }
+        if (total > 0) {
+            detail += QStringLiteral("（%1%）").arg(int(double(done) * 100.0 / double(total)));
+        }
+        updateTaskCard(m_progressBar->value(), QStringLiteral("补全文件中"), detail);
     }
 
     void onJavaInfo(const QString &path, int major, const QString &version, int is64) {

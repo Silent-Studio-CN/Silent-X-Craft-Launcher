@@ -13,6 +13,10 @@
 #include <atomic>
 #include <cstdint>
 
+extern "C" {
+struct sxcl_task; /* 只在两个静态回调的签名里用到(engine.h) */
+}
+
 class QThread;
 
 namespace sxcl::ui {
@@ -64,6 +68,12 @@ signals:
     void phaseChanged(int index, int total, const QString &name);
     // Java 探测结果(核心库选中的那一个)
     void javaInfo(const QString &path, int major, const QString &version, int is64Bit);
+    // 启动前「补全文件」的实时读数(docs/24 的 P0)。
+    //   finished = 已落定的件数(**含"已存在"命中的**),failed = 里面失败的件数,
+    //   label = 正在处理的那一件,bytesDone/bytesTotal = 这一件的进度。
+    // 由**下载引擎的工作线程**发出,界面按队列连接收(自动回到界面线程)。
+    void completeProgress(int finished, int failed, const QString &label, qint64 bytesDone,
+                          qint64 bytesTotal);
     // 最终命令行(**核心库打码后的**,逐行;见文件头)。accessToken 已在核心内部换成 ***。
     void commandLine(const QStringList &lines);
     // 进程输出的一行 + 核心库的归类结果(logscan)
@@ -83,6 +93,8 @@ private:
     void run();
     static int cbLine(void *userdata, int is_stderr, const char *line);
     static int cbStarted(void *userdata, int64_t pid);
+    static void cbCompleteProgress(void *userdata, const sxcl_task *task);
+    static int cbCompleteCancelled(void *userdata);
     int onLine(int isStderr, const char *line);
     int onStarted(int64_t pid);
 

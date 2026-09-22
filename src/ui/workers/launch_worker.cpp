@@ -8,12 +8,17 @@
 
 #include <QByteArray>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QSet>
 #include <QThread>
 
 #include <cstring>
 #include <utility>
 #include <vector>
 
+#include "sxcl/engine.h" // sxcl_task(补全进度的回调签名)
 #include "sxcl/fs.h"       // sxcl_fs_mkdirs:哈希缓存的目录要先建出来
 #include "sxcl/launch.h"
 #include "sxcl/log.h"
@@ -36,6 +41,24 @@ QByteArray utf8OrNull(const QString &text) {
 // ── 启动前"补全文件"的下载配置(PCL 启动链第 3 步) ──
 // 与安装、命令行前端**同一个口径**(设置文件 > 默认)。哈希缓存很关键:第二次启动要核对
 // 几千个文件,没有缓存就得把几百 MB 重新读一遍(engine.h 的 cache_path 就是为它准备的)。
+// 补全过程的进度桥(界面要显示"补到第几件了",见 docs/24 §8 的「还没做」)。
+//
+// 为什么需要它:引擎的 on_progress 是**从下载引擎的工作线程**回调的(workers 个线程并发),
+// 所以计数与去重必须自己在锁里做;信号本身靠 Qt 的队列连接回到界面线程。
+// 去重的判据是"这一件的 state 已经落定(DONE/FAILED/CANCELLED)且没见过" —— 引擎对每个任务
+// 会回调多次(0.5s 节流),落定时还会再回调一次,不做去重就会把同一件数好几次。
+struct CompleteProgressBridge {
+    LaunchWorker *owner = nullptr;
+    QMutex lock;
+    QSet<const void *> counted;
+    int finished = 0;
+    int failed = 0;
+    /* 节流:几千个资源对象"一个文件一次信号"会把界面线程淹掉 ——
+     * 实测(2026-09-22 晚)表现是"点了启动就卡住,连截图定时器都轮不上",
+     * 而不是崩。250ms 一次(4 次/秒)对读数完全够用。 */
+    QElapsedTimer lastEmit;
+};
+
 struct CompleteOpts {
     sxcl_engine_opts opts{};
     char cacheFile[600]{};
@@ -43,9 +66,10 @@ struct CompleteOpts {
     int preferMirror = 0;  // bmclapi/auto = 镜像优先;mojang = 官方优先
     int assetsLevel = 1;   // 资源对象补到哪一档(见 launch.h 的 complete_assets 说明)
     int skipFileCheck = 0; // 「关闭文件校验」:存在就算过(见 launch.h 的 skip_file_check)
+    CompleteProgressBridge progress; // 实时读数(见上)
 };
 
-void buildCompleteOpts(const QString &settingsFile, CompleteOpts *out) {
+void buildCompleteOpts(const QString &settingsFile, CompleteOpts *out, LaunchWorker *owner) {
     sxcl_settings_download dl;
     std::memset(&dl, 0, sizeof(dl));
     const QByteArray settingsUtf8 = settingsFile.toUtf8();
@@ -86,6 +110,11 @@ void buildCompleteOpts(const QString &settingsFile, CompleteOpts *out) {
         out->opts.cache_path = out->cacheFile;
     }
     out->preferMirror = (uiDownloadSource() != QLatin1String("mojang")) ? 1 : 0;
+    /* 实时读数:核心库把它转发给调用方给的那个 on_progress(manifest.c 的 fetch_on_progress),
+     * userdata 就是这座桥 —— 见 CompleteProgressBridge 的说明。 */
+    out->progress.owner = owner;
+    out->opts.on_progress = &LaunchWorker::cbCompleteProgress;
+    out->opts.userdata = &out->progress;
 #if defined(SXCL_UI_HAVE_QT_TRANSPORT)
     // Qt 后端有线程亲和性,引擎按需**每线程**建一个(engine.h 的说明);这里只给工厂。
     sxcl_transport_qt_bootstrap();
@@ -94,6 +123,53 @@ void buildCompleteOpts(const QString &settingsFile, CompleteOpts *out) {
 #endif
 }
 } // namespace
+
+/** 补全进度:引擎的工作线程回调(见 CompleteProgressBridge 的说明)。 */
+void LaunchWorker::cbCompleteProgress(void *userdata, const sxcl_task *task) {
+    auto *bridge = static_cast<CompleteProgressBridge *>(userdata);
+    if (bridge == nullptr || bridge->owner == nullptr || task == nullptr) {
+        return;
+    }
+    int finished = 0;
+    int failed = 0;
+    {
+        QMutexLocker locker(&bridge->lock);
+        const bool terminal = (task->state == SXCL_TASK_DONE || task->state == SXCL_TASK_FAILED ||
+                               task->state == SXCL_TASK_CANCELLED);
+        if (terminal && !bridge->counted.contains(task)) {
+            bridge->counted.insert(task);
+            ++bridge->finished;
+            if (task->state != SXCL_TASK_DONE) {
+                ++bridge->failed;
+            }
+        }
+        finished = bridge->finished;
+        failed = bridge->failed;
+    }
+    /* 节流判据放在锁里、发信号放在锁外:发信号可能触发直连槽(同一线程时),
+     * 拿着锁去跑别人的代码是死锁的经典配方。 */
+    bool should_emit = false;
+    {
+        QMutexLocker locker(&bridge->lock);
+        if (!bridge->lastEmit.isValid() || bridge->lastEmit.elapsed() >= 250) {
+            bridge->lastEmit.restart();
+            should_emit = true;
+        }
+    }
+    if (!should_emit) {
+        return;
+    }
+    const char *label = task->label != nullptr && task->label[0] != '\0' ? task->label : task->dest;
+    emit bridge->owner->completeProgress(finished, failed,
+                                         QString::fromUtf8(label != nullptr ? label : ""),
+                                         (qint64)task->bytes_done, (qint64)task->total_bytes);
+}
+
+/** 补全过程中的取消钩子:界面点「取消」置的就是这个位。 */
+int LaunchWorker::cbCompleteCancelled(void *userdata) {
+    auto *self = static_cast<LaunchWorker *>(userdata);
+    return (self != nullptr && self->m_cancel.load()) ? 1 : 0;
+}
 
 QStringList LaunchWorker::phaseNames() {
     // 与 launch_page.py:557-563 逐条一致(第 4 行在 Windows 上叫"等待游戏窗口",
@@ -250,7 +326,7 @@ void LaunchWorker::run() {
 
     // 启动前补全文件(要在 sxcl_launch_run **返回之后**才析构:引擎全程持有它)
     CompleteOpts complete;
-    buildCompleteOpts(m_request.settingsFile, &complete);
+    buildCompleteOpts(m_request.settingsFile, &complete, this);
 
     sxcl_launch_request req;
     std::memset(&req, 0, sizeof(req));
@@ -281,6 +357,10 @@ void LaunchWorker::run() {
     req.prefer_mirror = complete.preferMirror;
     req.complete_assets = complete.assetsLevel; // 资源对象那一遍(P0b):0/1/2,见 launch.h
     req.skip_file_check = complete.skipFileCheck; // 「关闭文件校验」:存在就算过(见 launch.h)
+    /* 补全过程中的取消钩子(docs/24 §8 的「还没做」第二条):
+     * 核心库在每个文件边界上问一次;界面上的「取消」按钮置的就是这个取消位。 */
+    req.complete_is_cancelled = &LaunchWorker::cbCompleteCancelled;
+    req.complete_cancel_ud = this;
 
     char err[256];
     err[0] = '\0';

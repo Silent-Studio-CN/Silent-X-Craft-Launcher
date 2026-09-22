@@ -22,6 +22,8 @@
 #include "sxcl/paths.h"
 #include "sxcl/settings.h"
 
+#include "workers/ui_paths.h" // uiSettingsFilePath:设置文件路径的唯一权威(见 ownSettingsFilePath)
+
 namespace sxcl::ui {
 namespace {
 
@@ -116,17 +118,17 @@ QString GameFolder::name() const {
 }
 
 QString ownSettingsFilePath() {
-#if defined(Q_OS_WIN)
-    QString base = qEnvironmentVariable("APPDATA");
-    if (base.isEmpty())
-        base = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-    return base + QStringLiteral("/SilentXCraftLauncher/settings.conf");
-#elif defined(Q_OS_MACOS)
-    return QDir::homePath() +
-           QStringLiteral("/Library/Application Support/SilentXCraftLauncher/settings.conf");
-#else
-    return QDir::homePath() + QStringLiteral("/.config/SilentXCraftLauncher/settings.conf");
-#endif
+    /* **不要在这里手拼路径**:它要的就是 uiSettingsFilePath() 那个文件,而那条路是唯一权威
+     * (核心库 sxcl_settings_default_path();SXCL_UI_SETTINGS 可以钉死)。
+     *
+     * 这里以前手拼了一份 %APPDATA%/SilentXCraftLauncher/settings.conf —— Windows 上碰巧一致,
+     * 安卓/Linux 上核心库给的路径**完全不同**(与 ui_paths.cpp 里记的那个"读的写的不是同一个文件"
+     * 是同一类事故),于是"当前版本 / 游戏目录 / 文件夹图标"这些键会读写两份文件。
+     *
+     * 2026-09-22 晚真机踩到:把 SXCL_UI_SETTINGS 钉到临时设置文件后,模组页/启动线程读的是临时文件,
+     * 主页却还读真实配置 —— 现象是"主页显示 26.3、点启动说这个版本还没安装"。
+     * 生产环境(Windows)两者恰好同路径,所以只在这里才暴露 —— 正是这类错误最危险的地方。 */
+    return uiSettingsFilePath();
 }
 
 QString resolveGameDirectory() {

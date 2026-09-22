@@ -54,6 +54,7 @@
 #include "sxcl/settings.h" // 启动恢复:ui.theme / ui.accent / ui.language(环境变量优先)
 
 // ComboBox:弹出层取证要用它的 showPopup()
+#include "fluent/fluent_segmented.h"   // Pivot:验收钩子要拨到「离线启动」那一档
 #include "fluent/fluent_setting_cards.h"
 
 // ── 运行日志(核心库 include/sxcl/log.h)──────────────────────────────────
@@ -647,6 +648,48 @@ int main(int argc, char *argv[]) {
             }
             visible.at(installIndex - 1)->click();
             std::fprintf(stderr, "[sxcl-ui] 模组页已点第 %d 个「装」\n", installIndex);
+        });
+    }
+
+    // 验收通路:从**主页点「启动」**(SXCL_UI_LAUNCH=1)。
+    //   走产品路径:点真按钮 -> HomePage::launchOffline -> 切到启动页 -> LaunchWorker 跑
+    //   (补全文件 / 选 Java / 起进程)。这样"界面这条启动链"在真机上也能被验到。
+    if (qEnvironmentVariableIntValue("SXCL_UI_LAUNCH") == 1) {
+        const int launchDelay = qEnvironmentVariableIntValue("SXCL_UI_LAUNCH_DELAY");
+        QTimer::singleShot(launchDelay > 0 ? launchDelay : 800, &app, [&window]() {
+            /* 先把登录方式滑块拨到「离线启动」:有已登录账户时主页会自动停在「正版登录」那一档,
+             * 直接按正版启动会拿**真账户**去跑游戏 —— 验收不能这么干。 */
+            const QList<Pivot *> pivots = window.findChildren<Pivot *>();
+            for (Pivot *pivot : pivots) {
+                if (pivot->item(QStringLiteral("offline")) != nullptr) {
+                    pivot->setCurrentItem(QStringLiteral("offline"));
+                    break;
+                }
+            }
+            /* 按 objectName 找那个按钮。**不要求可见**:登录滑块可能还停在「正版登录」那一档
+             * (有已登录账户时主页会自动停在那里),离线卡片就是 hidden 的 —— 但点它的
+             * clicked 照样走 launchOffline()。可见的那一个优先。 */
+            QAbstractButton *button = nullptr;
+            const QList<QAbstractButton *> found =
+                window.findChildren<QAbstractButton *>(QStringLiteral("homeOfflineLaunchButton"));
+            std::fprintf(stderr, "[sxcl-ui] 主页启动按钮候选 %d 个\n", (int)found.size());
+            for (QAbstractButton *candidate : found) {
+                if (candidate->isVisible()) {
+                    button = candidate;
+                    break;
+                }
+            }
+            if (button == nullptr && !found.isEmpty()) {
+                button = found.first();
+            }
+            if (button == nullptr) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] 找不到主页的「启动」按钮(SXCL_UI_LAUNCH 需要 "
+                             "SXCL_UI_ROUTE=home,并且设置里有 game.selected_version)\n");
+                return;
+            }
+            button->click();
+            std::fprintf(stderr, "[sxcl-ui] 主页已点「启动」(SXCL_UI_LAUNCH)\n");
         });
     }
 

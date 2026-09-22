@@ -263,6 +263,9 @@ void HomePage::buildContent() {
         rowLay->addWidget(m_offlineEdit, 1);
         auto *offlineBtn = new PrimaryPushButton(QStringLiteral("启动"), row);
         applyButtonFont(offlineBtn);
+        /* 稳定 objectName:验收钩子(SXCL_UI_LAUNCH)点**真的那个启动按钮** ——
+         * 这样"界面点启动 -> 补全文件 -> 起进程"整条链在真机上也能被验到,不必只靠命令行。 */
+        offlineBtn->setObjectName(QStringLiteral("homeOfflineLaunchButton"));
         connect(offlineBtn, &QAbstractButton::clicked, this, [this] { launchOffline(); });
         rowLay->addWidget(offlineBtn, 0);
         offlineLay->addWidget(row);
