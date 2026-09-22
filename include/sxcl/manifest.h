@@ -61,6 +61,13 @@ sxcl_task *sxcl_version_plan_task(sxcl_version_plan *plan, size_t index);
 /** 计划里所有任务的期望字节总数(进度显示用)。 */
 int64_t sxcl_version_plan_total_bytes(const sxcl_version_plan *plan);
 
+/** 「关闭文件校验」档(等价 PCL 的 ShouldIgnoreFileCheck,默认**关**):
+ *  开了以后,计划里**目标文件已经在磁盘上**的任务一个字节都不下、也不比对大小与哈希 ——
+ *  「存在就算过」(PCL ModMinecraft.vb:2214-2216 的开关 + :2122-2134 把已存在的从列表里剔掉)。
+ *  代价是「文件坏了」这件事**不会**被发现:这是用户自己要的取舍,界面上必须写清楚。
+ *  典型用法:老机器上「文件看着都在、就是校验不过」反复重下的场景。 */
+void sxcl_version_plan_set_skip_existing(sxcl_version_plan *plan, int on);
+
 /* ── 把计划跑一遍(启动前"补全文件"的核心) ── */
 
 #define SXCL_FETCH_OK        0   /**< 全部就绪(含"本来就都在",一个字节都没下) */

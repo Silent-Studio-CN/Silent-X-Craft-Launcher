@@ -42,6 +42,7 @@ struct CompleteOpts {
     int ready = 0;         // 1 = 有 Qt 传输后端,可以补;0 = 退化成"只报告"
     int preferMirror = 0;  // bmclapi/auto = 镜像优先;mojang = 官方优先
     int assetsLevel = 1;   // 资源对象补到哪一档(见 launch.h 的 complete_assets 说明)
+    int skipFileCheck = 0; // 「关闭文件校验」:存在就算过(见 launch.h 的 skip_file_check)
 };
 
 void buildCompleteOpts(const QString &settingsFile, CompleteOpts *out) {
@@ -57,7 +58,8 @@ void buildCompleteOpts(const QString &settingsFile, CompleteOpts *out) {
                SXCL_SETTINGS_OK) {
         path = cfg;
     }
-    int assetsLevel = 1; /* 默认:PCL 口径 —— 启动前只比大小,不逐个算 SHA-1 */
+    int assetsLevel = 1;  /* 默认:PCL 口径 —— 启动前只比大小,不逐个算 SHA-1 */
+    int skipFileCheck = 0; /* 默认关:该比对就比对 */
     if (path != nullptr) {
         if (sxcl_settings *settings = sxcl_settings_open(path)) {
             sxcl_settings_resolve_download(settings, &dl);
@@ -67,10 +69,14 @@ void buildCompleteOpts(const QString &settingsFile, CompleteOpts *out) {
             if (level >= 0 && level <= 2) {
                 assetsLevel = static_cast<int>(level);
             }
+            /* launch.skip_file_check:等价 PCL 的「关闭文件校验」(设置页有开关)。
+             * 开了的含义是**存在就算过** —— 坏文件不会被发现,这是用户自己选的取舍。 */
+            skipFileCheck = sxcl_settings_get_bool(settings, "launch.skip_file_check", 0) != 0 ? 1 : 0;
             sxcl_settings_free(settings);
         }
     }
     out->assetsLevel = assetsLevel;
+    out->skipFileCheck = skipFileCheck;
     out->opts.workers = dl.workers;
     out->opts.rate_bps = dl.rate_bps;
     out->opts.max_conn_per_file = dl.max_conn_per_file;
@@ -274,6 +280,7 @@ void LaunchWorker::run() {
     req.engine_opts = complete.ready ? &complete.opts : nullptr;
     req.prefer_mirror = complete.preferMirror;
     req.complete_assets = complete.assetsLevel; // 资源对象那一遍(P0b):0/1/2,见 launch.h
+    req.skip_file_check = complete.skipFileCheck; // 「关闭文件校验」:存在就算过(见 launch.h)
 
     char err[256];
     err[0] = '\0';

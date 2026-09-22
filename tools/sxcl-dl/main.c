@@ -94,6 +94,7 @@ typedef struct cli_opts {
     double rate;
     int workers;
     int conn; /* --conn:单文件几路分片(0 = 默认;>1 且文件 >=4MB 才分片) */
+    int skip_file_check; /* --no-file-check:关闭文件校验(存在就算过;PCL 同名开关) */
     int verbose;
     int limit;
     int skip_assets;
@@ -196,7 +197,8 @@ static int usage(void)
            "      └ --extract-install:跳过安装器 CLI,直接解包安装(跑 processors 重放;排查/验收用)\n"
            "  sxcl-dl launch <版本名> <游戏目录> [--java PATH] [--memory MB] [--instance NAME]\n"
            "      [--offline 玩家名 | --account [--token-file PATH]]\n"
-           "      [--backend default|vulkan|opengl] [--timeout 秒] [--settings PATH]\n"
+           "      [--backend default|vulkan|opengl] [--timeout 秒] [--settings PATH] [--no-file-check]\n"
+           "      └ --no-file-check:关闭文件校验(存在就算过、资源那一遍跳过;PCL 同名开关)\n"
            "      └ --account:用 sxcl-dl auth login 存下的正版身份启动(令牌不明文进日志)\n"
            "      [--dry-run] [--verbose]\n"
            "      └ 读版本 JSON -> 选 Java -> 按实例设置写 options.txt(渲染后端)-> 起进程\n"
@@ -990,6 +992,7 @@ typedef struct launch_cli_opts {
     int timeout_ms;
     int verbose;
     int dry_run;
+    int skip_file_check; /* --no-file-check:关闭文件校验(存在就算过;PCL 同名开关) */
 } launch_cli_opts;
 
 static int launch_echo_line(void *userdata, int is_stderr, const char *line)
@@ -1038,6 +1041,8 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
             ++i;
         } else if (strcmp(a, "--dry-run") == 0) {
             lo.dry_run = 1; /* 只准备(选 Java / 写 options.txt / 解 natives / 拼 argv),不起进程 */
+        } else if (strcmp(a, "--no-file-check") == 0) {
+            lo.skip_file_check = 1; /* 关闭文件校验(存在就算过;PCL 同名开关) */
         } else if (strcmp(a, "--verbose") == 0) {
             lo.verbose = 1;
         } else {
@@ -1144,6 +1149,9 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
     req.complete_files = can_complete;
     req.engine_opts = can_complete ? &lopts : NULL;
     req.prefer_mirror = o->prefer_mirror; /* --source 的同一口径 */
+    /* 关闭文件校验(可选;也可以用设置里的 launch.skip_file_check):
+     * 存在就算过、不比对大小与哈希,资源对象那一遍整个跳过 —— 与 PCL 的 ShouldIgnoreFileCheck 同口径。 */
+    req.skip_file_check = lo.skip_file_check;
     /* 资源对象(P0b):命令行默认"只比大小"(PCL 口径)。要强校验就设
      * SXCL_COMPLETE_ASSETS=2,要整块跳过就设 0 —— 验收/排查两档都用得上。 */
     {
@@ -2798,6 +2806,8 @@ static int cli_main(int argc, char **argv)
             o.verbose = 1;
         } else if (strcmp(a, "--skip-assets") == 0) {
             o.skip_assets = 1;
+        } else if (strcmp(a, "--no-file-check") == 0) {
+            o.skip_file_check = 1;
         } else if (strcmp(a, "--asset-mirror") == 0 && v) {
             o.asset_mirror = v;
             ++i;

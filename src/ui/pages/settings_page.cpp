@@ -149,6 +149,11 @@ const char *const kKeyDownloadEngine = "advanced.use_download_engine"; // 新增
 // docs/22 §14:CurseForge 官方 API 的 key(用户自己在 curseforge.com 申请)。
 // **三处必须用同一个字面量**:本页 / 模组页(mods_page.cpp)/ CLI(sxcl-dl mods --key 的兜底来源)。
 const char *const kKeyCfApiKey = "mods.curseforge_api_key";
+// 「关闭文件校验」(docs/24 的 P0a「还没做」那条;等价 PCL 的 ShouldIgnoreFileCheck)。
+// 开了以后启动前补全**存在就算过**:坏文件不会被发现 —— 代价必须写在卡片上,不能只写好处。
+const char *const kKeySkipFileCheck = "launch.skip_file_check";
+// 启动前补全资源对象补到哪一档(0/1/2,见 launch.h 的 complete_assets)。默认 1 = 只比大小。
+const char *const kKeyCompleteAssets = "launch.complete_assets";
 
 // SettingsPage.__init__ = BasePage(title="设置", subtitle="")(settings_page.py:203-209)
 const char *const kPageTitle = "设置";
@@ -1967,6 +1972,8 @@ private:
     SpinSettingCard *m_limitCard = nullptr;
     SwitchSettingCard *m_verifyCard = nullptr;
     CurseForgeKeyCard *m_cfKeyCard = nullptr; // 新增:CurseForge 的 key(没它 CF 那一源不查)
+    SwitchSettingCard *m_skipFileCheckCard = nullptr; // 新增:「关闭文件校验」(PCL 同名开关)
+    ComboBoxSettingCard *m_assetsLevelCard = nullptr; // 新增:启动前补全资源补到哪一档
 
     SwitchSettingCard *m_debugCard = nullptr;
     SwitchSettingCard *m_downloadEngineCard = nullptr;
@@ -2269,6 +2276,25 @@ void SettingsPage::buildContent() {
     gameGroup->addSettingCard(m_memoryCard);  // :334
     gameGroup->addSettingCard(m_windowCard);  // :335
     gameGroup->addSettingCard(m_gameDirCard); // :336
+    // 新增项(照抄项之后):启动前补全的两档(docs/24 的 P0「还没做」那条)。
+    // 放在**游戏设置**组:这是"这个版本怎么启动"的事,不是下载的事。
+    // 顺序纪律:先把卡片 new 出来(建进 gameGroup),再 addSettingCard —— 反过来会把 nullptr 塞进组里。
+    m_skipFileCheckCard = new SwitchSettingCard(
+        FluentIcon::qicon(FluentIcon::CERTIFICATE), QStringLiteral("关闭文件校验"),
+        QStringLiteral("启动前补全时「存在就算过」：不比对大小与哈希、也不补资源文件。"
+                       "代价是文件坏了不会被发现（PCL 同名开关同口径，默认关）"),
+        m_store.flag(kKeySkipFileCheck, false), gameGroup);
+    m_assetsLevelCard = new ComboBoxSettingCard(
+        FluentIcon::qicon(FluentIcon::UPDATE), QStringLiteral("启动前补全资源"),
+        QStringLiteral("资源对象（5000+ 个文件）补到哪一档；只比大小最快，强校验最稳"),
+        QStringList{QStringLiteral("不补（只要库与主 jar）"), QStringLiteral("只比大小（默认）"),
+                    QStringLiteral("强校验（逐个算 SHA-1）")},
+        QStringList{QStringLiteral("0"), QStringLiteral("1"), QStringLiteral("2")},
+        valueIndex(QStringList{QStringLiteral("0"), QStringLiteral("1"), QStringLiteral("2")},
+                   QString::number(m_store.number(kKeyCompleteAssets, 1)), 1),
+        gameGroup);
+    gameGroup->addSettingCard(m_skipFileCheckCard);
+    gameGroup->addSettingCard(m_assetsLevelCard);
 
     // ── 高级设置(settings_page.py:338-362)──
     auto *advancedGroup = new SettingCardGroup(QString::fromUtf8(kGroupAdvanced), m_view);
@@ -2417,6 +2443,11 @@ void SettingsPage::bindEvents() { // settings_page.py:428-435
     m_memoryCard->setChangeHandler([this](int value) { m_store.set(kKeyMaxMemory, value); });
     connect(m_verifyCard, &SwitchSettingCard::checkedChanged, this,
             [this](bool checked) { m_store.set(kKeyVerifySha1, checked); });
+    // 启动前补全(docs/24 的 P0):两个开关都只写设置文件,启动线程下一轮自己会读到。
+    connect(m_skipFileCheckCard, &SwitchSettingCard::checkedChanged, this,
+            [this](bool checked) { m_store.set(kKeySkipFileCheck, checked); });
+    connect(m_assetsLevelCard, &ComboBoxSettingCard::indexChanged, this,
+            [this](int, const QString &value) { m_store.set(kKeyCompleteAssets, value.toInt()); });
     connect(m_debugCard, &SwitchSettingCard::checkedChanged, this,
             [this](bool checked) { m_store.set(kKeyDebugMode, checked); });
     connect(m_downloadEngineCard, &SwitchSettingCard::checkedChanged, this,
@@ -2740,6 +2771,9 @@ void SettingsPage::resetSettings() {
     m_store.set(kKeyMaxConn, 32);                               // :476
     m_store.set(kKeyRate, 0);                                   // :477 speedLimitKbps = 0
     m_store.set(kKeyVerifySha1, true);                          // :478
+    // 本版新增项的重置 = 回到默认:文件校验关着(= 该比对就比对)、资源只比大小
+    m_store.set(kKeySkipFileCheck, false);
+    m_store.set(kKeyCompleteAssets, 1);
     // Python 的重置**没有**重置"版本列表刷新频率",也没有重置主题色(照抄,不"顺手修正")
     m_store.save();
 
@@ -2754,6 +2788,8 @@ void SettingsPage::resetSettings() {
     m_languageCard->comboBox()->setCurrentIndex(0);  // :489 语言 = ZH_CN
     m_sourceCard->comboBox()->setCurrentIndex(2);    // :490 下载源 = BMCLAPI
     m_windowCard->comboBox()->setCurrentIndex(1);    // :491 窗口 = 1280x720
+    m_skipFileCheckCard->setChecked(false);           // 新增项:关闭文件校验 = 关(默认)
+    m_assetsLevelCard->comboBox()->setCurrentIndex(1); // 新增项:资源补全 = 只比大小(默认)
     onThemeChanged();                                // :492 _on_theme_changed
 }
 

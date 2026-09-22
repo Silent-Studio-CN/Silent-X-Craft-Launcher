@@ -656,6 +656,11 @@ typedef struct sxcl_launch_request {
     int prefer_mirror;
     /** 镜像根;空 = 核心默认(BMCLAPI)。只有 prefer_mirror 非 0 时才用得上。 */
     const char *mirror_base;
+    /** 「关闭文件校验」(PCL 的 ShouldIgnoreFileCheck,默认**关**):非 0 时**存在就算过** ——
+     *  已经躺在磁盘上的文件一个字节都不下、也不比对大小与哈希,而且**资源对象那一遍整个跳过**
+     *  (PCL ModDownload.vb:67-68 就是被这个开关一头挡掉的)。
+     *  代价:文件坏了不会被发现。用户要的是「别再反复重下」,界面上必须把这个代价写清楚。 */
+    int skip_file_check;
     /** 资源文件(assets objects)补到哪一档(docs/24 的 P0b):
      *    0 = 不补(只要清单里那些:版本 JSON / 客户端 jar / 依赖库 / 资源**索引**);
      *    1 = **只比大小**(默认;PCL 启动前就是这个口径 —— 5000+ 个文件不逐个算哈希);

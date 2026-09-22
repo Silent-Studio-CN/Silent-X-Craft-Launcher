@@ -811,6 +811,36 @@ static void case_g_complete(void) {
     check(res.complete.files_failed >= 1, "  半截传输要如实记失败（不能当成功）");
     check(!sxcl_fs_exists(CLIB), "  半截内容绝不能落到正式路径上");
 
+    /* g10) **关闭文件校验**(req.skip_file_check = 1):「存在就算过」——
+     * 大小完全不对的库也不重下;资源对象那一遍**整个跳过**(与 PCL 的 ShouldIgnoreFileCheck 同口径,
+     * 见 docs/24 §2.1)。这一条同时要证明它**没有**被做成「什么都不下」:缺的照样补。 */
+    memset(&server, 0, sizeof(server));
+    memset(server.payload, 'y', sizeof(server.payload));
+    server.index_json = assetIndexBody();
+    server.short_by = 0;
+    (void)write_sized(CLIB, 999); /* 库在,但大小与 JSON 里声明的 64 完全不符 */
+    remove_if_there(COBJ1);       /* 资源对象缺一个 */
+    req.skip_file_check = 1;
+    memset(&res, 0, sizeof(res));
+    err[0] = '\0';
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "关闭文件校验也能启动");
+    check_int(server.requests, 0, "  **存在就算过:大小不对的库也不重下,一次 HTTP 都没发**");
+    check_int(res.complete.files_total, 3, "  清单只剩三件(jar + 库 + 索引;资源那一遍跳过)");
+    check_int(res.complete.files_skipped, 3, "  三件全按「已存在」命中");
+    check_int(res.complete.files_downloaded, 0, "  没有下载");
+    check(!sxcl_fs_exists(COBJ1), "  资源对象那一遍整个跳过(缺的那个也不补)");
+
+    /* 反证:文件**不在**时照补 —— 别把「不校验」做成了「不下」 */
+    remove_if_there(CLIB);
+    server.requests = 0;
+    memset(&res, 0, sizeof(res));
+    err[0] = '\0';
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "关着校验也照样补缺的文件");
+    check_int(server.requests > 0, 1, "  缺的库真去下了");
+    check(sxcl_fs_exists(CLIB), "  缺的库补回来了");
+    check_int(res.complete.files_downloaded, 1, "  只下了那一件");
+    req.skip_file_check = 0;
+
     /* 复原:把对象补上,后面的用例看到的是"全都在" */
     (void)write_sized(COBJ1, 64);
     (void)write_sized(CLIB, 64);

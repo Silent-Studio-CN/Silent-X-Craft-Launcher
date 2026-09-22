@@ -514,6 +514,13 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
                 }
                 (void)sxcl_version_plan_prefer_mirror(plan);
             }
+            /* 「关闭文件校验」:计划里已存在的文件全部不入队(见 manifest.h 的
+             * sxcl_version_plan_set_skip_existing)。只有库/jar/索引这一遍会走;
+             * 资源对象那一遍在下面被整个跳过(与 PCL 的 ShouldIgnoreFileCheck 同口径)。 */
+            if (req->skip_file_check != 0) {
+                sxcl_version_plan_set_skip_existing(plan, 1);
+                SXCL_LOG_I("launch", "启动前补全:已开「关闭文件校验」—— 存在的文件不比对、也不重下");
+            }
             sxcl_fetch_stats fstats;
             const int frc = sxcl_version_plan_fetch(plan, req->engine_opts,
                                                     req->complete_is_cancelled,
@@ -528,9 +535,12 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
             char aerr[192];
             aerr[0] = '\0';
             int arc = 0;
-            if (frc == SXCL_FETCH_OK || frc == SXCL_FETCH_PARTIAL) {
+            if ((frc == SXCL_FETCH_OK || frc == SXCL_FETCH_PARTIAL) && req->skip_file_check == 0) {
                 arc = complete_assets_pass(sxcl_json_root(doc), req, plan, &astats, aerr,
                                            sizeof(aerr));
+            } else if (req->skip_file_check != 0) {
+                /* 资源对象那一遍整个跳过(连索引都不打开):PCL 的开关就是这条口径。 */
+                SXCL_LOG_I("launch", "启动前补全:关闭文件校验,资源对象那一遍跳过");
             }
             if (arc > 0 && astats.total > 0) {
                 /* 第二遍跑的是**整张计划**,所以"总数/命中/失败"都取第二遍的:

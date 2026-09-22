@@ -312,6 +312,9 @@ struct sxcl_version_plan {
     char **dest_keys;
     size_t dest_cap;
     size_t dest_used;
+    /* 「关闭文件校验」档(见 manifest.h 的 sxcl_version_plan_set_skip_existing):
+     * 非 0 = 目标文件已经躺在磁盘上的任务一个字节都不下,也不比对大小/哈希。 */
+    int skip_existing;
 };
 
 /* 目标路径集合:FNV-1a + 开放寻址。返回 1 = 新插入,0 = 已存在,-1 = 装不下。 */
@@ -728,6 +731,13 @@ void sxcl_version_plan_free(sxcl_version_plan *plan)
     free(plan);
 }
 
+void sxcl_version_plan_set_skip_existing(sxcl_version_plan *plan, int on)
+{
+    if (plan != NULL) {
+        plan->skip_existing = on ? 1 : 0;
+    }
+}
+
 size_t sxcl_version_plan_count(const sxcl_version_plan *plan)
 {
     return plan ? plan->count : 0;
@@ -832,6 +842,16 @@ int sxcl_version_plan_fetch(sxcl_version_plan *plan, const sxcl_engine_opts *opt
     bridge.engine = engine;
     for (size_t i = 0; i < count; ++i) {
         sxcl_task *task = sxcl_version_plan_task(plan, i);
+        /* 「关闭文件校验」:存在就算过 —— 直接不入队,也**不做任何比对**
+         * (PCL 的 ShouldIgnoreFileCheck 就是把已存在的从列表里全剔掉,见 docs/24 §2.1)。
+         * 记成 skipped_existing,让统计与「齐了几个」的口径跟别的路径一致。 */
+        if (task != NULL && plan->skip_existing && task->dest != NULL && sxcl_fs_exists(task->dest)) {
+            task->skipped_existing = 1;
+            task->state = SXCL_TASK_DONE;
+            task->bytes_done = 0;
+            (void)snprintf(task->error, sizeof(task->error), "%s", "已存在(关闭文件校验,不比对)");
+            continue;
+        }
         if (task && sxcl_engine_submit(engine, task) != 0) {
             sxcl_engine_destroy(engine);
             if (err && err_len) {
