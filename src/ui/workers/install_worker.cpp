@@ -656,16 +656,27 @@ void InstallWorker::run() {
             }
         } else {
             SXCL_LOG_I("install",
-                       "Quilt 加载器层完成:实例=%s 库=%d(下载 %d) 字节=%lld 侧车纠偏=%d",
+                       "Quilt 加载器层完成:实例=%s 库=%d(下载 %d) 字节=%lld 侧车纠偏=%d 实产哈希=%d "
+                       "未二次确认=%d",
                        qres.instance, qres.libraries_total, qres.libraries_downloaded,
-                       (long long)qres.bytes_done, qres.sha1_from_sidecar);
-            emitLog(QStringLiteral("Quilt 就绪:%1 件依赖库(下到 %2 件,%3)%4")
+                       (long long)qres.bytes_done, qres.sha1_from_sidecar, qres.sha1_from_actual,
+                       qres.sha1_unverified);
+            if (qres.sha1_unverified > 0) {
+                emitLog(QStringLiteral("注意:%1 件库没拿到上游哈希(侧车超时、对照件也没下来),"
+                                       "已按官方源实际内容记录 —— 这一件没做过二次确认")
+                            .arg(qres.sha1_unverified));
+            }
+            emitLog(QStringLiteral("Quilt 就绪:%1 件依赖库(下到 %2 件,%3)%4%5")
                         .arg(qres.libraries_total)
                         .arg(qres.libraries_downloaded)
                         .arg(humanBytes(qres.bytes_done))
                         .arg(qres.sha1_from_sidecar > 0
                                  ? QStringLiteral(" · %1 件按 maven 侧车校验")
                                        .arg(qres.sha1_from_sidecar)
+                                 : QString())
+                        .arg(qres.sha1_from_actual > 0
+                                 ? QStringLiteral(" · %1 件按实际内容记录(上游哈希过期)")
+                                       .arg(qres.sha1_from_actual)
                                  : QString()));
         }
     }

@@ -1331,6 +1331,15 @@ static int quilt_install_from_meta(const cli_opts *o, const char *mc_version,
         printf("  提示: %d 件库的哈希与 meta 不一致,已按 maven 自己的 .sha1 校验(上游重建过)\n",
                res.sha1_from_sidecar);
     }
+    if (res.sha1_from_actual > 0) {
+        printf("  提示: %d 件库拿不到 maven 侧车、meta 的哈希又是旧值,已按"
+               "「同一下载两遍内容一致」的实际内容记录\n",
+               res.sha1_from_actual);
+    }
+    if (res.sha1_unverified > 0) {
+        printf("  注意: %d 件库的对照件也没下来,按官方源实际内容记录(**未二次确认**)\n",
+               res.sha1_unverified);
+    }
     printf("再启动: sxcl-dl launch \"%s\" \"%s\" --dry-run\n", res.instance, game_dir);
     return 0;
 }

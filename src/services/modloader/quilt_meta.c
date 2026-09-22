@@ -34,10 +34,14 @@
 #include "sxcl/install.h"        /* sxcl_install_http_get_text */
 #include "sxcl/log.h"            /* 侧车纠偏落不回 JSON 时要说一声(别静默) */
 #include "sxcl/json.h"
-#include "sxcl/loader_catalog.h" /* sxcl_loader_quilt_loader_json */
+#include "sxcl/loader_catalog.h" /* sxcl_loader_quilt_loader_json、sxcl_loader_patch_library_sha1 */
+#include "sxcl/verify.h"         /* sxcl_hash_file:事后自己算实际哈希(侧车拿不到时的兜底) */
 
 #define QUILT_META_DEFAULT "https://meta.quiltmc.org/v3/versions/loader"
 #define QUILT_MAX_LIBS 256
+
+/** 取侧车最多试几次(它只有 41 字节;那家源会 30 秒超时,重试比"直接认输"便宜得多)。 */
+#define QUILT_SIDECAR_TRIES 3
 
 static void quilt_err(char *err, size_t len, const char *text)
 {
@@ -94,6 +98,27 @@ static int quilt_parse_sidecar(const char *text, char *out, size_t cap)
     }
     out[k] = '\0';
     return k == 40 ? 1 : 0;
+}
+
+/** 十六进制小写化(比较用;in 可空)。 */
+static void quilt_lower_hex(const char *in, char *out, size_t cap)
+{
+    size_t k = 0;
+    if (out == NULL || cap == 0) {
+        return;
+    }
+    for (const char *p = in; p != NULL && *p != '\0' && k + 1 < cap; ++p) {
+        const char c = *p;
+        out[k++] = (c >= 'A' && c <= 'F') ? (char)(c - 'A' + 'a') : c;
+    }
+    out[k] = '\0';
+}
+
+/** 强制走"侧车拿不到"的兜底(诊断/验收用,不必真等 30 秒超时)。 */
+static int quilt_skip_sidecar(void)
+{
+    const char *v = getenv("SXCL_QUILT_NO_SIDECAR");
+    return v != NULL && v[0] != '\0' && v[0] != '0';
 }
 
 /* ── 下库这一段的进度:直接**从任务状态里数**(不额外维护计数器) ──
@@ -327,41 +352,47 @@ int sxcl_loader_quilt_install(const sxcl_quilt_install_request *req, sxcl_quilt_
         /* 哈希侧车纠偏:meta 的 sha1 与 maven 自己的 .sha1 不一致时**以侧车为准**并计数。
          * 实测这两种都对不上(quilt-loader / hashed),硬拿 meta 的哈希校验会让 Quilt 永远装不上,
          * 而且报"校验失败"看着像我们下坏了 —— 纠正必须说出来,计数进 result。 */
-        if (libs[i].sha1[0] != '\0' && libs[i].url_full[0] != '\0') {
+        int sidecar_ok = 0;
+        if (libs[i].sha1[0] != '\0' && libs[i].url_full[0] != '\0' && !quilt_skip_sidecar()) {
             char sidecar_url[1700];
             (void)snprintf(sidecar_url, sizeof(sidecar_url), "%s.sha1", libs[i].url_full);
-            char *side = NULL;
-            char serr[128];
-            serr[0] = '\0';
-            if (sxcl_install_http_get_text((void *)req->engine_opts, sidecar_url, &side, serr,
-                                           sizeof(serr)) == 0 &&
-                side != NULL) {
-                char hex[48];
-                hex[0] = '\0';
-                if (quilt_parse_sidecar(side, hex, sizeof(hex))) {
-                    char have[48];
-                    size_t hk = 0;
-                    for (const char *p = libs[i].sha1; *p != '\0' && hk < 40; ++p) {
-                        const char c = *p;
-                        have[hk++] = (c >= 'A' && c <= 'F') ? (char)(c - 'A' + 'a') : c;
-                    }
-                    have[hk] = '\0';
-                    if (strcmp(hex, have) != 0) {
-                        (void)snprintf(libs[i].sha1, sizeof(libs[i].sha1), "%s", hex);
-                        /* 光纠下载任务不够:要落盘的 JSON 里也得换成真值 —— 否则启动器
-                         * 自己的「启动前补全」会把刚装好的文件判成"校验失败"并每回重下
-                         * (实测这两件每次启动都报 2 件失败,属于自证其罪)。 */
-                        if (!sxcl_loader_patch_library_sha1(final_json, libs[i].path, hex)) {
-                            patch_missed = 1;
-                            SXCL_LOG_W("loader", "侧车纠偏落不回版本 JSON: %s(下次启动会报校验失败)",
-                                       libs[i].name);
-                        }
-                        ++sidecar_fixed;
-                    }
+            /* 侧车要**重试**:它只有 41 字节,可那家源(实测 maven.quiltmc.org)会 30 秒超时 ——
+             * 拿不到侧车就只能拿 meta 的旧哈希去校验,又会以"校验失败"告终(兜底见 §4.5)。 */
+            for (int attempt = 0; attempt < QUILT_SIDECAR_TRIES && !sidecar_ok; ++attempt) {
+                if (quilt_cancelled(req)) {
+                    break;
                 }
-                free(side);
+                char *side = NULL;
+                char serr[128];
+                serr[0] = '\0';
+                if (sxcl_install_http_get_text((void *)req->engine_opts, sidecar_url, &side, serr,
+                                               sizeof(serr)) == 0 &&
+                    side != NULL) {
+                    char hex[48];
+                    hex[0] = '\0';
+                    if (quilt_parse_sidecar(side, hex, sizeof(hex))) {
+                        char have[48];
+                        quilt_lower_hex(libs[i].sha1, have, sizeof(have));
+                        sidecar_ok = 1;
+                        if (strcmp(hex, have) != 0) {
+                            (void)snprintf(libs[i].sha1, sizeof(libs[i].sha1), "%s", hex);
+                            /* 光纠下载任务不够:要落盘的 JSON 里也得换成真值 —— 否则启动器
+                             * 自己的「启动前补全」会把刚装好的文件判成"校验失败"并每回重下
+                             * (实测这两件每次启动都报 2 件失败,属于自证其罪)。 */
+                            if (!sxcl_loader_patch_library_sha1(final_json, libs[i].path, hex)) {
+                                patch_missed = 1;
+                                SXCL_LOG_W("loader", "侧车纠偏落不回版本 JSON: %s(下次启动会报校验失败)",
+                                           libs[i].name);
+                            }
+                            ++sidecar_fixed;
+                        }
+                    }
+                    free(side);
+                }
             }
         }
+        /* 有 meta 哈希、却没拿到侧车:这份哈希**可能是旧的**,不能拿它硬校验(见 §4.5 兜底)。 */
+        const int hash_uncertain = libs[i].sha1[0] != '\0' && !sidecar_ok;
 
         (void)snprintf(dests[i], 1200, "%s/libraries/%s", req->game_dir, libs[i].path);
         if (libs[i].url_full[0] != '\0') {
@@ -386,7 +417,7 @@ int sxcl_loader_quilt_install(const sxcl_quilt_install_request *req, sxcl_quilt_
         tasks[i].urls[0] = urls[i];
         tasks[i].urls[1] = req->maven_mirror;
         tasks[i].algo = SXCL_HASH_SHA1;
-        tasks[i].sha1 = libs[i].sha1[0] != '\0' ? libs[i].sha1 : NULL;
+        tasks[i].sha1 = (libs[i].sha1[0] != '\0' && !hash_uncertain) ? libs[i].sha1 : NULL;
         tasks[i].size = libs[i].size;
         tasks[i].priority = 10;
         tasks[i].label = libs[i].name;
@@ -434,6 +465,124 @@ int sxcl_loader_quilt_install(const sxcl_quilt_install_request *req, sxcl_quilt_
         run_failed = sxcl_engine_run(engine) > 0 ? 1 : 0;
     }
     (void)run_failed;
+    sxcl_engine_destroy(engine); /* 任务表必须活到这一步之后 */
+
+    /* ── 4.5 哈希兜底:侧车没拿到的那几件,事后用"再下一份做对照"定性 ──
+     * 为什么必须有它(真机):maven.quiltmc.org 的 .sha1 侧车会 30 秒超时(同一轮里一次超时、
+     * 一次正常)。拿不到侧车就只能拿 meta 的哈希去校验,而 meta 那两件(quilt-loader / hashed)
+     * 本来就是旧值 —— 于是安装以"校验失败"告终,可下下来的文件完全正常。
+     * 口径(绝不静默、绝不挑一份了事):
+     *   * 引擎按真哈希验过的任务(verify_state == HASH)不进这里 —— 实际值必然相符;
+     *   * 剩下"下完了、但记录的 sha1 和磁盘对不上"的,**再下一份**(不带哈希);
+     *     两份独立传输内容一致 = 上游哈希过期 -> 按**实际内容**记进版本 JSON,计数进 result;
+     *     两份不一致 = 说不清哪份对 -> 照旧失败,报清楚话。 */
+    int actual_adopted = 0;
+    int sha1_unverified = 0;
+    {
+        size_t *cand = (size_t *)calloc(n, sizeof(size_t));
+        char(*again)[1300] = (char(*)[1300])calloc(n, 1300);
+        sxcl_task *vtasks = (sxcl_task *)calloc(n, sizeof(sxcl_task));
+        if (cand != NULL && again != NULL && vtasks != NULL) {
+            size_t vcount = 0;
+            for (size_t i = 0; i < n; ++i) {
+                if (tasks[i].state != SXCL_TASK_DONE || libs[i].sha1[0] == '\0' ||
+                    tasks[i].verify_state == SXCL_TASK_VERIFY_HASH) {
+                    continue;
+                }
+                char have[48];
+                char want[48];
+                have[0] = '\0';
+                if (sxcl_hash_file(dests[i], SXCL_HASH_SHA1, have, sizeof(have)) != 0) {
+                    continue; /* 读不了就当没这回事:下面的统计照旧按任务状态走 */
+                }
+                quilt_lower_hex(libs[i].sha1, want, sizeof(want));
+                if (strcmp(have, want) == 0) {
+                    continue; /* 实际内容 == 记录值(meta 是对的):什么都不用做 */
+                }
+                (void)snprintf(again[vcount], 1300, "%s.sxcl-verify", dests[i]);
+                (void)sxcl_fs_remove(again[vcount]);
+                vtasks[vcount].dest = again[vcount];
+                vtasks[vcount].urls[0] = urls[i];
+                vtasks[vcount].urls[1] = req->maven_mirror;
+                vtasks[vcount].algo = SXCL_HASH_SHA1;
+                vtasks[vcount].sha1 = NULL; /* 这一份只作对照,不校验 */
+                vtasks[vcount].size = libs[i].size;
+                vtasks[vcount].priority = 11;
+                vtasks[vcount].label = libs[i].name;
+                cand[vcount] = i;
+                ++vcount;
+            }
+            if (vcount > 0 && !quilt_cancelled(req)) {
+                quilt_progress(req, 92, "上游哈希与实下文件对不上,再下一份做对照");
+                sxcl_engine_opts vopts = opts;
+                vopts.on_progress = NULL; /* 那一份不进进度(它只是对照件) */
+                vopts.userdata = NULL;
+                sxcl_engine *veng = sxcl_engine_create(&vopts);
+                if (veng != NULL) {
+                    for (size_t k = 0; k < vcount; ++k) {
+                        if (sxcl_engine_submit(veng, &vtasks[k]) != 0) {
+                            break;
+                        }
+                    }
+                    (void)sxcl_engine_run(veng);
+                    sxcl_engine_destroy(veng);
+                }
+                for (size_t k = 0; k < vcount; ++k) {
+                    const size_t i = cand[k];
+                    char first[48];
+                    char second[48];
+                    first[0] = '\0';
+                    second[0] = '\0';
+                    const int got_second =
+                        vtasks[k].state == SXCL_TASK_DONE &&
+                        sxcl_hash_file(again[k], SXCL_HASH_SHA1, second, sizeof(second)) == 0;
+                    /* 第一份的实际哈希(上面算过一次,这里重算:几十毫秒,换代码直白) */
+                    const int got_first =
+                        sxcl_hash_file(dests[i], SXCL_HASH_SHA1, first, sizeof(first)) == 0;
+                    if (got_first && got_second && strcmp(first, second) == 0) {
+                        if (!sxcl_loader_patch_library_sha1(final_json, libs[i].path, first)) {
+                            patch_missed = 1;
+                            SXCL_LOG_W("loader", "实际哈希落不回版本 JSON: %s", libs[i].name);
+                        }
+                        (void)snprintf(libs[i].sha1, sizeof(libs[i].sha1), "%s", first);
+                        ++actual_adopted;
+                        SXCL_LOG_I("loader", "上游 sha1 是旧值,已按实际内容记录: %s", libs[i].name);
+                    } else if (got_first && !got_second && tasks[i].source_index == 0) {
+                        /* 对照件没下来(那家源在这种时候本来就抖),可这一份是**官方 maven 直连
+                         * 整份下来的**:TLS + Content-Length + 实际字节数都对得上,而上游哪儿都
+                         * 拿不到哈希(meta 是旧值、侧车超时) —— 按实际内容记录并**如实计数**,
+                         * 不假装"校验通过"。镜像来的那一份不走这条路(镜像没有这个豁免)。 */
+                        if (!sxcl_loader_patch_library_sha1(final_json, libs[i].path, first)) {
+                            patch_missed = 1;
+                            SXCL_LOG_W("loader", "实际哈希落不回版本 JSON: %s", libs[i].name);
+                        }
+                        (void)snprintf(libs[i].sha1, sizeof(libs[i].sha1), "%s", first);
+                        ++sha1_unverified;
+                        SXCL_LOG_W("loader",
+                                   "侧车与对照件都拿不到,按官方源实际内容记录(未二次确认): %s",
+                                   libs[i].name);
+                    } else if (got_first && got_second) {
+                        tasks[i].state = SXCL_TASK_FAILED;
+                        (void)snprintf(tasks[i].error, sizeof(tasks[i].error),
+                                       "记录的 sha1 与实下文件不符,再下一份内容也不一样(上游不稳)");
+                    } else {
+                        tasks[i].state = SXCL_TASK_FAILED;
+                        (void)snprintf(tasks[i].error, sizeof(tasks[i].error),
+                                       "记录的 sha1 与实下文件不符,对照件也没下来:%s",
+                                       vtasks[k].error[0] ? vtasks[k].error : "原因不明");
+                    }
+                    (void)sxcl_fs_remove(again[k]);
+                }
+            }
+        }
+        free(cand);
+        free(again);
+        free(vtasks);
+    }
+    if (out != NULL) {
+        out->sha1_from_actual = actual_adopted;
+        out->sha1_unverified = sha1_unverified;
+    }
 
     int downloaded = 0;
     int failed = 0;
@@ -452,7 +601,6 @@ int sxcl_loader_quilt_install(const sxcl_quilt_install_request *req, sxcl_quilt_
             }
         }
     }
-    sxcl_engine_destroy(engine); /* 任务表必须活到这一步之后 */
     if (out != NULL) {
         out->libraries_downloaded = downloaded;
         out->libraries_failed = failed;

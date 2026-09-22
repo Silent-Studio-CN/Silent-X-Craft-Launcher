@@ -346,6 +346,13 @@ typedef struct sxcl_quilt_install_result {
     /** 1 = 清单里的哈希与 maven 自己发的 .sha1 不一致(上游重建过文件),已按侧车纠正。
      *  实测:quilt-loader-0.20.0-beta.9.jar 与 hashed-1.20.1.jar 都是这一种。 */
     int sha1_from_sidecar;
+    /** 侧车拿不到、meta 的哈希又是旧值时,按"同一下载两遍、内容一致"定性并**按实际内容记录**
+     *  的件数(见 quilt_meta.c §4.5)。> 0 说明上游那份哈希过期了 —— 不是我们下坏了。 */
+    int sha1_from_actual;
+    /** 连对照件都拿不到(那家源抖)、但这一份是**官方 maven 直连整份下来**的:TLS + 长度都对得上,
+     *  上游又哪儿都没有可用哈希 —— 按实际内容记录并计在这里。**> 0 就要在界面上说出来**:
+     *  这不是"校验通过",是"没得可校"。镜像来的文件**没有**这个豁免。 */
+    int sha1_unverified;
     int64_t bytes_done;
 } sxcl_quilt_install_result;
 
