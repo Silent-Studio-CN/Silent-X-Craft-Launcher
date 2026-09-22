@@ -1093,6 +1093,12 @@ static void test_missing_libraries(void) {
     char first[SXCL_LOADER_CMD_ARG_MAX];
     first[0] = '\0';
 
+    /* **幂等**:上一棵树/上一轮跑过的话,目录里会留着上一次"补齐"的三件 ——
+     * 先全删掉再只摆 a、b,状态才是确定的(踩过:换了构建树跑,断言直接挂)。 */
+    (void)sxcl_fs_remove("build/_loader_tmp/missing-game/libraries/com/example/a/a-1.0.jar");
+    (void)sxcl_fs_remove("build/_loader_tmp/missing-game/libraries/com/example/b/b-1.0.jar");
+    (void)sxcl_fs_remove("build/_loader_tmp/missing-game/libraries/com/example/c/c-1.0.jar");
+
     check(write_file("build/_loader_tmp/missing-game/versions/probe/probe.json", vjson) == 0,
           "写下版本 JSON");
     check(write_file("build/_loader_tmp/missing-game/libraries/com/example/a/a-1.0.jar", "a") == 0,

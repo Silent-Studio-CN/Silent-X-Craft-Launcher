@@ -44,6 +44,7 @@
 #endif
 #include "fluent/fluent_cards.h"
 #include "fluent/fluent_controls.h"
+#include "fluent/fluent_dialog.h" // MessageBox(残骸的"删掉并继续 / 先不装"确认;与设置页同一个类)
 #include "fluent/fluent_labels.h"
 #include "fluent/fluent_input.h"
 #include "fluent/fluent_scroll.h"
@@ -58,6 +59,7 @@
 #include "workers/ui_paths.h" // 游戏目录/下载源/追踪的唯一一份口径(与安装 worker 同口径)
 
 // ── 核心库(纯 C)—— 加载器版本目录的取数/解析全走这里,界面层不自己认格式 ──
+#include "sxcl/fs.h"           // sxcl_fs_remove(清理残骸)
 #include "sxcl/install.h"       // sxcl_install_target_probe/describe(与安装引擎同一份"已存在"判定)
 #include "sxcl/loader_catalog.h" // sxcl_catalog_fetch/url/format_of + sxcl_loader_kind
 #include "sxcl/net.h"            // sxcl_transport_qt_create(Qt 传输后端,工作线程里建/释放)
@@ -1014,7 +1016,8 @@ private:
     // **判定只有一份**:核心库的 sxcl_install_target_probe(install.h)——
     // 安装引擎在拼路径之前用的是同一个函数,所以"这里说不存在、那边装到别处/覆盖掉"不可能再发生。
     // 口径:versions/<名>/<名>.json 存在**且能解析** = 真装过;同名 jar 残留 = 没装完的残骸。
-    bool versionNameTaken(const QString &versionName, QString *why = nullptr) const {
+    bool versionNameTaken(const QString &versionName, QString *why = nullptr,
+                          bool *remnant = nullptr) const {
         char text[SXCL_INSTALL_ERROR_MAX];
         text[0] = '\0';
         const int flags = sxcl_install_target_describe(text, sizeof(text),
@@ -1022,12 +1025,28 @@ private:
                                                        versionName.toUtf8().constData());
         if (why != nullptr)
             *why = QString::fromUtf8(text);
-        return flags != SXCL_INSTALL_TARGET_NONE;
+        // **口径统一(2026-09-22,docs/22 的 B2/C3)**:拦不拦只看"有没有可解析的版本 JSON"——
+        // 这正是安装引擎(sxcl_install_run 的预检)用的那一位。以前这里写的是 flags != NONE,
+        // 于是"同名 jar 没有 JSON"的**残骸也拦**:引擎明明愿意重装(它只拒 TARGET_JSON),
+        // 界面却只甩一句"版本已存在,请换个名字",用户既不知道能清理,也拿不到那句清理建议。
+        // 残骸现在走另一条路:提示 + 让用户选"清理残骸并继续"(见 onDownload)。
+        if (remnant != nullptr)
+            *remnant = (flags & SXCL_INSTALL_TARGET_JAR) != 0 && (flags & SXCL_INSTALL_TARGET_JSON) == 0;
+        return (flags & SXCL_INSTALL_TARGET_JSON) != 0;
     }
 
     void checkVersionExists(const QString &versionName) {
-        if (versionNameTaken(versionName)) {
+        QString why;
+        bool remnant = false;
+        if (versionNameTaken(versionName, &why, &remnant)) {
             styleNameInput(QStringLiteral("error"));
+            m_warning->setText(QStringLiteral("⚠ 不能与现有版本名相同"));
+            m_warning->setVisible(true);
+        } else if (remnant) {
+            // 残骸:引擎愿意装,所以**不画红框**,但要把引擎那句准确的话摆出来
+            // (它自己就写了"或先清理那个目录"),用户不用猜。
+            styleNameInput(QStringLiteral("normal"));
+            m_warning->setText(QStringLiteral("⚠ %1").arg(why));
             m_warning->setVisible(true);
         } else {
             styleNameInput(QStringLiteral("normal"));
@@ -1064,7 +1083,38 @@ private:
         // 与安装引擎同一份判定(核心库 sxcl_install_target_probe):这里说"已存在"就是引擎会拒装
         // 的那一种;这里说"没有",引擎也不会另判一套。
         QString why;
-        if (versionNameTaken(vn, &why)) {
+        bool remnant = false;
+        const bool taken = versionNameTaken(vn, &why, &remnant);
+        if (!taken && remnant) {
+            /* 残骸(docs/22 的 B2/C3):同名 jar 在、但没有可解析的版本 JSON —— 引擎愿意重装,
+             * 所以这里**给一条出路**,而不是像以前那样只说"换个名字"。
+             * 两个选择:清理掉那份残骸再装(推荐)/ 先不装(回去自己改名)。 */
+            const QString jar = QDir::toNativeSeparators(
+                gameDirectory() + QStringLiteral("/versions/") + vn + QLatin1Char('/') + vn +
+                QStringLiteral(".jar"));
+            auto *box = new MessageBox(QStringLiteral("发现没装完的残骸"),
+                                       QStringLiteral("%1\n\n装下去的话,启动前的「补全文件」会把缺的"
+                                                      "补齐;也可以先把这份残骸删掉再装（更干净）。")
+                                           .arg(why),
+                                       window());
+            box->setAttribute(Qt::WA_DeleteOnClose);
+            if (box->yesButton() != nullptr)
+                box->yesButton()->setText(QStringLiteral("删掉残骸并继续"));
+            if (box->cancelButton() != nullptr)
+                box->cancelButton()->setText(QStringLiteral("先不装"));
+            connect(box, &MessageBox::yesSignal, this, [this, jar] {
+                const int rc = sxcl_fs_remove(jar.toUtf8().constData());
+                InfoBar::push(rc == 0 ? InfoBar::Type::Success : InfoBar::Type::Warning,
+                              QStringLiteral("清理残骸"),
+                              rc == 0 ? QStringLiteral("已删掉 %1,可以重新装了").arg(jar)
+                                      : QStringLiteral("删不掉 %1（被占用?）—— 可以换个版本名继续")
+                                            .arg(jar),
+                              window(), 5000);
+            });
+            box->show();
+            return; // 等用户在对话框里做决定;要继续装就再点一次"开始下载"
+        }
+        if (taken) {
             // 统一错误出口(带 warning 级别):一样复制完整上下文到剪贴板
             UiErrorContext ctx;
             ctx.page = QStringLiteral("下载配置页 / download_config_%1").arg(m_versionId);
