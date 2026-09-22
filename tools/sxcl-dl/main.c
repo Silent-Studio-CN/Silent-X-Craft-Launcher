@@ -1043,6 +1043,8 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
             lo.dry_run = 1; /* 只准备(选 Java / 写 options.txt / 解 natives / 拼 argv),不起进程 */
         } else if (strcmp(a, "--no-file-check") == 0) {
             lo.skip_file_check = 1; /* 关闭文件校验(存在就算过;PCL 同名开关) */
+        } else if (strcmp(a, "--rate") == 0 || strcmp(a, "--workers") == 0) {
+            ++i; /* 通用参数已在 main 里解析,这里只跳过它的值(限速对补全也生效) */
         } else if (strcmp(a, "--verbose") == 0) {
             lo.verbose = 1;
         } else {

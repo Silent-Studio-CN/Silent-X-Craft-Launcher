@@ -106,6 +106,28 @@ static void test_oversized(void) {
     sxcl_limiter_destroy(lim);
 }
 
+/* 回归(2026-09-22 晚真机):**一笔比桶还大的 consume 必须收敛**。
+ * 引擎的读块是 256KiB(SXCL_READ_BLOCK),而 256KB/s 的限速桶只有 64KiB ——
+ * 旧实现里 take() 每次见到 need > burst 就把令牌清零、回报同一个等待时间,
+ * consume 的循环**永远出不来**:真机现象是"限速之后补全卡死,进程 CPU 0.6s、
+ * 线程全在 Sleep、游戏目录一个字节不涨;去掉限速立刻正常"。 */
+static void test_consume_oversized(void) {
+    const double rate = 256.0 * 1024.0; /* 桶 = rate*0.25s,但下限 64KiB -> 64KiB */
+    sxcl_limiter *lim = sxcl_limiter_create(rate);
+    if (!lim) {
+        check(0, "create 256KiB/s");
+        return;
+    }
+    sxcl_limiter_take(lim, (unsigned long long)sxcl_limiter_burst(lim)); /* 先抽干突发额度 */
+    const unsigned long long chunk = 256ULL * 1024;                      /* = 引擎读块 */
+    const double t0 = sxcl_limiter_now();
+    sxcl_limiter_consume(lim, chunk);
+    const double elapsed = sxcl_limiter_now() - t0;
+    /* 桶里那 64KiB 可以立刻走,剩下 192KiB 按 256KiB/s 等 ≈ 0.75s */
+    check_range(elapsed, 0.3, 2.5, "一笔大于桶的 consume 必须收敛(旧实现在这里死循环)");
+    sxcl_limiter_destroy(lim);
+}
+
 /* 回归:令牌不足时不得清零(清零会多等一轮,把 5MB/s 限成 2MB/s) */
 static void test_no_token_loss(void) {
     const double rate = 2.0 * 1024.0 * 1024.0;
@@ -174,6 +196,7 @@ int main(void) {
     test_burst();
     test_full_bucket();
     test_oversized();
+    test_consume_oversized();
     test_no_token_loss();
     test_throughput();
     test_set_rate();

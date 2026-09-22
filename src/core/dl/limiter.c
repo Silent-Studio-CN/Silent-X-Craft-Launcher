@@ -172,6 +172,12 @@ static void sxcl_refill_locked(sxcl_limiter *lim)
     }
 }
 
+/** 单次取额度(公共 API,测试也在用):令牌不够时**只回报还需等多久**,不真的睡。
+ *  注意:单笔 bytes **大于桶容量**时它永远等不满(桶装不下) —— 调用方要么按桶拆,
+ *  要么直接用 sxcl_limiter_consume()(它内部就是按桶拆的)。 */
+/** 单次取额度(公共 API,测试也在用):令牌不够时**只回报还需等多久**,不真的睡。
+ *  注意:单笔 bytes **大于桶容量**时它永远等不满(桶装不下) —— 调用方要么按桶拆,
+ *  要么直接用 sxcl_limiter_consume()(它内部就是按桶拆的)。 */
 double sxcl_limiter_take(sxcl_limiter *lim, uint64_t bytes)
 {
     if (!lim || bytes == 0) {
@@ -205,10 +211,30 @@ void sxcl_limiter_consume(sxcl_limiter *lim, uint64_t bytes)
     if (!lim || bytes == 0) {
         return;
     }
-    for (;;) {
-        const double wait = sxcl_limiter_take(lim, bytes);
+    if (lim->rate <= 0.0) {
+        return; /* 不限速 */
+    }
+    /* **必须按桶容量拆着要**:一笔比桶还大的请求在 take() 里永远等不满 ——
+     * take() 见到 need > burst 就把 tokens 清零并回报 need/rate,下一次调用又是同样一笔、
+     * 同样的等待,于是这个循环**永远出不来**。
+     * 实测(2026-09-22 晚):限速 256KB/s(桶 64KiB)+ 引擎 256KiB 读块 -> 补全卡死,
+     * 进程 CPU 0.6s、线程全在 Sleep、目录一个字节不涨;去掉限速立刻正常。
+     * 拆成不超过 burst 的几笔之后,每一笔要么扣掉额度、要么把桶装满,循环一定收敛。 */
+    double remaining = (double)bytes;
+    while (remaining > 0.0) {
+        double wait = 0.0;
+        sxcl_lock(lim);
+        sxcl_refill_locked(lim);
+        const double chunk = remaining > lim->burst ? lim->burst : remaining;
+        if (lim->tokens >= chunk) {
+            lim->tokens -= chunk;
+            remaining -= chunk;
+        } else {
+            wait = (chunk - lim->tokens) / lim->rate;
+        }
+        sxcl_unlock(lim);
         if (wait <= 0.0) {
-            return;
+            continue; /* 这一笔扣掉了,接着扣下一笔 */
         }
         double slice = wait < SXCL_CONSUME_SLICE ? wait : SXCL_CONSUME_SLICE;
         if (slice <= 0.0) {

@@ -37,7 +37,6 @@ struct QtBody {
      * 进程 CPU 0.09s、9 分钟零进展,界面就那样一直显示"正在下载"(见 docs/15 §7)。 */
     QElapsedTimer lastData;
     int stallMs = 60000;
-    int emptyPolls = 0;   // 连续"读到 0 字节"的轮数(见 qtRead 里的空转上限)
     QByteArray maskedUrl; // 只给日志用(URL 必须打码)
 };
 
@@ -80,7 +79,6 @@ void harvestReply(QtBody *b) {
     b->pending += b->reply->readAll();
     if (b->pending.size() != before) {
         b->lastData.restart(); // 有字节到达 = 这条连接还活着
-        b->emptyPolls = 0;     // 空转计数跟着清零(见 qtRead 的说明)
     }
     if (!b->reply->isFinished()) {
         return;
@@ -329,13 +327,6 @@ int64_t qtRead(void *ctx, sxcl_http_body *body, void *buf, size_t len) {
          * stderr 刷屏、界面线程被队列信号拖住(连截图定时器都轮不上)。
          * 阈值 200 轮 ≈ 10 秒:比它更慢的源本来就会被 60 秒的停滞看门狗兜住,
          * 而且报 IO 错误只是"这次尝试作废" —— 引擎保留已下部分,换路或原路续传,不会丢进度。 */
-        if (++b->emptyPolls >= 200) {
-            sxcl_log_write(SXCL_LOG_WARN, "net", "%s -> 连续 %d 轮没有新数据,当作半死连接放弃本次尝试",
-                           b->maskedUrl.constData(), b->emptyPolls);
-            b->reply->abort();
-            b->ioError = true;
-            return SXCL_NET_ERR_IO;
-        }
         /* 停滞看门狗:连接还在,但一个字节都不来。不判这条会永久挂住(见 QtBody 里的说明)。
          * 报 IO 错误,让引擎按"传输中断"处理 —— 保留已下部分,换路或续传,而不是干等。 */
         if (b->lastData.isValid() && b->lastData.elapsed() >= b->stallMs) {
