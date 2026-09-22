@@ -883,7 +883,8 @@ private:
             const char *type;
             const char *name;
         } loaders[] = {{"forge", "Forge"}, {"neoforge", "NeoForge"},
-                       {"fabric", "Fabric"}, {"optifine", "OptiFine"}};
+                       {"fabric", "Fabric"}, {"quilt", "Quilt"},
+                       {"optifine", "OptiFine"}};
         for (const auto &spec : loaders) {
             auto *row = new LoaderRow(QString::fromLatin1(spec.type),
                                       QString::fromLatin1(spec.name), m_view);
@@ -1124,6 +1125,7 @@ private:
         if (m_selectedLoader == QLatin1String("forge") ||
             m_selectedLoader == QLatin1String("neoforge") ||
             m_selectedLoader == QLatin1String("fabric") ||
+            m_selectedLoader == QLatin1String("quilt") ||
             m_selectedLoader == QLatin1String("optifine")) {
             for (LoaderRow *row : m_loaderRows) {
                 if (row->loaderType() != m_selectedLoader || !row->isSelected())

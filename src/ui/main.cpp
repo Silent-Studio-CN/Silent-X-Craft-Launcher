@@ -582,6 +582,20 @@ sxcl::ui::MainWindow window;
         });
     }
 
+    // 验收通路:直接打开**下载配置页**(SXCL_UI_CONFIG=<版本号>,如 1.20.1)。
+    //   加载器列表(Forge/NeoForge/Fabric/Quilt/OptiFine)就在这一页 —— 没有它只能靠手点版本行进去。
+    const QString configVersion = qEnvironmentVariable("SXCL_UI_CONFIG");
+    if (!configVersion.isEmpty()) {
+        QTimer::singleShot(400, &app, [&window, configVersion]() {
+            if (qEnvironmentVariableIsSet("SXCL_UI_TRACE")) {
+                std::fprintf(stderr, "[sxcl-ui] 打开下载配置页:%s(SXCL_UI_CONFIG)\n",
+                             configVersion.toUtf8().constData());
+            }
+            QMetaObject::invokeMethod(&window, "switchToDownloadConfig", Qt::DirectConnection,
+                                      Q_ARG(QString, configVersion));
+        });
+    }
+
     // 验收通路:进**子栏**(下载页左侧那三个:Minecraft 版本 / MOD / 光影;版本选择页的文件夹也是)。
     //   SXCL_UI_NAV=<routeKey>(如 download_mod):窗口起来后**点那一条** ——
     //   走产品路径(按钮 clicked -> NavPanel::setCurrent -> routeChanged -> 切 stack),
