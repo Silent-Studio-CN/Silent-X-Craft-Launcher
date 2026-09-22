@@ -415,6 +415,26 @@ typedef struct sxcl_loader_install_request {
     int (*on_line)(void *userdata, int is_stderr, const char *line);
 } sxcl_loader_install_request;
 
+/** 安装器 jar 的**形态**（docs/22 的 B4：先读 install_profile.json 再决定怎么装，
+ *  别再"盲试 4 组命令行"—— 每组默认 30 分钟超时，试错的代价是用户等两小时）。
+ *
+ *  判据（都是 Forge/NeoForge 安装器里稳定存在的键）：
+ *    新格式（1.13+）：`spec >= 1` / 有 `processors` / 有 `json`（指向 jar 里的 version.json）；
+ *    老格式（1.12-）：有 `install`（通用 jar 与坐标）或内嵌的 `versionInfo`；
+ *    都没有 = UNKNOWN：**不是一个能静默安装的安装器**（或文件坏了）—— 这种情况连方式 B 都做不了，
+ *    应当立刻如实失败，而不是在命令行上耗到超时。 */
+typedef enum sxcl_loader_installer_format {
+    SXCL_LOADER_INSTALLER_UNKNOWN = 0,
+    SXCL_LOADER_INSTALLER_LEGACY = 1,
+    SXCL_LOADER_INSTALLER_MODERN = 2
+} sxcl_loader_installer_format;
+
+/** 只看 install_profile.json 的**文本**判形态（纯函数，可单测）。 */
+sxcl_loader_installer_format sxcl_loader_installer_format_of(const char *profile_json, size_t len);
+/** 打开安装器 jar 读 install_profile.json 判形态（打不开/读不到 = UNKNOWN）。 */
+sxcl_loader_installer_format sxcl_loader_installer_probe(const char *installer_jar);
+const char *sxcl_loader_installer_format_name(sxcl_loader_installer_format format);
+
 /** 装一个模组加载器。返回 0 = 成功;1 = 失败(看 out->fail_stage / out->error);
  *  负数 = 参数不合法(压根没开始装)。out 必须非空。
  *

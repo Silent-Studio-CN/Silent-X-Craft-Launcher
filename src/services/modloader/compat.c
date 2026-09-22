@@ -140,6 +140,47 @@ sxcl_loader_kind sxcl_loader_kind_from_id(const char *id)
     return SXCL_LOADER_VANILLA;
 }
 
+sxcl_loader_installer_format sxcl_loader_installer_format_of(const char *profile_json, size_t len)
+{
+    if (profile_json == NULL || len == 0) {
+        return SXCL_LOADER_INSTALLER_UNKNOWN;
+    }
+    char perr[128];
+    perr[0] = '\0';
+    sxcl_json *doc = sxcl_json_parse(profile_json, len, perr, sizeof(perr));
+    if (doc == NULL) {
+        return SXCL_LOADER_INSTALLER_UNKNOWN;   /* 不是 JSON = 判不出来(调用方会当"没法装") */
+    }
+    const sxcl_json_value *root = sxcl_json_root(doc);
+    int format = SXCL_LOADER_INSTALLER_UNKNOWN;
+    if (root != NULL && sxcl_json_type_of(root) == SXCL_JSON_OBJECT) {
+        const int modern = sxcl_json_get_int64(root, "spec", 0) >= 1 ||
+                           sxcl_json_size(sxcl_json_get(root, "processors")) > 0 ||
+                           sxcl_json_get_string(root, "json", "")[0] != '\0';
+        const int legacy = sxcl_json_get(root, "install") != NULL ||
+                           sxcl_json_get(root, "versionInfo") != NULL;
+        if (modern) {
+            format = SXCL_LOADER_INSTALLER_MODERN;
+        } else if (legacy) {
+            format = SXCL_LOADER_INSTALLER_LEGACY;
+        }
+    }
+    sxcl_json_free(doc);
+    return (sxcl_loader_installer_format)format;
+}
+
+const char *sxcl_loader_installer_format_name(sxcl_loader_installer_format format)
+{
+    switch (format) {
+    case SXCL_LOADER_INSTALLER_MODERN:
+        return "1.13+ 新格式(spec/processors)";
+    case SXCL_LOADER_INSTALLER_LEGACY:
+        return "1.12- 老格式(install/versionInfo)";
+    default:
+        return "认不出来(没有 install_profile.json)";
+    }
+}
+
 int sxcl_loader_kind_implemented(sxcl_loader_kind kind)
 {
     /* 2026-09-22 晚:**Quilt 放开了**(docs/22 的 B7)。它本来就只差这一道门:

@@ -870,6 +870,8 @@ typedef struct install_ctx {
      * 活动中的安装器 zip(data 里的裸值要从它里面取)与取出来的临时目录。 */
     sxcl_zip *zip;
     char temp_dir[SXCL_LOADER_CMD_ARG_MAX];
+    /** 1 = 别去试方式 B（安装器根本不是能静默安装的那种:方式 B 同样要 install_profile.json）。 */
+    int skip_fallback;
 } install_ctx;
 
 static void ctx_report(install_ctx *ctx, int percent, const char *fmt, ...)
@@ -960,8 +962,11 @@ static int effective_timeout_ms(const sxcl_loader_install_request *req)
                                              : SXCL_LOADER_DEFAULT_TIMEOUT_MS;
 }
 
-/* 跑一组命令行。返回 sxcl_process_run 的返回值(0 = 跑完了,-1 = 没启动起来)。 */
-static int run_variant(install_ctx *ctx, const sxcl_loader_cmd *cmd, sxcl_process_result *pres)
+/* 跑一组命令行。返回 sxcl_process_run 的返回值(0 = 跑完了,-1 = 没启动起来)。
+ * timeout_ms > 0 时用它,否则用整次安装的默认超时 —— 见 run_installer_phase:
+ * 形态已知时我们会把总预算**按组数摊开**,免得"4 组各等 30 分钟"。 */
+static int run_variant(install_ctx *ctx, const sxcl_loader_cmd *cmd, int timeout_ms,
+                       sxcl_process_result *pres)
 {
     const char *args[SXCL_LOADER_CMD_MAX_ARGS + 1];
     size_t argc = cmd->argc;
@@ -988,7 +993,7 @@ static int run_variant(install_ctx *ctx, const sxcl_loader_cmd *cmd, sxcl_proces
     opts.args = args;
     opts.work_dir = cmd->work_dir[0] ? cmd->work_dir : NULL;
     opts.env = env_count > 0 ? env : NULL;
-    opts.timeout_ms = effective_timeout_ms(ctx->req);
+    opts.timeout_ms = timeout_ms > 0 ? timeout_ms : effective_timeout_ms(ctx->req);
     opts.on_line = install_on_line;
     opts.userdata = ctx;
 
@@ -2016,6 +2021,27 @@ done:
     return ok;
 }
 
+/* 形态预判(docs/22 的 B4 的落地实现):打开安装器读 install_profile.json 判形态。 */
+sxcl_loader_installer_format sxcl_loader_installer_probe(const char *installer_jar)
+{
+    if (installer_jar == NULL || installer_jar[0] == '\0') {
+        return SXCL_LOADER_INSTALLER_UNKNOWN;
+    }
+    sxcl_zip *zip = sxcl_zip_open(installer_jar);
+    if (zip == NULL) {
+        return SXCL_LOADER_INSTALLER_UNKNOWN;
+    }
+    char *text = read_zip_text(zip, "install_profile.json");
+    sxcl_zip_close(zip);
+    if (text == NULL) {
+        return SXCL_LOADER_INSTALLER_UNKNOWN;
+    }
+    const sxcl_loader_installer_format format =
+        sxcl_loader_installer_format_of(text, strlen(text));
+    free(text);
+    return format;
+}
+
 /* ── 方式 A ── */
 
 static int run_installer_phase(install_ctx *ctx, const char *versions_dir, const char *instance_dir)
@@ -2037,13 +2063,52 @@ static int run_installer_phase(install_ctx *ctx, const char *versions_dir, const
     env.instance_name = req->instance_name;
     env.mirror_maven = req->mirror_maven;
 
+    /* ── 先判形态,再决定怎么试（docs/22 的 B4）──
+     * 以前是"无条件按 4 组参数依次试",单组默认 30 分钟 —— 撞上装不了的安装器要用户等两小时。
+     * 现在先读 install_profile.json：
+     *   * 认不出来 -> **当场如实失败**,连方式 B 也做不了(它同样要这份 profile);
+     *   * 1.13+ 新格式 -> 只留 --installClient 那几组（`--installDir=` 是 1.12- 的旗标,
+     *     在新安装器上纯属浪费一轮超时）;
+     *   * 老格式 -> 照旧全试,但**总预算按组数摊开**；
+     * 三种情况都把这句人话报出去(命令行/界面日志里看得见"这次打算怎么装")。 */
+    const sxcl_loader_installer_format format = sxcl_loader_installer_probe(req->installer_jar);
+    if (format == SXCL_LOADER_INSTALLER_UNKNOWN) {
+        ctx_report(ctx, ctx->percent, "安装器里没有 install_profile.json —— 直接判失败（不再盲试命令行）");
+        ctx_fail(ctx, SXCL_LOADER_FAIL_PREPARE,
+                 "安装器 jar 里没有 install_profile.json：%s —— 这不是一个能静默安装的加载器安装器"
+                 "（也可能文件是坏的/没下完）。",
+                 req->installer_jar);
+        ctx->skip_fallback = 1;   /* 方式 B 同样要这份 profile,别再耗一遍 */
+        return 0;
+    }
+
     sxcl_loader_cmd cmds[4];
-    const size_t count = sxcl_loader_build_commands(req->kind, &env, cmds, 4);
+    size_t count = sxcl_loader_build_commands(req->kind, &env, cmds, 4);
     if (count == 0) {
         return 0;   /* 这种加载器没有静默 CLI -> 直接走方式 B */
     }
+    if (format == SXCL_LOADER_INSTALLER_MODERN && count > 1) {
+        size_t kept = 0;
+        for (size_t i = 0; i < count; ++i) {
+            if (strstr(cmds[i].desc, "旧 ") == NULL) {
+                cmds[kept++] = cmds[i];
+            }
+        }
+        if (kept > 0) {
+            count = kept;
+        }
+    }
 
-    const int timeout = effective_timeout_ms(req);
+    /* 总预算按组数摊开:一组最多 30 分钟,4 组就是两小时 —— 用户不会等。
+     * 每组至少留 60 秒(安装器起 JVM + 下几 MB 也得有这点时间)。 */
+    const int budget = effective_timeout_ms(req);
+    int per_variant = count > 0 ? budget / (int)count : budget;
+    if (per_variant < 60000) {
+        per_variant = budget < 60000 ? budget : 60000;
+    }
+    ctx_report(ctx, ctx->percent, "安装器形态：%s → 先试 %d 组命令行（每组最多 %d 秒）",
+               sxcl_loader_installer_format_name(format), (int)count, per_variant / 1000);
+
     for (size_t i = 0; i < count; ++i) {
         if (ctx_cancelled(ctx)) {
             ctx->cancelled = 1;
@@ -2053,7 +2118,7 @@ static int run_installer_phase(install_ctx *ctx, const char *versions_dir, const
         ctx_report(ctx, ctx->percent, cmds[i].desc);
         sxcl_process_result pres;
         memset(&pres, 0, sizeof(pres));
-        if (run_variant(ctx, &cmds[i], &pres) != 0) {
+        if (run_variant(ctx, &cmds[i], per_variant, &pres) != 0) {
             ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "启动安装器失败：%s",
                      pres.error[0] ? pres.error : cmds[i].program);
             continue;
@@ -2065,7 +2130,8 @@ static int run_installer_phase(install_ctx *ctx, const char *versions_dir, const
         }
         if (pres.timed_out) {
             ctx->timed_out = 1;
-            ctx_fail(ctx, SXCL_LOADER_FAIL_TIMEOUT, "安装器超过 %d 分钟没有完成", timeout / 60000);
+            ctx_fail(ctx, SXCL_LOADER_FAIL_TIMEOUT, "安装器超过 %d 分钟没有完成",
+                     per_variant / 60000);
             continue;
         }
         if (variant_succeeded(ctx, &pres, versions_dir, instance_dir)) {
@@ -2211,7 +2277,7 @@ static int install_optifine(install_ctx *ctx)
             }
             sxcl_process_result pres;
             memset(&pres, 0, sizeof(pres));
-            if (run_variant(ctx, &cmds[0], &pres) != 0) {
+            if (run_variant(ctx, &cmds[0], effective_timeout_ms(req), &pres) != 0) {
                 ctx_fail(ctx, SXCL_LOADER_FAIL_RUN_INSTALLER, "启动 OptiFine 安装器失败：%s",
                          pres.error[0] ? pres.error : req->java_path);
                 goto done;
@@ -2460,7 +2526,7 @@ int sxcl_loader_install(const sxcl_loader_install_request *req, sxcl_loader_inst
         /* 2) 方式 A。 */
         ok = run_installer_phase(&ctx, versions_dir, instance_dir);
         /* 3) 方式 B(回退)。 */
-        if (!ok && !ctx.cancelled) {
+        if (!ok && !ctx.cancelled && !ctx.skip_fallback) {
             if (!req->no_fallback && (req->kind == SXCL_LOADER_FORGE || req->kind == SXCL_LOADER_NEOFORGE)) {
                 ctx_report(&ctx, FALLBACK_PERCENT, "改用解包安装 %s", name);
                 out->used_fallback = 1;

@@ -18,6 +18,10 @@ static int g_pass = 0, g_fail = 0;
 static void check(int ok, const char *what) {
     if (ok) { ++g_pass; } else { ++g_fail; printf("  [!!] %s\n", what); }
 }
+static void check_int(long got, long want, const char *what) {
+    if (got == want) { ++g_pass; }
+    else { ++g_fail; printf("  [!!] %s: got %ld want %ld\n", what, got, want); }
+}
 static void check_str(const char *got, const char *want, const char *what) {
     if (got && want && strcmp(got, want) == 0) { ++g_pass; }
     else { ++g_fail; printf("  [!!] %s: got '%s' want '%s'\n", what, got ? got : "(null)", want ? want : "(null)"); }
@@ -1134,6 +1138,66 @@ static void test_missing_libraries(void) {
           "版本 JSON 不在时返回 0(没得核对,不误报)");
 }
 
+/* ── 安装器形态预判（docs/22 的 B4）──
+ *
+ * 判据只看 install_profile.json 的内容：新格式（spec>=1 / processors / json）与老格式
+ * （install / versionInfo）分别长什么样，真安装器里是稳定的（Forge 1.20.1 的 profile:
+ * spec=1 + 10 个 processors + json="/version.json"；Forge 1.12 的:install + versionInfo）。 */
+
+static void test_installer_format(void) {
+    /* 真格式：Forge 1.13+（截取关键键,顺序与真文件一致） */
+    const char *modern =
+        "{\"spec\":1,\"profile\":\"forge\",\"json\":\"/version.json\",\"minecraft\":\"1.20.1\","
+        "\"processors\":[{\"jar\":\"net.minecraftforge:installertools:1.3.0\",\"args\":[]}],"
+        "\"data\":{\"MAPPINGS\":{\"client\":\"[de.oceanlabs.mcp:mcp_config:1.20.1@zip]\"}},"
+        "\"libraries\":[{\"name\":\"net.minecraftforge:forge:1.20.1-47.2.0\"}]}";
+    check_int((int)sxcl_loader_installer_format_of(modern, strlen(modern)),
+              (int)SXCL_LOADER_INSTALLER_MODERN, "1.13+ 新格式(spec=1 + processors)");
+    check_str(sxcl_loader_installer_format_name(SXCL_LOADER_INSTALLER_MODERN),
+              "1.13+ 新格式(spec/processors)", "  形态名");
+
+    /* 新格式的另外两条判据单独验（只有 json / 只有 processors） */
+    const char *only_json = "{\"json\":\"/version.json\",\"libraries\":[]}";
+    check_int((int)sxcl_loader_installer_format_of(only_json, strlen(only_json)),
+              (int)SXCL_LOADER_INSTALLER_MODERN, "只有 json 键也算新格式");
+    const char *only_proc = "{\"processors\":[{\"jar\":\"a:b:1\"}]}";
+    check_int((int)sxcl_loader_installer_format_of(only_proc, strlen(only_proc)),
+              (int)SXCL_LOADER_INSTALLER_MODERN, "只有 processors 也算新格式");
+
+    /* 真格式：Forge 1.12-（install + versionInfo） */
+    const char *legacy =
+        "{\"install\":{\"path\":\"net.minecraftforge:forge:1.12.2-14.23.5.2860\","
+        "\"filePath\":\"forge-1.12.2-14.23.5.2860-universal.jar\",\"libraries\":[]},"
+        "\"versionInfo\":{\"id\":\"1.12.2-forge1.12.2-14.23.5.2860\",\"mainClass\":\"x\"}}";
+    check_int((int)sxcl_loader_installer_format_of(legacy, strlen(legacy)),
+              (int)SXCL_LOADER_INSTALLER_LEGACY, "1.12- 老格式(install + versionInfo)");
+
+    /* 认不出来的：空 / 不是 JSON / 是 JSON 但没有那几个键 */
+    check_int((int)sxcl_loader_installer_format_of(NULL, 0),
+              (int)SXCL_LOADER_INSTALLER_UNKNOWN, "没有文本 = 认不出来");
+    check_int((int)sxcl_loader_installer_format_of("not json at all", 15),
+              (int)SXCL_LOADER_INSTALLER_UNKNOWN, "不是 JSON = 认不出来");
+    const char *empty_obj = "{\"libraries\":[]}";
+    check_int((int)sxcl_loader_installer_format_of(empty_obj, strlen(empty_obj)),
+              (int)SXCL_LOADER_INSTALLER_UNKNOWN, "没有形态键 = 认不出来(会被当成装不了)");
+    check_str(sxcl_loader_installer_format_name(SXCL_LOADER_INSTALLER_UNKNOWN),
+              "认不出来(没有 install_profile.json)", "  形态名");
+
+    /* probe：打不开的文件/根本不是 zip 的 → UNKNOWN（真 zip 的判据由方式 A 的真机验收覆盖） */
+    check_int((int)sxcl_loader_installer_probe("build/_loader_tmp/没有这个安装器.jar"),
+              (int)SXCL_LOADER_INSTALLER_UNKNOWN, "安装器不存在 = 认不出来");
+    {
+        const char *fake = "build/_loader_tmp/not-a-jar.jar";
+        FILE *fh = fopen(fake, "wb");
+        if (fh != NULL) {
+            (void)fputs("我不是 zip", fh);
+            (void)fclose(fh);
+        }
+        check_int((int)sxcl_loader_installer_probe(fake), (int)SXCL_LOADER_INSTALLER_UNKNOWN,
+                  "不是 zip = 认不出来");
+    }
+}
+
 int main(void) {
     check(sxcl_fs_mkdirs("build/_loader_tmp") == 0, "建临时目录(否则后面写文件全失败)");
 
@@ -1148,6 +1212,7 @@ int main(void) {
     test_flatten();
     test_missing_libraries();
     test_install_args();
+    test_installer_format();
 
     printf("loader 测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
