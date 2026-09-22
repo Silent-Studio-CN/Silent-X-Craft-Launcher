@@ -34,6 +34,9 @@ set(SXCL_UI_SOURCES
   pages/game_folders.cpp    pages/game_folders.h
   pages/download_page.cpp   pages/team_page.cpp   pages/more_page.cpp
   pages/versions_select_page.cpp
+  #   mods_page.cpp  下载 → 拼图/太阳(MOD/光影,docs/22 的 A1;网络全在工作线程)
+  pages/mods_page.cpp
+  pages/mods_page.cpp
   # 工作线程层(阶段 7:下载->安装->启动 的界面接线)
   #   ui_paths.*       界面层共用的运行期取值(游戏目录/设置文件/内存/进度追踪)
   #   install_worker.* 把阻塞的 sxcl_install_run 放工作线程,阶段/进度/速度/取消回填 UI
@@ -43,6 +46,8 @@ set(SXCL_UI_SOURCES
   workers/launch_worker.cpp   workers/launch_worker.h
   #   ui_error.*       统一的错误出口:完整上下文 + 自动复制剪贴板(同一错误只复制一次)
   workers/ui_error.cpp        workers/ui_error.h
+  #   mods_worker.* 模组页的取文本/下文件(工作线程;模组下载不碰安装编排)
+  workers/mods_worker.cpp     workers/mods_worker.h
   # 账户(正版登录)—— Python 版没有这个功能,新增:
   #   account.*     账户快照 + 工作线程任务(登录/续期/注销/正版启动;主线程绝不阻塞)
   #   auth_dialog.* 设备码登录对话框(qf 风格的 MessageBoxBase)

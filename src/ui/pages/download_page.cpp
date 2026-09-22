@@ -187,17 +187,10 @@ QWidget *createDownloadPage(QWidget *parent) {
 
     auto *stack = new QStackedWidget(body);
     stack->addWidget(createVersionsPage(stack));
-    stack->addWidget(buildPlaceholderTab(
-        QStringLiteral("模组（MOD）"),
-        QStringLiteral("这一栏会做：按 MC 版本 + 加载器筛选、一键装进 versions/<实例>/mods、"
-                       "同名先拦下让你改名、依赖只列不自动装（口径见 docs/22：走 PCL 线路）。\n"
-                       "现在还没开工 —— 前置是「版本隔离」（docs/22 的 A2，现在是死开关）。"),
-        stack));
-    stack->addWidget(buildPlaceholderTab(
-        QStringLiteral("光影（Shader）"),
-        QStringLiteral("这一栏会做：装进 versions/<实例>/shaderpacks、与模组共用同一套筛选与同名处理。"
-                       "现在还没开工。"),
-        stack));
+    // MOD 那一栏:接上 sxcl/mods.h 的资源来源层(搜索/挑文件/装进隔离后的 mods)
+    stack->addWidget(createModsPage(stack, false));
+    // 光影那一栏:同一个组件(kind=shaderpacks;搜索还只在模组那一类上,下一轮补 project_type)
+    stack->addWidget(createModsPage(stack, true));
     stack->setCurrentIndex(0);
 
     QObject::connect(inner, &NavPanel::routeChanged, stack, [stack](const QString &key) {
