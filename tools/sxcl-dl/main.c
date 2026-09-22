@@ -990,6 +990,13 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
     req.complete_files = can_complete;
     req.engine_opts = can_complete ? &lopts : NULL;
     req.prefer_mirror = o->prefer_mirror; /* --source 的同一口径 */
+    /* 资源对象(P0b):命令行默认"只比大小"(PCL 口径)。要强校验就设
+     * SXCL_COMPLETE_ASSETS=2,要整块跳过就设 0 —— 验收/排查两档都用得上。 */
+    {
+        const char *env = getenv("SXCL_COMPLETE_ASSETS");
+        const int level = env != NULL ? atoi(env) : 1;
+        req.complete_assets = (level >= 0 && level <= 2) ? level : 1;
+    }
 
     sxcl_launch_result res;
     char err[256];

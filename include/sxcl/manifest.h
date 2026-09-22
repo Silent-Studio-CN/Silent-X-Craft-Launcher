@@ -110,6 +110,18 @@ int sxcl_version_plan_add_asset_objects(sxcl_version_plan *plan, const sxcl_json
                                         const char *game_dir, const char *base_url,
                                         const char *mirror_base, char *err, size_t err_len);
 
+/** 同上,但**自己选校验强度**(装的时候是强校验,启动前补全是弱校验):
+ *  verify_hash != 0 -> 带 sha1(引擎会读文件算哈希;有哈希缓存时第二次很快);
+ *  verify_hash == 0 -> **只比大小**(文件名的哈希就是内容哈希,想强校验随时可以再算)。
+ *
+ *  为什么要有这个开关(PCL 的口径):启动前要核对的是 **5000+ 个**资源文件、几百 MB,
+ *  逐个算 SHA-1 在机械盘上要几十秒 —— PCL 启动时只查"存在 + 大小",哈希留给下载器/手动补全。
+ *  我们默认按"只比大小"跑启动前那一遍(设置里可开到强校验),装的时候仍是强校验。 */
+int sxcl_version_plan_add_asset_objects_ex(sxcl_version_plan *plan, const sxcl_json *asset_index,
+                                           const char *game_dir, const char *base_url,
+                                           const char *mirror_base, int verify_hash, char *err,
+                                           size_t err_len);
+
 /* ── 镜像(第二路来源)── */
 
 /** BMCLAPI 镜像根。官方清单/版本 JSON/客户端 jar/依赖库/资源对象它都透传。 */

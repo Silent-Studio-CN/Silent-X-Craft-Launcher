@@ -252,6 +252,71 @@ static void log_argv(const sxcl_launch_result *out, const sxcl_launch_args *args
 
 /* ────────────────────────── 主流程 ────────────────────────── */
 
+/* ── 资源对象那一遍(P0b):索引 -> 展开 objects -> 再跑一次引擎 ──
+ *
+ * 为什么要两遍:清单里只有"资源索引"这一件(sxcl_version_plan_build),而 5000+ 个对象
+ * 得读**索引内容**才知道有哪些 —— 索引刚被第一遍下下来(或者本来就在),所以第二遍才有得展开。
+ * 第二遍跑的是**整张计划**,命中的那些会走引擎的"已存在"快路径,只下缺的。
+ *
+ * level 见 launch.h 的 complete_assets(0 不补 / 1 只比大小 / 2 强校验)。
+ * 镜像顺序**必须在这里自己排**:计划上那批已经 prefer_mirror 过一次了,再调一次会把它们换回来
+ * (manifest.h 明写"只应调用一次")—— 所以官方/镜像谁在前由这里的两个 base 决定。
+ *
+ * 返回:>0 = 第二遍真的跑了(值 = 新展开的对象数,统计写在 out);
+ *       0 = 不用补 / 没得补(没开档位、没有 assetIndex、索引还没下下来)—— 都不是错误;
+ *      <0 = 第二遍失败(err 有人话;调用方按"补不齐不拦启动"处理)。 */
+static int complete_assets_pass(const sxcl_json_value *root, const sxcl_launch_request *req,
+                                sxcl_version_plan *plan, sxcl_fetch_stats *out, char *err,
+                                size_t err_len)
+{
+    if (err && err_len) {
+        err[0] = '\0';
+    }
+    if (req->complete_assets <= 0) {
+        return 0;
+    }
+    const char *index_id = sxcl_json_get_string(sxcl_json_get(root, "assetIndex"), "id", NULL);
+    if (!index_id || !index_id[0]) {
+        return 0;   /* 这个版本没有资源索引(很老的版本就是没有):没得展开 */
+    }
+
+    char rel[160];
+    char path[SXCL_JAVA_PATH_MAX * 2];
+    (void)snprintf(rel, sizeof(rel), "assets/indexes/%s.json", index_id);
+    join_path(path, sizeof(path), req->game_dir, rel); /* 本文件是 void 版:拼不出来是空串,parse 会失败 */
+    char perr[192];
+    perr[0] = '\0';
+    sxcl_json *index_doc = sxcl_json_parse_file(path, perr, sizeof(perr));
+    if (!index_doc) {
+        /* 索引还没下下来(第一遍可能失败了):如实说一句,但不当错误 —— 启动照走 */
+        if (err && err_len) {
+            (void)snprintf(err, err_len, "资源索引还没下下来（%s），这次先不补资源文件",
+                           perr[0] ? perr : "读不出来");
+        }
+        return 0;
+    }
+
+    const char *first = SXCL_ASSET_OBJECTS_BASE;
+    const char *second = NULL;
+    if (req->prefer_mirror) {
+        first = (req->mirror_base && req->mirror_base[0]) ? req->mirror_base
+                                                          : SXCL_MIRROR_BMCLAPI_BASE;
+        second = SXCL_ASSET_OBJECTS_BASE;
+    }
+    const int added = sxcl_version_plan_add_asset_objects_ex(
+        plan, index_doc, req->game_dir, first, second, req->complete_assets >= 2 ? 1 : 0, err,
+        err_len);
+    sxcl_json_free(index_doc);
+    if (added <= 0) {
+        return 0;
+    }
+    SXCL_LOG_I("launch", "启动前补全:资源索引 %s 展开出 %d 个资源对象(%s)",
+               index_id, added, req->complete_assets >= 2 ? "强校验" : "只比大小");
+    const int rc = sxcl_version_plan_fetch(plan, req->engine_opts, req->complete_is_cancelled,
+                                           req->complete_cancel_ud, out, err, err_len);
+    return rc == SXCL_FETCH_OK ? added : (rc == SXCL_FETCH_PARTIAL ? added : -1);
+}
+
 int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
                     char *err, size_t err_len)
 {
@@ -453,11 +518,41 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
                                                     req->complete_is_cancelled,
                                                     req->complete_cancel_ud, &fstats, perr,
                                                     sizeof(perr));
-            out->complete.files_total = fstats.total;
-            out->complete.files_downloaded = fstats.downloaded;
-            out->complete.files_failed = fstats.failed;
-            out->complete.files_skipped = fstats.skipped;
-            out->complete.bytes_done = fstats.bytes_done;
+            /* ── 第二遍:资源对象(P0b)──
+             * 第一遍把资源**索引**下下来了,这一遍才有得展开 5000+ 个对象。
+             * 第二遍跑的是整张计划,所以"总数/命中"取第二遍的,"下载/失败/字节"两遍相加
+             * (第一遍下过的在第二遍一定命中,不会重复计)。 */
+            sxcl_fetch_stats astats;
+            memset(&astats, 0, sizeof(astats));
+            char aerr[192];
+            aerr[0] = '\0';
+            int arc = 0;
+            if (frc == SXCL_FETCH_OK || frc == SXCL_FETCH_PARTIAL) {
+                arc = complete_assets_pass(sxcl_json_root(doc), req, plan, &astats, aerr,
+                                           sizeof(aerr));
+            }
+            if (arc > 0 && astats.total > 0) {
+                /* 第二遍跑的是**整张计划**,所以"总数/命中/失败"都取第二遍的:
+                 * 失败**不能相加** —— 第一遍没下成的那件在第二遍里还会失败,相加就重复计了
+                 * (实测:一件库没下成,相加后报"失败 2 件")。
+                 * "下载/字节"可以相加:第一遍下过的在第二遍一定命中,不会重复。 */
+                out->complete.files_total = astats.total;
+                out->complete.files_skipped = astats.skipped;
+                out->complete.files_failed = astats.failed;
+                out->complete.files_downloaded = fstats.downloaded + astats.downloaded;
+                out->complete.bytes_done = fstats.bytes_done + astats.bytes_done;
+            } else {
+                out->complete.files_total = fstats.total;
+                out->complete.files_downloaded = fstats.downloaded;
+                out->complete.files_failed = fstats.failed;
+                out->complete.files_skipped = fstats.skipped;
+                out->complete.bytes_done = fstats.bytes_done;
+            }
+            if (arc < 0 && aerr[0]) {
+                (void)snprintf(perr, sizeof(perr), "资源对象没能补完：%s", aerr);
+            } else if (perr[0] == '\0' && aerr[0]) {
+                (void)snprintf(perr, sizeof(perr), "%s", aerr);
+            }
             if (perr[0]) {
                 (void)snprintf(out->complete.error, sizeof(out->complete.error), "%s", perr);
             } else if (frc != SXCL_FETCH_OK) {

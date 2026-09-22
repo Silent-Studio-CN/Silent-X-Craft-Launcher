@@ -621,6 +621,16 @@ int sxcl_version_plan_add_asset_objects(sxcl_version_plan *plan, const sxcl_json
                                         const char *game_dir, const char *base_url,
                                         const char *mirror_base, char *err, size_t err_len)
 {
+    /* 老入口 = 强校验(装的时候用的就是它) */
+    return sxcl_version_plan_add_asset_objects_ex(plan, asset_index, game_dir, base_url, mirror_base,
+                                                 1, err, err_len);
+}
+
+int sxcl_version_plan_add_asset_objects_ex(sxcl_version_plan *plan, const sxcl_json *asset_index,
+                                           const char *game_dir, const char *base_url,
+                                           const char *mirror_base, int verify_hash, char *err,
+                                           size_t err_len)
+{
     if (err && err_len) {
         err[0] = '\0';
     }
@@ -678,7 +688,9 @@ int sxcl_version_plan_add_asset_objects(sxcl_version_plan *plan, const sxcl_json
             snprintf(mirror, sizeof(mirror), "%s/%.2s/%s", mirror_base, hash, hash);
             mirror_url = mirror;
         }
-        plan_add(plan, url, dest, hash, size, SXCL_ASSET_OBJECTS_PRIORITY, name, mirror_url);
+        /* verify_hash=0 -> sha1 传 NULL:引擎按"只比大小"判"已存在",不读文件(启动前那一遍用) */
+        plan_add(plan, url, dest, verify_hash ? hash : NULL, size, SXCL_ASSET_OBJECTS_PRIORITY, name,
+                 mirror_url);
         ++added;
         free(dest);
     }

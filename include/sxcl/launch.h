@@ -656,6 +656,12 @@ typedef struct sxcl_launch_request {
     int prefer_mirror;
     /** 镜像根;空 = 核心默认(BMCLAPI)。只有 prefer_mirror 非 0 时才用得上。 */
     const char *mirror_base;
+    /** 资源文件(assets objects)补到哪一档(docs/24 的 P0b):
+     *    0 = 不补(只要清单里那些:版本 JSON / 客户端 jar / 依赖库 / 资源**索引**);
+     *    1 = **只比大小**(默认;PCL 启动前就是这个口径 —— 5000+ 个文件不逐个算哈希);
+     *    2 = 强校验(每个对象算 SHA-1;有哈希缓存时第二次很快,首次慢)。
+     *  资源对象要先有索引才能展开,所以它是**第二遍**(第一遍把索引下下来之后再跑一次)。 */
+    int complete_assets;
     /** 每落定一个文件问一次;非 0 = 取消(可空)。**从工作线程调用**,实现里别做重活。 */
     int (*complete_is_cancelled)(void *ud);
     void *complete_cancel_ud;

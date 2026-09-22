@@ -224,7 +224,7 @@ static const char *kVersionJson =
     "\"mainClass\":\"net.minecraft.client.main.Main\","
     "\"javaVersion\":{\"component\":\"java-runtime-delta\",\"majorVersion\":21},"
     "\"assetIndex\":{\"id\":\"17\","
-    "\"size\":64,\"url\":\"https://piston-meta.mojang.com/v1/packages/ff/17.json\"},"
+    "\"size\":200,\"url\":\"https://piston-meta.mojang.com/v1/packages/ff/17.json\"},"
     "\"arguments\":{"
     "  \"jvm\":[\"-Djava.library.path=${natives_directory}\",\"-cp\",\"${classpath}\"],"
     "  \"game\":[\"--username\",\"${auth_player_name}\",\"--version\",\"${version_name}\","
@@ -531,6 +531,8 @@ typedef struct fake_http {
     int fail_all;      /* 1 = 一律 404(验"补不上也要照常启动") */
     char last_url[512];
     unsigned char payload[64];
+    /* P0b:资源索引必须是**真 JSON** 才展得开 5000+ 个对象 —— URL 里带 "17.json" 时回这一份。 */
+    const char *index_json;
 } fake_http;
 
 typedef struct fake_body {
@@ -551,6 +553,18 @@ static int fake_request(void *ctx, const sxcl_http_request *req, sxcl_http_respo
         snprintf(s->last_url, sizeof(s->last_url), "%s", req->url);
     }
     memset(resp, 0, sizeof(*resp));
+    if (!s->fail_all && s->index_json != NULL && req != NULL && req->url != NULL &&
+        strstr(req->url, "17.json") != NULL) {
+        /* 资源索引:长度要**正好等于**夹具里 assetIndex.size(尾部用空格补齐,JSON 允许尾随空白) */
+        b->data = (const unsigned char *)s->index_json;
+        b->len = strlen(s->index_json);
+        resp->status = 200;
+        resp->content_length = (int64_t)b->len;
+        resp->total_length = (int64_t)b->len;
+        resp->accept_ranges = 1;
+        *body = (sxcl_http_body *)b;
+        return SXCL_NET_OK;
+    }
     if (s->fail_all) {
         resp->status = 404;
         b->data = (const unsigned char *)"";
@@ -635,6 +649,26 @@ static int cancel_right_away(void *ud) {
     return 1; /* 立刻喊停 */
 }
 
+/* ── P0b:资源索引与它展开出来的两个对象 ──
+ * 索引长度必须正好 200(夹具里 assetIndex.size = 200),尾部补空格(JSON 允许尾随空白)。 */
+#define COBJ1_HASH "aabbccddeeff00112233445566778899aabbccdd"
+#define COBJ2_HASH "00112233445566778899aabbccddeeff00112233"
+#define COBJ1 GAME_DIR "/assets/objects/aa/" COBJ1_HASH
+#define COBJ2 GAME_DIR "/assets/objects/00/" COBJ2_HASH
+static const char *kAssetIndexBody =
+    "{\"objects\":{\"probe/one.bin\":{\"hash\":\"" COBJ1_HASH "\",\"size\":64},"
+    "\"probe/two.bin\":{\"hash\":\"" COBJ2_HASH "\",\"size\":64}}}";
+
+static const char *assetIndexBody(void) {
+    static char padded[201];
+    if (padded[0] == '\0') {
+        memset(padded, ' ', sizeof(padded) - 1);
+        memcpy(padded, kAssetIndexBody, strlen(kAssetIndexBody));
+        padded[200] = '\0';
+    }
+    return padded;
+}
+
 static void case_g_complete(void) {
     fake_http server;
     sxcl_engine_opts opts;
@@ -649,6 +683,7 @@ static void case_g_complete(void) {
     opts.transport_factory = fake_factory;
     opts.userdata = &server;
     memset(server.payload, 'y', sizeof(server.payload));
+    server.index_json = assetIndexBody();   // P0b:资源索引那一路(必须是真 JSON)
 
     memset(&req, 0, sizeof(req));
     req.game_dir = GAME_DIR;
@@ -659,34 +694,44 @@ static void case_g_complete(void) {
     req.dry_run = 1;
     req.complete_files = 1;
     req.engine_opts = &opts;
+    req.complete_assets = 1;   /* P0b:资源对象按"只比大小"补(PCL 启动前的口径) */
 
-    /* g1) 三个文件都在(大小对得上)→ 一次 HTTP 都不该发 */
+    /* g1) 五个文件都在(大小对得上)→ 一次 HTTP 都不该发。
+     * 注意索引是 200 字节(与夹具的 assetIndex.size 一致),对象两个各 64 字节。 */
     check_int(write_sized(CJAR, 64), 0, "摆好客户端 jar(64 字节)");
     check_int(write_sized(CLIB, 64), 0, "摆好依赖库(64 字节)");
-    check_int(write_sized(CINDEX, 64), 0, "摆好资源索引(64 字节)");
+    (void)sxcl_fs_mkdirs_for_file(CINDEX);
+    check(write_text(CINDEX, assetIndexBody()) == 0,
+          "摆好资源索引(200 字节的**真 JSON** —— 展开对象要靠它的内容)");
+    check_int(write_sized(COBJ1, 64), 0, "摆好资源对象 1(64 字节)");
+    check_int(write_sized(COBJ2, 64), 0, "摆好资源对象 2(64 字节)");
     memset(&res, 0, sizeof(res));
     err[0] = '\0';
     check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "dry-run 成功");
     check_int(res.complete_ran, 1, "补全这一步跑了");
     check_int(server.requests, 0, "**文件都在:一次 HTTP 都没发**");
-    check_int(res.complete.files_total, 3, "清单三件:客户端 jar + 依赖库 + 资源索引");
-    check_int(res.complete.files_skipped, 3, "三件全部命中已有");
+    check_int(res.complete.files_total, 5, "清单五件:jar + 依赖库 + 索引 + 两个资源对象(P0b)");
+    check_int(res.complete.files_skipped, 5, "五件全部命中已有(资源对象也没重下)");
     check_int(res.complete.files_downloaded, 0, "没有下载");
     check_int((long)res.complete.bytes_done, 0, "没有写字节");
 
-    /* g2) 删掉两件 → 恰好把缺的下回来,第三件不重下 */
+    /* g2) 删掉库 + 索引 + 对象1 → 恰好把缺的下回来,另两件不重下。
+     * 这一局同时验证**两遍的顺序**:索引必须在第一遍下回来,第二遍才展得开对象。 */
     remove_if_there(CLIB);
     remove_if_there(CINDEX);
+    remove_if_there(COBJ1);
     server.requests = 0;
     memset(&res, 0, sizeof(res));
     err[0] = '\0';
     check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "缺文件时启动照常");
     check_int(server.requests > 0, 1, "真的去下了");
-    check_int(res.complete.files_downloaded, 2, "补回两件");
-    check_int(res.complete.files_skipped, 1, "第三件仍然命中已有(不重下)");
-    check_int((long)res.complete.bytes_done, 128, "写下去的字节数 = 2 x 64");
+    check_int(res.complete.files_downloaded, 3, "补回三件(依赖库 + 索引 + 对象1)");
+    /* 第二遍跑的是**整张计划**(5 件),命中的都算 skipped —— 所以这里比"没下过的件数"多 */
+    check_int(res.complete.files_skipped, 4, "第二遍里命中的 4 件都走了快路径");
+    check_int((long)res.complete.bytes_done, 200 + 64 + 64, "字节 = 索引 200 + 库 64 + 对象 64");
     check(sxcl_fs_exists(CLIB), "依赖库补回来了");
     check(sxcl_fs_exists(CINDEX), "资源索引补回来了");
+    check(sxcl_fs_exists(COBJ1), "资源对象补回来了(第二遍展开生效)");
 
     /* g3) 后端一律 404 → 补不上,但**不拦启动**(与 PCL 一致) */
     remove_if_there(CLIB);
@@ -695,7 +740,7 @@ static void case_g_complete(void) {
     err[0] = '\0';
     check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "补不齐也不拦启动");
     check_int(res.complete_ran, 1, "这一步跑了");
-    check_int(res.complete.files_failed, 1, "如实记下失败件数");
+    check_int(res.complete.files_failed, 1, "如实记下失败件数(只有那一件库;资源对象都在)");
     check(res.complete.error[0] != '\0', "错误原因留下来了(不是空的)");
     server.fail_all = 0;
 
@@ -727,7 +772,26 @@ static void case_g_complete(void) {
     check(strstr(res.complete.error, "取消") != NULL, "结果里说了是取消");
     req.complete_is_cancelled = NULL;
 
-    /* 复原 */
+    /* g7) 档位 0 = 不补资源:对象不补回来,清单也只有三件 */
+    remove_if_there(COBJ1);
+    req.complete_assets = 0;
+    memset(&res, 0, sizeof(res));
+    err[0] = '\0';
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "关掉资源那一档也能启动");
+    check_int(res.complete.files_total, 3, "档位 0:清单只有三件(不含资源对象)");
+    check(!sxcl_fs_exists(COBJ1), "档位 0:对象不会被补回来");
+
+    /* g8) 档位 2 = 强校验:假后端回的字节对不上索引里的 sha1 → 如实记失败
+     * (这一条同时证明"这个档位真的在算哈希",而不是摆设) */
+    req.complete_assets = 2;
+    memset(&res, 0, sizeof(res));
+    err[0] = '\0';
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "强校验档也照样启动");
+    check(res.complete.files_failed >= 1, "强校验:内容与 sha1 不符 → 记失败");
+    req.complete_assets = 1;
+
+    /* 复原:把对象补上,后面的用例看到的是"全都在" */
+    (void)write_sized(COBJ1, 64);
     (void)write_sized(CLIB, 64);
 }
 
