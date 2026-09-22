@@ -694,6 +694,11 @@ typedef struct sxcl_launch_result {
     char actual_backend[16];    /**< 日志显示实际生效的后端 */
     char options_path[SXCL_JAVA_PATH_MAX]; /**< 写过的 options.txt 路径 */
     char natives_dir[SXCL_JAVA_PATH_MAX];  /**< 原生库目录(-Djava.library.path 指向的那个) */
+    /** 版本隔离(settings 的 general.version_isolation,**默认关**):见 sxcl/isolation.h。
+     *  开了以后 --gameDir 指 versions/<版本名>,assets/libraries 仍从根目录取,
+     *  每个版本各有一套 mods/saves/config/options.txt。0 = 没开(所有版本共用一个根目录)。 */
+    int isolated;
+    char isolated_dir[SXCL_JAVA_PATH_MAX]; /**< 隔离目录(未隔离时是空串) */
     int natives_count;          /**< 原生库目录里就绪的文件数;0 = 这个版本没有原生库 */
     char game_dir[SXCL_JAVA_PATH_MAX];
     char error[256];            /**< 人话失败原因;空 = 没失败 */

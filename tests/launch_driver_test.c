@@ -795,6 +795,157 @@ static void case_g_complete(void) {
     (void)write_sized(CLIB, 64);
 }
 
+/* ── [h] 版本隔离（docs/22 的 A2 / docs/24 的 P3 前置） ──
+ *
+ * 口径：开了以后 --gameDir 指 <游戏目录>/versions/<版本名>（这一份自己的 mods/saves/config/
+ * options.txt），而 assets / libraries **仍从根目录取**；关着（默认）时一切照旧。
+ * 断言直接读 dry-run 报出来的命令行（driver.c 在 dry-run 时会逐行报 argv），
+ * 加上结果里的 isolated / isolated_dir / options_path 与磁盘上真建出来的子目录。 */
+
+static char g_iso_lines[16384];
+static size_t g_iso_len = 0;
+
+static int iso_capture(void *ud, int is_stderr, const char *line) {
+    (void)ud;
+    (void)is_stderr;
+    if (line != NULL) {
+        catf(g_iso_lines, sizeof(g_iso_lines), &g_iso_len, line);
+        catf(g_iso_lines, sizeof(g_iso_lines), &g_iso_len, "\n");
+    }
+    return 0;
+}
+
+/** 在捕获到的命令行里找某个开关**后面那一个参数**。
+ *  driver.c 每行报成 "  arg[12] --gameDir" / "  arg[13] <值>"（同一个开关与它的值分两行）,
+ *  所以做法是：找含 flag 的那一行 -> 取下一行 -> 剥掉 "  arg[N] " 前缀。 */
+static int arg_after(const char *flag, char *out, size_t cap) {
+    const char *p = g_iso_lines;
+    while ((p = strstr(p, flag)) != NULL) {
+        const char *eol = strchr(p, '\n');
+        if (eol == NULL) {
+            break;
+        }
+        const char *val = eol + 1;
+        const char *vend = strchr(val, '\n');
+        const size_t vlen = vend ? (size_t)(vend - val) : strlen(val);
+        const char *rest = val;
+        size_t rest_len = vlen;
+        for (size_t i = 0; i < vlen; ++i) {
+            if (val[i] == ']') {
+                rest = val + i + 1;
+                while (rest < val + vlen && *rest == ' ') {
+                    ++rest;
+                }
+                rest_len = (size_t)(val + vlen - rest);
+                break;
+            }
+        }
+        if (rest_len + 1 <= cap) {
+            memcpy(out, rest, rest_len);
+            out[rest_len] = '\0';
+            return 1;
+        }
+        p = eol + 1;
+    }
+    return 0;
+}
+
+/** 路径比较:Windows 上 join_path 用 '\\'、隔离模块用 '/'，同一份路径两种写法都算对。
+ *  (踩过:snprintf 拿同一个缓冲当输入输出是未定义行为,拼出来的路径会是乱的 —— 这里分开用。) */
+static void norm_path(const char *in, char *out, size_t cap) {
+    size_t n = 0;
+    for (const char *p = in != NULL ? in : ""; *p != '\0' && n + 1 < cap; ++p) {
+        out[n++] = (*p == '\\') ? '/' : *p;
+    }
+    out[n] = '\0';
+}
+
+static void check_path(const char *got, const char *want, const char *what) {
+    char a[1200];
+    char b[1200];
+    norm_path(got, a, sizeof(a));
+    norm_path(want, b, sizeof(b));
+    check_str(a, b, what);
+}
+
+/** 隔离目录（一律用 '/' 拼,比较走 check_path） */
+static void iso_base(char *out, size_t cap) {
+    (void)snprintf(out, cap, "%s/versions/1.21.4", GAME_DIR);
+}
+
+static void case_h_isolation(void) {
+    sxcl_launch_request req;
+    sxcl_launch_result res;
+    char err[256];
+    char value[1024];
+    char opts[1024];
+
+    printf("[h] 版本隔离:--gameDir 换成 versions/<版本名>,assets/libraries 仍指根目录\n");
+
+    {
+        sxcl_settings *st = sxcl_settings_open(SETTINGS);
+        if (st != NULL) {
+            sxcl_settings_set(st, "general.version_isolation", "1");
+            sxcl_settings_save(st, SETTINGS);
+            sxcl_settings_free(st);
+        }
+    }
+
+    g_iso_len = 0;
+    g_iso_lines[0] = '\0';
+    memset(&req, 0, sizeof(req));
+    req.game_dir = GAME_DIR;
+    req.version_name = "1.21.4";
+    req.java_path = g_fake_ok;
+    req.instance = "case-h";
+    req.backend = SXCL_LAUNCH_BACKEND_OPENGL;
+    req.settings_path = SETTINGS;
+    req.dry_run = 1;
+    req.on_line = iso_capture;
+    memset(&res, 0, sizeof(res));
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "隔离开启时 dry-run 成功");
+    check_int(res.isolated, 1, "结果里标明用了隔离");
+    check(res.isolated_dir[0] != '\0', "结果里给出了隔离目录");
+
+    check(arg_after("--gameDir", value, sizeof(value)), "命令行里有 --gameDir");
+    check(strstr(value, "versions") != NULL && strstr(value, "1.21.4") != NULL,
+          "  --gameDir 指到 versions/<版本名>");
+    check(strstr(g_iso_lines, "libraries") != NULL, "classpath 仍从根目录的 libraries 取（隔离只换数据目录）");
+    check(strstr(res.game_dir, "1.21.4") != NULL, "结果里的 game_dir 报的是实际生效的隔离目录");
+
+    iso_base(value, sizeof(value));
+    (void)snprintf(opts, sizeof(opts), "%s/options.txt", value);
+    check_path(res.options_path, opts, "options.txt 写进隔离目录（每个版本一套渲染设置）");
+    /* 注意:sxcl_fs_exists 只认**普通文件**(S_ISREG),目录要用 sxcl_fs_is_dir —— 踩过 */
+    (void)snprintf(opts, sizeof(opts), "%s/mods", value);
+    check(sxcl_fs_is_dir(opts), "隔离目录里建出了 mods/");
+    (void)snprintf(opts, sizeof(opts), "%s/saves", value);
+    check(sxcl_fs_is_dir(opts), "隔离目录里建出了 saves/");
+    (void)snprintf(opts, sizeof(opts), "%s/config", value);
+    check(sxcl_fs_is_dir(opts), "隔离目录里建出了 config/");
+
+    /* 再关掉:一切必须回到根目录行为（老用户升级上来时不能变样） */
+    {
+        sxcl_settings *st = sxcl_settings_open(SETTINGS);
+        if (st != NULL) {
+            sxcl_settings_set(st, "general.version_isolation", "0");
+            sxcl_settings_save(st, SETTINGS);
+            sxcl_settings_free(st);
+        }
+    }
+    g_iso_len = 0;
+    g_iso_lines[0] = '\0';
+    memset(&res, 0, sizeof(res));
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "隔离关闭时 dry-run 成功");
+    check_int(res.isolated, 0, "结果里标明没隔离");
+    check(strstr(res.options_path, "1.21.4") == NULL,
+          "options.txt 回到根目录（关掉隔离后行为与从前完全一致）");
+    check(arg_after("--gameDir", value, sizeof(value)), "命令行里有 --gameDir");
+    check(strstr(value, "versions") == NULL, "  --gameDir 回到根目录");
+    check_path(res.options_path, GAME_DIR "/options.txt", "根目录 options.txt 路径就是它");
+    check_path(res.game_dir, GAME_DIR, "结果里的 game_dir 回到根目录");
+}
+
 int main(void) {
     if (setup() != 0) {
         printf("夹具准备失败(写不了 %s?)\n", TMP_DIR);
@@ -814,6 +965,7 @@ int main(void) {
     case_e_timeout();
     case_f_errors();
     case_g_complete();
+    case_h_isolation();
     printf("launch_driver 测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -2130,7 +2130,9 @@ void SettingsPage::buildContent() {
 
     m_isolationCard = new SwitchSettingCard( // :276-282
         FluentIcon::qicon(FluentIcon::FOLDER), trText("page.settings.version_isolation", "版本隔离"),
-        QStringLiteral("每个版本使用独立的 .minecraft 目录"),
+        // 2026-09-22 晚:A2 真落地了 —— 说清"独立的是什么、共用的又是什么",
+        QStringLiteral("每个版本各用一套 mods / saves / config / options.txt"
+                       "（assets 与 libraries 仍然共用；默认关）"),
         m_store.flag(kKeyVersionIsolation, false), gameGroup);
     gameGroup->addSettingCard(m_isolationCard); // :283
 

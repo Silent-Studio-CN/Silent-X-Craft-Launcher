@@ -223,6 +223,7 @@ add_library(sxcl STATIC
   src/services/launch/args.c
   src/services/launch/logscan.c
   src/services/launch/driver.c
+  src/services/launch/isolation.c
   src/services/modloader/compat.c
   src/services/modloader/profiles.c
   src/services/modloader/installer.c

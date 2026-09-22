@@ -8,6 +8,7 @@
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif
 
+#include "sxcl/isolation.h"
 #include "sxcl/launch.h"
 
 #include "sxcl/crash.h"   /* 崩溃取证:退出后读 crash-reports 与 logs/latest.log */
@@ -573,6 +574,16 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
 
     /* ── 3. 渲染后端:实例设置(或显式覆盖)-> 启动前写进 options.txt ── */
     instance = (req->instance && *req->instance) ? req->instance : req->version_name;
+    /* 版本隔离的现场(下面第 3b 段填);提前声明,免得那段太长看不出状态。 */
+    int isolated = 0;
+    char isolated_dir[SXCL_JAVA_PATH_MAX];
+    char isolated_assets[SXCL_JAVA_PATH_MAX];
+    char isolated_libs[SXCL_JAVA_PATH_MAX];
+    char isolated_jar[SXCL_JAVA_PATH_MAX];
+    isolated_dir[0] = '\0';
+    isolated_assets[0] = '\0';
+    isolated_libs[0] = '\0';
+    isolated_jar[0] = '\0';
     if (req->settings_path && *req->settings_path) {
         settings = sxcl_settings_open(req->settings_path);
     }
@@ -587,7 +598,40 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
     copy_str(out->requested_backend, sizeof(out->requested_backend), requested);
     copy_str(out->actual_backend, sizeof(out->actual_backend), requested);
 
-    join_path(options_path, sizeof(options_path), req->game_dir, "options.txt");
+    /* ── 3b. 版本隔离（docs/22 的 A2 / docs/24 的 P3 前置）──
+     * 开了以后:这一个版本的数据目录就是 versions/<版本名>(mods/saves/config/options.txt …),
+     * assets 与 libraries 仍从根目录取 —— "两份 1.20.1 各装各的模组"就是这么成立的。
+     * 关着(默认)时下面每个分支都退回原来的根目录行为,一个字节都不变。 */
+    isolated = 0;
+    isolated_dir[0] = '\0';
+    if (settings != NULL && sxcl_settings_get_int(settings, "general.version_isolation", 0) != 0) {
+        char ierr[256];
+        ierr[0] = '\0';
+        if (sxcl_launch_prepare_isolated(req->game_dir, req->version_name, ierr, sizeof(ierr)) != 0) {
+            char msg[320];
+            (void)snprintf(msg, sizeof(msg), "版本隔离开着,但隔离目录准备不了:%s",
+                           ierr[0] ? ierr : "原因不明");
+            set_error_reason(out, err, err_len, msg, SXCL_REASON_FILE_PERMISSION);
+            goto done;
+        }
+        if (sxcl_launch_isolated_dir(req->game_dir, req->version_name, isolated_dir,
+                                     sizeof(isolated_dir)) != 0) {
+            isolated = 0;
+            isolated_dir[0] = '\0';
+        } else {
+            isolated = 1;
+        }
+    }
+    out->isolated = isolated;
+    copy_str(out->isolated_dir, sizeof(out->isolated_dir), isolated_dir);
+    /* 结果里的 game_dir 报**实际生效**的数据目录:开了隔离就是 versions/<版本名>
+     * (界面/日志拿它显示"这个版本的数据在哪儿",不该只报根目录)。 */
+    if (isolated) {
+        copy_str(out->game_dir, sizeof(out->game_dir), isolated_dir);
+    }
+
+    join_path(options_path, sizeof(options_path), isolated ? isolated_dir : req->game_dir,
+              "options.txt");
     copy_str(out->options_path, sizeof(out->options_path), options_path);
     options = sxcl_options_load(options_path);
     if (!options) {
@@ -641,9 +685,24 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
     ctx.xuid = req->xuid;
     ctx.client_id = req->client_id;
     ctx.version_name = req->version_name;
-    ctx.game_directory = req->game_dir;
+    ctx.game_directory = isolated ? isolated_dir : req->game_dir;
     ctx.natives_directory = natives;
-    if (fallback_jar[0]) {
+    if (isolated) {
+        /* 隔离:--gameDir 换成版本自己的目录,但 assets / libraries **必须**指回根目录,
+         * 客户端 jar 也是(它在 versions/<版本名>/<版本名>.jar)。不显式给的话,
+         * args.c 会按 --gameDir 相对拼出 versions/<版本名>/assets 这种不存在的路径。 */
+        join_path(isolated_assets, sizeof(isolated_assets), req->game_dir, "assets");
+        join_path(isolated_libs, sizeof(isolated_libs), req->game_dir, "libraries");
+        ctx.assets_root = isolated_assets;
+        ctx.library_directory = isolated_libs;
+        /* 客户端 jar 在 versions/<版本名>/<版本名>.jar（隔离不改它的位置） */
+        {
+            char jar_leaf[SXCL_JAVA_PATH_MAX];
+            (void)snprintf(jar_leaf, sizeof(jar_leaf), "%s.jar", req->version_name);
+            join_path(isolated_jar, sizeof(isolated_jar), versions_dir, jar_leaf);
+        }
+        ctx.client_jar = isolated_jar;
+    } else if (fallback_jar[0]) {
         ctx.client_jar = fallback_jar;   /* 实例自己没有 jar:用原版那份(见上面 1b) */
     }
     ctx.launcher_name = req->launcher_name;       /* NULL = 用默认 */
