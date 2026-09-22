@@ -188,7 +188,8 @@ static int usage(void)
            "  sxcl-dl options <options.txt> [--get KEY] [--set KEY=VALUE] [--remove KEY] [--dump]\n"
            "  sxcl-dl loader <forge|neoforge|fabric|quilt|optifine> <加载器版本> <MC 版本> <游戏目录>\n"
            "      [--java PATH] [--instance NAME] [--installer JAR] [--timeout MS] [--maven-mirror URL]\n"
-           "      [--no-fallback] [--verbose]\n"
+           "      [--no-fallback] [--extract-install] [--verbose]\n"
+           "      └ --extract-install:跳过安装器 CLI,直接解包安装(跑 processors 重放;排查/验收用)\n"
            "  sxcl-dl launch <版本名> <游戏目录> [--java PATH] [--memory MB] [--instance NAME]\n"
            "      [--offline 玩家名 | --account [--token-file PATH]]\n"
            "      [--backend default|vulkan|opengl] [--timeout 秒] [--settings PATH]\n"
@@ -718,15 +719,71 @@ static void loader_progress(void *userdata, int percent, const char *status)
     fflush(stdout);
 }
 
+/* 安装流程用到的两个回调共用一个 userdata(见 loader.h 的说明),所以这里把
+ * "CLI 选项 + 游戏目录"打成一包。 */
+typedef struct loader_cli_ctx {
+    const cli_opts *o;
+    const char *game_dir;
+} loader_cli_ctx;
+
 /* --verbose 时把安装器吐出来的原始每一行也打出来(排查"退出码 1"这种只有结论没有原因的情况)。 */
 static int loader_raw_line(void *userdata, int is_stderr, const char *line)
 {
-    const cli_opts *o = (const cli_opts *)userdata;
-    if (o && o->verbose) {
+    const loader_cli_ctx *ctx = (const loader_cli_ctx *)userdata;
+    if (ctx && ctx->o && ctx->o->verbose) {
         printf("      [%s] %s\n", is_stderr ? "err" : "out", line);
         fflush(stdout);
     }
     return 0;
+}
+
+/* 方式 B(解包安装)要下的依赖库:交给 CLI 自己的下载引擎,与安装器那条路同一个写法。
+ * **清单里给了绝对地址(downloads.artifact.url)就用它** —— 这些库不都躺在同一个主机上
+ * (实测 Forge 1.20.1 的 46 条:jsr305 在 libraries.minecraft.net,其余在 maven.minecraftforge.net)。
+ * 处理器(jarsplitter / installertools / binarypatcher…)也在这份清单里,所以这一步之后
+ * 方式 B 才真的能把 processors 跑起来。 */
+static int loader_on_libraries(void *userdata, const sxcl_loader_library *libs, size_t count)
+{
+    const loader_cli_ctx *ctx = (const loader_cli_ctx *)userdata;
+    if (!ctx || !ctx->o || count == 0) {
+        return 0;
+    }
+    cli_state st;
+    memset(&st, 0, sizeof(st));
+    st.verbose = ctx->o->verbose;
+    sxcl_engine *engine = NULL;
+    if (make_engine(ctx->o, &st, &engine) != 0) {
+        return 1;
+    }
+    printf("  方式 B 依赖库: %d 件\n", (int)count);
+    fflush(stdout);
+    int failed = 0;
+    for (size_t i = 0; i < count && !failed; ++i) {
+        char dest[1400];
+        char url[1600];
+        snprintf(dest, sizeof(dest), "%s/libraries/%s", ctx->game_dir, libs[i].path);
+        if (libs[i].url_full[0]) {
+            snprintf(url, sizeof(url), "%s", libs[i].url_full);
+        } else {
+            const size_t ul = strlen(libs[i].url);
+            const char *sep = (ul > 0 && libs[i].url[ul - 1] == '/') ? "" : "/";
+            snprintf(url, sizeof(url), "%s%s%s", libs[i].url, sep, libs[i].path);
+        }
+        sxcl_task t;
+        memset(&t, 0, sizeof(t));
+        t.dest = dest;
+        t.urls[0] = url;
+        t.urls[1] = ctx->o->mirror;
+        t.algo = SXCL_HASH_SHA1;
+        t.priority = 10;
+        t.label = libs[i].name;
+        if (run_one(engine, &t) != SXCL_TASK_DONE) {
+            fprintf(stderr, "依赖库下载失败(%s): %s\n", libs[i].name, t.error);
+            failed = 1;
+        }
+    }
+    sxcl_engine_destroy(engine);
+    return failed ? 1 : 0;
 }
 
 /* 读一行文本(去掉首尾空白)。返回 0 成功。 */
@@ -1099,6 +1156,7 @@ static int cmd_loader(int argc, char **argv, const cli_opts *opts_in)
     const char *maven_mirror = NULL;
     int timeout_ms = 0;
     int no_fallback = 0;
+    int extract_install = 0;
     for (int i = 6; i < argc; ++i) {
         const char *a = argv[i];
         const char *v = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -1119,6 +1177,8 @@ static int cmd_loader(int argc, char **argv, const cli_opts *opts_in)
             ++i;
         } else if (strcmp(a, "--no-fallback") == 0) {
             no_fallback = 1;
+        } else if (strcmp(a, "--extract-install") == 0) {
+            extract_install = 1;   /* 跳过安装器 CLI,直接走方式 B(解包 + 重放 processors) */
         } else if (strcmp(a, "--rate") == 0 || strcmp(a, "--workers") == 0 ||
                    strcmp(a, "--conn") == 0 || strcmp(a, "--cache") == 0 ||
                    strcmp(a, "--mirror") == 0 || strcmp(a, "--source") == 0) {
@@ -1199,10 +1259,16 @@ static int cmd_loader(int argc, char **argv, const cli_opts *opts_in)
     req.mirror_maven = maven_mirror;
     req.timeout_ms = timeout_ms;
     req.no_fallback = no_fallback;
+    req.force_extract_install = extract_install;
+    loader_cli_ctx lctx;
+    memset(&lctx, 0, sizeof(lctx));
+    lctx.o = o;
+    lctx.game_dir = game_dir;
     req.on_progress = loader_progress;
     req.is_cancelled = loader_cancelled;
-    req.userdata = (void *)o;   /* 给 loader_raw_line 看 --verbose;进度回调不看它 */
+    req.userdata = &lctx;   /* on_line 看 --verbose,on_libraries 要游戏目录 */
     req.on_line = loader_raw_line;
+    req.on_libraries = loader_on_libraries;
 
     sxcl_loader_install_result res;
     const int rc = sxcl_loader_install(&req, &res);

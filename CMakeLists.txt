@@ -326,6 +326,7 @@ if(SXCL_BUILD_TESTS)
     launch_driver_test tests/launch_driver_test.c
     natives_test tests/natives_test.c
     loader_test  tests/loader_test.c
+    processor_test tests/processor_test.c
   )
   list(LENGTH SXCL_TESTS _n)
   math(EXPR _last "${_n} - 1")

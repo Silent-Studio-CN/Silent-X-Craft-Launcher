@@ -690,6 +690,49 @@ static const sxcl_json_value *profile_section(const sxcl_json_value *root, const
     return sxcl_json_get(root, key);
 }
 
+/* 已经写出的那几条里有没有这个坐标(容量满了之后不再去重,件数仍然继续数)。 */
+static int library_seen(const sxcl_loader_library *out, size_t total, size_t out_cap,
+                        const char *coord)
+{
+    const size_t written = total < out_cap ? total : out_cap;
+    for (size_t i = 0; i < written; ++i) {
+        if (library_same(&out[i], coord)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* 把一条 libraries[] 条目扒成"下载要用的三样东西"(坐标 / 落盘相对路径 / URL)。
+ * **权威顺序**:条目自带的 downloads.artifact.path 与 .url 优先,其次才是"按 maven 根地址拼"。
+ * 只按根地址拼会漏掉分类器与扩展名,更会漏掉"同一份清单里不同条目落在不同主机"这件事 ——
+ * 实测 Forge 1.20.1 的 46 条安装期依赖:com.google.code.findbugs:jsr305 在
+ * libraries.minecraft.net,其余在 maven.minecraftforge.net,全靠这个字段。
+ * lib 传 NULL 表示"这条不是 libraries[] 里的对象"(processors[].classpath / .jar 那两处)。 */
+static void fill_library(sxcl_loader_library *dst, const sxcl_json_value *lib, const char *coord,
+                         const char *fallback)
+{
+    dst->name[0] = '\0';
+    dst->path[0] = '\0';
+    dst->url[0] = '\0';
+    dst->url_full[0] = '\0';
+    (void)copy_cap(dst->name, sizeof(dst->name), coord);
+    (void)copy_cap(dst->url, sizeof(dst->url),
+                   lib ? sxcl_json_get_string(lib, "url", fallback) : fallback);
+    const sxcl_json_value *downloads = lib ? sxcl_json_get(lib, "downloads") : NULL;
+    const sxcl_json_value *artifact = downloads ? sxcl_json_get(downloads, "artifact") : NULL;
+    if (artifact && sxcl_json_type_of(artifact) == SXCL_JSON_OBJECT) {
+        (void)copy_cap(dst->url_full, sizeof(dst->url_full),
+                       sxcl_json_get_string(artifact, "url", ""));
+        (void)copy_cap(dst->path, sizeof(dst->path),
+                       sxcl_json_get_string(artifact, "path", ""));
+    }
+    if (!dst->path[0] &&
+        sxcl_loader_maven_path(coord, dst->path, sizeof(dst->path)) != SXCL_LOADER_OK) {
+        dst->path[0] = '\0';
+    }
+}
+
 size_t sxcl_loader_collect_libraries(const sxcl_json *version_json, const char *default_maven,
                                      sxcl_loader_library *out, size_t out_cap)
 {
@@ -714,34 +757,17 @@ size_t sxcl_loader_collect_libraries(const sxcl_json *version_json, const char *
         if (!coord[0]) {
             continue;
         }
-        const char *url = sxcl_json_get_string(lib, "url", fallback);
-        /* 去重只看已写出的条目(容量满了之后不再去重,数字仍然继续数)。 */
-        int seen = 0;
-        const size_t written = total < out_cap ? total : out_cap;
-        for (size_t k = 0; k < written; ++k) {
-            if (library_same(&out[k], coord)) {
-                seen = 1;
-                break;
-            }
-        }
-        if (seen) {
+        if (library_seen(out, total, out_cap, coord)) {
             continue;
         }
         if (total < out_cap && out) {
-            sxcl_loader_library *dst = &out[total];
-            dst->name[0] = '\0';
-            dst->path[0] = '\0';
-            dst->url[0] = '\0';
-            (void)copy_cap(dst->name, sizeof(dst->name), coord);
-            (void)copy_cap(dst->url, sizeof(dst->url), url);
-            if (sxcl_loader_maven_path(coord, dst->path, sizeof(dst->path)) != SXCL_LOADER_OK) {
-                dst->path[0] = '\0';
-            }
+            fill_library(&out[total], lib, coord, fallback);
         }
         ++total;
     }
 
-    /* processors[].classpath[] 里是处理器要用的 jar,同样要从加载器自己的 maven 拉。 */
+    /* processors[] 里的两处也都要下:classpath[](处理器依赖)与 jar(处理器自己)。
+     * 为什么要收 processors[].jar:清单偶尔漏写它(漏了就是"处理器起不来"),补一道便宜。 */
     const sxcl_json_value *processors = profile_section(root, "processors");
     const size_t proc_count = sxcl_json_size(processors);
     for (size_t i = 0; i < proc_count; ++i) {
@@ -749,34 +775,22 @@ size_t sxcl_loader_collect_libraries(const sxcl_json *version_json, const char *
         if (!proc || sxcl_json_type_of(proc) != SXCL_JSON_OBJECT) {
             continue;
         }
+        const char *jar_coord = sxcl_json_get_string(proc, "jar", "");
+        if (jar_coord[0] && !library_seen(out, total, out_cap, jar_coord)) {
+            if (total < out_cap && out) {
+                fill_library(&out[total], NULL, jar_coord, fallback);
+            }
+            ++total;
+        }
         const sxcl_json_value *classpath = sxcl_json_get(proc, "classpath");
         const size_t cp_count = sxcl_json_size(classpath);
         for (size_t k = 0; k < cp_count; ++k) {
             const char *coord = sxcl_json_string(sxcl_json_at(classpath, k));
-            if (!coord || !coord[0]) {
-                continue;
-            }
-            int seen = 0;
-            const size_t written = total < out_cap ? total : out_cap;
-            for (size_t j = 0; j < written; ++j) {
-                if (library_same(&out[j], coord)) {
-                    seen = 1;
-                    break;
-                }
-            }
-            if (seen) {
+            if (!coord || !coord[0] || library_seen(out, total, out_cap, coord)) {
                 continue;
             }
             if (total < out_cap && out) {
-                sxcl_loader_library *dst = &out[total];
-                dst->name[0] = '\0';
-                dst->path[0] = '\0';
-                dst->url[0] = '\0';
-                (void)copy_cap(dst->name, sizeof(dst->name), coord);
-                (void)copy_cap(dst->url, sizeof(dst->url), fallback);
-                if (sxcl_loader_maven_path(coord, dst->path, sizeof(dst->path)) != SXCL_LOADER_OK) {
-                    dst->path[0] = '\0';
-                }
+                fill_library(&out[total], NULL, coord, fallback);
             }
             ++total;
         }

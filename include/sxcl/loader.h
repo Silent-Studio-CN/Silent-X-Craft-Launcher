@@ -160,13 +160,20 @@ int sxcl_loader_maven_path(const char *coord, char *out, size_t out_len);
 
 typedef struct sxcl_loader_library {
     char name[160];   /**< 原始 Maven 坐标 */
-    char path[320];   /**< 相对 libraries/ 的路径(正斜杠) */
+    char path[320];   /**< 相对 libraries/ 的路径(正斜杠;优先用清单里给的 downloads.artifact.path) */
     char url[256];    /**< 下载根地址(不带 path;以 '/' 结尾) */
+    /** 清单里**直接给的**完整下载地址(版本 JSON / install_profile.json 的
+     *  downloads.artifact.url)。**有就必须优先用它**:同一份清单里不同条目可能落在不同主机
+     *  (实测 Forge 1.20.1 的 46 条安装期依赖:jsr305 在 libraries.minecraft.net、
+     *  其余在 maven.minecraftforge.net),只按 maven 根地址拼会 404。空串 = 清单没给。 */
+    char url_full[512];
 } sxcl_loader_library;
 
-/** 从版本 JSON(以及它的 processors[].classpath[])收集需要下载的依赖库。
- *  url 缺失的坐标用 default_maven(Forge: https://maven.minecraftforge.net/;
- *  NeoForge: https://maven.neoforged.net/releases/)。
+/** 从版本 JSON 或 install_profile.json 收集需要下载的依赖库。
+ *  收的是三处:libraries[](含 install.libraries)、processors[].classpath[](处理器要用的 jar)、
+ *  processors[].jar(处理器自己;**怕清单漏写,列进来是补漏**)。
+ *  条目自带 downloads.artifact 时用它的 url/path;url 缺失的坐标才用 default_maven
+ *  (Forge: https://maven.minecraftforge.net/;NeoForge: https://maven.neoforged.net/releases/)。
  *  返回**实际条数**(可能大于 out_cap,此时只填了前 out_cap 条);out 可为 NULL(out_cap=0)
  *  用来先问"一共几条" —— 此时没有存名字的地方,所以**不去重**,拿到的是原始条目数;
  *  给了 out 才会按坐标去重。 */
@@ -371,6 +378,9 @@ typedef struct sxcl_loader_install_request {
     int timeout_ms;              /**< <=0 = 用默认 30 分钟(OptiFine 15 分钟) */
     int no_fallback;             /**< 非 0 = 方式 A 失败就直接失败;0(默认)= 回退方式 B。
                                   *  注意是"反向开关":零初始化的请求 = 走 Python 版的行为(失败就回退)。 */
+    int force_extract_install;   /**< 非 0 = **跳过安装器 CLI**,直接走方式 B(解包 + processors 重放)。
+                                  *  用途:① 安装器 CLI 在我们没覆盖到的版本上不灵时的兜底;
+                                  *  ② "解包安装"这条路自己的端到端验收入口(CLI: --extract-install)。 */
     int keep_sandbox;            /**< 1 = 保留临时沙箱目录(排查用;默认删掉) */
     sxcl_loader_progress_fn on_progress;   /**< 可空 */
     void *userdata;
@@ -400,10 +410,12 @@ typedef struct sxcl_loader_install_request {
  *    4) 方式 A 全失败且 allow_fallback 且是 Forge/NeoForge -> 方式 B 解包安装;
  *    5) 收尾:把版本 JSON 的 id/文件名统一成实例名(启动器按目录名找版本)。
  *
- *  未实现的边界(明说,不含糊):方式 B 只做到 Python 版 _extract_install 那一步 ——
- *  解出安装器自带的 maven/ 与通用 jar、拼出版本 JSON、把依赖库清单交给 on_libraries;
- *  重放 processors(需要解 data/*.lzma、拼 classpath 起 Java)不在这里,版本 JSON 里的
- *  processors 字段原样保留,交给启动/补全流程。 */
+ *  方式 B 现在**会重放 processors[]**(1.13+ Forge / NeoForge 的安装真身:跑 installertools /
+ *  jarsplitter / ForgeAutoRenamingTool / binarypatcher —— 见 sxcl/processor.h)。顺序:解出安装器
+ *  自带的 maven/ 与通用 jar -> on_libraries 下依赖库 -> 重放 processors -> 复制原版 jar ->
+ *  写版本 JSON(写 JSON 是最后一步,"有 JSON" 才等于"装完了",见 docs/22 的 B3/C4)。
+ *  重放只做 client 那一侧(install_profile 的 sides 过滤),处理器要用的库靠 on_libraries 下齐;
+ *  重放失败 = 这次安装失败(不留一份"看着装好、其实没打补丁"的实例)。 */
 int sxcl_loader_install(const sxcl_loader_install_request *req, sxcl_loader_install_result *out);
 
 #ifdef __cplusplus

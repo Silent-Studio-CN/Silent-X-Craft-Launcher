@@ -10,6 +10,7 @@
 
 #include "sxcl/fs.h"
 #include "sxcl/process.h"
+#include "sxcl/processor.h"
 #include "sxcl/zip.h"
 
 #include <stdarg.h>
@@ -738,7 +739,9 @@ static void sandbox_env_pop(int pushed)
 
 /* ── 临时目录与递归删除(OptiFine 沙箱用) ── */
 
-static int make_sandbox_root(char *out, size_t cap)
+/* 建一个"一次性临时根目录"并返回它的路径。tag 只用来区分用途(OptiFine 沙箱 / processors 取文件),
+ * 都落在系统临时目录下,名字里带 pid 与 tick,保证并发调用也不会撞。 */
+static int make_temp_root(char *out, size_t cap, const char *tag)
 {
     int written = -1;
 #if defined(_WIN32)
@@ -755,7 +758,7 @@ static int make_sandbox_root(char *out, size_t cap)
     while (len > 1 && (base[len - 1] == '\\' || base[len - 1] == '/')) {
         base[--len] = '\0';
     }
-    written = snprintf(out, cap, "%s/sxcl-optifine-%lu-%lu", base,
+    written = snprintf(out, cap, "%s/sxcl-%s-%lu-%lu", base, tag ? tag : "tmp",
                        (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount());
     free(base);
 #else
@@ -763,7 +766,8 @@ static int make_sandbox_root(char *out, size_t cap)
     if (!base || !base[0]) {
         base = "/tmp";
     }
-    written = snprintf(out, cap, "%s/sxcl-optifine-%ld-%ld", base, (long)getpid(), (long)time(NULL));
+    written = snprintf(out, cap, "%s/sxcl-%s-%ld-%ld", base, tag ? tag : "tmp", (long)getpid(),
+                       (long)time(NULL));
 #endif
     if (written <= 0 || (size_t)written >= cap) {
         out[0] = '\0';
@@ -861,6 +865,10 @@ typedef struct install_ctx {
      * NULL = 找不到(那就拍不了,只能按继承式写,并如实报出来)。 */
     sxcl_json *base_doc;
     char base_id[SXCL_LOADER_CMD_ARG_MAX];   /**< 原版版本号(写进 clientVersion) */
+    /* 方式 B 重放 processors 时要用的两样东西(都是"这一趟"的现场,不是持久状态):
+     * 活动中的安装器 zip(data 里的裸值要从它里面取)与取出来的临时目录。 */
+    sxcl_zip *zip;
+    char temp_dir[SXCL_LOADER_CMD_ARG_MAX];
 } install_ctx;
 
 static void ctx_report(install_ctx *ctx, int percent, const char *fmt, ...)
@@ -1535,6 +1543,207 @@ int sxcl_loader_count_missing_libraries(const char *game_dir, const char *instan
 }
 
 /* Python: _extract_install —— 不启动安装器进程,直接从 jar 里拼出版本 JSON(老 Forge 只能这么装)。 */
+/* ── processors 重放（1.13+ Forge / NeoForge 的安装真身，见 sxcl/processor.h） ── */
+
+/** data 里的裸值（安装器 zip 里的相对路径）取出来落到临时文件，把临时文件路径交回去。
+ *  FCL 用 Files.createTempFile 随机名；我们用"条目路径把斜杠换成下划线"当文件名 ——
+ *  同样是"一条数据一个文件"，顺带避免了不同目录下同名条目（如两个 args.txt）互相覆盖。 */
+static int processor_take_file(void *ud, const char *entry, char *out, size_t cap)
+{
+    install_ctx *ctx = (install_ctx *)ud;
+    if (!ctx->zip || !ctx->temp_dir[0] || !entry || !entry[0]) {
+        return -1;
+    }
+    /* 清单里写的是 "/data/client.lzma"，zip 里的条目名是 "data/client.lzma" ——
+     * 我们按名字精确查条目，所以要先去掉前导斜杠（FCL 那边是 zip 文件系统的绝对路径，能直接开）。 */
+    char name[SXCL_LOADER_CMD_ARG_MAX];
+    strip_leading_slashes(entry, name, sizeof(name));
+    if (!name[0]) {
+        return -1;
+    }
+    char file_name[SXCL_LOADER_CMD_ARG_MAX];
+    (void)snprintf(file_name, sizeof(file_name), "%s", name);
+    for (size_t i = 0; file_name[i]; ++i) {
+        if (file_name[i] == '/') {
+            file_name[i] = '_';
+        }
+    }
+    char dest[SXCL_LOADER_CMD_ARG_MAX];
+    if (join_path(dest, sizeof(dest), ctx->temp_dir, file_name) != 0) {
+        return -1;
+    }
+    if (sxcl_zip_extract_file(ctx->zip, name, dest) != 0) {
+        return -1;
+    }
+    const int wrote = snprintf(out, cap, "%s", dest);
+    return (wrote > 0 && (size_t)wrote < cap) ? 0 : -1;
+}
+
+/** 处理器输出的一行：转发给调用方（日志/界面）+ 自己留一行尾巴 + 检查取消。
+ *  刻意**不**走 install_on_line —— 那里会解析安装器的进度标记，处理器的输出不该被当成
+ *  "安装器完工"（那会让方式 A 的判定逻辑误判）。 */
+static int processor_on_line(void *ud, int is_stderr, const char *line)
+{
+    install_ctx *ctx = (install_ctx *)ud;
+    if (line && line[0]) {
+        if (ctx->req->on_line && ctx->req->on_line(ctx->req->userdata, is_stderr, line) != 0) {
+            ctx->cancelled = 1;
+            return 1;
+        }
+        const size_t len = strlen(line);
+        const size_t copy = len < sizeof(ctx->last_lines[0]) - 1 ? len : sizeof(ctx->last_lines[0]) - 1;
+        memcpy(ctx->last_lines[2], line, copy);
+        ctx->last_lines[2][copy] = '\0';
+        ctx->last_line_count = 1;
+    }
+    if (ctx_cancelled(ctx)) {
+        ctx->cancelled = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/** 跑一条处理器：走 sxcl/process.h（于是超时、日志、取消全都是安装流程那一套）。 */
+static int processor_run(void *ud, const char *program, const char *const *argv, size_t argc,
+                         const char *work_dir, int timeout_ms, int *exit_code, char *err,
+                         size_t err_len)
+{
+    install_ctx *ctx = (install_ctx *)ud;
+    (void)argc;   /* opts.args 是 NULL 结尾的，条数用不上 */
+    if (exit_code) {
+        *exit_code = -1;
+    }
+    sxcl_process_opts opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.program = program;
+    opts.args = argv;
+    opts.work_dir = work_dir;
+    opts.timeout_ms = timeout_ms;
+    opts.on_line = processor_on_line;
+    opts.userdata = ctx;
+
+    ctx->last_line_count = 0;
+    ctx->last_lines[2][0] = '\0';
+    sxcl_process_result pres;
+    memset(&pres, 0, sizeof(pres));
+    const int rc = sxcl_process_run(&opts, &pres);
+    if (rc != 0) {
+        if (err && err_len) {
+            (void)snprintf(err, err_len, "%s", pres.error[0] ? pres.error : "进程没启动起来");
+        }
+        return rc;
+    }
+    if (exit_code) {
+        *exit_code = pres.exit_code;
+    }
+    if (pres.exit_code != 0 && err && err_len) {
+        if (pres.timed_out) {
+            (void)snprintf(err, err_len, "跑超时了（%d 秒）", timeout_ms / 1000);
+        } else if (ctx->last_lines[2][0]) {
+            (void)snprintf(err, err_len, "%s", ctx->last_lines[2]);
+        } else {
+            (void)snprintf(err, err_len, "退出码 %d", pres.exit_code);
+        }
+    }
+    return 0;
+}
+
+static int processor_is_cancelled(void *ud)
+{
+    return ctx_cancelled((const install_ctx *)ud);
+}
+
+static void processor_report(void *ud, const char *text)
+{
+    install_ctx *ctx = (install_ctx *)ud;
+    ctx_report(ctx, ctx->percent, "%s", text ? text : "");
+}
+
+/** 找原版客户端 jar：优先 versions/<原版>/<原版>.jar（原版自己装过），
+ *  否则 versions/<实例>/<实例>.jar —— 引擎这次安装就是把它下在那儿的（install.c 的 client_jar 阶段）。 */
+static int find_minecraft_jar(const sxcl_loader_install_request *req, const char *instance_dir,
+                              char *out, size_t cap)
+{
+    out[0] = '\0';
+    char leaf[SXCL_LOADER_CMD_ARG_MAX];
+    char dir[SXCL_LOADER_CMD_ARG_MAX];
+    char cand[SXCL_LOADER_CMD_ARG_MAX];
+    if (req->game_dir && req->game_dir[0] && req->base_version && req->base_version[0] &&
+        snprintf(leaf, sizeof(leaf), "%s.jar", req->base_version) > 0 &&
+        join_path(dir, sizeof(dir), req->game_dir, "versions") == 0 &&
+        join_path(dir, sizeof(dir), dir, req->base_version) == 0 &&
+        join_path(cand, sizeof(cand), dir, leaf) == 0 && sxcl_fs_exists(cand)) {
+        (void)snprintf(out, cap, "%s", cand);
+        return 0;
+    }
+    if (instance_dir && instance_dir[0] && req->instance_name && req->instance_name[0] &&
+        snprintf(leaf, sizeof(leaf), "%s.jar", req->instance_name) > 0 &&
+        join_path(cand, sizeof(cand), instance_dir, leaf) == 0 && sxcl_fs_exists(cand)) {
+        (void)snprintf(out, cap, "%s", cand);
+        return 0;
+    }
+    return -1;
+}
+
+/** 重放 processors[]。返回 1 = 全跑完（或本来就没有），0 = 失败/取消（原因已进 ctx）。 */
+static int run_processors(install_ctx *ctx, const sxcl_json *profile, const char *instance_dir)
+{
+    const sxcl_loader_install_request *req = ctx->req;
+    const size_t total = sxcl_processor_count(profile);
+    if (total == 0) {
+        return 1;   /* 1.12 及以前没有 processors：这条路本来就是空的 */
+    }
+
+    if (make_temp_root(ctx->temp_dir, sizeof(ctx->temp_dir), "processors") != 0) {
+        ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "建不了处理器的临时目录");
+        return 0;
+    }
+
+    char mc_jar[SXCL_LOADER_CMD_ARG_MAX];
+    if (find_minecraft_jar(req, instance_dir, mc_jar, sizeof(mc_jar)) != 0) {
+        /* 没有原版 jar 就别硬跑（jarsplitter 第一步就要它）——如实报，别让用户看一句
+         * "处理器失败"去猜。 */
+        ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT,
+                 "找不到原版客户端 jar（versions/%s/%s.jar），处理器没法跑",
+                 req->base_version ? req->base_version : "?", req->base_version ? req->base_version : "?");
+        return 0;
+    }
+
+    sxcl_processor_ctx pctx;
+    memset(&pctx, 0, sizeof(pctx));
+    pctx.game_dir = req->game_dir;
+    pctx.installer_jar = req->installer_jar;
+    pctx.minecraft_jar = mc_jar;
+    pctx.minecraft_version = req->base_version;
+    pctx.temp_dir = ctx->temp_dir;
+    pctx.java_path = req->java_path;
+    pctx.timeout_ms = effective_timeout_ms(req);
+    pctx.take_file = processor_take_file;
+    pctx.run = processor_run;
+    pctx.is_cancelled = processor_is_cancelled;
+    pctx.report = processor_report;
+    pctx.ud = ctx;
+
+    /* 处理器要用的 jar/classpath 是上一步 on_libraries 下的；实测它们就躺在 libraries/ 里。 */
+    ctx_report(ctx, ctx->percent, "重放安装器处理器（%d 条，client 侧）…", (int)total);
+    char perr[SXCL_PROCESSOR_ERR_MAX];
+    perr[0] = '\0';
+    sxcl_processor_stats pstats;
+    const int rc = sxcl_processors_run(profile, "client", &pctx, &pstats, perr, sizeof(perr));
+    if (rc == 2 || ctx->cancelled) {
+        ctx_fail(ctx, SXCL_LOADER_FAIL_CANCELLED, "用户取消了安装（处理器重放中途）");
+        return 0;
+    }
+    if (rc != 0) {
+        ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "安装器处理器没跑成：%s",
+                 perr[0] ? perr : "原因不明");
+        return 0;
+    }
+    ctx_report(ctx, ctx->percent, "处理器重放完成（跑了 %d 条，产物已就绪跳过 %d 条）",
+               pstats.ran, pstats.skipped);
+    return 1;
+}
+
 static int extract_install(install_ctx *ctx, const char *instance_dir)
 {
     const sxcl_loader_install_request *req = ctx->req;
@@ -1620,7 +1829,15 @@ static int extract_install(install_ctx *ctx, const char *instance_dir)
     }
 
     /* 依赖库清单交给调用方(启动器的下载引擎,见 sxcl/engine.h 的用法说明)。
-     * 老格式(版本信息嵌在 install_profile.json 里)要从整份 profile 里找 ——
+     *
+     * **两份清单都要收**(FCL 也是两个来源:GameLibrariesTask(profile.getLibraries()) 与
+     * checkLibraryCompletion(forgeVersion)):
+     *   * 版本 JSON(version.json)—— 实例**运行**要用的库(fmlloader / JarJar / mixin …);
+     *   * install_profile.json —— **安装期**要用的库(installertools / jarsplitter /
+     *     binarypatcher / ForgeAutoRenamingTool / mcp_config …),processors 重放就靠它们,
+     *     少一件就是"处理器起不来"。以前只收 version_doc,于是 1.13+ 的工具库一件都没下 ——
+     *     真机上就是这么撞出来的(处理器 jar 不在)。
+     * 老格式(1.12-,版本信息嵌在 install_profile.json 里)只有 profile 那份,
      * libraries 在 install 下面(collect_libraries 里的 _section 语义)。 */
     if (req->on_libraries) {
         sxcl_loader_library *libs =
@@ -1629,11 +1846,40 @@ static int extract_install(install_ctx *ctx, const char *instance_dir)
             ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "内存不足，列不出依赖库");
             goto done;
         }
-        sxcl_json *collect_doc = version_doc ? version_doc : profile;
-        size_t total = sxcl_loader_collect_libraries(collect_doc, maven_for_kind(req->kind), libs,
-                                                     SXCL_LOADER_MAX_LIBRARIES);
-        if (total > SXCL_LOADER_MAX_LIBRARIES) {
-            total = SXCL_LOADER_MAX_LIBRARIES;
+        const char *maven = maven_for_kind(req->kind);
+        size_t total = 0;
+        if (version_doc) {
+            total = sxcl_loader_collect_libraries(version_doc, maven, libs, SXCL_LOADER_MAX_LIBRARIES);
+            if (total > SXCL_LOADER_MAX_LIBRARIES) {
+                total = SXCL_LOADER_MAX_LIBRARIES;
+            }
+        }
+        if (profile) {
+            sxcl_loader_library *extra =
+                (sxcl_loader_library *)malloc(sizeof(sxcl_loader_library) * SXCL_LOADER_MAX_LIBRARIES);
+            if (!extra) {
+                free(libs);
+                ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "内存不足，列不出依赖库");
+                goto done;
+            }
+            size_t extra_count = sxcl_loader_collect_libraries(profile, maven, extra,
+                                                               SXCL_LOADER_MAX_LIBRARIES);
+            if (extra_count > SXCL_LOADER_MAX_LIBRARIES) {
+                extra_count = SXCL_LOADER_MAX_LIBRARIES;
+            }
+            for (size_t i = 0; i < extra_count && total < SXCL_LOADER_MAX_LIBRARIES; ++i) {
+                int seen = 0;
+                for (size_t k = 0; k < total; ++k) {
+                    if (strcmp(libs[k].name, extra[i].name) == 0) {
+                        seen = 1;
+                        break;
+                    }
+                }
+                if (!seen) {
+                    libs[total++] = extra[i];   /* 整条拷:名字/路径/URL 三样都带着 */
+                }
+            }
+            free(extra);
         }
         /* Python: 老格式里 install.libraries 那条 net.minecraftforge:forge:<版本> 没有分类器,
          * 拼出来在 maven 上不存在(实测 404),PCL 也是直接用 install.path 那份 —— 这里把它剔掉,
@@ -1658,6 +1904,18 @@ static int extract_install(install_ctx *ctx, const char *instance_dir)
             ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "依赖库没有下齐（方式 B）");
             goto done;
         }
+    }
+
+    /* ── processors 重放（1.13+ Forge / NeoForge 的安装真身） ──
+     * 位置就是 FCL 的位置：库下齐之后、写版本 JSON 之前。两条理由都不能挪：
+     *   * 必须在 on_libraries 之后 —— 处理器的 jar 与 classpath 是上一步才落地的；
+     *   * 必须在写 JSON 之前 —— 写 JSON 是"装完了"的标记（docs/22 的 B3/C4），
+     *     处理器没跑成就是安装失败，绝不能留下一份"看着装好、其实没打补丁"的实例。 */
+    ctx->zip = zip;
+    const int proc_ok = run_processors(ctx, profile, instance_dir);
+    ctx->zip = NULL;
+    if (!proc_ok) {
+        goto done;
     }
 
     copy_vanilla_client(req->game_dir, req->base_version, instance_dir, req->instance_name);
@@ -1728,6 +1986,10 @@ static int extract_install(install_ctx *ctx, const char *instance_dir)
     }
 
 done:
+    if (ctx->temp_dir[0]) {
+        (void)remove_tree(ctx->temp_dir);   /* 里面是给处理器看的中间物（解出来的 lzma 等），不留 */
+        ctx->temp_dir[0] = '\0';
+    }
     free(profile_text);
     sxcl_json_free(profile);
     sxcl_json_free(version_doc);
@@ -1740,6 +2002,12 @@ done:
 static int run_installer_phase(install_ctx *ctx, const char *versions_dir, const char *instance_dir)
 {
     const sxcl_loader_install_request *req = ctx->req;
+    if (req->force_extract_install) {
+        /* 用户/排查点名要"解包安装":别去试安装器 CLI,直接进方式 B。
+         * (也是方式 B + processors 重放的端到端验收入口 —— CLI 的 --extract-install。) */
+        ctx_report(ctx, ctx->percent, "按请求跳过安装器 CLI，直接解包安装");
+        return 0;
+    }
     sxcl_loader_cmd_env env;
     memset(&env, 0, sizeof(env));
     env.java_path = req->java_path;
@@ -1835,7 +2103,7 @@ static int install_optifine(install_ctx *ctx)
     char real_libraries[SXCL_LOADER_CMD_ARG_MAX];
 
     res->used_sandbox = 1;
-    if (make_sandbox_root(sandbox, sizeof(sandbox)) != 0) {
+    if (make_temp_root(sandbox, sizeof(sandbox), "optifine") != 0) {
         ctx_fail(ctx, SXCL_LOADER_FAIL_PREPARE, "建不了临时沙箱目录（%s）", sandbox);
         return 0;
     }

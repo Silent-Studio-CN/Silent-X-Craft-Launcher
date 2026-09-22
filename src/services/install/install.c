@@ -1154,10 +1154,14 @@ static int on_loader_libraries(void *userdata, const sxcl_loader_library *libs, 
     /* 竞技场要装两类串:目标路径(<游戏目录>/libraries/<path>,比 path 长不少)与完整 URL。
      * 这里按"每项实际长度 + 余量"算,别用 path 的长度近似 —— 少算一个字节就是堆越界。 */
     const size_t game_len = strlen(r->game_dir);
+    const char *mirror_base = (r->plan->mirror_base && *r->plan->mirror_base)
+                                  ? r->plan->mirror_base
+                                  : (r->plan->prefer_mirror ? SXCL_MIRROR_BMCLAPI_BASE : NULL);
     size_t arena_size = 0;
     for (size_t i = 0; i < count; ++i) {
         arena_size += game_len + strlen(libs[i].path) + 32; /* "/libraries/" + NUL + 余量 */
         arena_size += strlen(libs[i].url) + strlen(libs[i].path) + 8;
+        arena_size += strlen(libs[i].url_full) * 2 + 128;   /* 清单给的绝对地址 + 可能来一条镜像 */
     }
     char *arena = (char *)malloc(arena_size ? arena_size : 1);
     sxcl_task *tasks = (sxcl_task *)calloc(count, sizeof(sxcl_task));
@@ -1180,10 +1184,41 @@ static int on_loader_libraries(void *userdata, const sxcl_loader_library *libs, 
             break;
         }
         const size_t dn = strlen(dest) + 1;
+        /* 候选路（最多三条）：
+         *   ① 清单里直接给的绝对地址（downloads.artifact.url）—— 最权威，不同条目可能在不同主机；
+         *   ② 它的镜像（sxcl_manifest_mirror_url 能认出来的话）；
+         *   ③ "maven 根地址 + 相对路径"—— 清单没给绝对地址时用，给了也留作兜底（换个主机再试一次）。
+         * prefer_mirror 时镜像排最前 —— 与安装器/资源对象同一个口径：镜像不通自动切回官方。 */
+        char cand[3][1024];
+        size_t cand_n = 0;
+        char full_mirror[1024];
+        full_mirror[0] = '\0';
+        if (libs[i].url_full[0] != '\0' && mirror_base &&
+            sxcl_manifest_mirror_url(libs[i].url_full, mirror_base, full_mirror,
+                                     sizeof(full_mirror)) != 0) {
+            full_mirror[0] = '\0';
+        }
+        if (libs[i].url_full[0] != '\0') {
+            if (r->plan->prefer_mirror && full_mirror[0] != '\0') {
+                set_text(cand[cand_n++], sizeof(cand[0]), "%s", full_mirror);
+                set_text(cand[cand_n++], sizeof(cand[0]), "%s", libs[i].url_full);
+            } else {
+                set_text(cand[cand_n++], sizeof(cand[0]), "%s", libs[i].url_full);
+                if (full_mirror[0] != '\0') {
+                    set_text(cand[cand_n++], sizeof(cand[0]), "%s", full_mirror);
+                }
+            }
+        }
         const size_t ul = strlen(libs[i].url);
         const char *sep = (ul > 0 && libs[i].url[ul - 1] == '/') ? "" : "/";
-        const size_t need = dn + ul + strlen(sep) + strlen(libs[i].path) + 1;
-        if (off + need > arena_size) { /* 防御:算错了也绝不越界写 */
+        if (ul > 0 && strlen(libs[i].path) + ul + 2 < sizeof(cand[0])) {
+            set_text(cand[cand_n++], sizeof(cand[0]), "%s%s%s", libs[i].url, sep, libs[i].path);
+        }
+        size_t need = dn + 8;
+        for (size_t k = 0; k < cand_n; ++k) {
+            need += strlen(cand[k]) + 8;
+        }
+        if (cand_n == 0 || off + need > arena_size) { /* 防御:算错了也绝不越界写 */
             bad_path = 1;
             break;
         }
@@ -1191,9 +1226,11 @@ static int on_loader_libraries(void *userdata, const sxcl_loader_library *libs, 
         tasks[i].dest = arena + off;
         off += dn;
 
-        set_text(arena + off, arena_size - off, "%s%s%s", libs[i].url, sep, libs[i].path);
-        tasks[i].urls[0] = arena + off;
-        off += strlen(arena + off) + 1;
+        for (size_t k = 0; k < cand_n; ++k) {
+            set_text(arena + off, arena_size - off, "%s", cand[k]);
+            tasks[i].urls[k] = arena + off;
+            off += strlen(arena + off) + 1;
+        }
 
         tasks[i].algo = SXCL_HASH_SHA1;
         tasks[i].size = 0; /* 加载器依赖库没有官方哈希:只做大小/可读检查(与 Python 一致) */
