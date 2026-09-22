@@ -2721,7 +2721,21 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
     return 0;
 }
 
+/* 真入口:把命令跑完,再等一次 Qt 的全局线程池(域名解析在它上面跑),然后才退出。
+ * 不这么收尾的话,Qt 静态析构时池子里还有等待线程,会打印
+ * "QWaitCondition: Destroyed while threads are still waiting" ——
+ * 看着像我们的线程没回收,其实是 Qt 退出时的固有现象(实测:光在 transport 销毁处等还不够,
+ * 因为那之后 HTTP 层还会往池子里丢活)。 */
+static int cli_main(int argc, char **argv);
+
 int main(int argc, char **argv)
+{
+    const int rc = cli_main(argc, argv);
+    sxcl_transport_qt_drain(2000);
+    return rc;
+}
+
+static int cli_main(int argc, char **argv)
 {
     /* 无缓冲输出:崩溃时不会把最后一段输出留在缓冲区里丢掉(排查跨平台崩溃吃过这个亏) */
     setvbuf(stdout, NULL, _IONBF, 0);

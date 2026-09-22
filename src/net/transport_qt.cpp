@@ -398,6 +398,16 @@ extern "C" void sxcl_transport_qt_bootstrap(void) {
     new QCoreApplication(argc, argv);
 }
 
+extern "C" void sxcl_transport_qt_drain(int timeout_ms) {
+    if (QCoreApplication::instance() == nullptr) {
+        return; // 没引导过 Qt:没有池子可等
+    }
+    QThreadPool *pool = QThreadPool::globalInstance();
+    if (pool != nullptr) {
+        (void)pool->waitForDone(timeout_ms > 0 ? timeout_ms : 1500);
+    }
+}
+
 extern "C" sxcl_transport *sxcl_transport_qt_create(void) {
     QtTransport *t = new QtTransport();
     t->nam = new QNetworkAccessManager();

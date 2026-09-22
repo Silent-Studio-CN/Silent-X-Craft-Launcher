@@ -89,6 +89,12 @@ sxcl_transport *sxcl_transport_qt_create(void);
  *  引擎的工作线程里跑嵌套事件循环依赖它;纯 C 调用方(如 sxcl-dl)靠这个函数引导。 */
 void sxcl_transport_qt_bootstrap(void);
 
+/** 把 Qt 全局线程池里的活儿等完(域名解析就在那个池子上跑)。
+ *  纯 C 的调用方(如 sxcl-dl)**在进程退出前**调一次:否则 Qt 的静态析构会在池子还有等待线程时
+ *  打印 "QWaitCondition: Destroyed while threads are still waiting"(看着像我们的线程泄漏)。
+ *  timeout_ms <= 0 用默认值(1500ms)。没引导过 Qt 时是空操作。 */
+void sxcl_transport_qt_drain(int timeout_ms);
+
 /** libcurl 后端(Win/Linux/Android;性能后端,HTTP/2 多路复用)。 */
 sxcl_transport *sxcl_transport_libcurl_create(void);
 
