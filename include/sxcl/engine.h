@@ -24,6 +24,12 @@ extern "C" {
 /** 慢源判定阈值(字节/秒)与宽限(秒),与 Python 版保持一致。 */
 #define SXCL_MIN_SOURCE_SPEED (512 * 1024)
 #define SXCL_SLOW_SOURCE_GRACE 8.0
+/** 候选来源最多走**几轮**。一轮 = 把候选按健康度排一遍、逐个试。
+ *  为什么要多轮:慢源判定会为"更快的备选"掉头,而备选可能根本是死的(实测:Quilt 官方
+ *  maven 只有 32KB/s,备选镜像没有 Quilt -> 只走一轮就等于"把唯一能出数据的源赶走,然后全失败")。
+ *  现在一轮结束**只要有进展**就再来一轮(每轮按最新死活记录重排),慢源也能一轮一轮磨完;
+ *  一轮下来一个字节都没进展才认输。 */
+#define SXCL_SOURCE_ROUNDS 8
 
 typedef enum sxcl_task_state {
     SXCL_TASK_PENDING = 0,

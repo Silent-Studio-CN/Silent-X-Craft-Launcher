@@ -16,6 +16,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSet>
+#include <QThreadPool>
 #include <QTimer>
 #include <QUrl>
 
@@ -31,6 +32,12 @@ struct QtBody {
     bool finished = false;
     bool aborted = false;
     bool ioError = false;
+    /* 停滞看门狗:连接还在、但没有新字节到达多久算"死了"。
+     * 不设这条会**永久卡住** —— 实测 Quilt 官方 maven 下到 1.19MB 后彻底停摆,
+     * 进程 CPU 0.09s、9 分钟零进展,界面就那样一直显示"正在下载"(见 docs/15 §7)。 */
+    QElapsedTimer lastData;
+    int stallMs = 60000;
+    QByteArray maskedUrl; // 只给日志用(URL 必须打码)
 };
 
 struct QtTransport {
@@ -68,7 +75,11 @@ void pumpReply(QNetworkReply *reply, int maxWaitMs) {
 
 /* 把回复里已经到达的字节收进 pending,并在结束时置上 finished/ioError */
 void harvestReply(QtBody *b) {
+    const int before = b->pending.size();
     b->pending += b->reply->readAll();
+    if (b->pending.size() != before) {
+        b->lastData.restart(); // 有字节到达 = 这条连接还活着
+    }
     if (!b->reply->isFinished()) {
         return;
     }
@@ -88,6 +99,9 @@ void harvestReply(QtBody *b) {
         }
     }
     b->pending += b->reply->readAll();
+    if (b->pending.size() != before) {
+        b->lastData.restart();
+    }
 }
 
 /* 从 Content-Range: bytes a-b/total 里取 a/b/total;解析不出返回 false */
@@ -257,6 +271,18 @@ int qtRequest(void *ctx, const sxcl_http_request *req, sxcl_http_response *resp,
 
     QtBody *b = new QtBody();
     b->reply = reply;
+    /* 停滞阈值 = 请求超时的 2 倍(引擎给的 30s -> 60s 无数据就当这条路死了)。
+     * 比超时宽松是有意的:慢到 32KB/s 的源每 1~2 秒也会来一批字节,60 秒没动静才是真停摆。 */
+    b->stallMs = (req->timeout_ms > 0 ? int(req->timeout_ms) : kDefaultTimeoutMs) * 2;
+    if (b->stallMs < 30000) {
+        b->stallMs = 30000;
+    }
+    b->lastData.start();
+    {
+        char masked[SXCL_LOG_URL_MAX + 48];
+        (void)sxcl_log_mask_url(req->url, masked, sizeof(masked));
+        b->maskedUrl = QByteArray(masked);
+    }
     b->pending = reply->readAll(); // 头到达时往往已经带了第一批正文
     t->bodies.insert(b);
     *body = reinterpret_cast<sxcl_http_body *>(b);
@@ -294,6 +320,15 @@ int64_t qtRead(void *ctx, sxcl_http_body *body, void *buf, size_t len) {
             return 0;
         if (t->cancelled)
             return SXCL_NET_ERR_CANCELLED;
+        /* 停滞看门狗:连接还在,但一个字节都不来。不判这条会永久挂住(见 QtBody 里的说明)。
+         * 报 IO 错误,让引擎按"传输中断"处理 —— 保留已下部分,换路或续传,而不是干等。 */
+        if (b->lastData.isValid() && b->lastData.elapsed() >= b->stallMs) {
+            sxcl_log_write(SXCL_LOG_WARN, "net", "%s -> 传输停滞 %lldms 无数据,放弃本次尝试",
+                           b->maskedUrl.constData(), (long long)b->lastData.elapsed());
+            b->reply->abort();
+            b->ioError = true;
+            return SXCL_NET_ERR_IO;
+        }
         pumpReply(b->reply, 50); /* 每轮最多 50ms,由上面的状态判断决定是否继续 */
     }
 }
@@ -338,6 +373,14 @@ void qtDestroy(void *ctx) {
         t->nam->clearAccessCache();
         delete t->nam;
         t->nam = nullptr;
+    }
+    /* 再把 Qt **全局线程池**里的活等完。DNS 查询(QHostInfo)就跑在那个池子上,
+     * 池子是懒创建的进程级单例,退出时才析构 —— 那时线程还挂在它的等待条件上,
+     * 于是打印 "QWaitCondition: Destroyed while threads are still waiting"(看着像我们的线程泄漏,
+     * 其实是 Qt 静态析构的固有现象)。这里主动等一次,池子的线程就干净退出了。
+     * 超时给 2s:查询通常几百毫秒就该完;真卡住也不能让收尾挂死(那比一行告警糟糕得多)。 */
+    if (QThreadPool::globalInstance() != nullptr) {
+        (void)QThreadPool::globalInstance()->waitForDone(2000);
     }
     delete t;
 }

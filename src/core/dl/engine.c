@@ -279,10 +279,6 @@ static char *part_path_of(const char *dest)
     return p;
 }
 
-static int more_sources(const sxcl_task *t, int from)
-{
-    return (from + 1 < 4 && t->urls[from + 1] != NULL) ? 1 : 0;
-}
 
 /* 进度回调:按 0.5 秒节流,速度用两次采样之间的增量算 */
 typedef struct progress_clock {
@@ -432,6 +428,29 @@ static void source_rank(sxcl_engine *e, const char *url, int *dead, int *fails)
         }
     }
     sxcl_lock_release(&e->lock);
+}
+
+/** 值不值得为"更快的备选"离开一个**正在出数据**的慢源。判据是**履历**:
+ *  备选必须没被判死,而且失败次数**不超过**当前这一路(fails <= 当前)。
+ *
+ *  为什么要这条:光看"还有没有别的候选"是个赌 —— 实测 Quilt 官方 maven 只有 32KB/s,
+ *  被"换路"赶到一个根本没有 Quilt 的镜像上,镜像 404,最后**一无所获**(唯一能出数据的源被赶走了)。
+ *  加上履历这一条之后:两边都没失败过 = 值得赌一次(官方 20KB/s、镜像 2MB/s 的常规场景照旧受益);
+ *  一旦备选先失败过,就不再为它掉头,老老实实把慢源磨完(慢 > 失败)。 */
+static int better_live_source(sxcl_engine *e, const sxcl_task *t, int from)
+{
+    int cur_dead = 0;
+    int cur_fails = 0;
+    source_rank(e, t->urls[from], &cur_dead, &cur_fails);
+    for (int i = from + 1; i < 4 && t->urls[i] != NULL; ++i) {
+        int dead = 0;
+        int fails = 0;
+        source_rank(e, t->urls[i], &dead, &fails);
+        if (dead == 0 && fails <= cur_fails) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /** 按源健康度排出这次任务的候选顺序(稳定:健康度相同的仍按调用方给的先后)。
@@ -616,7 +635,7 @@ static int try_source(sxcl_worker *w, sxcl_task *t, const char *part, int src, i
             report_progress(e, t, &pc, 0);
 
             const double elapsed = sxcl_limiter_now() - t_begin;
-            if (elapsed > SXCL_SLOW_SOURCE_GRACE && more_sources(t, src)) {
+            if (elapsed > SXCL_SLOW_SOURCE_GRACE && better_live_source(e, t, src)) {
                 const double avg = (double)(offset - start_offset) / elapsed;
                 if (avg < (double)SXCL_MIN_SOURCE_SPEED) {
                     switch_source = 1;
@@ -1162,12 +1181,27 @@ static int run_task(sxcl_worker *w, sxcl_task *t)
         t->resume_from = 0;
     }
 
+    /* 候选**多轮**走(见 SXCL_SOURCE_ROUNDS):慢源判定的"换路"是有代价的 ——
+     * 备选可能是死的,而正在出数据的源只是慢。一轮结束只要有进展就再来一轮,
+     * 每轮按最新的死活记录重排名次(判死的源排到最后、不删),直到一轮下来零进展。 */
     int rc = 1;
-    for (int k = 0; k < order_count; ++k) {
-        rc = try_source(w, t, part, order[k], &offset, pj);
+    for (int round = 0; round < SXCL_SOURCE_ROUNDS; ++round) {
+        const int count = order_candidates(e, t, order, 4);
+        const int64_t before = offset;
+        rc = 1;
+        for (int k = 0; k < count; ++k) {
+            rc = try_source(w, t, part, order[k], &offset, pj);
+            if (rc == 0 || rc == -1) {
+                break;
+            }
+        }
         if (rc == 0 || rc == -1) {
             break;
         }
+        if (offset > before) {
+            continue; /* 这一轮有进展(哪怕只有 0.2MB):接着磨 */
+        }
+        break;        /* 一轮下来一个字节都没进展:认输 */
     }
     free(pj);
     free(part);

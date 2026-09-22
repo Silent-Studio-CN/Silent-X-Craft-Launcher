@@ -93,6 +93,7 @@ static sxcl_transport *make_qt_transport(void *userdata)
 typedef struct cli_opts {
     double rate;
     int workers;
+    int conn; /* --conn:单文件几路分片(0 = 默认;>1 且文件 >=4MB 才分片) */
     int verbose;
     int limit;
     int skip_assets;
@@ -180,7 +181,8 @@ static LONG WINAPI sxcl_crash_handler(EXCEPTION_POINTERS *info)
 static int usage(void)
 {
     printf("sxcl-dl —— SXCL-C 下载引擎命令行前端\n"
-           "  sxcl-dl get <url> <dest> [--sha1 HEX] [--size N] [--rate 5MB] [--workers N] [--mirror URL]\n"
+           "  sxcl-dl get <url> <dest> [--sha1 HEX] [--size N] [--rate 5MB] [--workers N] [--conn N] [--mirror URL]\n"
+           "      └ --conn:单文件几路分片(>=4MB 的文件才分;慢源单连接只有几 KB/s 时靠它)\n"
            "  sxcl-dl manifest <dest> [--rate 5MB]\n"
            "  sxcl-dl version <版本号|latest> <游戏目录> [--rate 5MB] [--workers N] [--verbose]\n"
            "      [--source bmclapi|mojang|auto] [--mirror URL] [--skip-assets] [--asset-mirror URL]\n"
@@ -229,6 +231,7 @@ static int make_engine(const cli_opts *o, cli_state *st, sxcl_engine **out)
     opts.workers = o->workers;
     opts.rate_bps = o->rate;
     opts.retry_per_source = 2;
+    opts.max_conn_per_file = o->conn; /* 0 = 引擎默认(单连接);>1 且文件 >=4MB 才分片 */
     opts.cache_path = o->cache;
     opts.on_progress = on_progress;
     opts.userdata = st;
@@ -2069,6 +2072,7 @@ static int cmd_java_preset(const cli_opts *o, const char *platform, const char *
     opts.workers = o->workers;
     opts.rate_bps = o->rate;
     opts.retry_per_source = 2;
+    opts.max_conn_per_file = o->conn; /* 同上:JRE 那种大文件也走 --conn */
     opts.cache_path = o->cache;
     sxcl_transport_qt_bootstrap();
     opts.transport_factory = make_qt_transport;
@@ -2187,7 +2191,7 @@ static int cmd_java(int argc, char **argv, const cli_opts *o)
     int force = 0;
     /* main() 已经把全局下载参数(workers/rate/source/…)解析进 o 了,这里见到它们
      * 只跳过 —— 否则 "java preset --workers 8" 会被当成"未知参数"直接用法报错。 */
-    static const char *const kGlobalWithValue[] = { "--rate", "--workers", "--source", "--mirror",
+    static const char *const kGlobalWithValue[] = { "--rate", "--workers", "--conn", "--source", "--mirror",
                                                     "--limit", "--asset-mirror", "--cache" };
     for (int i = 3; i < argc; ++i) {
         const char *a = argv[i];
@@ -2754,6 +2758,11 @@ int main(int argc, char **argv)
             ++i;
         } else if (strcmp(a, "--workers") == 0 && v) {
             o.workers = atoi(v);
+            ++i;
+        } else if (strcmp(a, "--conn") == 0 && v) {
+            /* 单文件分片数。慢源单连接只有几 KB/s 时,分片是唯一的出路(实测 Quilt 官方 maven);
+             * 门槛:文件 >=4MB 且每片 >=1MB(见 engine.h 的 SXCL_SEGMENT_MIN_*)。 */
+            o.conn = atoi(v);
             ++i;
         } else if (strcmp(a, "--source") == 0 && v) {
             if (strcmp(v, "mojang") == 0) {
