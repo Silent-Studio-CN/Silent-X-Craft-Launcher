@@ -26,6 +26,7 @@
 #include "page_shell.h" // pageTokenText(取令牌色;与下载/团队/更多同一份)
 
 #include "dialogs/account.h"
+#include "dialogs/auth_dialog.h" // 未登录/凭据过期 -> 直接开登录窗（而不是偷偷用离线跑起来）
 #include "fluent_theme.h"
 #include "libqf.h"
 #include "main_window.h"
@@ -189,6 +190,28 @@ void HomePage::buildContent() {
     m_loginPivot->addItem(QStringLiteral("account"), QStringLiteral("正版登录"));
     m_loginPivot->setIndicatorColor(FluentTheme::instance().tokens().accent,
                                     FluentTheme::instance().tokens().accent);
+    /* PivotItem 默认是 **18pt** 的大字(qf 移动端的口径),摆在主页上会和那条 3px 指示条挤在一起 ——
+     * 用户 2026-09-22 晚点名「主页两个登录滑块和文字串了」。这里把字号/内边距/选中态**显式钉死**,
+     * 不再依赖 qf 那套字号。 */
+    for (const QString &key : {QStringLiteral("offline"), QStringLiteral("account")}) {
+        if (PivotItem *it = m_loginPivot->item(key)) {
+            QFont f = it->font();
+            f.setPixelSize(14);
+            f.setWeight(QFont::DemiBold);
+            it->setFont(f);
+            it->setProperty("hasIcon", false);
+            it->setFixedHeight(34);
+            it->setCursor(Qt::PointingHandCursor);
+        }
+    }
+    m_loginPivot->setFixedHeight(38);
+    m_loginPivot->setStyleSheet(
+        QStringLiteral("Pivot { background: transparent; border: none; }"
+                       // 内边距 10px:两个条目各 80 宽,文字 56 + 20 = 76 才装得下(18px 会被切掉)
+                       "PivotItem { background: transparent; border: none; padding: 4px 10px; }"
+                       "PivotItem[isSelected='true'] { color: %1; }"
+                       "PivotItem[isSelected='false'] { color: %2; }")
+            .arg(pageTokenText("accent"), pageTokenText("textSecondary")));
     launchLay->addWidget(m_loginPivot, 0, Qt::AlignLeft);
 
     auto *launchStack = new QStackedWidget(launchRow);
@@ -426,14 +449,32 @@ void HomePage::launchWithAccount() {
         return;
     }
     const AccountSnapshot account = loadAccountSnapshot();
-    if (!accountCanLaunch(account) && account.loggedIn) {
-        const QString why =
-            (!account.hasMcToken || account.mcExpired)
-                ? QStringLiteral("登录凭据已过期：到 设置 → 账户 点「刷新」免密续期；不行就重新登录一次")
-                : QStringLiteral("这个账户没有 Java 版档案（没买或没取到），本次按离线身份启动");
-        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("本次没有用正版身份"), why, window(),
-                      8000);
-    } else if (accountCanLaunch(account)) {
+    /* 用户 2026-09-22 晚点名：「正版登录不登录就启动？」—— 这一路（「正版登录」那一页）
+     * 的按钮**只负责登录**：账号不能用就**绝不起游戏**。以前会掉进"离线身份启动"，
+     * 用户看到的就是"没登录也能开"，以为正版登录是摆设。想不用账号玩，切到「离线启动」那一页。 */
+    if (!accountCanLaunch(account)) {
+        if (!account.loggedIn) {
+            InfoBar::push(InfoBar::Type::Info, QStringLiteral("先登录正版账号"),
+                          QStringLiteral("这一路要用正版身份启动；不想登录就切回上面的「离线启动」。"),
+                          window(), 5000);
+        } else if (!account.hasMcToken || account.mcExpired) {
+            InfoBar::push(InfoBar::Type::Warning, QStringLiteral("登录凭据过期了，先刷新或重新登录"),
+                          QStringLiteral("凭据已过期：在下面的登录窗口里重新登录一次（或去 设置 → 账户 "
+                                         "点「刷新」免密续期）。"),
+                          window(), 8000);
+        } else {
+            InfoBar::push(InfoBar::Type::Warning, QStringLiteral("这个账户没有 Java 版档案"),
+                          QStringLiteral("没买 Java 版（或档案没取到），正版这一路用不了；"
+                                         "想进游戏请切回「离线启动」。"),
+                          window(), 8000);
+        }
+        if (AuthLoginDialog *dialog = AuthLoginDialog::open(window())) {
+            QObject::connect(dialog, &AuthLoginDialog::accountChanged, this,
+                             [this] { refresh(); });
+        }
+        return;
+    }
+    if (accountCanLaunch(account)) {
         InfoBar::push(InfoBar::Type::Info, QStringLiteral("用已登录的正版账户启动"),
                       QStringLiteral("%1（玩家名 %2，内存 %3 MB）")
                           .arg(currentVersion(), account.playerName)
