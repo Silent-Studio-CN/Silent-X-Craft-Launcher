@@ -34,6 +34,7 @@
 #define MAVEN_FORGE     "https://maven.minecraftforge.net/"
 #define MAVEN_NEOFORGE  "https://maven.neoforged.net/releases/"
 #define MAVEN_FABRIC    "https://maven.fabricmc.net/"
+#define MAVEN_QUILT     "https://maven.quiltmc.org/repository/release/"
 
 #define FALLBACK_PERCENT 40
 #define POST_PERCENT     85
@@ -1130,8 +1131,13 @@ static const char *maven_for_kind(sxcl_loader_kind kind)
     if (kind == SXCL_LOADER_NEOFORGE) {
         return MAVEN_NEOFORGE;
     }
-    if (kind == SXCL_LOADER_FABRIC || kind == SXCL_LOADER_QUILT) {
+    if (kind == SXCL_LOADER_FABRIC) {
         return MAVEN_FABRIC;
+    }
+    if (kind == SXCL_LOADER_QUILT) {
+        /* Quilt 的库在它自己的 maven(不是 Fabric 的)—— 用 Fabric 那个会 404。
+         * (安装器自己写出来的版本 JSON 里带显式 url,这条只是"清单没给 url"时的兜底。) */
+        return MAVEN_QUILT;
     }
     return MAVEN_FORGE;
 }

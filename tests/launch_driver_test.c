@@ -529,6 +529,9 @@ static void case_f_errors(void) {
 typedef struct fake_http {
     int requests;      /* 收到几次请求(0 = 一个字节都没下) */
     int fail_all;      /* 1 = 一律 404(验"补不上也要照常启动") */
+    /* 声明的长度照旧,但**只给这么多字节**(模拟服务端提前掐断:Content-Length 说 64,实际 16)。
+     * 回归用例:引擎会把 .part 预分配到最终大小,只按大小校验就会把半截文件当成品。 */
+    int short_by;
     char last_url[512];
     unsigned char payload[64];
     /* P0b:资源索引必须是**真 JSON** 才展得开 5000+ 个对象 —— URL 里带 "17.json" 时回这一份。 */
@@ -576,6 +579,9 @@ static int fake_request(void *ctx, const sxcl_http_request *req, sxcl_http_respo
         resp->accept_ranges = 1;
         b->data = s->payload;
         b->len = sizeof(s->payload);
+        if (s->short_by > 0 && (size_t)s->short_by < b->len) {
+            b->len -= (size_t)s->short_by; /* 提前 EOF:声明与实到不一致 */
+        }
     }
     *body = (sxcl_http_body *)b;
     return SXCL_NET_OK;
@@ -789,6 +795,21 @@ static void case_g_complete(void) {
     check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "强校验档也照样启动");
     check(res.complete.files_failed >= 1, "强校验:内容与 sha1 不符 → 记失败");
     req.complete_assets = 1;
+
+    /* g9) **半截传输**:服务端声明 64 字节却只给 16 字节 —— 必须记失败,绝不能把半截文件
+     * 落到正式路径上。引擎会把 .part **预分配到最终大小**,所以"文件大小 == 期望大小"永远成立,
+     * 只按大小校验就会放过它 —— 真机上(2026-09-22 晚)8.3MB 的 Quilt 安装器只到了 2MB、
+     * 后半段全是 0,却报了"成功",一直到 java 打不开那个 jar 才暴露。 */
+    remove_if_there(CLIB);
+    memset(&server, 0, sizeof(server));
+    memset(server.payload, 'y', sizeof(server.payload));
+    server.index_json = assetIndexBody();
+    server.short_by = 48; /* 64 -> 只给 16 */
+    memset(&res, 0, sizeof(res));
+    err[0] = '\0';
+    check_int(sxcl_launch_run(&req, &res, err, sizeof(err)), 0, "半截传输也不拦启动");
+    check(res.complete.files_failed >= 1, "  半截传输要如实记失败（不能当成功）");
+    check(!sxcl_fs_exists(CLIB), "  半截内容绝不能落到正式路径上");
 
     /* 复原:把对象补上,后面的用例看到的是"全都在" */
     (void)write_sized(COBJ1, 64);

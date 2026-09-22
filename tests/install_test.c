@@ -1033,9 +1033,19 @@ static void test_args(void) {
     check_int(sxcl_install_run(&req, &res), SXCL_INSTALL_ERR_ARG, "加载器计划没有 Java = 参数错");
     check(strstr(res.error, "Java") != NULL, "原因里点名 Java");
     plan.java_path = "java";
-    plan.loader = SXCL_LOADER_QUILT;
-    check_int(sxcl_install_run(&req, &res), SXCL_INSTALL_ERR_ARG, "还没实现的加载器 = 参数错");
-    check(strstr(res.error, "Quilt") != NULL, "原因里点名 Quilt");
+    /* Quilt 2026-09-22 晚放开(docs/22 的 B7):它**不再**在参数校验被拦下,而是照常往下走
+     * (走到"取安装器"那一步才因为夹具里没有真安装器而失败 —— 那不是参数错)。
+     * 用**独立的实例名**,免得它留下的产物把后面的用例顶成"目标已存在"(-10)。 */
+    {
+        sxcl_install_plan q = plan;
+        q.loader = SXCL_LOADER_QUILT;
+        q.version_id = INSTANCE "-quilt";
+        check(sxcl_install_run(&req, &res) != SXCL_INSTALL_ERR_ARG,
+              "Quilt 的参数被接受（B7 已实现，不再当参数错）");
+        char qdir[1024];
+        (void)snprintf(qdir, sizeof(qdir), "%s/versions/%s-quilt", game, INSTANCE);
+        (void)sxcl_fs_remove_tree(qdir);   // 清理它可能留下的产物,保证用例之间互不影响
+    }
     plan.loader = SXCL_LOADER_FORGE;
 
     sxcl_install_io broken = kFakeIo;
@@ -1046,6 +1056,13 @@ static void test_args(void) {
 
     /* 清单已在手:不该取网络 */
     reset_all();
+    /* 目标必须是"还没装过"的状态:同一条用例里前面的分支(比如刚放开的 Quilt)可能留下产物,
+     * 那会让这里直接顶成 -10(目标已存在)。用例之间不许互相影响 —— 先清干净。 */
+    {
+        char target[1024];
+        (void)snprintf(target, sizeof(target), "%s/versions/%s", game, INSTANCE);
+        (void)sxcl_fs_remove_tree(target);
+    }
     sxcl_install_plan offline;
     base_plan(&offline, game);
     offline.manifest_text = kManifest; /* 清单已在手 */

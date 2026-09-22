@@ -134,9 +134,9 @@ static void test_parse_version(void) {
     check(sxcl_loader_kind_implemented(SXCL_LOADER_FORGE) &&
           sxcl_loader_kind_implemented(SXCL_LOADER_NEOFORGE) &&
           sxcl_loader_kind_implemented(SXCL_LOADER_FABRIC) &&
-          sxcl_loader_kind_implemented(SXCL_LOADER_OPTIFINE), "四种已实现的加载器");
-    check(!sxcl_loader_kind_implemented(SXCL_LOADER_QUILT) &&
-          !sxcl_loader_kind_implemented(SXCL_LOADER_VANILLA), "Quilt/原版没有静默安装实现");
+          sxcl_loader_kind_implemented(SXCL_LOADER_QUILT) &&
+          sxcl_loader_kind_implemented(SXCL_LOADER_OPTIFINE), "五种已实现的加载器（2026-09-22 晚放开 Quilt）");
+    check(!sxcl_loader_kind_implemented(SXCL_LOADER_VANILLA), "原版不走「静默安装加载器」这条路");
 
     /* OptiFine 条目的 forge 字段 */
     {
@@ -202,7 +202,8 @@ static void test_check_selection(void) {
               "原因说清楚了");
     }
 
-    /* 2d) 还没实现的加载器 */
+    /* 2d) Quilt 放开之后:选一个**可用**的 Quilt 版本不该再报"没实现"
+     * (以前这一格断言的是 "Quilt 还没有安装实现 = error")。 */
     {
         sxcl_loader_selection sel;
         memset(&sel, 0, sizeof(sel));
@@ -210,10 +211,19 @@ static void test_check_selection(void) {
         sel.kind = SXCL_LOADER_QUILT;
         sel.available_versions = fabric_versions;
         sel.available_count = 2;
+        sel.loader_version = "0.16.0"; /* 必须在 available_versions 里(fabric_versions 的两项之一) */
         (void)sxcl_loader_check_selection(&sel, &issues);
-        check(sxcl_loader_issues_has_error(&issues), "Quilt 还没有安装实现 = error");
-        check(strstr(issues.items[0].message, "Quilt") != NULL, "  (说的是 Quilt)");
-        check_str(sxcl_loader_issue_level_name(issues.items[0].level), "error", "级别名");
+        check(!sxcl_loader_issues_has_error(&issues),
+              "选了可用的 Quilt 版本不再报错（B7:Quilt 已实现）");
+    }
+    /* 2d-2) 原版仍然不该被当成"可静默安装的加载器"来校验 */
+    {
+        sxcl_loader_selection sel;
+        memset(&sel, 0, sizeof(sel));
+        sel.base_version = "1.20.1";
+        sel.kind = SXCL_LOADER_VANILLA;
+        (void)sxcl_loader_check_selection(&sel, &issues);
+        check(!sxcl_loader_issues_has_error(&issues), "原版选择本身不报错（它只是没加载器）");
     }
 
     /* 2e) 这个原版下该加载器一个版本都没有 */
@@ -925,8 +935,10 @@ static void test_install_args(void) {
 
     req.kind = SXCL_LOADER_VANILLA;
     check(sxcl_loader_install(&req, &res) == SXCL_LOADER_ERR_ARG, "原版 = 参数错");
+    /* Quilt 2026-09-22 晚放开了:它不再"参数错",而是照常往下走(真机验收见 docs/22 §10)。
+     * 这里断言的是"参数被接受"——安装本身会因为夹具里没有真安装器而失败,那是另一回事。 */
     req.kind = SXCL_LOADER_QUILT;
-    check(sxcl_loader_install(&req, &res) == SXCL_LOADER_ERR_ARG, "还没有实现的加载器 = 参数错");
+    check(sxcl_loader_install(&req, &res) != SXCL_LOADER_ERR_ARG, "Quilt 的参数被接受（不再拦）");
     req.kind = SXCL_LOADER_FORGE;
 
     req.installer_jar = NULL;

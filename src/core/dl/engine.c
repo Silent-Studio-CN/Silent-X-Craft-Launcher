@@ -646,8 +646,18 @@ static int try_source(sxcl_worker *w, sxcl_task *t, const char *part, int src, i
             free(buf);
             return 1; /* 保留已下部分,换路续传 */
         }
+        /* **读到 EOF 但没读够**要当失败:单连接这条路会把 .part 预分配到最终大小,
+         * 于是"文件大小 == 期望大小"永远成立 —— 只按大小校验就会把半截文件改名成正式文件
+         * (实测:8.3MB 的 Quilt 安装器只到了 2MB,后半段全是 0,却报了"成功",一直到 java 打不开
+         * 那个 jar 才暴露)。判据用**实际写下多少字节**(offset),不是文件有多长。 */
+        if (finished && t->size > 0 && offset < t->size) {
+            source_note_failure(e, t->urls[src], 0);
+            snprintf(t->error, sizeof(t->error), "传输提前结束(候选 #%d,只到 %lld/%lld 字节)",
+                     src + 1, (long long)offset, (long long)t->size);
+            finished = 0;
+        }
         if (!finished) {
-            continue; /* 传输中断:同一路重试,从头接着 offset 续 */
+            continue; /* 传输中断/提前收尾:同一路重试,从头接着 offset 续 */
         }
 
         /* 读完 → 强校验(大小 + 摘要)。续传过的文件无法边下边算,这里统一读回校验 */
@@ -1019,6 +1029,13 @@ static int segmented_download(sxcl_engine *e, sxcl_task *t, const char *part, co
     }
     free(threads);
     t->bytes_done = done;
+
+    /* 分片也可能"提前收尾却不报错":同样按**实际写下多少**判,别信预分配出来的文件长度。 */
+    if (ok && t->size > 0 && done < t->size) {
+        ok = 0;
+        snprintf(t->error, sizeof(t->error), "分片传输提前结束(只到 %lld/%lld 字节)",
+                 (long long)done, (long long)t->size);
+    }
 
     if (!ok) {
         if (pj) {

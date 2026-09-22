@@ -142,10 +142,14 @@ sxcl_loader_kind sxcl_loader_kind_from_id(const char *id)
 
 int sxcl_loader_kind_implemented(sxcl_loader_kind kind)
 {
-    /* Python: IMPLEMENTED_LOADERS = (FORGE, NEOFORGE, FABRIC, OPTIFINE) —— Quilt 还没做,
-     * 选了要挡住(它在 UI 里会出现,但选了也不能装)。 */
+    /* 2026-09-22 晚:**Quilt 放开了**(docs/22 的 B7)。它本来就只差这一道门:
+     * 类型/元数据(catalog 走 meta.quiltmc.org)/命令行(与 Fabric 同一条 -mcversion/-loader/-dir)
+     * 全都在,Quilt 官方安装器是 Fabric 安装器的 fork,参数一模一样。
+     * 真机验收见 docs/22 §10(装了 1.20.1 + Quilt,版本 JSON 能独立启动那条口径照旧)。
+     * 原版(VANILLA)仍然不走"静默安装加载器"这条路。 */
     return kind == SXCL_LOADER_FORGE || kind == SXCL_LOADER_NEOFORGE ||
-           kind == SXCL_LOADER_FABRIC || kind == SXCL_LOADER_OPTIFINE;
+           kind == SXCL_LOADER_FABRIC || kind == SXCL_LOADER_QUILT ||
+           kind == SXCL_LOADER_OPTIFINE;
 }
 
 /* ── 版本串解析 ── */
