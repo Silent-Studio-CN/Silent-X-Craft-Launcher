@@ -4,23 +4,37 @@
  * All rights reserved.
  */
 
-// 版本选择页 —— **2026-09-22 界面重构**(用户口述,规格见 docs/25 §3)。
+// 版本选择页 —— **2026-09-22 界面重构**（用户口述，规格见 docs/25 §3）+ 当日**晚**的第二轮重构。
 //
-// 用户原话:「原来的所有安装版本都堆在主页整体砍掉。改成版本选择页。用户可以更改已安装的版本。
-// 选择页布局：左侧为文件夹列表"当前文件夹"，如果有用户导入历史，也提供切其他文件夹。我们不强制
+// 用户原话（第一轮）：「原来的所有安装版本都堆在主页整体砍掉。改成版本选择页。用户可以更改已安装的
+// 版本。选择页布局：左侧为文件夹列表"当前文件夹"，如果有用户导入历史，也提供切其他文件夹。我们不强制
 // 根目录一定是 .minecraft，如果有别的名字，"当前文件夹"就显示这个文件夹的名字。」
 //
-// 布局:左栏 = 文件夹列表(当前文件夹 + 探测到的其它 + 导入的历史 + "导入文件夹…"),
-//      右栏 = 该文件夹下**已安装的版本**(一行一个,显示**文件夹名** + 加载器/问题,点一下即设为当前)。
+// 用户原话（第二轮，看到第一版之后）：「游戏版本选择还是那个问题，整个设计理念给我顶下，**绝对不能
+// 出现原生点选的画风**，版本选择现在也做侧 2 栏。另外当 2 栏被拉出，鼠标悬停的文件夹出现设置按钮。
+// 可以自定义文件夹图标（目前内置狐狸头，铁砧，工作台，草方块等等），SXCL 用的图标都给他支持。
+// 另外，记住了自适应！不要给我出现因为没放下导致的横向竖向滑动条。必须的除外（下载列表之类的）。」
 //
-// "版本 = versions/ 下的文件夹名"这条 PCL 概念由核心库保证:
-//   启动靠目录名(实例名)+ 该目录里任意一份能解析出版本信息的 JSON + JSON 里的库/主类/资源索引,
+// 所以这一版：
+//   * 文件夹列表**不再是单选按钮那种原生味**，而是**复用主侧边栏同一个 NavPanel**（侧 2 栏）：
+//     汉堡三横、48 <-> 322 折叠动画、150ms OutQuad、选中指示条 —— 与下载页那条、窗口左边那条
+//     完全同一份实现（"不存在两套动画对不上"）。
+//   * 文件夹图标**由用户挑**（folder_icons.h）：默认草方块，可换狐狸/铁砧/红石灯/模组/光影…
+//     鼠标悬停那一行 **右侧出现齿轮**，点开在**页面内**挑图标（不弹原生文件框）。
+//   * 自适应：图标用流式布局自动换行、卡片文字换行/省略，横向滚动条一律关掉
+//     （只有"版本列表"这一栏允许竖向滚动 —— 那是列表本身，用户也认可"必须的除外"）。
+//
+// "版本 = versions/ 下的文件夹名"这条 PCL 概念由核心库保证：
+//   启动靠目录名（实例名）+ 该目录里任意一份能解析出版本信息的 JSON + JSON 里的库/主类/资源索引，
 //   与"MC 版本号"无关 —— 所以文件夹叫 114514、JSON 里的 id 也叫 114514 照样能跑。
-//   右栏的元数据(加载器/能不能启动/为什么不能)全部来自 sxcl_instance_scan,与"版本页"同一份实现。
+//   右栏的元数据（加载器/能不能启动/为什么不能）全部来自 sxcl_instance_scan，与"版本页"同一份实现。
 
 #include "page_factory.h"
 #include "game_folders.h"
 #include "page_shell.h"
+
+#include "../folder_icons.h"
+#include "../nav.h"
 
 #include "fluent_theme.h"
 #include "libqf.h"
@@ -32,17 +46,20 @@
 #include "fluent/fluent_cards.h"
 #include "fluent/fluent_controls.h"
 #include "fluent/fluent_labels.h"
+#include "fluent/fluent_scroll.h"
 #include "fluent/fluent_selection.h"
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
 
-#include <QButtonGroup>
 #include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFont>
+#include <QFontMetrics>
 #include <QHBoxLayout>
-#include <QScrollArea>
+#include <QLabel>
+#include <QStackedWidget>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -53,81 +70,70 @@
 namespace sxcl::ui {
 namespace {
 
+const char *const kFolderPrefix = "folder:";
+const char *const kImportKey = "folder_import";
+
+QString normPath(const QString &path) {
+    return QDir::cleanPath(QDir::fromNativeSeparators(path));
+}
+
+bool samePath(const QString &a, const QString &b) {
+#if defined(Q_OS_WIN)
+    return normPath(a).compare(normPath(b), Qt::CaseInsensitive) == 0;
+#else
+    return normPath(a) == normPath(b);
+#endif
+}
+
 class SelectPage : public PageShell {
 public:
     explicit SelectPage(QWidget *parent)
         : PageShell(QStringLiteral("版本选择"),
-                    QStringLiteral("一个原版可以装无数个实例 · 认的是文件夹名，不是 MC 版本号"),
+                    QStringLiteral("认的是文件夹名，不是 MC 版本号 · 悬停文件夹可换图标"),
                     QStringLiteral("sxclPage_select"), parent) {
         m_gameDir = resolveGameDirectory();
         buildBody();
-        reload();
+        rebuildNav(true);
+        reloadVersions();
     }
 
 private:
+    // ── 骨架：侧 2 栏(NavPanel) + 右内容(版本列表 / 图标选择) ──
     void buildBody() {
         auto *body = new QWidget(view());
         auto *lay = new QHBoxLayout(body);
         lay->setContentsMargins(0, 0, 0, 0);
-        lay->setSpacing(16);
+        lay->setSpacing(12);
 
-        // ── 左栏:文件夹列表 ──
-        auto *left = new CardWidget(body);
-        left->setFixedWidth(280);
-        auto *leftLay = new QVBoxLayout(left);
-        leftLay->setContentsMargins(16, 16, 16, 16);
-        leftLay->setSpacing(8);
-        leftLay->addWidget(new StrongBodyLabel(QStringLiteral("文件夹"), left));
-        m_folderHint = new BodyLabel(QString(), left);
-        m_folderHint->setWordWrap(true);
-        const QColor secondary = pageTokenColor("textSecondary");
-        m_folderHint->setTextColor(secondary, secondary);
-        leftLay->addWidget(m_folderHint);
+        // 侧 2 栏的容器：NavPanel 每次重建（换文件夹/换图标都要重排图标），放容器里好替换。
+        m_navSlot = new QWidget(body);
+        auto *slotLay = new QVBoxLayout(m_navSlot);
+        slotLay->setContentsMargins(0, 0, 0, 0);
+        slotLay->setSpacing(0);
+        m_navLay = slotLay;
+        lay->addWidget(m_navSlot, 0);
 
-        m_folderBox = new QWidget(left);
-        m_folderLay = new QVBoxLayout(m_folderBox);
-        m_folderLay->setContentsMargins(0, 0, 0, 0);
-        m_folderLay->setSpacing(4);
-        leftLay->addWidget(m_folderBox);
-        m_folderGroup = new QButtonGroup(left);
-        m_folderGroup->setExclusive(true);
-        connect(m_folderGroup, &QButtonGroup::idClicked, this, [this](int id) {
-            const QVector<GameFolder> folders = detectGameFolders(m_gameDir);
-            if (id >= 0 && id < folders.size()) {
-                m_gameDir = folders[id].path;
-                setGameDirectory(m_gameDir); // 状态保留:选的文件夹要记住
-                reload();
-            }
-        });
+        m_stack = new QStackedWidget(body);
+        m_stack->addWidget(buildVersionsPane());
+        lay->addWidget(m_stack, 1);
+        addContent(body);
+    }
 
-        leftLay->addStretch(1);
-        auto *importBtn = new PushButton(QStringLiteral("导入文件夹…"), left);
-        applyButtonFont(importBtn);
-        connect(importBtn, &QAbstractButton::clicked, this, [this] {
-            const QString dir = QFileDialog::getExistingDirectory(
-                this, QStringLiteral("选择游戏文件夹（不一定要叫 .minecraft）"), m_gameDir);
-            if (dir.isEmpty())
-                return;
-            m_gameDir = QDir::fromNativeSeparators(dir);
-            setGameDirectory(m_gameDir); // 顺带进 game.known_dirs 历史
-            reload();
-        });
-        leftLay->addWidget(importBtn);
-        lay->addWidget(left, 0);
+    QWidget *buildVersionsPane() {
+        auto *pane = new QWidget(m_stack);
+        auto *lay = new QVBoxLayout(pane);
+        lay->setContentsMargins(0, 0, 0, 0);
+        lay->setSpacing(8);
 
-        // ── 右栏:该文件夹下的已安装版本 ──
-        auto *right = new QWidget(body);
-        auto *rightLay = new QVBoxLayout(right);
-        rightLay->setContentsMargins(0, 0, 0, 0);
-        rightLay->setSpacing(8);
-        m_listHint = new BodyLabel(QString(), right);
+        m_listHint = new BodyLabel(QString(), pane);
         m_listHint->setWordWrap(true);
+        const QColor secondary = pageTokenColor("textSecondary");
         m_listHint->setTextColor(secondary, secondary);
-        rightLay->addWidget(m_listHint);
+        lay->addWidget(m_listHint);
 
-        auto *scroll = new ScrollArea(right);
+        auto *scroll = new ScrollArea(pane);
         scroll->setWidgetResizable(true);
-        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); // 横向一律不出（自适应）
         auto *holder = new QWidget(scroll);
         holder->setStyleSheet(QStringLiteral("background: transparent;"));
         scroll->setWidget(holder);
@@ -135,18 +141,122 @@ private:
         m_listLay->setContentsMargins(0, 0, 0, 0);
         m_listLay->setSpacing(8);
         m_listLay->setAlignment(Qt::AlignTop);
-        rightLay->addWidget(scroll, 1);
-        lay->addWidget(right, 1);
-
-        addContent(body);
+        lay->addWidget(scroll, 1);
+        return pane;
     }
 
-    void clearFolderRows() {
-        while (QLayoutItem *item = m_folderLay->takeAt(0)) {
-            if (QWidget *widget = item->widget())
-                widget->deleteLater();
-            delete item;
+    // ── 侧 2 栏：文件夹 ──
+    void rebuildNav(bool expand = false) {
+        const bool expanded = expand || (m_nav && !m_nav->collapsed());
+        if (m_nav) {
+            m_navLay->removeWidget(m_nav);
+            m_nav->deleteLater();
+            m_nav = nullptr;
         }
+        m_nav = new NavPanel(m_navSlot);
+        m_nav->setObjectName(QStringLiteral("sxclVersionFolderNav")); // 用例按它找这一层
+        // 侧栏**纵向撑满**(用户 2026-09-22 晚:"都改成侧边栏挤压右侧大页,不接受向下挤压"):
+        // 这一列自己吃掉整条高度,右栏才是被挤的那一边 —— 以前 AlignTop 让面板只有内容高,
+        // 视觉上像"东西被压到下面去了"。
+        m_navLay->addWidget(m_nav, 1);
+
+        QVector<GameFolder> folders = detectGameFolders(m_gameDir);
+        bool currentListed = false;
+        for (const GameFolder &f : folders) {
+            if (samePath(f.path, m_gameDir))
+                currentListed = true;
+        }
+        if (!currentListed) {
+            // 手动导入的目录还没进探测列表：补一条，保证"当前文件夹"永远在列表里
+            GameFolder self;
+            self.path = normPath(m_gameDir);
+            self.label = QStringLiteral("当前配置");
+            self.exists = true;
+            folders.prepend(self);
+        }
+
+        for (const GameFolder &f : folders) {
+            NavItem item;
+            item.routeKey = QString::fromLatin1(kFolderPrefix) + f.path;
+            // 名字都叫 .minecraft 的时候根本分不清谁是谁 —— 上面名字、下面小字路径
+            // (用户 2026-09-22 晚点名),路径过长时中间省略。
+            item.title = f.name();
+            item.subtitle = QDir::toNativeSeparators(f.path);
+            item.actionIcon = QStringLiteral("Setting"); // 悬停出现齿轮（用户点名）
+            m_nav->addItem(item);
+            // 图标在**应用起来之后**现拼（NavItem 里不能放 QPixmap，见 nav.h 的说明）
+            m_nav->setItemIconPixmap(item.routeKey, folderIconForId(folderIconId(f.path), 24).pixmap(24, 24));
+        }
+
+        NavItem importItem;
+        importItem.routeKey = QString::fromLatin1(kImportKey);
+        importItem.qfIcon = QStringLiteral("Add");
+        importItem.title = QStringLiteral("导入文件夹…");
+        importItem.bottom = true;
+        m_nav->addItem(importItem);
+
+        for (const GameFolder &f : folders) {
+            if (samePath(f.path, m_gameDir)) {
+                m_nav->setCurrent(QString::fromLatin1(kFolderPrefix) + f.path);
+                break;
+            }
+        }
+
+        connect(m_nav, &NavPanel::routeChanged, this, [this](const QString &key) {
+            if (key == QLatin1String(kImportKey)) {
+                importFolder();
+                return;
+            }
+            if (!key.startsWith(QLatin1String(kFolderPrefix)))
+                return;
+            const QString path = key.mid(int(qstrlen(kFolderPrefix)));
+            if (samePath(path, m_gameDir))
+                return;
+            m_gameDir = path;
+            setGameDirectory(m_gameDir); // 状态保留：选的文件夹要记住
+            m_stack->setCurrentIndex(0);
+            rebuildNav();
+            reloadVersions();
+        });
+        connect(m_nav, &NavPanel::itemAction, this, [this](const QString &key) {
+            if (!key.startsWith(QLatin1String(kFolderPrefix)))
+                return;
+            // 弹窗锚在**那颗齿轮**上（NavPanel 把齿轮挂在这一行下面）
+            m_lastActionAnchor = m_nav->actionButton(key);
+            showIconPicker(key.mid(int(qstrlen(kFolderPrefix))));
+        });
+
+        m_nav->setCollapsed(!expanded);
+    }
+
+    void importFolder() {
+        // 只有"导入一个磁盘上的文件夹"这一步需要系统目录选择器（没有别的办法拿到任意路径）；
+        // 页面本身与挑图标都不用它 —— 用户反对的是页面的"原生点选画风"。
+        const QString dir = QFileDialog::getExistingDirectory(
+            this, QStringLiteral("选择游戏文件夹（不一定要叫 .minecraft）"), m_gameDir);
+        if (dir.isEmpty())
+            return;
+        m_gameDir = normPath(dir);
+        setGameDirectory(m_gameDir); // 顺带进 game.known_dirs 历史
+        m_stack->setCurrentIndex(0);
+        rebuildNav();
+        reloadVersions();
+    }
+
+    /** 齿轮 -> **弹窗**挑图标（用户点名：弹窗、颜色选择器样式，不做单页）。
+     *  锚点就用那颗齿轮本身，选完先关窗再重建侧栏。 */
+    void showIconPicker(const QString &path) {
+        const QString title = QFileInfo(path).fileName();
+        QWidget *anchor = m_lastActionAnchor;
+        showFolderIconPopup(anchor != nullptr ? anchor : m_nav, path, title,
+                            [this, path, title](const QString &id) {
+                                setFolderIconId(path, id);
+                                rebuildNav();
+                                InfoBar::push(InfoBar::Type::Success, QStringLiteral("图标已更新"),
+                                              QStringLiteral("「%1」的图标已保存（下次打开还是它）")
+                                                  .arg(title.isEmpty() ? path : title),
+                                              window(), 3000);
+                            });
     }
 
     void clearVersionRows() {
@@ -157,41 +267,12 @@ private:
         }
     }
 
-    void reload() {
-        const QVector<GameFolder> folders = detectGameFolders(m_gameDir);
-        const QString currentName = QDir(m_gameDir).dirName();
-        m_folderHint->setText(QStringLiteral("当前文件夹：%1")
-                                  .arg(currentName.isEmpty() ? m_gameDir : currentName));
-        clearFolderRows();
-        // 重新建按钮组(旧的随 deleteLater 走)
-        m_folderGroup->deleteLater();
-        m_folderGroup = new QButtonGroup(m_folderBox);
-        m_folderGroup->setExclusive(true);
-        connect(m_folderGroup, &QButtonGroup::idClicked, this, [this](int id) {
-            const QVector<GameFolder> list = detectGameFolders(m_gameDir);
-            if (id >= 0 && id < list.size()) {
-                m_gameDir = list[id].path;
-                setGameDirectory(m_gameDir);
-                reload();
-            }
-        });
-        for (int i = 0; i < folders.size(); ++i) {
-            const GameFolder &folder = folders[i];
-            auto *row = new RadioButton(
-                QStringLiteral("%1（%2 个版本）").arg(folder.name()).arg(folder.versions),
-                m_folderBox);
-            row->setToolTip(QStringLiteral("%1\n来源：%2").arg(QDir::toNativeSeparators(folder.path),
-                                                            folder.label));
-            const bool isCurrent =
-                QDir(folder.path).absolutePath().compare(QDir(m_gameDir).absolutePath(),
-                                                         Qt::CaseInsensitive) == 0;
-            row->setChecked(isCurrent);
-            m_folderGroup->addButton(row, i);
-            m_folderLay->addWidget(row);
-        }
-
-        // 右栏:这个文件夹下的已安装版本(核心库扫描:加载器/能不能启动/为什么不能)
+    // ── 右栏：这个文件夹下的已安装版本 ──
+    void reloadVersions() {
         clearVersionRows();
+        const QString currentName = QDir(m_gameDir).dirName();
+        const QString shownName = currentName.isEmpty() ? m_gameDir : currentName;
+
         sxcl_instance_list list;
         memset(&list, 0, sizeof(list));
         char err[256];
@@ -199,37 +280,43 @@ private:
         const int rc =
             sxcl_instance_scan(m_gameDir.toUtf8().constData(), nullptr, &list, err, sizeof(err));
         const QString saved = selectedVersionName();
+        const QColor secondary = pageTokenColor("textSecondary");
         int shown = 0;
         if (rc == 0) {
             for (size_t i = 0; i < list.count; ++i) {
                 const sxcl_instance &inst = list.items[i];
                 auto *card = new CardWidget(m_listLay->parentWidget());
-                card->setFixedHeight(64);
+                card->setMinimumHeight(62);
                 card->setCursor(Qt::PointingHandCursor);
                 auto *rowLay = new QHBoxLayout(card);
                 rowLay->setContentsMargins(20, 8, 16, 8);
-                rowLay->setSpacing(16);
+                rowLay->setSpacing(12);
 
                 auto *text = new QVBoxLayout();
                 text->setSpacing(2);
                 const QString name = QString::fromUtf8(inst.id);
-                auto *title = new BodyLabel(
-                    QStringLiteral("%1%2").arg(name, name == saved ? QStringLiteral("　← 当前") : QString()),
-                    card);
+                const bool isCurrent = (name == saved);
+                QString titleText = name;
+                if (isCurrent)
+                    titleText += QStringLiteral("　← 当前");
+                auto *title = new BodyLabel(titleText, card);
                 {
                     QFont font = title->font();
                     font.setPixelSize(15);
                     font.setWeight(QFont::DemiBold);
                     title->setFont(font);
                 }
+                // 长版本名**省略**而不是把卡片撑宽（自适应：横向滚动条一律不出）
+                title->setToolTip(name);
                 text->addWidget(title);
+
                 QStringList bits;
                 if (inst.summary[0] != '\0')
                     bits << QString::fromUtf8(inst.summary);
-                if (inst.base_version[0] != '\0')
-                    bits << QStringLiteral("原版 %1%2").arg(QString::fromUtf8(inst.base_version),
-                                                          inst.base_reliable ? QString()
-                                                                             : QStringLiteral("(猜的)"));
+                // 只在**确信**时才说原版是哪个：以前会显示"原版 1.12.2(猜的)"，
+                // 用户 2026-09-22 晚点名嫌它难看（"我真没绷住"）——猜的就别写出来。
+                if (inst.base_version[0] != '\0' && inst.base_reliable)
+                    bits << QStringLiteral("原版 %1").arg(QString::fromUtf8(inst.base_version));
                 bits << (inst.has_jar ? QStringLiteral("有 jar") : QStringLiteral("无自己的 jar"));
                 if (!inst.launchable)
                     bits << QStringLiteral("不能启动：%1")
@@ -238,23 +325,30 @@ private:
                                                            : sxcl_instance_problem_default_text(
                                                                  inst.problem_code)));
                 auto *detail = new BodyLabel(bits.join(QStringLiteral(" · ")), card);
-                const QColor secondary = pageTokenColor("textSecondary");
+                detail->setWordWrap(true);
                 detail->setTextColor(secondary, secondary);
                 text->addWidget(detail);
                 rowLay->addLayout(text, 1);
 
                 if (!inst.launchable) {
-                    auto *bad = new BodyLabel(QStringLiteral("⚠"), card);
-                    bad->setStyleSheet(QStringLiteral("color: %1;").arg(pageTokenText("warning")));
+                    // 警示三角是**自绘 svg**(用户点名:不要 emoji),颜色跟随主题
+                    auto *bad = new InfoIconWidget(InfoBarIcon::Warning, card);
+                    bad->setFixedSize(16, 16);
+                    bad->setToolTip(QStringLiteral("这一份还不能启动（原因见左边那行小字）"));
                     rowLay->addWidget(bad, 0, Qt::AlignVCenter);
                 }
 
-                QObject::connect(card, &QWidget::customContextMenuRequested, card, [] {});
-                auto *pick = new PushButton(QStringLiteral("用这个"), card);
-                applyButtonFont(pick);
-                const QString picked = name;
-                connect(pick, &QAbstractButton::clicked, this, [this, picked] { choose(picked); });
-                rowLay->addWidget(pick, 0, Qt::AlignVCenter);
+                if (isCurrent) {
+                    auto *tag = new BodyLabel(QStringLiteral("当前版本"), card);
+                    tag->setTextColor(secondary, secondary);
+                    rowLay->addWidget(tag, 0, Qt::AlignVCenter);
+                } else {
+                    auto *pick = new PushButton(QStringLiteral("用这个"), card);
+                    applyButtonFont(pick);
+                    const QString picked = name;
+                    QObject::connect(pick, &QAbstractButton::clicked, this, [this, picked] { choose(picked); });
+                    rowLay->addWidget(pick, 0, Qt::AlignVCenter);
+                }
                 m_listLay->addWidget(card);
                 ++shown;
             }
@@ -262,16 +356,18 @@ private:
         sxcl_instance_list_free(&list);
 
         if (shown == 0) {
-            m_listHint->setText(QStringLiteral("「%1」里还没有已安装的版本（去「下载 → Minecraft 版本」装一个）")
-                                    .arg(currentName.isEmpty() ? m_gameDir : currentName));
+            m_listHint->setText(
+                QStringLiteral("「%1」里还没有已安装的版本（去「下载 → Minecraft 版本」装一个）")
+                    .arg(shownName));
         } else {
-            m_listHint->setText(QStringLiteral("这个文件夹里有 %1 个版本；点「用这个」把它设为当前版本")
+            m_listHint->setText(QStringLiteral("「%1」里有 %2 个版本；点「用这个」把它设为当前版本")
+                                    .arg(shownName)
                                     .arg(shown));
         }
     }
 
     void choose(const QString &name) {
-        setSelectedVersionName(name); // game.selected_version:关掉重开也记得
+        setSelectedVersionName(name); // game.selected_version：关掉重开也记得
         InfoBar::push(InfoBar::Type::Success, QStringLiteral("已切换当前版本"),
                       QStringLiteral("%1（目录名就是版本名，随便改不影响启动）").arg(name), window(),
                       4000);
@@ -280,11 +376,12 @@ private:
     }
 
     QString m_gameDir;
-    QWidget *m_folderBox = nullptr;
-    QVBoxLayout *m_folderLay = nullptr;
-    QButtonGroup *m_folderGroup = nullptr;
+    QWidget *m_navSlot = nullptr;
+    QVBoxLayout *m_navLay = nullptr;
+    NavPanel *m_nav = nullptr;
+    QWidget *m_lastActionAnchor = nullptr; // 弹窗要锚在用户点的那颗齿轮上
+    QStackedWidget *m_stack = nullptr;
     QVBoxLayout *m_listLay = nullptr;
-    BodyLabel *m_folderHint = nullptr;
     BodyLabel *m_listHint = nullptr;
 };
 

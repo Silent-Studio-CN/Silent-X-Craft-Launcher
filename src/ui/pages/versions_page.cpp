@@ -39,6 +39,7 @@
 #if defined(_MSC_VER)
 #pragma warning(push, 0) // libqf 的头在 /W4 下不是零警告,整体静音(见 libqf.h 的说明)
 #endif
+#include "../ui_icons.h"              // 自绘 svg 小图标（警示三角）
 #include "fluent/fluent_controls.h"      // PushButton / InfoBar
 #include "fluent/fluent_input.h"         // SearchLineEdit
 #include "fluent/fluent_labels.h"        // TitleLabel / SubtitleLabel / BodyLabel
@@ -209,11 +210,9 @@ public:
             return m_loaders.value(v.id);
         case ProblemRole:
             return m_problems.value(v.id);
-        case Qt::ToolTipRole: {
-            const QString state =
-                m_installed.contains(v.id) ? QStringLiteral("已安装") : QStringLiteral("未安装");
-            return QStringLiteral("%1\n%2 | %3 | %4").arg(v.id, v.type, v.releaseLabel(), state);
-        }
+        case Qt::ToolTipRole:
+            // 同样不评判"装没装过"（用户点名）；只报这一行是什么版本。
+            return QStringLiteral("%1\n%2 | %3").arg(v.id, v.type, v.releaseLabel());
         default:
             return {};
         }
@@ -293,27 +292,15 @@ public:
         painter->drawText(QRect(left + 226, rect.top(), 110, rect.height()),
                           Qt::AlignVCenter | Qt::AlignLeft, version.releaseLabel());
 
-        if (model->installedAt(index.row())) {
+        {
             const QVariantList loaders = model->loadersAt(index.row());
             const QString problem = model->problemAt(index.row());
-            QStringList kinds;
-            for (const QVariant &item : loaders) {
-                const QStringList pair = item.toStringList();
-                if (!pair.isEmpty())
-                    kinds << pair.at(0);
-            }
-            // icons.py:78-97 state_icon_kind(草方块 = Minecraft 版本的通用符号)
-            const QString iconKind =
-                SxclIcons::stateIconKind(version.type, kinds, !problem.isEmpty());
-            painter->drawPixmap(
-                QRect(left + 340, rect.top() + (rect.height() - 14) / 2, 14, 14),
-                SxclIcons::instance().blockPixmap(iconKind, 28));
-            painter->setPen(t.success);
-            painter->drawText(QRect(left + 360, rect.top(), 60, rect.height()),
-                              Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("已安装"));
-
-            // 同一个原版下装了哪些模组加载器(用户经常一个版本装好几套)
-            int chipX = left + 424;
+            /* 这里以前会画一个绿字"已安装" + 状态方块图。**2026-09-22 晚按用户的话删掉**：
+             *   「用户下无数个同版本你也管不着？游戏下载用得着你告诉用户那个下载过了？」
+             * "版本 = versions/ 下的文件夹名"，同一个原版装几个都正常，这份清单是**下载**用的，
+             * 不该在这上面评判用户装没装过。留下的是真正有用的信息：
+             * 这个 MC 版本下已经装了哪些**加载器**、以及"装了却启动不了"的原因。 */
+            int chipX = left + 340;
             const QFontMetrics metrics = painter->fontMetrics();
             const int shown = qMin(3, int(loaders.size()));
             for (int i = 0; i < shown; ++i) {
@@ -336,10 +323,12 @@ public:
                 chipX += width + 6;
             }
 
-            // 不能启动的原因直接贴在行里(缺前置/JSON 坏),别等用户点启动才报错
+            // 不能启动的原因直接贴在行里(缺前置/JSON 坏),别等用户点启动才报错。
+            // 警示三角是**自绘 svg**(用户点名:黄色感叹号 emoji 换掉),与文字一起居中排在 chip 里。
             if (!problem.isEmpty()) {
-                const QString text = QStringLiteral("⚠ ") + problem;
-                const int width = metrics.horizontalAdvance(text) + 16;
+                const QString text = problem;
+                const int iconSide = 14;
+                const int width = metrics.horizontalAdvance(text) + iconSide + 22;
                 if (chipX + width <= rect.right() - 8) {
                     const QRect chip(chipX, rect.top() + (rect.height() - 20) / 2, width, 20);
                     const QColor color = t.danger;
@@ -348,8 +337,17 @@ public:
                     painter->setPen(QPen(color, 1));
                     painter->setBrush(fill);
                     painter->drawRoundedRect(chip, 4, 4);
+                    const QPixmap warn = uiWarningPixmap(iconSide, color);
+                    if (!warn.isNull()) {
+                        const QRect iconRect(chip.left() + 6,
+                                             chip.top() + (chip.height() - iconSide) / 2, iconSide,
+                                             iconSide);
+                        painter->drawPixmap(iconRect, warn);
+                    }
                     painter->setPen(color);
-                    painter->drawText(chip, Qt::AlignCenter, text);
+                    painter->drawText(QRect(chip.left() + iconSide + 10, chip.top(),
+                                            chip.width() - iconSide - 14, chip.height()),
+                                      Qt::AlignVCenter | Qt::AlignLeft, text);
                 }
             }
             painter->setBrush(Qt::NoBrush);

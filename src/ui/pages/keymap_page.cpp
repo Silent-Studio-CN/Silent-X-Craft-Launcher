@@ -6,6 +6,7 @@
 
 #include "page_factory.h"
 
+#include "../ui_icons.h" // 自绘 svg 小图标（冲突列表的警示三角）
 #include "fluent_theme.h"
 #include "libqf.h"
 #include "theme_bridge.h"
@@ -1101,7 +1102,8 @@ QWidget *createKeymapPage(QWidget *parent) {
             conflictList->addItem(item);
         }
         for (const KConflict &conflict : conflicts) {
-            auto *item = new QListWidgetItem(QStringLiteral("⚠ ") + conflict.message);
+            auto *item = new QListWidgetItem(conflict.message);
+            item->setIcon(uiWarningIcon(16)); // 自绘 svg（用户点名：黄色感叹号 emoji 换掉）
             item->setForeground(QBrush(warning));
             item->setData(Qt::UserRole, conflict.controls.isEmpty() ? QString()
                                                                     : conflict.controls.first());

@@ -40,6 +40,7 @@
 #include "fluent/fluent_input.h"
 #include "fluent/fluent_labels.h"
 #include "fluent/fluent_scroll.h"
+#include "fluent/fluent_segmented.h" // Pivot:离线/正版的滑动选项(PCL 形态)
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
@@ -54,6 +55,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShowEvent>
+#include <QStackedWidget>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -95,6 +97,8 @@ private:
     BodyLabel *m_accountState = nullptr;  // 正版卡的状态行
     PushButton *m_accountButton = nullptr;
     QLineEdit *m_offlineEdit = nullptr;   // 离线 ID(状态保留)
+    Pivot *m_loginPivot = nullptr;        // 离线 / 正版 的滑动选项(PCL 形态)
+    QStackedWidget *m_loginStack = nullptr; // 两张卡二选一显示
     BodyLabel *m_dirName = nullptr;       // 当前文件夹的名字
     BodyLabel *m_dirDisplay = nullptr;    // 完整路径
 };
@@ -173,14 +177,25 @@ void HomePage::buildContent() {
     versionLay->addWidget(changeBtn, 0, Qt::AlignVCenter);
     m_vBox->addWidget(versionCard);
 
-    // ── ② 启动区:左正版 / 右离线 ──
+    // ── ② 启动区:**PCL 那样的滑动选项**(离线 / 正版二选一,不同时摆在眼前) ──
+    // 用户 2026-09-22 晚点名:「正版和离线做 PCL 一样的滑动选项，不同时存在，默认离线」。
+    // Pivot 就是 libqf 里那套带滑动指示条的分段控件(与 PCL 的登录方式切换同一个形态)。
     auto *launchRow = new QWidget(m_view);
-    auto *launchLay = new QHBoxLayout(launchRow);
+    auto *launchLay = new QVBoxLayout(launchRow);
     launchLay->setContentsMargins(0, 0, 0, 0);
-    launchLay->setSpacing(16);
+    launchLay->setSpacing(8);
+    m_loginPivot = new Pivot(launchRow);
+    m_loginPivot->addItem(QStringLiteral("offline"), QStringLiteral("离线启动"));
+    m_loginPivot->addItem(QStringLiteral("account"), QStringLiteral("正版登录"));
+    m_loginPivot->setIndicatorColor(FluentTheme::instance().tokens().accent,
+                                    FluentTheme::instance().tokens().accent);
+    launchLay->addWidget(m_loginPivot, 0, Qt::AlignLeft);
+
+    auto *launchStack = new QStackedWidget(launchRow);
+    m_loginStack = launchStack;
     {
         // 左:正版启动
-        auto *accountCard = new CardWidget(launchRow);
+        auto *accountCard = new CardWidget(launchStack);
         auto *accountLay = new QVBoxLayout(accountCard);
         accountLay->setContentsMargins(20, 16, 20, 16);
         accountLay->setSpacing(8);
@@ -197,10 +212,10 @@ void HomePage::buildContent() {
         applyButtonFont(m_accountButton);
         connect(m_accountButton, &QAbstractButton::clicked, this, [this] { launchWithAccount(); });
         accountLay->addWidget(m_accountButton, 0, Qt::AlignLeft);
-        launchLay->addWidget(accountCard, 1);
+        launchStack->addWidget(accountCard);
 
         // 右:离线启动(用户点名:ID 输入框 + 状态保留;已登录正版也能用这一路)
-        auto *offlineCard = new CardWidget(launchRow);
+        auto *offlineCard = new CardWidget(launchStack);
         auto *offlineLay = new QVBoxLayout(offlineCard);
         offlineLay->setContentsMargins(20, 16, 20, 16);
         offlineLay->setSpacing(8);
@@ -228,8 +243,15 @@ void HomePage::buildContent() {
         connect(offlineBtn, &QAbstractButton::clicked, this, [this] { launchOffline(); });
         rowLay->addWidget(offlineBtn, 0);
         offlineLay->addWidget(row);
-        launchLay->addWidget(offlineCard, 1);
+        launchStack->addWidget(offlineCard);
     }
+    // 默认**离线**(用户点名):正版那条要等用户主动切过去/登录
+    m_loginStack->setCurrentIndex(0);
+    m_loginPivot->setCurrentItem(QStringLiteral("offline"));
+    connect(m_loginPivot, &Pivot::currentItemChanged, this, [this](const QString &key) {
+        m_loginStack->setCurrentIndex(key == QLatin1String("account") ? 1 : 0);
+    });
+    launchLay->addWidget(launchStack, 1);
     m_vBox->addWidget(launchRow);
 
     // ── ③ 当前文件夹卡(用户:显示文件夹自己的名字,不强制叫 .minecraft)──
@@ -340,7 +362,7 @@ void HomePage::refresh() {
         m_accountButton->setEnabled(true);
     } else {
         m_accountState->setText(QStringLiteral("还没登录。登录后可以用正版身份启动；"
-                                               "不想登录就用右边的离线启动。"));
+                                               "不想登录就切回上面的「离线启动」。"));
         m_accountButton->setText(QStringLiteral("登录"));
         m_accountButton->setEnabled(true);
     }

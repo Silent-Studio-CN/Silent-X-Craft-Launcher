@@ -167,6 +167,12 @@ typedef struct sxcl_loader_library {
      *  (实测 Forge 1.20.1 的 46 条安装期依赖:jsr305 在 libraries.minecraft.net、
      *  其余在 maven.minecraftforge.net),只按 maven 根地址拼会 404。空串 = 清单没给。 */
     char url_full[512];
+    /** 清单里给的 SHA-1 / 大小(downloads.artifact.sha1 / .size)。**有就必须用**:只写
+     *  "size = 0、没有哈希"那种任务引擎判不出完整性 —— 实测真机上下到一半的连接被掐断,
+     *  584 KB 的半截 zip 被当成"下载完成",一直要到处理器读它才炸(zip END header not found)。
+     *  而且有哈希就顺带拿到了"已存在且校验通过 -> 一个字节都不下"的快路径。空串/0 = 清单没给。 */
+    char sha1[41];
+    int64_t size;
 } sxcl_loader_library;
 
 /** 从版本 JSON 或 install_profile.json 收集需要下载的依赖库。
@@ -393,6 +399,16 @@ typedef struct sxcl_loader_install_request {
      *  (dest = <game_dir>/libraries/<path>,urls[0] = <url><path>),再 sxcl_engine_run。
      *  返回非 0 = 失败(安装按方式 B 失败收场)。 */
     int (*on_libraries)(void *userdata, const sxcl_loader_library *libs, size_t count);
+    /** 可空:替代"下载客户端映射"这条处理器(FCL: patchDownloadMojangMappingsTask)。
+     *  1.14~1.20 的安装器里有条 `--task DOWNLOAD_MOJMAPS` —— 它**自己去 piston-data 抓**
+     *  client_mappings,而那个站点在国内经常连不上(FCL 专门为它打了补丁)。
+     *  实现方式:读版本 JSON 的 `downloads.client_mappings`(URL + sha1 + size),交给自己的
+     *  下载引擎(镜像优先、强校验 SHA-1)—— 已经下过并校验通过时**一个字节都不下**。
+     *  mc_version/output 已经把字面量求好了(如 "1.20.1" 与 <game_dir>/libraries/net/minecraft/...)。
+     *  返回 0 = 已经下好了(processors 会跳过那条处理器);
+     *  非 0 = 没下成 —— **照常跑处理器**,让它自己再试一次(有官方网络的环境照样能装完)。 */
+    int (*on_mappings)(void *userdata, const char *mc_version, const char *output, char *err,
+                       size_t err_len);
     /** 可空:安装器每输出一行原始输出就回调一次(与 process.h 的 on_line 同签名同语义)。
      *  用途:CLI 的 --verbose、启动器记日志/进度界面;返回非 0 = 请求终止安装。
      *  注意用的是上面那个 userdata(不是 cancel_userdata)。 */

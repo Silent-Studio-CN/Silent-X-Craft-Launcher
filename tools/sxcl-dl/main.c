@@ -724,6 +724,7 @@ static void loader_progress(void *userdata, int percent, const char *status)
 typedef struct loader_cli_ctx {
     const cli_opts *o;
     const char *game_dir;
+    const char *instance;
 } loader_cli_ctx;
 
 /* --verbose 时把安装器吐出来的原始每一行也打出来(排查"退出码 1"这种只有结论没有原因的情况)。 */
@@ -734,6 +735,89 @@ static int loader_raw_line(void *userdata, int is_stderr, const char *line)
         printf("      [%s] %s\n", is_stderr ? "err" : "out", line);
         fflush(stdout);
     }
+    return 0;
+}
+
+/* 客户端映射:见 loader.h 的 on_mappings。
+ * 1.14~1.20 的安装器里有条 `--task DOWNLOAD_MOJMAPS`,它直接去 piston-data 抓那份 client.txt
+ * (国内经常连不上,FCL 为它专门打了补丁)。我们手里有描述它的 URL + SHA-1 + size(版本 JSON 的
+ * downloads.client_mappings),顺手用镜像下掉;下不成返回非 0,处理器照跑(自己再试一次)。 */
+static int loader_on_mappings(void *userdata, const char *mc_version, const char *output, char *err,
+                              size_t err_len)
+{
+    const loader_cli_ctx *ctx = (const loader_cli_ctx *)userdata;
+    if (err && err_len) {
+        err[0] = '\0';
+    }
+    if (!ctx || !ctx->o || !ctx->game_dir || !output || !output[0]) {
+        return 1;
+    }
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/versions/%s/%s.json", ctx->game_dir,
+             mc_version ? mc_version : "", mc_version ? mc_version : "");
+    if (!sxcl_fs_exists(path) && ctx->instance && ctx->instance[0]) {
+        snprintf(path, sizeof(path), "%s/versions/%s/%s.json", ctx->game_dir, ctx->instance,
+                 ctx->instance);
+    }
+    if (!sxcl_fs_exists(path)) {
+        snprintf(err, err_len, "版本 JSON 不在: %s", path);
+        return 1;
+    }
+    char jerr[192];
+    jerr[0] = '\0';
+    sxcl_json *doc = sxcl_json_parse_file(path, jerr, sizeof(jerr));
+    if (!doc) {
+        snprintf(err, err_len, "版本 JSON 读不出来: %s", jerr[0] ? jerr : path);
+        return 1;
+    }
+    const sxcl_json_value *downloads = sxcl_json_get(sxcl_json_root(doc), "downloads");
+    const sxcl_json_value *cm = downloads ? sxcl_json_get(downloads, "client_mappings") : NULL;
+    const char *url = cm ? sxcl_json_get_string(cm, "url", "") : "";
+    const char *sha1 = cm ? sxcl_json_get_string(cm, "sha1", "") : "";
+    const long long size = cm ? (long long)sxcl_json_get_int64(cm, "size", 0) : 0;
+    sxcl_json_free(doc);
+    if (!url[0] || !sha1[0] || size <= 0) {
+        snprintf(err, err_len, "版本 JSON 里没有 downloads.client_mappings");
+        return 1;
+    }
+
+    cli_state st;
+    memset(&st, 0, sizeof(st));
+    st.verbose = ctx->o->verbose;
+    sxcl_engine *engine = NULL;
+    if (make_engine(ctx->o, &st, &engine) != 0) {
+        snprintf(err, err_len, "下载引擎起不来");
+        return 1;
+    }
+    char mirror[1024];
+    mirror[0] = '\0';
+    const int have_mirror =
+        sxcl_manifest_mirror_url(url, SXCL_MIRROR_BMCLAPI_BASE, mirror, sizeof(mirror)) == 0;
+    sxcl_task t;
+    memset(&t, 0, sizeof(t));
+    t.dest = output;
+    if (ctx->o->prefer_mirror && have_mirror) {
+        t.urls[0] = mirror;
+        t.urls[1] = url;
+    } else {
+        t.urls[0] = url;
+        if (have_mirror) {
+            t.urls[1] = mirror;
+        }
+    }
+    t.sha1 = sha1;
+    t.algo = SXCL_HASH_SHA1;
+    t.size = size;
+    t.priority = 0;
+    t.label = "client_mappings";
+    const int state = run_one(engine, &t);
+    sxcl_engine_destroy(engine);
+    if (state != SXCL_TASK_DONE) {
+        snprintf(err, err_len, "%s", t.error[0] ? t.error : "下载失败");
+        return 1;
+    }
+    printf("  客户端映射已由下载引擎取回: %s\n", output);
+    fflush(stdout);
     return 0;
 }
 
@@ -775,6 +859,9 @@ static int loader_on_libraries(void *userdata, const sxcl_loader_library *libs, 
         t.urls[0] = url;
         t.urls[1] = ctx->o->mirror;
         t.algo = SXCL_HASH_SHA1;
+        /* 清单给了哈希/大小就用它:半截文件不会再被当成"下完了",重跑还能走"已存在"快路径 */
+        t.sha1 = libs[i].sha1[0] ? libs[i].sha1 : NULL;
+        t.size = libs[i].size;
         t.priority = 10;
         t.label = libs[i].name;
         if (run_one(engine, &t) != SXCL_TASK_DONE) {
@@ -1264,11 +1351,13 @@ static int cmd_loader(int argc, char **argv, const cli_opts *opts_in)
     memset(&lctx, 0, sizeof(lctx));
     lctx.o = o;
     lctx.game_dir = game_dir;
+    lctx.instance = instance;
     req.on_progress = loader_progress;
     req.is_cancelled = loader_cancelled;
     req.userdata = &lctx;   /* on_line 看 --verbose,on_libraries 要游戏目录 */
     req.on_line = loader_raw_line;
     req.on_libraries = loader_on_libraries;
+    req.on_mappings = loader_on_mappings;
 
     sxcl_loader_install_result res;
     const int rc = sxcl_loader_install(&req, &res);

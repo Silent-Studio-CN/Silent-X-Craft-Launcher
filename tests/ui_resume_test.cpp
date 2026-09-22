@@ -11,7 +11,7 @@
  *   ② 目标目录变了(记录里的 gameDir != 这次解析出来的):照样不续跑,登记"上次目标目录已变";
  *   ③ 旧文件(schema 1,没有 gameDir):照读不炸,同样不自动续装(兼容);
  *   ④ 用户点那条记录 = 走产品路径(navigateToTask,与任务卡 onClick 同一个入口):
- *      目标已存在 -> 拒装 + InfoBar,绝不覆盖用户的版本 JSON;
+ *      目标已存在 -> 不开工 + InfoBar(人话是"这条任务不用恢复了"),绝不覆盖用户的版本 JSON;
  *   ⑤ SXCL_UI_RESUME_TASKS=1(验收钉子):自动续跑确实恢复了(页面被建出来),
  *      而且**即使钉子开着**,目标已存在时安装引擎也会拒装(核心库预检,不覆盖)。
  *
@@ -290,7 +290,10 @@ int runCase(int n) {
                                   Q_ARG(QString, key)); // 与任务卡 onClick 同一个入口
         pump(500);
         check(!hasRoute(window, key), QStringLiteral("目标已存在 -> 点它也不开工"));
-        check(hasText(infoBarTexts(), QStringLiteral("没有恢复")), QStringLiteral("给了一句人话(InfoBar)"));
+        // 文案 2026-09-22 晚改过：以前是"没有恢复:目标已经存在"(像在拒绝用户)，
+        // 现在是"这条任务不用恢复了 —— 可能你之前已经装好了"(用户点名:别评判用户装过没有)。
+        // 行为不变：**照样不开工、绝不覆盖**。
+        check(hasText(infoBarTexts(), QStringLiteral("不用恢复")), QStringLiteral("给了一句人话(InfoBar)"));
         check(targetMarkerAlive(dirOk, instance), QStringLiteral("用户的版本 JSON 原样还在"));
     } else if (n == 5) {
         section(QStringLiteral("⑤ 验收钉子 SXCL_UI_RESUME_TASKS=1 -> 自动续跑确实回来了"));

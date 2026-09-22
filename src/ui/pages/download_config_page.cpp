@@ -44,7 +44,6 @@
 #endif
 #include "fluent/fluent_cards.h"
 #include "fluent/fluent_controls.h"
-#include "fluent/fluent_dialog.h" // MessageBox(残骸的"删掉并继续 / 先不装"确认;与设置页同一个类)
 #include "fluent/fluent_labels.h"
 #include "fluent/fluent_input.h"
 #include "fluent/fluent_scroll.h"
@@ -869,7 +868,7 @@ private:
         connect(m_nameInput, &QLineEdit::textChanged, this,
                 [this](const QString &text) { onNameManualEdit(text); }); // :171
 
-        m_warning = new BodyLabel(QStringLiteral("⚠ 不能与现有版本名相同"), m_view); // :173
+        m_warning = new BodyLabel(QString(), m_view); // :173（提示文案在 checkVersionExists 里给）
         m_warning->setTextColor(FluentTheme::instance().tokens().danger);            // :175
         m_warning->setVisible(false);                                                // :176
         m_nameSection->addContent(m_nameInput);                                      // :177
@@ -1035,18 +1034,42 @@ private:
         return (flags & SXCL_INSTALL_TARGET_JSON) != 0;
     }
 
+    /** 这个名字被占了的话，往后找一个空名字（base / base-2 / base-3 …）。
+     *
+     *  **为什么是"换名字"而不是"拦住用户"**（用户 2026-09-22 晚的原话）：
+     *    「用户下无数个同版本你也管不着？游戏下载用得着你告诉用户那个下载过了？」
+     *  版本 = versions/ 下的**文件夹名**：同一个原版装几份都正常，界面既不该拦、
+     *  也不该教育用户"你下过了"。占名字这件事只有一种真实后果 —— 不能往同一个文件夹里
+     *  再装一份（那是覆盖，会毁掉原来那份），所以这里**自动换个空文件夹名**，
+     *  用户照样一键装第二份、第三份，全程不需要为名字操心。 */
+    QString nextFreeVersionName(const QString &base) const {
+        QString candidate = base.trimmed();
+        if (candidate.isEmpty())
+            candidate = m_versionId;
+        if (!versionNameTaken(candidate))
+            return candidate;
+        for (int i = 2; i <= 99; ++i) {
+            const QString alt = QStringLiteral("%1-%2").arg(candidate).arg(i);
+            if (!versionNameTaken(alt))
+                return alt;
+        }
+        return candidate + QStringLiteral("-") + QString::number(QDateTime::currentMSecsSinceEpoch());
+    }
+
     void checkVersionExists(const QString &versionName) {
         QString why;
         bool remnant = false;
         if (versionNameTaken(versionName, &why, &remnant)) {
-            styleNameInput(QStringLiteral("error"));
-            m_warning->setText(QStringLiteral("⚠ 不能与现有版本名相同"));
+            // 只提示"会换个空名字装"，不画红框、不说"不能" —— 用户要装多少份都行
+            styleNameInput(QStringLiteral("normal"));
+            m_warning->setText(QStringLiteral("「%1」已经有一份了，这次会装成「%2」")
+                                   .arg(versionName, nextFreeVersionName(versionName)));
             m_warning->setVisible(true);
         } else if (remnant) {
             // 残骸:引擎愿意装,所以**不画红框**,但要把引擎那句准确的话摆出来
             // (它自己就写了"或先清理那个目录"),用户不用猜。
             styleNameInput(QStringLiteral("normal"));
-            m_warning->setText(QStringLiteral("⚠ %1").arg(why));
+            m_warning->setText(QStringLiteral("%1").arg(why));
             m_warning->setVisible(true);
         } else {
             styleNameInput(QStringLiteral("normal"));
@@ -1073,7 +1096,7 @@ private:
     // :499-549 开始下载。核心库的安装引擎还没接到 UI(见报告),这里是"算好参数后交给
     // 主窗口的下载进度页"这一段 —— 与 Python 的 switch_to_download_progress 调用一致。
     void onDownload() {
-        const QString vn = m_nameInput->text().trimmed();
+        QString vn = m_nameInput->text().trimmed();
         if (vn.isEmpty()) {
             InfoBar::push(InfoBar::Type::Warning, QStringLiteral("请输入版本名称"),
                           QStringLiteral("版本名称不能为空"), this, 3000);
@@ -1082,51 +1105,18 @@ private:
         const QString dir = gameDirectory() + QStringLiteral("/versions/") + vn;
         // 与安装引擎同一份判定(核心库 sxcl_install_target_probe):这里说"已存在"就是引擎会拒装
         // 的那一种;这里说"没有",引擎也不会另判一套。
-        QString why;
-        bool remnant = false;
-        const bool taken = versionNameTaken(vn, &why, &remnant);
-        if (!taken && remnant) {
-            /* 残骸(docs/22 的 B2/C3):同名 jar 在、但没有可解析的版本 JSON —— 引擎愿意重装,
-             * 所以这里**给一条出路**,而不是像以前那样只说"换个名字"。
-             * 两个选择:清理掉那份残骸再装(推荐)/ 先不装(回去自己改名)。 */
-            const QString jar = QDir::toNativeSeparators(
-                gameDirectory() + QStringLiteral("/versions/") + vn + QLatin1Char('/') + vn +
-                QStringLiteral(".jar"));
-            auto *box = new MessageBox(QStringLiteral("发现没装完的残骸"),
-                                       QStringLiteral("%1\n\n装下去的话,启动前的「补全文件」会把缺的"
-                                                      "补齐;也可以先把这份残骸删掉再装（更干净）。")
-                                           .arg(why),
-                                       window());
-            box->setAttribute(Qt::WA_DeleteOnClose);
-            if (box->yesButton() != nullptr)
-                box->yesButton()->setText(QStringLiteral("删掉残骸并继续"));
-            if (box->cancelButton() != nullptr)
-                box->cancelButton()->setText(QStringLiteral("先不装"));
-            connect(box, &MessageBox::yesSignal, this, [this, jar] {
-                const int rc = sxcl_fs_remove(jar.toUtf8().constData());
-                InfoBar::push(rc == 0 ? InfoBar::Type::Success : InfoBar::Type::Warning,
-                              QStringLiteral("清理残骸"),
-                              rc == 0 ? QStringLiteral("已删掉 %1,可以重新装了").arg(jar)
-                                      : QStringLiteral("删不掉 %1（被占用?）—— 可以换个版本名继续")
-                                            .arg(jar),
-                              window(), 5000);
-            });
-            box->show();
-            return; // 等用户在对话框里做决定;要继续装就再点一次"开始下载"
-        }
-        if (taken) {
-            // 统一错误出口(带 warning 级别):一样复制完整上下文到剪贴板
-            UiErrorContext ctx;
-            ctx.page = QStringLiteral("下载配置页 / download_config_%1").arg(m_versionId);
-            ctx.action = QStringLiteral("开始下载(实例名 %1)").arg(vn);
-            ctx.reason = QStringLiteral("版本 '%1' 已经安装,请使用不同的版本名称").arg(vn);
-            ctx.detail = QStringLiteral("%1(目标目录 %2)")
-                             .arg(why, QDir::toNativeSeparators(dir));
-            ctx.title = QStringLiteral("版本已存在");
-            ctx.warning = true;
-            pushUiError(this, ctx, 6000);
-            styleNameInput(QStringLiteral("error"));
-            return;
+        /* 用户点名（2026-09-22 晚）：「用户下无数个同版本你也管不着？游戏下载用得着你告诉
+         * 用户那个下载过了？」—— 这里**不拦、不问、不说教**：这个名字已经有主了就自动往后找
+         * 一个空文件夹名（1.20.1 -> 1.20.1-2 -> …），既不覆盖已经装好的那一份，也不打断用户。
+         *
+         * "版本 = versions/ 下的文件夹名"（PCL 概念）：同一个原版装多少份都由用户说了算，
+         * 界面唯一要保证的是**别往同一个文件夹里再装一遍**（那是覆盖，会毁掉原来那份）。
+         * 以前那两段（"版本已存在，请换名字"的错误弹窗 + "发现没装完的残骸"的确认框）都删了。 */
+        const QString requested = vn;
+        vn = nextFreeVersionName(vn);
+        if (vn != requested) {
+            const QSignalBlocker blocker(m_nameInput);
+            m_nameInput->setText(vn);
         }
 
         QString loaderType = QStringLiteral("none");

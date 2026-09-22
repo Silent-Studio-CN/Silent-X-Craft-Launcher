@@ -54,6 +54,10 @@ set(SXCL_UI_SOURCES
   sxcl_icons.cpp     sxcl_icons.h
   theme_bridge.cpp   theme_bridge.h
   icon_registry.cpp  icon_registry.h
+  #   ui_icons.*     界面自绘小图标（警示三角等；用户点名"emoji 换成 svg"）
+  ui_icons.cpp       ui_icons.h
+  #   folder_icons.* 文件夹自定义图标（用户点名：悬停文件夹出设置按钮，从应用内挑图标）
+  folder_icons.cpp   folder_icons.h
   nav.cpp            nav.h
   main_window.cpp    main_window.h
   #   tray.*       任务栏托盘图标:「最小化 = 隐藏窗口」后的恢复入口(新增设计,
@@ -135,6 +139,16 @@ if(SXCL_BUILD_TESTS)
   sxcl_deploy_qt(sxcl_fabric_installer_test)
   add_test(NAME sxcl_fabric_installer_test COMMAND sxcl_fabric_installer_test)
   set_tests_properties(sxcl_fabric_installer_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sxcl_qt_bin}")
+
+  # 文件夹自定义图标（目录 / 持久化 / 回落 / 页面内选择器）—— 纯逻辑 + 控件计数，不用截图
+  add_executable(sxcl_ui_folder_icons_test "${CMAKE_SOURCE_DIR}/tests/ui_folder_icons_test.cpp")
+  target_link_libraries(sxcl_ui_folder_icons_test PRIVATE sxcl_ui_core)
+  sxcl_warnings(sxcl_ui_folder_icons_test)
+  sxcl_deploy_qt(sxcl_ui_folder_icons_test)
+  add_test(NAME sxcl_ui_folder_icons_test COMMAND sxcl_ui_folder_icons_test -platform offscreen)
+  set_tests_properties(sxcl_ui_folder_icons_test PROPERTIES
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sxcl_qt_bin}")
 

@@ -454,7 +454,7 @@ void InstallWorker::run() {
                            "Fabric 安装器版本取不到(镜像与官方都不通)—— 退回**猜测值**:"
                            "拿 loader 版本 %s 当安装器版本(大概率 404)",
                            m_request.loaderVersion.toUtf8().constData());
-                emitLog(QStringLiteral("⚠ 取不到 Fabric 安装器版本清单,用了**猜测值** %1"
+                emitLog(QStringLiteral("[注意] 取不到 Fabric 安装器版本清单,用了**猜测值** %1"
                                        "(拿 loader 版本当安装器版本,大概率 404)")
                             .arg(m_request.loaderVersion));
             }

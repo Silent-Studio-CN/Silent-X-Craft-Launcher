@@ -1648,6 +1648,18 @@ static int processor_run(void *ud, const char *program, const char *const *argv,
     return 0;
 }
 
+/** 把"下载客户端映射"这条处理器的替代实现转发给调用方(见 loader.h 的 on_mappings)。 */
+static int processor_download_mappings(void *ud, const char *version, const char *output, char *err,
+                                       size_t err_len)
+{
+    install_ctx *ctx = (install_ctx *)ud;
+    const sxcl_loader_install_request *req = ctx->req;
+    if (!req->on_mappings) {
+        return 1;   /* 没接就照常跑处理器 */
+    }
+    return req->on_mappings(req->userdata, version, output, err, err_len);
+}
+
 static int processor_is_cancelled(void *ud)
 {
     return ctx_cancelled((const install_ctx *)ud);
@@ -1719,6 +1731,7 @@ static int run_processors(install_ctx *ctx, const sxcl_json *profile, const char
     pctx.java_path = req->java_path;
     pctx.timeout_ms = effective_timeout_ms(req);
     pctx.take_file = processor_take_file;
+    pctx.download_mappings = req->on_mappings ? processor_download_mappings : NULL;
     pctx.run = processor_run;
     pctx.is_cancelled = processor_is_cancelled;
     pctx.report = processor_report;

@@ -28,9 +28,11 @@
 #include "page_factory.h"
 #include "page_shell.h"
 
+#include "../fluent_theme.h"
 #include "../icon_registry.h"
 #include "../nav.h"
 #include "../sxcl_icons.h"
+#include "../ui_icons.h"
 #include "libqf.h"          // InfoBar(与其他页同一个入口)
 #include "workers/ui_paths.h"
 
@@ -48,12 +50,25 @@
 #endif
 
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QStackedWidget>
 #include <QVBoxLayout>
 #include <QWidget>
 
 namespace sxcl::ui {
 namespace {
+
+/** 当前"版本形态"：game.edition（java / bedrock）。读不出来就按 java —— 用户点名默认是 Java。 */
+QString currentEdition() {
+    const QByteArray path = uiSettingsFilePath().toUtf8();
+    sxcl_settings *st = sxcl_settings_open(path.constData());
+    if (!st)
+        return QStringLiteral("java");
+    const char *raw = sxcl_settings_get(st, "game.edition", "java");
+    const QString edition = QString::fromUtf8(raw ? raw : "java");
+    sxcl_settings_free(st);
+    return edition.isEmpty() ? QStringLiteral("java") : edition;
+}
 
 // 占位卡:MOD / 光影这两栏现在没内容,如实说清楚"这一栏会做什么、什么时候做"。
 CardWidget *buildPlaceholderCard(const QString &title, const QString &body, QWidget *parent) {
@@ -88,37 +103,21 @@ QWidget *createDownloadPage(QWidget *parent) {
     auto *page = new PageShell(QStringLiteral("下载"), QStringLiteral("官方 / 镜像双路 · 静默安装"),
                                QStringLiteral("sxclPage_download"), parent);
 
-    // ── 顶部右侧:基岩版开关(预留;位置待用户确认)──
-    {
-        auto *row = new QWidget(page->view());
-        auto *lay = new QHBoxLayout(row);
-        lay->setContentsMargins(0, 0, 0, 0);
-        lay->addStretch(1);
-        auto *bedrock = new RadioButton(QStringLiteral("基岩版（未接入）"), row);
-        QObject::connect(bedrock, &QRadioButton::clicked, row, [bedrock] {
-            // 状态键先落盘(界面能点到的开关必须存得住),功能之后再接。
-            const QByteArray path = uiSettingsFilePath().toUtf8();
-            if (sxcl_settings *st = sxcl_settings_open(path.constData())) {
-                sxcl_settings_set(st, "game.edition", "bedrock");
-                sxcl_settings_free(st);
-            }
-            InfoBar::push(InfoBar::Type::Info, QStringLiteral("基岩版还没接入"),
-                          QStringLiteral("这里先把开关占住（状态会记住）。基岩版要走 Rust+C 那条线，"
-                                         "现在的下载与启动都只有 Java 版。"),
-                          bedrock, 4000);
-        });
-        lay->addWidget(bedrock, 0, Qt::AlignVCenter);
-        page->addContent(row);
-    }
-
     // ── 双层侧边栏 + 右内容区 ──
     auto *body = new QWidget(page->view());
     auto *bodyLay = new QHBoxLayout(body);
     bodyLay->setContentsMargins(0, 0, 0, 0);
     bodyLay->setSpacing(12);
 
+    // 左侧一整列 = 侧 2 栏 + 它的页脚(版本形态滑块)。**整列撑满高度**,右内容区才是被挤的那一边
+    // —— 用户 2026-09-22 晚:"都改成侧边栏挤压右侧大页,不接受向下挤压"。
+    auto *leftCol = new QWidget(body);
+    auto *leftLay = new QVBoxLayout(leftCol);
+    leftLay->setContentsMargins(0, 0, 0, 0);
+    leftLay->setSpacing(8);
+
     // 第二层:与窗口左边那条**同一个组件**,所以动画/几何/选中态天然一致。
-    auto *inner = new NavPanel(body);
+    auto *inner = new NavPanel(leftCol);
     const NavItem kDownloadNav[] = {
         {QStringLiteral("download_mc"), QString(), QStringLiteral("vanilla"),
          QStringLiteral("Minecraft 版本"), false, -1},
@@ -134,7 +133,57 @@ QWidget *createDownloadPage(QWidget *parent) {
     // 进页面就把那套展开动画演一遍(用户点名"要包含完整的动画"):48 -> 322 / 150ms / OutQuad。
     // 之后三横菜单照常折叠/展开,与主侧边栏一模一样。
     inner->setCollapsed(false);
-    bodyLay->addWidget(inner, 0);
+    leftLay->addWidget(inner, 1); // 侧栏吃掉竖直方向的余量
+
+    // ── 侧栏页脚:Java 版 / 基岩版 滑块(用户点名:滑块 + 咖啡杯 + 基岩 LOGO) ──
+    {
+        auto *foot = new CardWidget(leftCol);
+        auto *fl = new QVBoxLayout(foot);
+        fl->setContentsMargins(16, 12, 16, 12);
+        fl->setSpacing(6);
+        auto *row = new QHBoxLayout();
+        row->setSpacing(8);
+        auto *javaIcon = new QLabel(foot);
+        javaIcon->setPixmap(fluent::icon(QStringLiteral("Cafe"), FluentTheme::instance().isDark())
+                                .pixmap(18, 18));
+        javaIcon->setToolTip(QStringLiteral("Java 版"));
+        row->addWidget(javaIcon, 0, Qt::AlignVCenter);
+        auto *slider = new SwitchButton(QStringLiteral("Java 版"), foot);
+        slider->setToolTip(QStringLiteral("Java 版 / 基岩版：二选一（切换会记住）"));
+        row->addWidget(slider, 0, Qt::AlignVCenter);
+        auto *bedrockIcon = new QLabel(foot);
+        const QPixmap bedrockLogo = uiBedrockLogoPixmap(14);
+        if (!bedrockLogo.isNull())
+            bedrockIcon->setPixmap(bedrockLogo);
+        else
+            bedrockIcon->setText(QStringLiteral("基岩版"));
+        bedrockIcon->setToolTip(QStringLiteral("基岩版"));
+        row->addWidget(bedrockIcon, 0, Qt::AlignVCenter);
+        row->addStretch(1);
+        fl->addLayout(row);
+
+        const QString edition = currentEdition();
+        slider->setChecked(edition == QLatin1String("bedrock"));
+        slider->setText(slider->isChecked() ? QStringLiteral("基岩版") : QStringLiteral("Java 版"));
+        QObject::connect(slider, &SwitchButton::checkedChanged, foot, [slider, foot](bool on) {
+            // 状态键落盘(界面能点到的开关必须存得住),功能之后再接 —— 基岩版走 Rust+C 那条线。
+            const QByteArray path = uiSettingsFilePath().toUtf8();
+            if (sxcl_settings *st = sxcl_settings_open(path.constData())) {
+                sxcl_settings_set(st, "game.edition", on ? "bedrock" : "java");
+                sxcl_settings_save(st, path.constData()); // 必须存盘,否则"记住"是假的
+                sxcl_settings_free(st);
+            }
+            slider->setText(on ? QStringLiteral("基岩版") : QStringLiteral("Java 版"));
+            if (on) {
+                InfoBar::push(InfoBar::Type::Info, QStringLiteral("基岩版还没接入"),
+                              QStringLiteral("开关已经记住（game.edition=bedrock）。基岩版要走 Rust+C "
+                                             "那条线，现在的下载与启动都只有 Java 版。"),
+                              foot, 4500);
+            }
+        });
+        leftLay->addWidget(foot, 0);
+    }
+    bodyLay->addWidget(leftCol, 0);
 
     auto *stack = new QStackedWidget(body);
     stack->addWidget(createVersionsPage(stack));

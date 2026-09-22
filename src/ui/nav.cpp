@@ -8,6 +8,7 @@
 
 #include <QCursor>
 #include <QEasingCurve>
+#include <QEvent>
 #include <QFont>
 #include <QPainter>
 #include <QPixmap>
@@ -50,7 +51,14 @@ QByteArray qfIconSvg(const QString &name, bool dark) {
 
 // 画 16x16 图标盒里的图标(盒的左上角已由调用方给出)
 void paintIcon(QPainter &p, const QRectF &box, const QString &qfIconName,
-               const QString &blockKind, bool dark) {
+               const QString &blockKind, bool dark, const QPixmap &custom = QPixmap()) {
+    if (!custom.isNull()) {
+        // 页面给的现成图标(文件夹自定义图标,见 NavItem.iconPixmap):已经按目标尺寸做好,
+        // 直接居中画 —— 与方块图那条同样的整数矩形,避免半像素模糊。
+        const QRect target = box.toRect();
+        p.drawPixmap(target, custom);
+        return;
+    }
     if (!blockKind.isEmpty()) {
         // Python: grass_block_icon(24) 得到的是 **QIcon**,drawIcon 走
         // icon.paint(painter, QRectF(rect).toRect(), Qt.AlignCenter) —— 整数矩形 + 居中。
@@ -123,6 +131,16 @@ NavButton::NavButton(const QIcon &icon, const QString &qfIconName, const QString
     setFixedSize(40, 36); // qf navigation_widget.py:48 setFixedSize(40, 36)
 }
 
+void NavButton::setPixmapIcon(const QPixmap &pm) {
+    m_pixmap = pm;
+    update();
+}
+
+void NavButton::setSubtitle(const QString &text) {
+    m_subtitle = text;
+    update();
+}
+
 QRect NavButton::indicatorRect() const {
     // qf navigation_widget.py:127-130 indicatorRect = QRectF(m.left(), 10, 3, 16)
     return QRect(0, 10, 3, 16);
@@ -160,8 +178,8 @@ void NavButton::paintEvent(QPaintEvent *) {
     }
 
     // ---- 图标:16x16,位于 (11.5, 10) ----
-    paintIcon(p, QRectF(kIconLeft, kIconTop, kIconSide, kIconSide), m_qfIconName, m_blockKind,
-              dark);
+    paintIcon(p, QRectF(kIconLeft, kIconTop, kIconSide, kIconSide), m_qfIconName, m_blockKind, dark,
+              m_pixmap);
 
     // ---- 文字:折叠态不画 ----
     if (isCompacted())
@@ -170,10 +188,27 @@ void NavButton::paintEvent(QPaintEvent *) {
     f.setPixelSize(kTextPixelSize);
     p.setFont(f);
     p.setPen(textColor());
-    const bool hasIcon = !m_qfIconName.isEmpty() || !m_blockKind.isEmpty();
+    const bool hasIcon = !m_qfIconName.isEmpty() || !m_blockKind.isEmpty() || !m_pixmap.isNull();
     const qreal left = hasIcon ? kTextLeftWithIcon : kTextLeftNoIcon;
-    p.drawText(QRectF(left, 0, width() - kTextRightReserve - left, height()), Qt::AlignVCenter,
-               text());
+    // 右侧留出齿轮的位置(有动作按钮时):用户点名"文件夹右侧设置和按钮错位"，
+    // 其实就是文字压到了齿轮底下 —— 文字区必须先把位置让出来。
+    const qreal reserve = kTextRightReserve + (m_actionReserve ? 34.0 : 0.0);
+    const qreal textWidth = width() - reserve - left;
+    if (m_subtitle.isEmpty()) {
+        p.drawText(QRectF(left, 0, textWidth, height()), Qt::AlignVCenter, text());
+        return;
+    }
+    // 两行:上行名字(正常字号)、下行路径(小一号 + 次要色)
+    const qreal half = height() / 2.0;
+    p.drawText(QRectF(left, 1, textWidth, half - 1), Qt::AlignVCenter | Qt::AlignLeft, text());
+    QFont small = f;
+    small.setPixelSize(11);
+    p.setFont(small);
+    QColor sub = textColor();
+    sub.setAlpha(150);
+    p.setPen(sub);
+    const QString elided = fontMetrics().elidedText(m_subtitle, Qt::ElideMiddle, int(textWidth));
+    p.drawText(QRectF(left, half, textWidth, half - 2), Qt::AlignVCenter | Qt::AlignLeft, elided);
 }
 
 // ---------------------------------------------------------------- NavPanel
@@ -250,7 +285,85 @@ NavigationPushButton *NavPanel::addItem(const NavItem &item) {
         setCurrent(key);
         emit routeChanged(key);
     });
+    if (!item.subtitle.isEmpty()) {
+        btn->setSubtitle(item.subtitle);
+        btn->setFixedHeight(48); // 两行:名字 + 小字路径
+    }
+    if (!item.actionIcon.isEmpty()) {
+        btn->setActionReserve(true);
+        attachActionButton(btn, item.routeKey, item.actionIcon);
+    }
     return btn;
+}
+
+// ── 悬停动作按钮（用户点名：「当 2 栏被拉出，鼠标悬停的文件夹出现设置按钮」） ──
+
+void NavPanel::attachActionButton(NavigationPushButton *host, const QString &routeKey,
+                                 const QString &svgName) {
+    auto *btn = new NavToolButton(svgName, host);
+    btn->setFixedSize(32, 32);            // 行高 36，留 2px 边距
+    btn->setCursor(Qt::PointingHandCursor);
+    btn->setToolTip(QStringLiteral("设置图标"));
+    btn->hide();
+    // 点它**不选中这一行**（它是子控件，点击本来就到不了宿主），只把动作发出去。
+    connect(btn, &NavigationWidget::clicked, this, [this, routeKey](bool) { emit itemAction(routeKey); });
+    m_actionButtons.insert(routeKey, btn);
+    host->installEventFilter(this);
+    btn->installEventFilter(this);
+    layoutActionButton(host);
+}
+
+void NavPanel::layoutActionButton(NavigationPushButton *host) {
+    for (auto it = m_actionButtons.begin(); it != m_actionButtons.end(); ++it) {
+        NavToolButton *btn = it.value();
+        if (btn->parentWidget() != host)
+            continue;
+        // 折叠态(48 宽)根本没地方摆它 —— 直接藏起来
+        if (m_collapsed || host->width() < 120) {
+            btn->hide();
+            return;
+        }
+        btn->move(host->width() - btn->width() - 4, (host->height() - btn->height()) / 2);
+    }
+}
+
+bool NavPanel::eventFilter(QObject *watched, QEvent *event) {
+    auto *host = qobject_cast<NavigationPushButton *>(watched);
+    if (host) {
+        if (event->type() == QEvent::Resize) {
+            layoutActionButton(host);
+        } else if (event->type() == QEvent::Enter) {
+            for (auto it = m_actionButtons.begin(); it != m_actionButtons.end(); ++it) {
+                if (it.value()->parentWidget() == host && !m_collapsed && host->width() >= 120)
+                    it.value()->show();
+            }
+        } else if (event->type() == QEvent::Leave) {
+            for (auto it = m_actionButtons.begin(); it != m_actionButtons.end(); ++it) {
+                NavToolButton *btn = it.value();
+                // 鼠标挪到"齿轮"上时不能把它藏掉（否则刚要点就没了）
+                if (btn->parentWidget() == host && !btn->underMouse())
+                    btn->hide();
+            }
+        }
+        return QFrame::eventFilter(watched, event);
+    }
+    for (auto it = m_actionButtons.begin(); it != m_actionButtons.end(); ++it) {
+        NavToolButton *btn = it.value();
+        if (btn != watched)
+            continue;
+        if (event->type() == QEvent::Enter)
+            btn->show();
+        else if (event->type() == QEvent::Leave && !btn->parentWidget()->underMouse())
+            btn->hide();
+        break;
+    }
+    return QFrame::eventFilter(watched, event);
+}
+
+void NavPanel::setItemIconPixmap(const QString &routeKey, const QPixmap &pm) {
+    auto *btn = dynamic_cast<NavButton *>(m_buttons.value(routeKey, nullptr));
+    if (btn)
+        btn->setPixmapIcon(pm);
 }
 
 void NavPanel::setCurrent(const QString &routeKey) {
@@ -259,6 +372,10 @@ void NavPanel::setCurrent(const QString &routeKey) {
     m_current = routeKey;
     for (auto it = m_buttons.begin(); it != m_buttons.end(); ++it)
         it.value()->setSelected(it.key() == routeKey);
+}
+
+QWidget *NavPanel::actionButton(const QString &routeKey) const {
+    return m_actionButtons.value(routeKey, nullptr);
 }
 
 NavigationPushButton *NavPanel::button(const QString &routeKey) const {
@@ -271,8 +388,15 @@ void NavPanel::setWidgetsCompacted(bool compacted) {
         b->setCompacted(compacted);
         // qf NavigationWidget.setCompacted:折叠 40x36,展开 EXPAND_WIDTH(312)x36
         // (navigation_widget.py:73-84;libqf 的 setCompacted 只改状态不改尺寸,这里补齐)
-        b->setFixedSize(compacted ? 40 : NavigationWidget::EXPAND_WIDTH, 36);
+        const int rowHeight = b->height() > 40 ? 48 : 36; // 两行(名字+路径)的行保持 48
+        b->setFixedSize(compacted ? 40 : NavigationWidget::EXPAND_WIDTH, rowHeight);
         b->setToolTip(compacted ? b->text() : QString());
+    }
+    for (auto it = m_actionButtons.begin(); it != m_actionButtons.end(); ++it) {
+        if (compacted)
+            it.value()->hide();
+        else
+            layoutActionButton(qobject_cast<NavigationPushButton *>(it.value()->parentWidget()));
     }
     update();
 }

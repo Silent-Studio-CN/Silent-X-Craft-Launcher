@@ -34,6 +34,18 @@ struct NavItem {
     // 也不是 qf 内置图标 —— 它们走 IconRegistry(语义名 -> assets/icons/pcl/*.svg)。
     // -1 = 不用它(qfIcon / blockKind 优先)。
     int semantic = -1;
+
+    // ↓ 2026-09-22 晚新增的两个字段(**必须放在最后**:别处还有 {key, qfIcon, blockKind, title,
+    //   bottom, semantic} 这样的聚合初始化,插在中间会把 int 塞给 QString/QPixmap)。
+
+    /** 非空 = 这一行**悬停时**右侧出现一个动作按钮(用 qf 图标名,如 "Setting")。
+     *  用户点名:"当 2 栏被拉出,鼠标悬停的文件夹出现设置按钮"。点它不会选中这一行,
+     *  而是发 NavPanel::itemAction(routeKey)。 */
+    QString actionIcon;
+    /** 第二行小字（文件夹列表就是它显示**路径**：用户 2026-09-22 晚点名
+     *  「文件夹列表都是 .minecraft 就算了。怎么区分啊？做成上方名字下方小字路径」）。
+     *  非空时这一行会变高（两行文字），字号更小、颜色取次要文字色。 */
+    QString subtitle;
 };
 
 // 纯图标工具按钮(qf python NavigationToolButton):
@@ -63,6 +75,13 @@ public:
     NavButton(const QIcon &icon, const QString &qfIconName, const QString &blockKind,
               const QString &text, QWidget *parent = nullptr);
 
+    /** 页面给的现成图标(文件夹自定义图标);空 = 回到 qfIcon / blockKind。 */
+    void setPixmapIcon(const QPixmap &pm);
+    /** 第二行小字(路径之类);空 = 单行。 */
+    void setSubtitle(const QString &text);
+    /** 右侧是否留出动作按钮(齿轮)的位置,免得文字压到它下面。 */
+    void setActionReserve(bool reserve) { m_actionReserve = reserve; }
+
 protected:
     void paintEvent(QPaintEvent *) override;
     QRect indicatorRect() const override; // 选中指示条:QRectF(0,10,3,16)
@@ -70,6 +89,9 @@ protected:
 private:
     QString m_qfIconName;
     QString m_blockKind;
+    QPixmap m_pixmap;
+    QString m_subtitle;
+    bool m_actionReserve = false;
 };
 
 // 导航面板:顶部组(返回 + 菜单 + 导航项)+ 弹性 + 底部组(设置)
@@ -85,10 +107,18 @@ public:
     explicit NavPanel(QWidget *parent = nullptr);
 
     NavigationPushButton *addItem(const NavItem &item);
+    /** 给一条已经加进来的条目换上一张"现成的图"(版本选择页的文件夹自定义图标)。
+     *  为什么不做成 NavItem 的字段:NavItem 有**文件作用域**的数组(kNavSpec / kDownloadNav),
+     *  而 QPixmap 必须在 QGuiApplication 之后构造 —— 放进结构体里会让那些静态数组
+     *  在 main() 之前就构造 QPixmap,直接报"Must construct a QGuiApplication before a QPixmap"。
+     *  所以由页面在建好条目之后单独设(那时应用早就起来了)。 */
+    void setItemIconPixmap(const QString &routeKey, const QPixmap &pm);
     void setCurrent(const QString &routeKey);
     QString currentRouteKey() const { return m_current; }
     const QVector<NavItem> &items() const { return m_items; }
     NavigationPushButton *button(const QString &routeKey) const;
+    /** 这一行的悬停动作按钮（齿轮）；没有就返回 nullptr。弹窗类 UI 拿它当锚点。 */
+    QWidget *actionButton(const QString &routeKey) const;
 
     // qf navigation_panel.py:83 menuButton 对应的汉堡按钮(与条目的间距、位置同 qf)
     NavToolButton *menuButton() const { return m_menuBtn; }
@@ -99,9 +129,18 @@ public:
 
 signals:
     void routeChanged(const QString &routeKey);
+    /** 某一行右侧的"动作按钮"(NavItem.actionIcon)被点了。参数是那一行的 routeKey。 */
+    void itemAction(const QString &routeKey);
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void setWidgetsCompacted(bool compacted);
+    /** 给一条导航项挂上悬停动作按钮(见 NavItem.actionIcon)。 */
+    void attachActionButton(NavigationPushButton *host, const QString &routeKey,
+                            const QString &svgName);
+    void layoutActionButton(NavigationPushButton *host);
 
     QVBoxLayout *m_top = nullptr;
     QVBoxLayout *m_bottom = nullptr;
@@ -110,6 +149,7 @@ private:
     QPropertyAnimation *m_widthAni = nullptr; // 展开/折叠:150ms OutQuad(qf navigation_panel.py:121-122)
     QVector<NavItem> m_items;
     QHash<QString, NavigationPushButton *> m_buttons;
+    QHash<QString, NavToolButton *> m_actionButtons;   /**< routeKey -> 悬停动作按钮 */
     QString m_current;
     bool m_collapsed = true; // qf 默认 displayMode = COMPACT(折叠,48 宽)
 };

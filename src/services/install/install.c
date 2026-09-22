@@ -1142,6 +1142,87 @@ static void on_loader_progress(void *userdata, int percent, const char *status) 
     emit_progress(r, SXCL_INSTALL_EVENT_STAGE_PROGRESS, percent, text, NULL);
 }
 
+/** 客户端映射:改从版本 JSON 的 downloads.client_mappings 下(见 loader.h 的 on_mappings)。
+ *
+ *  为什么不让处理器自己去下:1.14~1.20 的安装器里有条 `--task DOWNLOAD_MOJMAPS`,它会直接去
+ *  piston-data 抓那份 client.txt —— 官方站点在国内经常连不上,整个安装就卡死在它身上
+ *  (FCL 专门为它打了 patchDownloadMojangMappingsTask)。我们手里已经有描述这份文件的
+ *  URL + SHA-1 + size(版本 JSON 的 downloads.client_mappings),没理由不顺手用镜像下掉。
+ *
+ *  下好了就返回 0(processors 跳过那条);没下成返回非 0 —— **处理器照跑**,让它自己再试一次。
+ *  这条失败**不算安装失败**(fatal=0):它只是让后面的处理器多一次机会。 */
+static int install_loader_mappings(void *userdata, const char *mc_version, const char *output,
+                                   char *err, size_t err_len)
+{
+    install_run *r = (install_run *)userdata;
+    if (err && err_len) {
+        err[0] = '\0';
+    }
+    if (!output || !output[0]) {
+        set_text(err, err_len, "下载客户端映射:没给输出路径");
+        return 1;
+    }
+    char jerr[192];
+    jerr[0] = '\0';
+    sxcl_json *doc = r->version_json_path[0]
+                         ? sxcl_json_parse_file(r->version_json_path, jerr, sizeof(jerr))
+                         : NULL;
+    if (!doc) {
+        set_text(err, err_len, "下载客户端映射:版本 JSON 读不出来（%s）%s", r->version_json_path,
+                 jerr[0] ? jerr : "");
+        return 1;
+    }
+    const sxcl_json_value *downloads = sxcl_json_get(sxcl_json_root(doc), "downloads");
+    const sxcl_json_value *cm = downloads ? sxcl_json_get(downloads, "client_mappings") : NULL;
+    const char *url = cm ? sxcl_json_get_string(cm, "url", "") : "";
+    const char *sha1 = cm ? sxcl_json_get_string(cm, "sha1", "") : "";
+    const int64_t size = cm ? sxcl_json_get_int64(cm, "size", 0) : 0;
+    if (!url[0] || !sha1[0] || size <= 0) {
+        set_text(err, err_len, "下载客户端映射:版本 JSON 里没有 downloads.client_mappings（%s）",
+                 mc_version ? mc_version : "?");
+        sxcl_json_free(doc);
+        return 1;
+    }
+
+    char mirror[1024];
+    mirror[0] = '\0';
+    const char *base = install_mirror_base(r->plan);
+    const int have_mirror =
+        (base && sxcl_manifest_mirror_url(url, base, mirror, sizeof(mirror)) == 0) ? 1 : 0;
+
+    sxcl_task task;
+    memset(&task, 0, sizeof(task));
+    task.dest = output;
+    if (r->plan->prefer_mirror && have_mirror) {
+        task.urls[0] = mirror;
+        task.urls[1] = url;
+    } else {
+        task.urls[0] = url;
+        if (have_mirror) {
+            task.urls[1] = mirror;
+        }
+    }
+    task.sha1 = sha1;
+    task.algo = SXCL_HASH_SHA1;
+    task.size = size;
+    task.priority = 0;
+    task.label = "客户端映射";
+    sxcl_json_free(doc);
+
+    sxcl_task *batch[1];
+    batch[0] = &task;
+    const int rc = download_batch(r, SXCL_INSTALL_STAGE_LOADER_RUN, "客户端映射", batch, 1, 0,
+                                  SXCL_INSTALL_ERR_LOADER, "客户端映射");
+    if (rc == SXCL_INSTALL_ERR_CANCELLED) {
+        return 1;   /* 取消交给安装器的取消检查去收场 */
+    }
+    if (rc != 0 || task.state != SXCL_TASK_DONE) {
+        set_text(err, err_len, "%s", task.error[0] ? task.error : "下载器没跑起来");
+        return 1;
+    }
+    return 0;
+}
+
 /**
  * 方式 B(解包安装)会把"要下载的依赖库"交回来:在这里走一遍下载钩子。
  * 任何一个库失败都算加载器安装失败(与 Python 的 _stage_download_loader_libs 一致)。
@@ -1233,7 +1314,11 @@ static int on_loader_libraries(void *userdata, const sxcl_loader_library *libs, 
         }
 
         tasks[i].algo = SXCL_HASH_SHA1;
-        tasks[i].size = 0; /* 加载器依赖库没有官方哈希:只做大小/可读检查(与 Python 一致) */
+        /* 清单里给了 SHA-1 / 大小就用它（Forge/NeoForge 的 install_profile.json 都给）：
+         * ① 引擎会**强校验**，半截文件不会再被当成"下载完成"；
+         * ② 命中"已存在且校验通过"的快路径，重装时一个字节都不下。 */
+        tasks[i].sha1 = libs[i].sha1[0] ? libs[i].sha1 : NULL;
+        tasks[i].size = libs[i].size;
         tasks[i].priority = 10;
         tasks[i].label = libs[i].name;
         ptrs[i] = &tasks[i];
@@ -1273,6 +1358,7 @@ static int stage_loader_run(install_run *r) {
     request.is_cancelled = loader_is_cancelled;
     request.cancel_userdata = r;
     request.on_libraries = on_loader_libraries;
+    request.on_mappings = install_loader_mappings;
 
     sxcl_loader_install_result result;
     memset(&result, 0, sizeof(result));

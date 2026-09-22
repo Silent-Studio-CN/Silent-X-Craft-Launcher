@@ -1732,8 +1732,12 @@ bool MainWindow::resumePendingTask(const QString &taskId) {
     if ((flags & SXCL_INSTALL_TARGET_JSON) != 0) {
         sxcl_install_target_describe(why, sizeof(why), record.gameDir.toUtf8().constData(),
                                      instance.toUtf8().constData());
-        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("没有恢复:目标已经存在"),
-                      QString::fromUtf8(why), this, 12000);
+        /* 不覆盖是对的（那是**已经装好**的一份），但别把话说成"拒绝你"。
+         * 用户 2026-09-22 晚点名：同一个版本装几份都由用户说了算，界面不评判。 */
+        InfoBar::push(InfoBar::Type::Info, QStringLiteral("这条任务不用恢复了"),
+                      QStringLiteral("「%1」里现在有一份能启动的版本了 —— 可能你之前已经装好了。")
+                          .arg(instance),
+                      this, 8000);
         uiTrace(QStringLiteral("win | 恢复被拒(目标已存在):%1 | %2").arg(instance,
                                                                         QString::fromUtf8(why)));
         return true;

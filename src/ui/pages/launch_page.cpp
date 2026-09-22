@@ -262,6 +262,14 @@ private:
 
         layout->addWidget(makeSectionTitle(QStringLiteral("游戏输出（按核心库日志归类）"), card));
         m_logView = makeMonoView(card, 168);
+        /* 游戏一启动就会**刷屏**(Forge/模组几百上千行),以前每来一行就 appendPlainText
+         * 并滚到底 —— UI 线程被这些重绘活活压住,Windows 直接给窗口打上"未响应"。
+         * 现在**攒着按帧刷**(见 onLogLine / flushLogLines),并且给视图一个块数上限,
+         * 让它不会无限长大。用户 2026-09-22 晚点名:"一启动游戏 SXCL 直接未响应。注意做异步" */
+        m_logView->setMaximumBlockCount(6000);
+        m_logFlush = new QTimer(this);
+        m_logFlush->setInterval(120); // 每秒最多刷 8 次
+        connect(m_logFlush, &QTimer::timeout, this, [this] { flushLogLines(); });
         layout->addWidget(m_logView);
 
         m_vBox->addWidget(card);                             // :585 add_content(card)
@@ -527,11 +535,35 @@ private:
                            .arg(stream, tag,
                                 severity >= 2 ? QStringLiteral("[!]") : QString(),
                                 text);
-        m_logView->appendPlainText(line);
-        m_logView->verticalScrollBar()->setValue(m_logView->verticalScrollBar()->maximum());
+        m_logPending.append(line);
+        // 刷屏太猛时只留最近的:界面不是日志文件(完整日志在 logs/ 里,有导出入口)
+        if (m_logPending.size() > 4000) {
+            const int drop = m_logPending.size() - 4000;
+            m_logPending.remove(0, drop);
+            m_logDropped += drop;
+        }
+        if (!m_logFlush->isActive())
+            m_logFlush->start();
         m_logLineCount += 1;
         if (severity >= 2 || kind == QLatin1String("crash"))
             m_lastProblemLine = text;
+    }
+
+    /** 把攒下的日志一次性贴上去(定时器驱动)。 */
+    void flushLogLines() {
+        if (!m_logPending.isEmpty()) {
+            QString batch = m_logPending.join(QLatin1Char('\n'));
+            m_logPending.clear();
+            if (m_logDropped > 0) {
+                batch.prepend(QStringLiteral("……（刷屏太快，省略了 %1 行；完整日志见「更多 → 日志」）\n")
+                                  .arg(m_logDropped));
+                m_logDropped = 0;
+            }
+            m_logView->appendPlainText(batch);
+            m_logView->verticalScrollBar()->setValue(m_logView->verticalScrollBar()->maximum());
+        }
+        if (m_logPending.isEmpty())
+            m_logFlush->stop();
     }
 
     // 核心库的稳定英文键 -> 中文短标签(logscan.c:637-651 是键的唯一来源)
@@ -897,6 +929,10 @@ private:
     BodyLabel *m_javaLabel = nullptr;          // Java 探测结果
     QPlainTextEdit *m_commandView = nullptr;   // 最终命令行(核心库打码后的)
     QPlainTextEdit *m_logView = nullptr;       // stdout/stderr(带核心库归类标签)
+    /* 日志按帧刷(见 flushLogLines):游戏刷屏时 UI 线程必须还能喘气 */
+    QTimer *m_logFlush = nullptr;
+    QStringList m_logPending;
+    int m_logDropped = 0;
 
     // ── 阶段 7 新增:执行侧 ──
     LaunchWorker *m_worker = nullptr;     // 工作线程外壳(this 的子对象,析构时会 join)

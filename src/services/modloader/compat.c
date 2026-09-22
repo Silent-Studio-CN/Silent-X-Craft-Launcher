@@ -716,6 +716,8 @@ static void fill_library(sxcl_loader_library *dst, const sxcl_json_value *lib, c
     dst->path[0] = '\0';
     dst->url[0] = '\0';
     dst->url_full[0] = '\0';
+    dst->sha1[0] = '\0';
+    dst->size = 0;
     (void)copy_cap(dst->name, sizeof(dst->name), coord);
     (void)copy_cap(dst->url, sizeof(dst->url),
                    lib ? sxcl_json_get_string(lib, "url", fallback) : fallback);
@@ -726,6 +728,8 @@ static void fill_library(sxcl_loader_library *dst, const sxcl_json_value *lib, c
                        sxcl_json_get_string(artifact, "url", ""));
         (void)copy_cap(dst->path, sizeof(dst->path),
                        sxcl_json_get_string(artifact, "path", ""));
+        (void)copy_cap(dst->sha1, sizeof(dst->sha1), sxcl_json_get_string(artifact, "sha1", ""));
+        dst->size = sxcl_json_get_int64(artifact, "size", 0);
     }
     if (!dst->path[0] &&
         sxcl_loader_maven_path(coord, dst->path, sizeof(dst->path)) != SXCL_LOADER_OK) {
