@@ -54,6 +54,22 @@
 namespace sxcl::ui {
 namespace {
 
+/** 光影那一栏要的加载器 slug：Modrinth 认的是 iris / optifine / canvas，
+ *  拿实例的 fabric/forge 去筛会一条都搜不到（这是"不自动换加载器"在光影上的等价物：
+ *  我们只按"这个实例理论上能装哪种光影加载器"去筛，搜不到就如实说搜不到）。 */
+QByteArray shaderLoaderSlug(const QByteArray &instanceLoader) {
+    if (instanceLoader.isEmpty()) {
+        return QByteArray();
+    }
+    if (instanceLoader == QByteArrayLiteral("optifine")) {
+        return QByteArrayLiteral("optifine");
+    }
+    if (instanceLoader == QByteArrayLiteral("fabric") || instanceLoader == QByteArrayLiteral("quilt")) {
+        return QByteArrayLiteral("iris");
+    }
+    return QByteArray();   /* forge/neoforge:光影加载器不统一,不筛(如实让用户自己看) */
+}
+
 /** 版本隔离开着吗（与启动层同一个键）。 */
 bool versionIsolationOn() {
     const QByteArray path = uiSettingsFilePath().toUtf8();
@@ -166,9 +182,16 @@ private:
         const QByteArray text = m_search->text().trimmed().toUtf8();
         const QByteArray mc = m_mc.toUtf8();
         const QByteArray loader = m_loader.toUtf8();
+        /* 资源类型:模组那一栏必须钉死 "mod"（Modrinth 默认不筛类型，不钉的话光影/资源包会混进来）；
+         * 光影那一栏钉 "shader"，并且加载器要换成 Modrinth 光影那一套 slug ——
+         * 它认的是 iris / optifine / canvas，拿实例的 fabric 去筛会一条都搜不到。 */
+        const QByteArray type = QByteArrayLiteral("mod");
+        const QByteArray shaderType = QByteArrayLiteral("shader");
+        const QByteArray shaderLoader = shaderLoaderSlug(loader);
         q.text = text.constData();
         q.game_version = mc.constData();
-        q.loader = loader.constData();
+        q.loader = m_shaders ? shaderLoader.constData() : loader.constData();
+        q.project_type = m_shaders ? shaderType.constData() : type.constData();
         q.limit = 20;
         char url[1200];
         if (sxcl_mods_modrinth_search_url(&q, url, sizeof(url)) != 0) {

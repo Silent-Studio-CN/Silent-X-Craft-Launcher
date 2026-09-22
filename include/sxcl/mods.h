@@ -38,6 +38,10 @@ typedef struct sxcl_mods_query {
     const char *game_version;  /**< 如 "1.20.1" */
     const char *loader;        /**< "fabric" / "forge" / "neoforge" / "quilt" / 空 */
     const char *category;      /**< 分类 slug，可空 */
+    /** 资源类型 facet（Modrinth 的 project_type）："mod" / "shader" / "resourcepack" /
+     *  "datapack" / "plugin"；空 = 不筛（两个源混着来）。
+     *  **模组那一栏要传 "mod"**：不传的话光影/资源包会混进模组列表（实测 Modrinth 默认不筛类型）。 */
+    const char *project_type;
     const char *sort;          /**< "relevance" / "downloads" / "updated" / "newest"，可空 = 相关度 */
     int offset;                /**< >= 0 */
     int limit;                 /**< 1..100，<=0 取 20 */

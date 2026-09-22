@@ -87,6 +87,21 @@ static void test_search_url(void) {
     check(strstr(url, "versions:1.20.1") != NULL, "  游戏版本进了 facets");
     check(strstr(url, "categories:fabric") != NULL, "  加载器进了 facets");
 
+    /* 资源类型 facet：模组那一栏必须传 "mod"（不传的话光影/资源包会混进模组列表） */
+    memset(&q, 0, sizeof(q));
+    q.project_type = "mod";
+    check_int(sxcl_mods_modrinth_search_url(&q, url, sizeof(url)), 0, "只筛类型也拼得出来");
+    check(strstr(url, "project_type:mod") != NULL, "  project_type 进了 facets");
+    q.project_type = "shader";
+    check_int(sxcl_mods_modrinth_search_url(&q, url, sizeof(url)), 0, "光影类型也拼得出来");
+    check(strstr(url, "project_type:shader") != NULL, "  shader 进了 facets");
+    q.game_version = "1.20.1";
+    q.loader = "iris";
+    check_int(sxcl_mods_modrinth_search_url(&q, url, sizeof(url)), 0, "光影+版本+加载器一起");
+    check(strstr(url, "project_type:shader") != NULL && strstr(url, "versions:1.20.1") != NULL &&
+              strstr(url, "categories:iris") != NULL,
+          "  三个 facet 组都在");
+
     /* 空条件：不拼 facets，也不拼空 query */
     memset(&q, 0, sizeof(q));
     check_int(sxcl_mods_modrinth_search_url(&q, url, sizeof(url)), 0, "空条件也能拼");

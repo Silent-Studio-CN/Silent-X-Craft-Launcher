@@ -175,9 +175,14 @@ static void url_escape(const char *text, char *out, size_t cap)
  *   facets=[["categories:forge"],["versions:1.20.1"]] */
 static int modrinth_facets(const sxcl_mods_query *q, char *out, size_t cap)
 {
-    char group[4][160];
+    char group[5][160];
     size_t groups = 0;
     char escaped[200];
+    if (q->project_type != NULL && q->project_type[0] != '\0') {
+        url_escape(q->project_type, escaped, sizeof(escaped));
+        (void)snprintf(group[groups], sizeof(group[0]), "[\"project_type:%s\"]", escaped);
+        ++groups;
+    }
     if (q->game_version != NULL && q->game_version[0] != '\0') {
         url_escape(q->game_version, escaped, sizeof(escaped));
         (void)snprintf(group[groups], sizeof(group[0]), "[\"versions:%s\"]", escaped);

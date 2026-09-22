@@ -198,7 +198,7 @@ static int usage(void)
            "      [--dry-run] [--verbose]\n"
            "      └ 读版本 JSON -> 选 Java -> 按实例设置写 options.txt(渲染后端)-> 起进程\n"
            "        -> 每行归类 -> 出一条人话结论(发现 Vulkan 回退会写回 lastGraphicsApi)\n"
-           "  sxcl-dl mods search <关键词> [--mc 1.20.1] [--loader fabric] [--limit N]\n"
+           "  sxcl-dl mods search <关键词> [--mc 1.20.1] [--loader fabric] [--type mod|shader] [--limit N]\n"
            "  sxcl-dl mods files <工程 id|短名> [--mc 1.20.1] [--loader fabric]\n"
            "      └ 模组资源层(docs/22 的 A1):搜索走服务端 facets;挑文件要求版本+加载器都对得上,\n"
            "        不自动换加载器;取 JSON 走我们自己的引擎(候选/UA/缓存)\n"
@@ -2415,6 +2415,7 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
     const char *project = NULL;
     const char *mc = NULL;
     const char *loader = NULL;
+    const char *type = NULL;
     int limit = 20;
     if (strcmp(sub, "search") == 0) {
         if (argc < 4) {
@@ -2441,6 +2442,9 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
         } else if (strcmp(a, "--limit") == 0 && v) {
             limit = atoi(v);
             ++i;
+        } else if (strcmp(a, "--type") == 0 && v) {
+            type = v;
+            ++i;
         } else if (strcmp(a, "--rate") == 0 || strcmp(a, "--workers") == 0 ||
                    strcmp(a, "--conn") == 0 || strcmp(a, "--cache") == 0 ||
                    strcmp(a, "--mirror") == 0 || strcmp(a, "--source") == 0) {
@@ -2466,6 +2470,7 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
         q.text = text;
         q.game_version = mc;
         q.loader = loader;
+        q.project_type = type;
         q.limit = limit;
         if (sxcl_mods_modrinth_search_url(&q, url, sizeof(url)) != 0) {
             fprintf(stderr, "搜索 URL 拼不出来(条件太长?)\n");
