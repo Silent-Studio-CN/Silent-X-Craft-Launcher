@@ -625,6 +625,107 @@ int sxcl_mods_curseforge_search_parse(const char *json, size_t len, sxcl_mod_pag
     return 0;
 }
 
+
+int sxcl_mods_curseforge_versions_url(int64_t mod_id, const char *game_version,
+                                      const char *loader_slug, char *out, size_t out_len)
+{
+    if (mod_id <= 0 || out == NULL || out_len == 0) {
+        return -1;
+    }
+    char game[120];
+    game[0] = '\0';
+    if (game_version != NULL && game_version[0] != '\0') {
+        url_escape(game_version, game, sizeof(game));
+    }
+    const int n = snprintf(out, out_len,
+                           "https://api.curseforge.com/v1/mods/%lld/files?gameVersion=%s"
+                           "&modLoaderType=%d&pageSize=50",
+                           (long long)mod_id, game, sxcl_mods_curseforge_loader_type(loader_slug));
+    return (n < 0 || (size_t)n >= out_len) ? -1 : 0;
+}
+
+int sxcl_mods_curseforge_versions_parse(const char *json, size_t len, sxcl_mod_file *out,
+                                        size_t cap, size_t *count, char *err, size_t err_len)
+{
+    if (count != NULL) {
+        *count = 0;
+    }
+    if (json == NULL || out == NULL || cap == 0) {
+        set_err(err, err_len, "参数不全");
+        return -1;
+    }
+    char perr[160];
+    perr[0] = '\0';
+    sxcl_json *doc = sxcl_json_parse(json, len, perr, sizeof(perr));
+    if (doc == NULL) {
+        set_err(err, err_len, "文件列表不是合法 JSON");
+        return -1;
+    }
+    const sxcl_json_value *root = sxcl_json_root(doc);
+    const sxcl_json_value *data = sxcl_json_get(root, "data");
+    const size_t n = sxcl_json_size(data);
+    size_t written = 0;
+    for (size_t i = 0; i < n && written < cap; ++i) {
+        const sxcl_json_value *file = sxcl_json_at(data, i);
+        sxcl_mod_file *dst = &out[written];
+        (void)snprintf(dst->version_id, sizeof(dst->version_id), "%lld",
+                       (long long)sxcl_json_get_int64(file, "id", 0));
+        copy_cap(dst->version_number, sizeof(dst->version_number),
+                 sxcl_json_get_string(file, "displayName", ""));
+        copy_cap(dst->title, sizeof(dst->title), sxcl_json_get_string(file, "displayName", ""));
+        copy_cap(dst->filename, sizeof(dst->filename), sxcl_json_get_string(file, "fileName", ""));
+        copy_cap(dst->url, sizeof(dst->url), sxcl_json_get_string(file, "downloadUrl", ""));
+        dst->size = sxcl_json_get_int64(file, "fileLength", 0);
+        dst->primary = 1;   /* CF 的 /files 返回的就是这个版本的文件,不用再挑 primary */
+        /* hashes[]:{value, algo};官方枚举 algo=1 是 SHA-1 */
+        {
+            const sxcl_json_value *hashes = sxcl_json_get(file, "hashes");
+            const size_t hn = sxcl_json_size(hashes);
+            for (size_t k = 0; k < hn; ++k) {
+                const sxcl_json_value *h = sxcl_json_at(hashes, k);
+                if (sxcl_json_get_int64(h, "algo", 0) == 1) {
+                    copy_cap(dst->sha1, sizeof(dst->sha1), sxcl_json_get_string(h, "value", ""));
+                    break;
+                }
+            }
+        }
+        /* gameVersions[] 里既有游戏版本也有加载器名(Forge/Fabric…),统一塞进去 ——
+         * sxcl_mods_pick_file 的匹配是"列表里有这个词" */
+        join_strings(sxcl_json_get(file, "gameVersions"), dst->game_versions,
+                     sizeof(dst->game_versions), 8);
+        copy_cap(dst->loaders, sizeof(dst->loaders), dst->game_versions);
+        /* dependencies[]:relationType=3 是 RequiredDependency */
+        {
+            const sxcl_json_value *deps = sxcl_json_get(file, "dependencies");
+            const size_t dn = sxcl_json_size(deps);
+            size_t used = 0;
+            dst->required_deps[0] = '\0';
+            for (size_t d = 0; d < dn && used + 2 < sizeof(dst->required_deps); ++d) {
+                const sxcl_json_value *dep = sxcl_json_at(deps, d);
+                if (sxcl_json_get_int64(dep, "relationType", 0) != 3) {
+                    continue;
+                }
+                const int64_t dep_id = sxcl_json_get_int64(dep, "modId", 0);
+                if (dep_id <= 0) {
+                    continue;
+                }
+                const int w = snprintf(dst->required_deps + used, sizeof(dst->required_deps) - used,
+                                       "%s%lld", used > 0 ? " " : "", (long long)dep_id);
+                if (w > 0) {
+                    used += (size_t)w;
+                }
+            }
+        }
+        if (dst->url[0] == '\0' || dst->filename[0] == '\0') {
+            continue;   /* CF 有个别文件不给直链(作者关掉了 API 分发):跳过,如实少一条 */
+        }
+        ++written;
+    }
+    *count = written;
+    sxcl_json_free(doc);
+    return 0;
+}
+
 /* ── 落盘目录 ── */
 
 int sxcl_mods_dir(const char *game_dir, const char *instance, const char *kind, int isolated,

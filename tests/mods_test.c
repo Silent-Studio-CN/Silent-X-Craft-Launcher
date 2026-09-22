@@ -279,12 +279,68 @@ static void test_curseforge(void) {
               "不是 JSON = 失败");
 }
 
+
+/* CurseForge 的文件列表（/v1/mods/<id>/files）：hashes algo==1 是 SHA-1、
+ * dependencies relationType==3 是必装、gameVersions 里加载器名与游戏版本混在一起。 */
+static const char *kCfFilesJson =
+    "{\"data\":["
+    "{\"id\":4321001,\"displayName\":\"jei-1.20.1-forge-15.2.0.27.jar\","
+    "\"fileName\":\"jei-1.20.1-forge-15.2.0.27.jar\","
+    "\"downloadUrl\":\"https://edge.forgecdn.net/files/4321/1/jei-1.20.1-forge-15.2.0.27.jar\","
+    "\"fileLength\":1234567,\"gameVersions\":[\"1.20.1\",\"1.20.2\",\"Forge\"],"
+    "\"hashes\":[{\"value\":\"aaaa\",\"algo\":2},"
+    "{\"value\":\"3333333333333333333333333333333333333333\",\"algo\":1}],"
+    "\"dependencies\":[{\"modId\":238222,\"relationType\":3},"
+    "{\"modId\":999,\"relationType\":2}]},"
+    "{\"id\":4321002,\"displayName\":\"jei-1.19.2-forge.jar\",\"fileName\":\"jei-1.19.2-forge.jar\","
+    "\"downloadUrl\":\"https://edge.forgecdn.net/files/4321/2/jei-1.19.2-forge.jar\","
+    "\"fileLength\":100,\"gameVersions\":[\"1.19.2\",\"Forge\"],\"hashes\":[],\"dependencies\":[]},"
+    "{\"id\":4321003,\"displayName\":\"没有直链的文件\",\"fileName\":\"no-link.jar\","
+    "\"downloadUrl\":null,\"fileLength\":0,\"gameVersions\":[\"1.20.1\"],\"hashes\":[],\"dependencies\":[]}"
+    "] }";
+
+static void test_curseforge_files(void) {
+    char url[640];
+    check_int(sxcl_mods_curseforge_versions_url(238222, "1.20.1", "forge", url, sizeof(url)), 0,
+              "CF 文件列表 URL 拼得出来");
+    check(strstr(url, "/v1/mods/238222/files?") != NULL, "  路径对");
+    check(strstr(url, "gameVersion=1.20.1") != NULL, "  游戏版本在");
+    check(strstr(url, "modLoaderType=1") != NULL, "  Forge 的枚举在");
+    check_int(sxcl_mods_curseforge_versions_url(0, NULL, NULL, url, sizeof(url)), -1,
+              "没有 id = 参数错");
+
+    sxcl_mod_file files[8];
+    size_t count = 0;
+    char err[160];
+    err[0] = '\0';
+    check_int(sxcl_mods_curseforge_versions_parse(kCfFilesJson, strlen(kCfFilesJson), files, 8,
+                                                 &count, err, sizeof(err)),
+              0, "CF 文件列表解析成功");
+    check_int((long)count, 2, "  两条**有直链**的(没有直链的那条被跳过)");
+    check_str(files[0].filename, "jei-1.20.1-forge-15.2.0.27.jar", "  文件名");
+    check_str(files[0].version_id, "4321001", "  文件 id 转字符串");
+    check_str(files[0].sha1, "3333333333333333333333333333333333333333",
+              "  hashes 里 algo==1 的才是 SHA-1(不是第一个)");
+    check_int((long)files[0].size, 1234567, "  文件大小");
+    check_str(files[0].required_deps, "238222", "  只有 relationType==3 的算必装依赖");
+    check_str(files[1].required_deps, "", "  第二条没有依赖");
+
+    sxcl_mod_file picked;
+    memset(&picked, 0, sizeof(picked));
+    check_int(sxcl_mods_pick_file(files, count, "1.20.1", "forge", &picked), 0,
+              "挑出 1.20.1 + forge 那条");
+    check_str(picked.filename, "jei-1.20.1-forge-15.2.0.27.jar", "  挑对了");
+    check_int(sxcl_mods_pick_file(files, count, "1.19.2", "fabric", &picked), -1,
+              "加载器对不上 -> 不挑(与 Modrinth 同一口径)");
+}
+
 int main(void) {
     test_search_url();
     test_search_parse();
     test_versions_and_pick();
     test_mods_dir();
     test_curseforge();
+    test_curseforge_files();
     printf("mods 测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

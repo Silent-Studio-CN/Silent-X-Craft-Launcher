@@ -121,6 +121,13 @@ int sxcl_mods_curseforge_search_url(const sxcl_mods_query *q, char *out, size_t 
 int sxcl_mods_curseforge_search_parse(const char *json, size_t len, sxcl_mod_page *out, char *err,
                                       size_t err_len);
 
+/** CurseForge 的文件列表 URL：/v1/mods/<数字 id>/files?gameVersion=…&modLoaderType=… */
+int sxcl_mods_curseforge_versions_url(int64_t mod_id, const char *game_version,
+                                      const char *loader_slug, char *out, size_t out_len);
+/** 解析 /v1/mods/<id>/files 的响应（{"data":[…]};hashes 里 algo==1 是 SHA-1）。 */
+int sxcl_mods_curseforge_versions_parse(const char *json, size_t len, sxcl_mod_file *out,
+                                        size_t cap, size_t *count, char *err, size_t err_len);
+
 /** 从一批文件里挑"最适合这个实例的那个"：
  *  先按 loaders 里有没有这个加载器、game_versions 里有没有这个版本打分，再优先 primary，
  *  最后取上传时间最新的那个（数组通常已按时间倒序，所以"第一个最高分"就是它）。 */

@@ -25,7 +25,8 @@
 #include "sxcl/install.h" /* 版本 JSON 落盘 sxcl_install_write_version_json;缺它会 C4013 -> C2220 */
 #include "sxcl/limiter.h"
 #include "sxcl/loader.h"
-#include "sxcl/mods.h"   /* mods 子命令:模组资源来源层(Modrinth)的端到端验收入口 */
+#include "sxcl/http.h"   /* CF 的 x-api-key 头要走带 header 的那条 HTTP */
+#include "sxcl/mods.h"   /* mods 子命令:模组资源来源层(Modrinth/CurseForge)的端到端验收入口 */
 #include "sxcl/manifest.h"
 #include "sxcl/net.h"
 #include "sxcl/options.h"
@@ -2407,6 +2408,51 @@ static void cli_log_atexit(void)
  * 取 JSON 走**我们自己的引擎**（官方/镜像候选、UA、缓存都在里面），解析走 sxcl/mods.h ——
  * 与界面点"搜索/安装"是同一条路,所以这个命令就是这一层的真机验收。
  */
+/** 带自定义请求头取文本（CurseForge 的 x-api-key 走这条;Modrinth 不需要头）。 */
+static int mods_fetch_with_key(const char *url, const char *key, char **out, char *err,
+                               size_t err_len) {
+    *out = NULL;
+    /* 必须先 bootstrap:Qt 的 TLS 后端是在这一步装上的 —— 不调它,HTTPS 会报
+     * "No functional TLS backend was found"(实测)。引擎那条路内部会做,这里手工建的传输要自己来。 */
+    sxcl_transport_qt_bootstrap();
+    sxcl_transport *tr = make_qt_transport(NULL);
+    if (tr == NULL) {
+        snprintf(err, err_len, "传输后端起不来");
+        return -1;
+    }
+    char key_hdr[320];
+    snprintf(key_hdr, sizeof(key_hdr), "x-api-key: %s", key);
+    const char *headers[3];
+    headers[0] = "Accept: application/json";
+    headers[1] = key_hdr;
+    headers[2] = NULL;
+    size_t len = 0;
+    const int rc = sxcl_http_get_text(tr, url, headers, out, &len, err, err_len);
+    if (tr->destroy != NULL) {
+        tr->destroy(tr->ctx);
+    }
+    return rc;
+}
+
+/** 从设置文件里读 CF 的 key（设置页里那一栏写的就是这个键）。 */
+static int mods_key_from_settings(char *out, size_t cap) {
+    out[0] = '\0';
+    char path[1024];
+    char err[160];
+    err[0] = '\0';
+    if (sxcl_settings_default_path(path, sizeof(path), err, sizeof(err)) != 0) {
+        return -1;
+    }
+    sxcl_settings *st = sxcl_settings_open(path);
+    if (st == NULL) {
+        return -1;
+    }
+    const char *key = sxcl_settings_get(st, "mods.curseforge_api_key", "");
+    snprintf(out, cap, "%s", key != NULL ? key : "");
+    sxcl_settings_free(st);
+    return out[0] != '\0' ? 0 : -1;
+}
+
 static int cmd_mods(int argc, char **argv, const cli_opts *o) {
     if (argc < 3) {
         return usage();
@@ -2470,17 +2516,92 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
      * 没配 key 就**如实不查** —— 不假装有结果、也不偷偷退回 Modrinth 冒充双源。 */
     const int want_cf = source != NULL && _stricmp(source, "curseforge") == 0;
     if (want_cf) {
-        if (api_key == NULL || api_key[0] == '\0') {
+        char key_buf[256];
+        const char *key = api_key;
+        if (key == NULL || key[0] == '\0') {
+            if (mods_key_from_settings(key_buf, sizeof(key_buf)) == 0) {
+                key = key_buf;
+            }
+        }
+        if (key == NULL || key[0] == '\0') {
             fprintf(stderr,
                     "CurseForge 需要 API key：去 https://console.curseforge.com 申请一个，"
                     "然后 --key <KEY>（或填进设置 mods.curseforge_api_key）。\n"
                     "没配 key 就不查这一源 —— 我们不会假装有结果。\n");
             return 2;
         }
-        fprintf(stderr,
-                "带了 key，但这一轮的 CurseForge **只接了 URL 与解析**（单测 108 项里 33 项是它）；"
-                "真正的联网查询下一轮补。现在请先看 Modrinth 那一源。\n");
-        return 2;
+        char cf_url[1200];
+        sxcl_mods_query q;
+        memset(&q, 0, sizeof(q));
+        if (project != NULL) {
+            const long long id = atoll(project);
+            if (sxcl_mods_curseforge_versions_url((int64_t)id, mc, loader, cf_url, sizeof(cf_url)) != 0) {
+                fprintf(stderr, "CF 文件列表 URL 拼不出来（工程 id 要是数字）\n");
+                return 2;
+            }
+        } else {
+            q.text = text;
+            q.game_version = mc;
+            q.loader = loader;
+            q.project_type = type != NULL ? type : "mod";
+            q.limit = limit;
+            if (sxcl_mods_curseforge_search_url(&q, cf_url, sizeof(cf_url)) != 0) {
+                fprintf(stderr, "CF 搜索 URL 拼不出来\n");
+                return 2;
+            }
+        }
+        printf("请求(带 x-api-key 头,key 不进 URL): %s\n", cf_url);
+        fflush(stdout);
+        char *text_body = NULL;
+        char herr[256];
+        herr[0] = '\0';
+        if (mods_fetch_with_key(cf_url, key, &text_body, herr, sizeof(herr)) != 0 || text_body == NULL) {
+            fprintf(stderr, "取 CurseForge 失败: %s\n", herr[0] ? herr : "(没有说明)");
+            free(text_body);
+            return 1;
+        }
+        char perr[192];
+        perr[0] = '\0';
+        if (project != NULL) {
+            sxcl_mod_file files[32];
+            size_t count = 0;
+            if (sxcl_mods_curseforge_versions_parse(text_body, strlen(text_body), files, 32, &count,
+                                                    perr, sizeof(perr)) != 0) {
+                fprintf(stderr, "解析 CF 文件列表失败: %s\n", perr);
+                free(text_body);
+                return 1;
+            }
+            printf("共 %d 个文件:\n", (int)count);
+            for (size_t i = 0; i < count; ++i) {
+                printf("  [%d] %s | %s | %lld 字节 | sha1=%.8s…\n", (int)i + 1, files[i].filename,
+                       files[i].game_versions, (long long)files[i].size, files[i].sha1);
+            }
+            sxcl_mod_file picked;
+            memset(&picked, 0, sizeof(picked));
+            if (count > 0 && sxcl_mods_pick_file(files, count, mc, loader, &picked) == 0) {
+                printf("挑中(装这个): %s\n  URL: %s\n", picked.filename, picked.url);
+            } else {
+                printf("没有适合这个实例的文件（版本/加载器对不上，口径不自动换加载器）\n");
+            }
+        } else {
+            sxcl_mod_page page;
+            if (sxcl_mods_curseforge_search_parse(text_body, strlen(text_body), &page, perr,
+                                                  sizeof(perr)) != 0) {
+                fprintf(stderr, "解析 CF 搜索结果失败: %s\n", perr);
+                free(text_body);
+                return 1;
+            }
+            printf("共命中 %d 条(这一页 %d 条):\n", (int)page.total, (int)page.count);
+            for (size_t i = 0; i < page.count; ++i) {
+                const sxcl_mod_hit *h = &page.items[i];
+                printf("  [%d] %s（%s） 下载 %lld | %s\n      id=%s | 支持 %s\n", (int)i + 1,
+                       h->title, h->author, (long long)h->downloads, h->description, h->id,
+                       h->versions);
+            }
+            sxcl_mods_page_free(&page);
+        }
+        free(text_body);
+        return 0;
     }
     char url[1200];
     int is_files = 0;
