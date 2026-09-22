@@ -242,6 +242,30 @@ void InstallWorker::emitLog(const QString &line) {
     emit logLine(line);
 }
 
+/** Quilt 那一步的进度(核心库从它自己的引擎线程回调)。 */
+void InstallWorker::cbQuiltProgress(void *userdata, int percent, const char *text) {
+    auto *self = static_cast<InstallWorker *>(userdata);
+    if (self == nullptr) {
+        return;
+    }
+    InstallProgress update;
+    update.stageIndex = -1; /* 不属于核心库那张阶段表(它只在 plan.loader 非原版时才有) */
+    update.stageTotal = 0;
+    update.stageId = QStringLiteral("loader_quilt");
+    update.stageName = QStringLiteral("加载 Quilt（从 meta 直装）");
+    update.stagePercent = percent;
+    update.percent = -1; /* 整体百分比由核心库那条给过,这里不改(不假装两个进度能相加) */
+    update.status = QString::fromUtf8(text != nullptr ? text : "");
+    emit self->progress(update);
+    self->emitLog(update.status);
+}
+
+/** Quilt 那一步的取消检查(转发给工作线程的取消位)。 */
+int InstallWorker::cbQuiltCancelled(void *userdata) {
+    auto *self = static_cast<InstallWorker *>(userdata);
+    return (self != nullptr && self->m_cancel.load()) ? 1 : 0;
+}
+
 void InstallWorker::cbProgress(void *userdata, const sxcl_install_progress *progress) {
     if (userdata == nullptr || progress == nullptr)
         return;
@@ -466,7 +490,16 @@ void InstallWorker::run() {
     }
     installerUrl = installerUrlFor(m_request.loaderType, m_request.versionId,
                                   m_request.loaderVersion, fabricInstaller);
-    if (hasLoader && installerUrl.isEmpty()) {
+    /* ── Quilt 走**另一条路**(docs/22 §16)──
+     * 它那个安装器 jar(org.quiltmc:quilt-installer,8.7MB)只有 maven.quiltmc.org 一家托管,
+     * 实测 32KB/s 且会停摆(BMCLAPI 与 Maven Central 都 404)—— GUI 走"下载安装器再跑"这条路
+     * 等于永远装不上。所以这一档:核心库的加载器阶段**跳过**(plan.loader 按原版装),
+     * 装完原版之后由这一层再调 sxcl_loader_quilt_install()(取 meta → 拼加载器层 → 拍平 → 下库)。 */
+    const bool quiltFromMeta = (loaderKind == SXCL_LOADER_QUILT);
+    if (quiltFromMeta) {
+        installerUrl.clear(); /* 没有安装器,也不需要 */
+    }
+    if (hasLoader && !quiltFromMeta && installerUrl.isEmpty()) {
         // **如实报**:不去猜一个 URL 然后让用户看到 404;
         // OptiFine 没有稳定的 maven 直链,这条分支就是它的实话。
         SXCL_LOG_E("install", "没开始就失败:%s 的安装器地址拿不到(加载器版本='%s')",
@@ -488,9 +521,9 @@ void InstallWorker::run() {
     plan.game_dir = gameDir.constData();
     plan.version_id = versionId.constData();
     plan.instance_name = instanceName.constData();
-    plan.loader = loaderKind;
-    plan.loader_version = hasLoader ? loaderVersion.constData() : nullptr;
-    plan.installer_url = hasLoader ? installerUrl.constData() : nullptr;
+    plan.loader = quiltFromMeta ? SXCL_LOADER_VANILLA : loaderKind; /* Quilt 的加载器层自己做 */
+    plan.loader_version = (hasLoader && !quiltFromMeta) ? loaderVersion.constData() : nullptr;
+    plan.installer_url = (hasLoader && !quiltFromMeta) ? installerUrl.constData() : nullptr;
     plan.java_path = javaPath.isEmpty() ? nullptr : javaPath.constData();
     plan.assets = assetsLevelFrom(m_request.assetsLevel);
     plan.keep_installer = m_request.keepInstaller;
@@ -583,7 +616,62 @@ void InstallWorker::run() {
     if (result.natives_files >= 0)
         detail += QStringLiteral(" · natives %1 个").arg(result.natives_files);
 
-    if (ok) {
+    /* ── Quilt 的加载器层:原版装完之后在这里做(见上面 quiltFromMeta 的说明)── */
+    QString quiltError;
+    if (ok && quiltFromMeta && !m_cancel.load()) {
+        emitLog(QStringLiteral("Quilt:从 meta 直装(不下 8.7MB 的安装器 jar)"));
+        /* 拍平用**刚装好的这份实例 JSON**(而不是 versions/<mc>/<mc>.json):
+         * 实例名可能是用户自定的,那份才是这个实例的原版层。 */
+        const QByteArray qBase =
+            (QDir::fromNativeSeparators(m_request.gameDir) + QStringLiteral("/versions/") +
+             instance + QLatin1Char('/') + instance + QStringLiteral(".json"))
+                .toUtf8();
+        sxcl_quilt_install_request qreq;
+        memset(&qreq, 0, sizeof(qreq));
+        qreq.game_dir = gameDir.constData();
+        qreq.mc_version = versionId.constData();
+        qreq.loader_version = loaderVersion.constData();
+        qreq.instance_name = instanceName.constData();
+        qreq.base_json_path = qBase.constData();
+        qreq.engine_opts = &opts;
+        qreq.retries = 6; /* Quilt 那家源抖,试多一点(每次从续传点接着试) */
+        qreq.on_progress = &InstallWorker::cbQuiltProgress;
+        qreq.progress_ud = this;
+        qreq.is_cancelled = &InstallWorker::cbQuiltCancelled;
+        qreq.cancel_ud = this;
+
+        sxcl_quilt_install_result qres;
+        memset(&qres, 0, sizeof(qres));
+        char qerr[256];
+        qerr[0] = '\0';
+        const int qrc = sxcl_loader_quilt_install(&qreq, &qres, qerr, sizeof(qerr));
+        if (qrc != SXCL_LOADER_OK) {
+            quiltError = QString::fromUtf8(qerr[0] ? qerr : "原因不明");
+            SXCL_LOG_E("install", "Quilt 加载器层失败: %s", quiltError.toUtf8().constData());
+            emitLog(QStringLiteral("Quilt 没装上:%1").arg(quiltError));
+            if (qres.sha1_from_sidecar > 0) {
+                emitLog(QStringLiteral(
+                            "提示:有 %1 件库的哈希与 meta 不一致,已按 maven 自己的 .sha1 校验")
+                            .arg(qres.sha1_from_sidecar));
+            }
+        } else {
+            SXCL_LOG_I("install",
+                       "Quilt 加载器层完成:实例=%s 库=%d(下载 %d) 字节=%lld 侧车纠偏=%d",
+                       qres.instance, qres.libraries_total, qres.libraries_downloaded,
+                       (long long)qres.bytes_done, qres.sha1_from_sidecar);
+            emitLog(QStringLiteral("Quilt 就绪:%1 件依赖库(下到 %2 件,%3)%4")
+                        .arg(qres.libraries_total)
+                        .arg(qres.libraries_downloaded)
+                        .arg(humanBytes(qres.bytes_done))
+                        .arg(qres.sha1_from_sidecar > 0
+                                 ? QStringLiteral(" · %1 件按 maven 侧车校验")
+                                       .arg(qres.sha1_from_sidecar)
+                                 : QString()));
+        }
+    }
+    const bool okFinal = ok && quiltError.isEmpty();
+
+    if (okFinal) {
         SXCL_LOG_I("install", "安装成功:实例=%s 阶段=%d/%llu 跳过文件=%llu 非致命失败=%llu 字节=%llu",
                    instance.toUtf8().constData(), result.stages_done,
                    (unsigned long long)sxcl_install_plan_stage_count(&plan),

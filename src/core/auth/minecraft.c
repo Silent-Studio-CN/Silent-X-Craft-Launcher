@@ -50,7 +50,24 @@ static void mc_error_text(const sxcl_auth_http *r, const char *what, char *err, 
             sxcl_json_free(doc);
         }
     }
-    if (r->status == 401) {
+    /* ── 403「Invalid app registration」:这不是网络也不是配置错误,是**资格问题** ──
+     * 2026-09-22 真机实测(日志):devicecode/token/xboxlive/xsts 四跳全 200,
+     * 第 6 跳 POST api.minecraftservices.com/authentication/login_with_xbox 回
+     *   403 {"path":"/authentication/login_with_xbox",
+     *        "errorMessage":"Invalid app registration, see https://aka.ms/AppRegInfo for more information"}
+     * 社区(2026-08-29,微软 Q&A 5984225)的结论:微软/我的世界现在要求**第三方启动器把 Azure 应用的
+     * client id 提交给 Mojang 审批、进允许名单**,否则这一跳永远 403 —— 不是我们代码写错了。
+     * 所以这里必须把"这是什么、要做什么"说清楚,别让用户以为是自己账号的问题。 */
+    if (r->status == 403 && strstr(detail, "Invalid app registration") != NULL) {
+        sxcl_auth_err(err, err_len,
+                      "%s：微软/我的世界拒绝了这个**启动器的应用身份**（HTTP 403：Invalid app "
+                      "registration）—— 不是你的账号问题，也不是网络问题。"
+                      "第三方启动器要把自己 Azure 应用的 client id 提交给 Mojang 审批进允许名单"
+                      "（见 https://help.minecraft.net/hc/en-us/articles/16254801392141），"
+                      "否则第 6 跳一定 403。临时办法：在 设置 → 账户 里填一个**已被批准**的 client id"
+                      "（或环境变量 %s）。原始返回：%s",
+                      what, SXCL_AUTH_ENV_CLIENT_ID, detail);
+    } else if (r->status == 401) {
         sxcl_auth_err(err, err_len, "%s：登录凭据被拒绝（HTTP 401）%s%s", what,
                       detail[0] ? "：" : "", detail);
     } else if (r->status == 404) {

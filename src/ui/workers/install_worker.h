@@ -93,6 +93,9 @@ private:
 
     // 核心库回调(userdata = this;**可能来自引擎的工作线程**)
     static void cbProgress(void *userdata, const sxcl_install_progress *progress);
+    // Quilt 那一步(meta 直装)的进度与取消:核心库从自己的引擎线程回调
+    static void cbQuiltProgress(void *userdata, int percent, const char *text);
+    static int cbQuiltCancelled(void *userdata);
     static int cbCancelled(void *userdata);
     void onProgress(const sxcl_install_progress *progress, bool force);
     void emitLog(const QString &line);

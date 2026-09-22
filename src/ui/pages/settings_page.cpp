@@ -1916,6 +1916,90 @@ private:
     std::function<void(const QString &)> m_onSave;
 };
 
+// ──────────────── 卡片:微软应用 ID(2026-09-22 晚新增;正版登录第 6 跳 403 的出口)────────────────
+//
+// 实测(用户真机):devicecode/token/xboxlive/xsts 四跳全 200,第 6 跳
+// POST api.minecraftservices.com/authentication/login_with_xbox 回
+//   403 {"errorMessage":"Invalid app registration, see https://aka.ms/AppRegInfo …"}
+// 社区(微软 Q&A 5984225,2026-08-29)的结论:Mojang 现在要求第三方启动器把 Azure 应用的 client id
+// **提交审批进允许名单**,否则这一跳永远 403 —— 不是账号问题、也不是网络问题。
+// 核心库一直支持覆盖(SXCL_AUTH_CLIENT_ID / 设置项 auth.client_id),这里给它一个界面入口:
+// 拿到批准后的 id 填进来即可(留空 = 用内置默认)。
+class MsaClientIdCard : public SettingCard {
+public:
+    explicit MsaClientIdCard(QWidget *parent = nullptr)
+        : SettingCard(FluentIcon::qicon(FluentIcon::PEOPLE),
+                      QStringLiteral("微软应用 ID（client id）"),
+                      QStringLiteral("正版登录第 6 跳报 403「Invalid app registration」时，"
+                                     "把已被 Mojang 批准的 client id 填在这里"), parent) {
+        setFixedHeight(100);
+
+        m_edit = new QLineEdit(this);
+        m_edit->setMinimumWidth(330);
+        m_edit->setFixedHeight(34);
+        m_edit->setPlaceholderText(QStringLiteral("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx（留空 = 用内置默认）"));
+        m_edit->setObjectName(QStringLiteral("msaClientIdEdit"));
+        m_save = new PushButton(QStringLiteral("保存"), this);
+        m_save->setFixedHeight(34);
+        m_clear = new PushButton(QStringLiteral("恢复默认"), this);
+        m_clear->setFixedHeight(34);
+        m_state = new CaptionLabel(QString(), this);
+
+        auto *right = new QVBoxLayout();
+        right->setSpacing(4);
+        right->setContentsMargins(0, 0, 0, 0);
+        auto *top = new QHBoxLayout();
+        top->setSpacing(8);
+        top->addWidget(m_edit);
+        top->addWidget(m_save);
+        top->addWidget(m_clear);
+        right->addLayout(top);
+        right->addWidget(m_state, 0, Qt::AlignRight);
+        hBox()->addLayout(right, 0);
+        hBox()->addSpacing(16);
+
+        connect(m_save, &QAbstractButton::clicked, this, [this] { commit(m_edit->text()); });
+        connect(m_clear, &QAbstractButton::clicked, this, [this] {
+            m_edit->clear();
+            commit(QString());
+        });
+        connect(m_edit, &QLineEdit::returnPressed, this, [this] { commit(m_edit->text()); });
+        refresh();
+    }
+
+    void setStored(const QString &value) {
+        m_value = value.trimmed();
+        refresh();
+    }
+    void setSaveHandler(std::function<void(const QString &)> handler) {
+        m_onSave = std::move(handler);
+    }
+
+private:
+    void commit(const QString &value) {
+        m_value = value.trimmed();
+        if (m_onSave) {
+            m_onSave(m_value);
+        }
+        m_edit->clear();
+        refresh();
+    }
+    void refresh() {
+        const bool custom = !m_value.isEmpty();
+        m_clear->setEnabled(custom);
+        m_state->setText(custom ? QStringLiteral("已覆盖（%1…）").arg(m_value.left(8))
+                                : QStringLiteral("用内置默认 —— 它**没在** Mojang 允许名单里，"
+                                                 "第 6 跳会 403（要审批）"));
+    }
+
+    QLineEdit *m_edit = nullptr;
+    PushButton *m_save = nullptr;
+    PushButton *m_clear = nullptr;
+    CaptionLabel *m_state = nullptr;
+    QString m_value;
+    std::function<void(const QString &)> m_onSave;
+};
+
 // ─────────────────────────── 页面本体 ───────────────────────────
 
 class SettingsPage : public ScrollArea {
@@ -1986,6 +2070,7 @@ private:
     // 账户(新增):状态卡 + 登录/刷新/注销三张动作卡;同一时刻只跑一个后台任务。
     AccountStatusCard *m_accountCard = nullptr;
     PushSettingCard *m_loginCard = nullptr;
+    MsaClientIdCard *m_clientIdCard = nullptr; // 新增:微软应用 ID(允许名单那件事的出口)
     PushSettingCard *m_refreshCard = nullptr;
     PushSettingCard *m_logoutCard = nullptr;
     AccountTask *m_accountTask = nullptr;
@@ -2363,10 +2448,21 @@ void SettingsPage::buildContent() {
     m_logoutCard = new PushSettingCard( // 删掉本机加密保存的凭据(幂等)
         QStringLiteral("注销"), FluentIcon::qicon(FluentIcon::CANCEL),
         QStringLiteral("退出登录"), QStringLiteral("删除本机加密保存的登录凭据"), accountGroup);
+    /* 「微软应用 ID」卡(2026-09-22 晚新增)。
+     * 起因是用户真机登录到第 6 跳拿到 403「Invalid app registration」:
+     * 微软/我的世界现在要求第三方启动器把 Azure 应用的 client id 提交给 Mojang 审批进允许名单,
+     * 否则 login_with_xbox 一定 403(见 minecraft.c 里那段说明)。
+     * 核心库本来就支持覆盖(SXCL_AUTH_CLIENT_ID / auth.client_id),这里给它一个界面入口:
+     * 拿到批准的 id 直接填进来就能登录,不用重新编译。 */
+    m_clientIdCard = new MsaClientIdCard(accountGroup);
+    m_clientIdCard->setStored(m_store.text(SXCL_AUTH_SETTINGS_CLIENT_ID));
+    m_clientIdCard->setSaveHandler(
+        [this](const QString &id) { m_store.set(SXCL_AUTH_SETTINGS_CLIENT_ID, id); });
     accountGroup->addSettingCard(m_accountCard);
     accountGroup->addSettingCard(m_loginCard);
     accountGroup->addSettingCard(m_refreshCard);
     accountGroup->addSettingCard(m_logoutCard);
+    accountGroup->addSettingCard(m_clientIdCard);
 
     // ── 关于(settings_page.py:397-413)──
     m_aboutGroup = new SettingCardGroup(trText("page.settings.about_group", kGroupAbout), m_view);

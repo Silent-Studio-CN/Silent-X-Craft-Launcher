@@ -324,6 +324,10 @@ typedef struct sxcl_quilt_install_request {
     const char *loader_version;  /**< 必填:Quilt loader 版本(如 "0.20.0-beta.9") */
     const char *instance_name;   /**< 可空 = "<mc>-quilt-<loader 版本>" */
     const char *meta_url;        /**< 可空 = 官方 meta.quiltmc.org/v3/versions/loader/<mc> */
+    /** 可空 = 拿 <game>/versions/<mc>/<mc>.json 当原版层来拍平。
+     *  界面那条路会传**刚装好的实例 JSON**(实例名可能是用户自定的,那份才是它的原版层);
+     *  传了不存在的路径会退回"只写加载器层"(启动层会在内存里合并)。 */
+    const char *base_json_path;
     const char *maven_mirror;    /**< 可空:库的第二候选(与 CLI 的 --mirror 同义) */
     const sxcl_engine_opts *engine_opts; /**< 必填:取文本与下库都用它(要有 transport_factory) */
     int retries;                 /**< <=0 = 2(每个源最多试几次;慢/抖的源调高) */
