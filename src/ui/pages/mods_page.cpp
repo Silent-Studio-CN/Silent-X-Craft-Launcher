@@ -39,8 +39,12 @@
 #endif
 
 #include <QDir>
+#include <QFile>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QLineEdit>
+#include <QPixmap>
+#include <QPointer>
 #include <QScrollArea>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -364,6 +368,17 @@ private:
             rowLay->setContentsMargins(16, 10, 16, 10);
             rowLay->setSpacing(12);
 
+            /* 图标位（Modrinth 的 CDN）：先摆一个空框，图标在工作线程下回来再填 ——
+             * 界面绝不为了一个图标卡住（用户点名过"未响应"）。取不到就留空框，不造假图。 */
+            auto *icon = new QLabel(card);
+            icon->setFixedSize(40, 40);
+            icon->setStyleSheet(QStringLiteral("QLabel { background: rgba(255,255,255,0.06);"
+                                               " border-radius: 8px; }"));
+            rowLay->addWidget(icon, 0, Qt::AlignTop);
+            if (hit.icon_url[0] != '\0') {
+                startIcon(QString::fromUtf8(hit.icon_url), QString::fromUtf8(hit.id), icon);
+            }
+
             auto *textCol = new QVBoxLayout();
             textCol->setSpacing(2);
             auto *title = new BodyLabel(QString::fromUtf8(hit.title), card);
@@ -396,6 +411,44 @@ private:
             rowLay->addWidget(btn, 0, Qt::AlignVCenter);
             m_list->addWidget(card);
         }
+    }
+
+    /** 取一张图标（工作线程下到 <数据根>/icons/<id>.png，命中缓存就不再下）。
+     *  target 用 QPointer 兜着:卡片可能已经被 clearResults() 删掉了。 */
+    void startIcon(const QString &url, const QString &id, QLabel *target) {
+        if (url.isEmpty() || id.isEmpty() || target == nullptr) {
+            return;
+        }
+        const QString dir = uiLauncherDataRoot() + QStringLiteral("/icons");
+        (void)QDir().mkpath(dir);
+        const QString path = dir + QLatin1Char('/') + id + QStringLiteral(".png");
+        if (QFile::exists(path)) {
+            setIconFromFile(path, target);
+            return;
+        }
+        ModsWorker::Request req;
+        req.op = ModsWorker::DownloadFile;
+        req.url = url;
+        req.dest = path;
+        req.settingsFile = uiSettingsFilePath();
+        auto *worker = new ModsWorker(req, this);
+        const QPointer<QLabel> guard(target);
+        QObject::connect(worker, &ModsWorker::finished, this,
+                         [guard, path](bool ok, const QString &, const QString &, qint64) {
+                             if (ok && !guard.isNull()) {
+                                 setIconFromFile(path, guard.data());
+                             }
+                         });
+        worker->start();
+    }
+
+    static void setIconFromFile(const QString &path, QLabel *target) {
+        QPixmap pm(path);
+        if (pm.isNull() || target == nullptr) {
+            return;
+        }
+        target->setPixmap(pm.scaled(40, 40, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        target->setStyleSheet(QStringLiteral("QLabel { background: transparent; }"));
     }
 
     bool m_shaders = false;
