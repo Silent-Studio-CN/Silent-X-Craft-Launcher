@@ -703,6 +703,49 @@ static void test_end_to_end_pick(void)
     check_str(items[0].forge, "47.2.18", "  它要求配套 Forge 47.2.18");
 }
 
+/* Quilt:从 meta **跳过安装器 jar** 直接拼「加载器版本 JSON」(docs/22 §16 的正解)。
+ * 真实夹具(meta.quiltmc.org/v3/versions/loader/1.20.1 第 1 项)里:
+ *   * launcherMeta.libraries 是**对象**(client/common/server 三个数组),不是数组;
+ *   * libraries.common 里**没有** quilt-loader / hashed / intermediary 这三样,
+ *     它们分别写在项内的 loader / hashed / intermediary 里(还带着 sha1 与 file_size)。 */
+static void test_quilt_loader_json(void) {
+    char *text = NULL;
+    char err[192];
+    err[0] = '\0';
+    check(sxcl_loader_quilt_loader_json(k_quilt_json_mc, strlen(k_quilt_json_mc), "0.20.0-beta.9",
+                                        "1.20.1", &text, err, sizeof(err)) == SXCL_CATALOG_OK,
+          "Quilt:meta 能拼出加载器 JSON");
+    check(text != NULL, "  有文本");
+    if (text != NULL) {
+        check(strstr(text, "\"inheritsFrom\": \"1.20.1\"") != NULL, "  inheritsFrom 指原版");
+        check(strstr(text, "org.quiltmc.loader.impl.launch.knot.KnotClient") != NULL,
+              "  mainClass 是 KnotClient");
+        check(strstr(text, "org.quiltmc:quilt-loader:0.20.0-beta.9") != NULL,
+              "  加载器自己在清单里(meta 的 libraries 里没有它)");
+        check(strstr(text, "org.quiltmc:hashed:1.20.1") != NULL, "  hashed 在(启动必需)");
+        check(strstr(text, "net.fabricmc:intermediary:1.20.1") != NULL, "  intermediary 在");
+        check(strstr(text, "org.quiltmc:quilt-json5:1.0.4+final") != NULL,
+              "  launcherMeta.libraries 的 common 展开了(它是对象不是数组)");
+        check(strstr(text, "bed0a01be87c4378d9002611d9642e8f9e9c2cff") != NULL,
+              "  加载器的 sha1 带上了(强校验)");
+        check(strstr(text, "\"size\": 1550096") != NULL, "  大小也带上了");
+        check(strstr(text, "downloads") != NULL, "  有哈希的写成标准的 downloads.artifact 形态");
+        check(strstr(text, "maven.quiltmc.org/repository/release/org/quiltmc/quilt-loader/") != NULL,
+              "  完整 URL 按 maven 路径拼出来");
+        free(text);
+        text = NULL;
+    }
+    err[0] = '\0';
+    check(sxcl_loader_quilt_loader_json(k_quilt_json_mc, strlen(k_quilt_json_mc), "9.9.9", "1.20.1",
+                                        &text, err, sizeof(err)) != SXCL_CATALOG_OK,
+          "meta 里没有这个版本 -> 失败");
+    check(err[0] != '\0', "  有人话原因");
+    check(text == NULL, "  失败时不产出文本");
+    check(sxcl_loader_quilt_loader_json(NULL, 0, "0.20.0-beta.9", "1.20.1", &text, err, sizeof(err)) !=
+              SXCL_CATALOG_OK,
+          "空 meta -> 失败");
+}
+
 int main(void)
 {
     test_xml_scanner();
@@ -715,6 +758,7 @@ int main(void)
     test_urls();
     test_bad_input();
     test_end_to_end_pick();
+    test_quilt_loader_json();
 
     printf("加载器版本目录测试: 通过 %d 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

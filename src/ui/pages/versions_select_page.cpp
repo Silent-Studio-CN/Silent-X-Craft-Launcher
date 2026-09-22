@@ -100,23 +100,22 @@ public:
 private:
     // ── 骨架：侧 2 栏(NavPanel) + 右内容(版本列表 / 图标选择) ──
     void buildBody() {
-        auto *body = new QWidget(view());
-        auto *lay = new QHBoxLayout(body);
-        lay->setContentsMargins(0, 0, 0, 0);
-        lay->setSpacing(12);
-
         // 侧 2 栏的容器：NavPanel 每次重建（换文件夹/换图标都要重排图标），放容器里好替换。
-        m_navSlot = new QWidget(body);
+        m_navSlot = new QWidget(view());
         auto *slotLay = new QVBoxLayout(m_navSlot);
         slotLay->setContentsMargins(0, 0, 0, 0);
         slotLay->setSpacing(0);
         m_navLay = slotLay;
-        lay->addWidget(m_navSlot, 0);
 
-        m_stack = new QStackedWidget(body);
+        /* 两栏版式（PageShell::beginSideLayout）：侧 2 栏**从内容区顶部开始**、贴页面左边缘。
+         * 用户 2026-09-22 晚点名：「版本选择的侧2 没贴紧侧1，中间的空间很丑」——
+         * 以前走 addContent()，整页左边距 28px + 标题压在上头，侧 2 既离侧 1 有 28px，
+         * 又比侧 1 低一截。现在左外边距 0、标题只在右列上方。 */
+        QVBoxLayout *rightLay = beginSideLayout(m_navSlot);
+
+        m_stack = new QStackedWidget(view());
         m_stack->addWidget(buildVersionsPane());
-        lay->addWidget(m_stack, 1);
-        addContent(body);
+        rightLay->addWidget(m_stack, 1);
     }
 
     QWidget *buildVersionsPane() {

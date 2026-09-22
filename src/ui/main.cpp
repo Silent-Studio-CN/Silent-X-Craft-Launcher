@@ -406,7 +406,20 @@ int main(int argc, char *argv[]) {
 
     sxcl::ui::ThemeBridge::instance().refreshAll();
 
-    sxcl::ui::MainWindow window;
+        /* 语义图标表(assets/icons/pcl/*.svg -> IconRegistry)必须在**建界面之前**加载:
+     * 下载页那层"双层侧边栏"里的 MOD / 光影 用的就是它(NavItem.semantic)。
+     * 以前只有版本选择页(文件夹图标)顺手加载过一次 —— 用户不进那一页,那两格就是**空白图标**
+     * (用户 2026-09-22 晚点名:「MOD 和光影都没显示图标」)。 */
+    if (sxcl::ui::IconRegistry::instance().resolveIconDir()) {
+        (void)sxcl::ui::IconRegistry::instance().load();
+    }
+    std::fprintf(stderr, "[sxcl-ui] 语义图标: 目录=%s mod=%d shader=%d 条目=%d\n",
+                 sxcl::ui::IconRegistry::instance().iconDir().toUtf8().constData(),
+                 (int)sxcl::ui::IconRegistry::instance().has(sxcl::ui::IconRegistry::Mod),
+                 (int)sxcl::ui::IconRegistry::instance().has(sxcl::ui::IconRegistry::Shader),
+                 (int)sxcl::ui::IconRegistry::instance().count());
+
+sxcl::ui::MainWindow window;
 
     // ── 取证通路:强制窗口**逻辑**尺寸(SXCL_UI_WINDOW=<宽>x<高>)──────────────
     // 为什么需要它:桌面 1:1 参考图的口径是 1100x750(内容区 1052x702),而安卓手机给

@@ -26,6 +26,7 @@
 #endif
 
 #include <QColor>
+#include <QHBoxLayout>
 #include <QLatin1String>
 #include <QString>
 #include <QVBoxLayout>
@@ -67,6 +68,38 @@ public:
     void addStretch() { m_box->addStretch(1); }               // :65-66
     // 把整块内容一次装进一个横向容器(下载页那种"左栏 + 右内容区"用得上)
     QVBoxLayout *box() const { return m_box; }
+
+    /** **两栏版式**:左栏(页面自己的侧边栏)**从内容区顶部开始**,标题/副标题挪到右列上方。
+     *
+     *  用户 2026-09-22 晚连着两次点名:「侧2 还是被上方文字顶的向下移动了」——
+     *  以前整页是"标题 + 副标题 + 内容"竖着排,左栏自然被上面那两行文字顶下去十几到上百像素,
+     *  与窗口那条主侧边栏(侧1)怎么都对不齐。现在:
+     *    * 左外边距给 **0** —— 左栏贴着页面左边缘,视觉上与侧1 连成一条;
+     *    * 标题只在右列上方(右列自己留 24px 顶距),左栏不跟着动。
+     *  返回右列的竖布局:后续内容加进它(**不要再调 addContent / addStretch**)。
+     *  side 可空(只要版式不要左栏)。 */
+    QVBoxLayout *beginSideLayout(QWidget *side) {
+        m_box->removeWidget(m_title);
+        m_box->removeWidget(m_subtitle);
+        m_box->setContentsMargins(0, 0, 28, 24);
+        auto *row = new QHBoxLayout();
+        row->setContentsMargins(0, 0, 0, 0);
+        row->setSpacing(12);
+        if (side != nullptr) {
+            row->addWidget(side, 0);
+        }
+        auto *right = new QWidget(m_view);
+        right->setStyleSheet(QStringLiteral("background: transparent;"));
+        auto *rightLay = new QVBoxLayout(right);
+        rightLay->setContentsMargins(0, 24, 0, 0); // 标题的顶距只算在右列头上
+        rightLay->setSpacing(16);
+        rightLay->setAlignment(Qt::AlignTop);
+        rightLay->addWidget(m_title);
+        rightLay->addWidget(m_subtitle);
+        row->addWidget(right, 1);
+        m_box->addLayout(row, 1);
+        return rightLay;
+    }
 
 private:
     QWidget *m_view = nullptr;

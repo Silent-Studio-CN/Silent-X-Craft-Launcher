@@ -181,11 +181,15 @@ void HomePage::buildContent() {
     // ── ② 启动区:**PCL 那样的滑动选项**(离线 / 正版二选一,不同时摆在眼前) ──
     // 用户 2026-09-22 晚点名:「正版和离线做 PCL 一样的滑动选项，不同时存在，默认离线」。
     // Pivot 就是 libqf 里那套带滑动指示条的分段控件(与 PCL 的登录方式切换同一个形态)。
-    auto *launchRow = new QWidget(m_view);
-    auto *launchLay = new QVBoxLayout(launchRow);
-    launchLay->setContentsMargins(0, 0, 0, 0);
-    launchLay->setSpacing(8);
-    m_loginPivot = new Pivot(launchRow);
+    /* 整块装进**一张卡**(与上下的版本卡 / 文件夹卡同宽、同内边距)。
+     * 用户 2026-09-22 晚(第二次)点名:「正版登录和离线登录的块不对页」——
+     * 以前这块是**裸的**:滑块贴着页面左边缘(没有卡的 20px 内边距),里面又各套了一层卡,
+     * 于是"标题 / 滑块 / 卡里的文字"三样各对齐到不同的 x,和别的卡怎么都差一截。 */
+    auto *loginCard = new CardWidget(m_view);
+    auto *loginLay = new QVBoxLayout(loginCard);
+    loginLay->setContentsMargins(20, 16, 20, 16);
+    loginLay->setSpacing(12);
+    m_loginPivot = new Pivot(loginCard);
     m_loginPivot->addItem(QStringLiteral("offline"), QStringLiteral("离线启动"));
     m_loginPivot->addItem(QStringLiteral("account"), QStringLiteral("正版登录"));
     m_loginPivot->setIndicatorColor(FluentTheme::instance().tokens().accent,
@@ -212,15 +216,16 @@ void HomePage::buildContent() {
                        "PivotItem[isSelected='true'] { color: %1; }"
                        "PivotItem[isSelected='false'] { color: %2; }")
             .arg(pageTokenText("accent"), pageTokenText("textSecondary")));
-    launchLay->addWidget(m_loginPivot, 0, Qt::AlignLeft);
+    loginLay->addWidget(m_loginPivot, 0, Qt::AlignLeft);
 
-    auto *launchStack = new QStackedWidget(launchRow);
+    auto *launchStack = new QStackedWidget(loginCard);
     m_loginStack = launchStack;
     {
-        // 左:正版启动
-        auto *accountCard = new CardWidget(launchStack);
+        // 左:正版启动(裸页,**不再套第二层卡** —— 夹心卡在视觉上就是"不对页")
+        auto *accountCard = new QWidget(launchStack);
+        accountCard->setStyleSheet(QStringLiteral("background: transparent;"));
         auto *accountLay = new QVBoxLayout(accountCard);
-        accountLay->setContentsMargins(20, 16, 20, 16);
+        accountLay->setContentsMargins(0, 0, 0, 0);
         accountLay->setSpacing(8);
         auto *accountTitle = new StrongBodyLabel(QStringLiteral("正版启动"), accountCard);
         accountTitle->setStyleSheet(
@@ -238,9 +243,10 @@ void HomePage::buildContent() {
         launchStack->addWidget(accountCard);
 
         // 右:离线启动(用户点名:ID 输入框 + 状态保留;已登录正版也能用这一路)
-        auto *offlineCard = new CardWidget(launchStack);
+        auto *offlineCard = new QWidget(launchStack);
+        offlineCard->setStyleSheet(QStringLiteral("background: transparent;"));
         auto *offlineLay = new QVBoxLayout(offlineCard);
-        offlineLay->setContentsMargins(20, 16, 20, 16);
+        offlineLay->setContentsMargins(0, 0, 0, 0);
         offlineLay->setSpacing(8);
         auto *offlineTitle = new StrongBodyLabel(QStringLiteral("离线启动"), offlineCard);
         offlineTitle->setStyleSheet(
@@ -277,8 +283,8 @@ void HomePage::buildContent() {
     connect(m_loginPivot, &Pivot::currentItemChanged, this, [this](const QString &key) {
         m_loginStack->setCurrentIndex(key == QLatin1String("account") ? 1 : 0);
     });
-    launchLay->addWidget(launchStack, 1);
-    m_vBox->addWidget(launchRow);
+    loginLay->addWidget(launchStack, 1);
+    m_vBox->addWidget(loginCard);
 
     // ── ③ 当前文件夹卡(用户:显示文件夹自己的名字,不强制叫 .minecraft)──
     auto *dirCard = new CardWidget(m_view);

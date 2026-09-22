@@ -104,14 +104,10 @@ QWidget *createDownloadPage(QWidget *parent) {
                                QStringLiteral("sxclPage_download"), parent);
 
     // ── 双层侧边栏 + 右内容区 ──
-    auto *body = new QWidget(page->view());
-    auto *bodyLay = new QHBoxLayout(body);
-    bodyLay->setContentsMargins(0, 0, 0, 0);
-    bodyLay->setSpacing(12);
-
-    // 左侧一整列 = 侧 2 栏 + 它的页脚(版本形态滑块)。**整列撑满高度**,右内容区才是被挤的那一边
-    // —— 用户 2026-09-22 晚:"都改成侧边栏挤压右侧大页,不接受向下挤压"。
-    auto *leftCol = new QWidget(body);
+    // 用 PageShell 的**两栏版式**:左边这一列(侧 2 栏 + 页脚)**从内容区顶部开始**,
+    // 标题/副标题挪到右列上方 —— 用户 2026-09-22 晚两次点名:「侧2 还是被上方文字顶的向下移动了」。
+    // 左列贴页面左边缘(左外边距 0),与窗口主侧边栏(侧1)连成一条。
+    auto *leftCol = new QWidget(page->view());
     auto *leftLay = new QVBoxLayout(leftCol);
     leftLay->setContentsMargins(0, 0, 0, 0);
     leftLay->setSpacing(8);
@@ -183,9 +179,9 @@ QWidget *createDownloadPage(QWidget *parent) {
         });
         leftLay->addWidget(foot, 0);
     }
-    bodyLay->addWidget(leftCol, 0);
+    QVBoxLayout *rightLay = page->beginSideLayout(leftCol); // 右列:标题 + 副标题 + 内容
 
-    auto *stack = new QStackedWidget(body);
+    auto *stack = new QStackedWidget(page->view());
     stack->addWidget(createVersionsPage(stack));
     // MOD 那一栏:接上 sxcl/mods.h 的资源来源层(搜索/挑文件/装进隔离后的 mods)
     stack->addWidget(createModsPage(stack, false));
@@ -203,8 +199,7 @@ QWidget *createDownloadPage(QWidget *parent) {
         }
     });
 
-    bodyLay->addWidget(stack, 1);
-    page->addContent(body);
+    rightLay->addWidget(stack, 1);
     return page;
 }
 

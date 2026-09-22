@@ -8,11 +8,21 @@
 
 #include "sxcl/loader_catalog.h"
 
+#include "sxcl/loader.h" /* sxcl_loader_maven_path:拼 downloads.artifact 的落盘路径 */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* ── 小工具(与 modloader/compat.c 同一套写法) ── */
+
+/** 写一句人话原因(err 可空)。 */
+static void catalog_err(char *err, size_t cap, const char *text)
+{
+    if (err != NULL && cap > 0) {
+        snprintf(err, cap, "%s", text != NULL ? text : "");
+    }
+}
 
 static int copy_cap(char *dst, size_t cap, const char *src)
 {
@@ -535,6 +545,201 @@ size_t sxcl_catalog_parse_quilt_json(const char *json, size_t len, const char *m
                                      sxcl_catalog_entry *out, size_t out_cap)
 {
     return parse_meta_json(json, len, mc, out, out_cap);
+}
+
+/* ── Quilt:从 meta 直接拼「加载器版本 JSON」(不走安装器 jar) ──
+ *
+ * 为什么需要它:Quilt 的安装器 jar(org.quiltmc:quilt-installer,8.7MB)只有 maven.quiltmc.org
+ * 一家托管,实测 32KB/s 且会停摆(BMCLAPI 与 Maven Central 都 404 —— 见 docs/22 §16),
+ * 那条路在本机根本走不完。而 meta.quiltmc.org 的返回体里**本来就有**
+ * launcherMeta.libraries 与 mainClass.client,照着拼就是一份完整的"加载器版本 JSON"。
+ *
+ * 产出**与 Fabric/Forge 安装器写出来的那份同形**:带 inheritsFrom 的"加载器层",
+ * 调用方再用 sxcl_loader_flatten_json() 与原版合并成能独立启动的单层 JSON(PCL 同形)。 */
+int sxcl_loader_quilt_loader_json(const char *meta_json, size_t len, const char *loader_version,
+                                  const char *mc_version, char **out_text, char *err,
+                                  size_t err_len)
+{
+    if (out_text != NULL) {
+        *out_text = NULL;
+    }
+    if (meta_json == NULL || loader_version == NULL || loader_version[0] == '\0' || out_text == NULL) {
+        catalog_err(err, err_len, "参数不全");
+        return SXCL_CATALOG_ERR_ARG;
+    }
+    char perr[160];
+    perr[0] = '\0';
+    sxcl_json *doc = sxcl_json_parse(meta_json, len, perr, sizeof(perr));
+    if (doc == NULL) {
+        catalog_err(err, err_len, "meta 不是合法 JSON");
+        return SXCL_CATALOG_ERR_FORMAT;
+    }
+    const sxcl_json_value *root = sxcl_json_root(doc);
+    const size_t count = sxcl_json_size(root);
+    const sxcl_json_value *picked = NULL;
+    const char *main_class = NULL;
+    for (size_t i = 0; i < count; ++i) {
+        const sxcl_json_value *item = sxcl_json_at(root, i);
+        if (item == NULL) {
+            continue;
+        }
+        const sxcl_json_value *loader = sxcl_json_get(item, "loader");
+        const sxcl_json_value *src = loader != NULL ? loader : item;
+        const char *version = sxcl_json_get_string(src, "version", "");
+        char from_maven[128];
+        from_maven[0] = '\0';
+        if (version[0] == '\0') {
+            /* 只有 maven 坐标("org.quiltmc:quilt-loader:0.20.0-beta.9")时取最后一段 */
+            const char *maven = sxcl_json_get_string(src, "maven", "");
+            const char *colon = maven != NULL ? strrchr(maven, ':') : NULL;
+            if (colon != NULL && colon[1] != '\0') {
+                copy_cap(from_maven, sizeof(from_maven), colon + 1);
+                version = from_maven;
+            }
+        }
+        if (version[0] == '\0' || strcmp(version, loader_version) != 0) {
+            continue;
+        }
+        const sxcl_json_value *launcher_meta = sxcl_json_get(item, "launcherMeta");
+        const sxcl_json_value *classes = sxcl_json_get(launcher_meta, "mainClass");
+        const char *client = sxcl_json_get_string(classes, "client", "");
+        if (client[0] == '\0') {
+            continue; /* 没有入口类的条目不是我们要的(有些老条目形态不同) */
+        }
+        picked = item;
+        main_class = client;
+        break;
+    }
+    if (picked == NULL) {
+        sxcl_json_free(doc);
+        catalog_err(err, err_len, "meta 里没有这个 loader 版本(或它没有 mainClass)");
+        return SXCL_CATALOG_ERR_FORMAT;
+    }
+    const sxcl_json_value *launcher_meta = sxcl_json_get(picked, "launcherMeta");
+    const sxcl_json_value *libs = sxcl_json_get(launcher_meta, "libraries");
+    /* 注意:实测 Quilt 的 libraries 是**对象**(client/common/server),sxcl_json_size 只对数组有效 ——
+     * 用数组长度判空会把好好的 meta 判成"空的"(踩过一次)。 */
+    if (sxcl_json_size(libs) == 0 && sxcl_json_member_count(libs) == 0) {
+        sxcl_json_free(doc);
+        catalog_err(err, err_len, "这个 loader 版本的 launcherMeta.libraries 是空的");
+        return SXCL_CATALOG_ERR_FORMAT;
+    }
+    /* 产出的 JSON 比 meta 小得多:按 meta 长度 + 余量分配一次就够,写不下就如实报错。 */
+    size_t cap = len + 4096;
+    char *buf = (char *)malloc(cap);
+    if (buf == NULL) {
+        sxcl_json_free(doc);
+        catalog_err(err, err_len, "内存不足");
+        return SXCL_CATALOG_ERR_ARG;
+    }
+    size_t used = 0;
+    int truncated = 0;
+#define QUILT_APPEND(...)                                                                          \
+    do {                                                                                           \
+        const int w = snprintf(buf + used, cap - used, __VA_ARGS__);                               \
+        if (w < 0 || (size_t)w >= cap - used) {                                                    \
+            truncated = 1;                                                                         \
+        } else {                                                                                   \
+            used += (size_t)w;                                                                     \
+        }                                                                                          \
+    } while (0)
+    QUILT_APPEND("{\n  \"id\": \"quilt-%s\",\n  \"inheritsFrom\": \"%s\",\n  \"mainClass\": \"%s\",\n",
+                 loader_version, mc_version != NULL ? mc_version : "", main_class);
+    QUILT_APPEND("  \"libraries\": [");
+    size_t written = 0;
+    /* 一条库:有哈希/大小就写成标准的 downloads.artifact 形态(带完整 URL + sha1 + size)。
+     * 为什么:我们的 sxcl_loader_collect_libraries 认的是 downloads.artifact(强校验 + 落盘路径),
+     * 而 Quilt 的 meta 只给 {name,url} —— 三样关键件本来就在项里带着哈希,别浪费。 */
+#define QUILT_EMIT_LIB(coord, root, sha1, size)                                                     \
+    do {                                                                                           \
+        QUILT_APPEND("%s\n    {\"name\": \"%s\"", written > 0 ? "," : "", (coord));                 \
+        if ((root) != NULL && (root)[0] != '\0') {                                                 \
+            QUILT_APPEND(", \"url\": \"%s\"", (root));                                             \
+        }                                                                                          \
+        if ((sha1) != NULL && (sha1)[0] != '\0') {                                                 \
+            char rel[420];                                                                         \
+            rel[0] = '\0';                                                                         \
+            if (sxcl_loader_maven_path((coord), rel, sizeof(rel)) == SXCL_LOADER_OK) {              \
+                QUILT_APPEND(", \"downloads\": {\"artifact\": {\"url\": \"%s%s\", \"path\": \"%s\"", \
+                             (root), rel, rel);                                                    \
+                QUILT_APPEND(", \"sha1\": \"%s\"", (sha1));                                         \
+                if ((size) > 0) {                                                                  \
+                    QUILT_APPEND(", \"size\": %lld", (long long)(size));                            \
+                }                                                                                  \
+                QUILT_APPEND("}}");                                                                \
+            }                                                                                      \
+        }                                                                                          \
+        QUILT_APPEND("}");                                                                         \
+        ++written;                                                                                 \
+    } while (0)
+
+    /* ① 加载器自己 + hashed + intermediary:meta 的 libraries 里**没有**这三样,
+     *    但它们是"能起来"的最小集合(HMCL 也是这么补的)。坐标在项内的 loader/hashed/intermediary。 */
+    {
+        struct {
+            const char *key;
+            const char *maven_root;
+        } const extras[] = {
+            {"loader", "https://maven.quiltmc.org/repository/release/"},
+            {"hashed", "https://maven.quiltmc.org/repository/release/"},
+            {"intermediary", "https://maven.fabricmc.net/"},
+        };
+        for (size_t i = 0; i < sizeof(extras) / sizeof(extras[0]); ++i) {
+            const sxcl_json_value *obj = sxcl_json_get(picked, extras[i].key);
+            const char *coord = sxcl_json_get_string(obj, "maven", "");
+            if (coord[0] == '\0') {
+                continue;
+            }
+            const char *sha1 = sxcl_json_get_string(sxcl_json_get(obj, "hashes"), "sha1", "");
+            const int64_t size = sxcl_json_get_int64(obj, "file_size", 0);
+            QUILT_EMIT_LIB(coord, extras[i].maven_root, sha1, size);
+        }
+    }
+    /* ② launcherMeta.libraries:实测是**对象**(client / common / server 三个数组),
+     *    也有版本给的是数组 —— 两种形态都认(是对象就把里面所有数组都展开)。 */
+    if (sxcl_json_type_of(libs) == SXCL_JSON_OBJECT) {
+        const size_t members = sxcl_json_member_count(libs);
+        for (size_t m = 0; m < members; ++m) {
+            const sxcl_json_value *group = sxcl_json_member_value(libs, m);
+            if (sxcl_json_type_of(group) != SXCL_JSON_ARRAY) {
+                continue;
+            }
+            const size_t n = sxcl_json_size(group);
+            for (size_t i = 0; i < n; ++i) {
+                const sxcl_json_value *lib = sxcl_json_at(group, i);
+                const char *name = sxcl_json_get_string(lib, "name", "");
+                if (name[0] == '\0') {
+                    continue;
+                }
+                QUILT_EMIT_LIB(name, sxcl_json_get_string(lib, "url", ""),
+                               sxcl_json_get_string(lib, "sha1", ""),
+                               sxcl_json_get_int64(lib, "size", 0));
+            }
+        }
+    } else {
+        const size_t n = sxcl_json_size(libs);
+        for (size_t i = 0; i < n; ++i) {
+            const sxcl_json_value *lib = sxcl_json_at(libs, i);
+            const char *name = sxcl_json_get_string(lib, "name", "");
+            if (name[0] == '\0') {
+                continue;
+            }
+            QUILT_EMIT_LIB(name, sxcl_json_get_string(lib, "url", ""),
+                           sxcl_json_get_string(lib, "sha1", ""),
+                           sxcl_json_get_int64(lib, "size", 0));
+        }
+    }
+#undef QUILT_EMIT_LIB
+    QUILT_APPEND("\n  ]\n}\n");
+#undef QUILT_APPEND
+    sxcl_json_free(doc);
+    if (truncated || written == 0) {
+        free(buf);
+        catalog_err(err, err_len, truncated ? "拼出来的 JSON 太长" : "没有任何可用的库条目");
+        return SXCL_CATALOG_ERR_FORMAT;
+    }
+    *out_text = buf;
+    return SXCL_CATALOG_OK;
 }
 
 /* ── 解析:OptiFine(BMCLAPI JSON) ── */

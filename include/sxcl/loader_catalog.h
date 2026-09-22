@@ -119,6 +119,21 @@ size_t sxcl_catalog_parse_fabric_json(const char *json, size_t len, const char *
 size_t sxcl_catalog_parse_quilt_json(const char *json, size_t len, const char *mc,
                                      sxcl_catalog_entry *out, size_t out_cap);
 
+/** **Quilt:跳过安装器 jar,直接从 meta 拼一份「加载器版本 JSON」**（docs/22 §16 的正解）。
+ *
+ *  为什么:Quilt 的安装器 jar（org.quiltmc:quilt-installer，8.7MB）只有 maven.quiltmc.org
+ *  一家托管，实测 32KB/s 且会停摆（BMCLAPI 与 Maven Central 都 404）；而 meta 的返回体里
+ *  **本来就有** launcherMeta.libraries 与 mainClass.client —— 照着拼就够了。
+ *
+ *  产出与 Fabric/Forge 安装器写出来的那份**同形**：带 inheritsFrom 的"加载器层"
+ *  （id = "quilt-<版本>"、mainClass、libraries[] 带各自的 url，有 sha1/size 就照抄）。
+ *  调用方再拿 sxcl_loader_flatten_json() 与原版合并成能独立启动的单层 JSON（PCL 同形）。
+ *
+ *  meta_json = GET https://meta.quiltmc.org/v3/versions/loader/<mc> 的返回体。
+ *  成功返回 SXCL_CATALOG_OK 并让 *out_text 指向 malloc 出来的文本（调用方 free）。 */
+int sxcl_loader_quilt_loader_json(const char *meta_json, size_t len, const char *loader_version,
+                                  const char *mc_version, char **out_text, char *err, size_t err_len);
+
 /** BMCLAPI 的 OptiFine 列表(JSON,带 forge 字段)。 */
 size_t sxcl_catalog_parse_optifine_json(const char *json, size_t len, const char *mc,
                                         sxcl_catalog_entry *out, size_t out_cap);
