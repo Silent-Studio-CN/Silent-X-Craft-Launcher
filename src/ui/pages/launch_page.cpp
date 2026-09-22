@@ -359,6 +359,31 @@ private:
                     .arg(count));
     }
 
+    /** 游戏**正常退出**之后:把启动页收掉、回到主页(用户 2026-09-23 点名)。
+     *
+     *  原话:「游戏清完之后不要卡在墙页,启动页直接关闭,回到主屏幕就是主页的选择版本」。
+     *  为什么要留 1.6 秒:那一句"游戏已退出"的 InfoBar 与退出码得让人**看得见**,
+     *  然后才收页 —— 立刻跳走会让人以为"点了一下什么都没发生"。
+     *  只有**成功**这一支才自动收:失败/取消要停在页上,原因得让人看清楚(那是要动手的)。
+     *  还会再确认一次"这页眼下真的在前台" —— 用户要是自己先切走了,就别把页面从他手上抢走。 */
+    void scheduleReturnHome() {
+        QPointer<LaunchProgressPage> self(this);
+        QTimer::singleShot(1600, this, [self]() {
+            if (self == nullptr || !self->isVisible()) {
+                return;
+            }
+            QWidget *w = self->window();
+            if (w == nullptr) {
+                return;
+            }
+            /* goBackFromLaunch = hideTempPage(true):回到进来之前那一页(从主页点启动就是主页);
+             * 万一下层没这个方法,退回"版本列表"那条老路,绝不把用户丢在空白的临时页上。 */
+            if (!QMetaObject::invokeMethod(w, "goBackFromLaunch", Qt::DirectConnection)) {
+                (void)QMetaObject::invokeMethod(w, "goBackToVersions", Qt::DirectConnection);
+            }
+        });
+    }
+
     void callTaskState(const char *method) {
         QObject *page = tasksPage();
         if (page == nullptr) {
@@ -658,6 +683,7 @@ private:
             callTaskState("setTaskDone");
             InfoBar::push(InfoBar::Type::Success, QStringLiteral("游戏已退出"), message, this,
                           4000);
+            scheduleReturnHome(); // 游戏退了就回主页(不再卡在启动页)
             return;
         }
 
@@ -784,6 +810,7 @@ private:
             m_logView->appendPlainText(QStringLiteral("[info] %1 · %2").arg(title, detail));
             callTaskState("setTaskDone");
             InfoBar::push(InfoBar::Type::Success, title, detail, this, 5000);
+            scheduleReturnHome(); // 正版那一路同理:退了就回主页
             return;
         }
         for (const PhaseRow &row : m_phaseWidgets) {

@@ -220,6 +220,13 @@ void HomePage::buildContent() {
 
     auto *launchStack = new QStackedWidget(loginCard);
     m_loginStack = launchStack;
+    /* 页序**必须**跟着滑块条目走(滑块第一条是"离线启动")。
+     * 2026-09-23 崩溃级 bug:两条各按自己方便的顺序 addWidget —— 滑块 [离线,正版]、
+     * 栈 [正版,离线],于是"选离线看到的却是正版那一页(登录/刷新),选正版看到的却是离线 ID 填空"。
+     * 现在两个下标都**由 addWidget 的返回值定**,默认页取离线的那个,不再靠"数第几个"，
+     * 以后谁挪了代码块也不会再错位。 */
+    int accountIndex = -1;
+    int offlineIndex = -1;
     {
         // 左:正版启动(裸页,**不再套第二层卡** —— 夹心卡在视觉上就是"不对页")
         auto *accountCard = new QWidget(launchStack);
@@ -240,7 +247,7 @@ void HomePage::buildContent() {
         applyButtonFont(m_accountButton);
         connect(m_accountButton, &QAbstractButton::clicked, this, [this] { launchWithAccount(); });
         accountLay->addWidget(m_accountButton, 0, Qt::AlignLeft);
-        launchStack->addWidget(accountCard);
+        accountIndex = launchStack->addWidget(accountCard);
 
         // 右:离线启动(用户点名:ID 输入框 + 状态保留;已登录正版也能用这一路)
         auto *offlineCard = new QWidget(launchStack);
@@ -275,14 +282,16 @@ void HomePage::buildContent() {
         connect(offlineBtn, &QAbstractButton::clicked, this, [this] { launchOffline(); });
         rowLay->addWidget(offlineBtn, 0);
         offlineLay->addWidget(row);
-        launchStack->addWidget(offlineCard);
+        offlineIndex = launchStack->addWidget(offlineCard);
     }
     // 默认**离线**(用户点名):正版那条要等用户主动切过去/登录
-    m_loginStack->setCurrentIndex(0);
+    m_loginStack->setCurrentIndex(offlineIndex);
     m_loginPivot->setCurrentItem(QStringLiteral("offline"));
-    connect(m_loginPivot, &Pivot::currentItemChanged, this, [this](const QString &key) {
-        m_loginStack->setCurrentIndex(key == QLatin1String("account") ? 1 : 0);
-    });
+    connect(m_loginPivot, &Pivot::currentItemChanged, this,
+            [this, accountIndex, offlineIndex](const QString &key) {
+                m_loginStack->setCurrentIndex(key == QLatin1String("account") ? accountIndex
+                                                                              : offlineIndex);
+            });
     loginLay->addWidget(launchStack, 1);
     m_vBox->addWidget(loginCard);
 

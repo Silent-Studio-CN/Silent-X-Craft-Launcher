@@ -15,6 +15,9 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QAbstractButton> // 验收钩子:点模组页的搜索按钮(可能是 PrimaryPushButton)
+#include "crash_handler.h" // 启动器自己的崩溃取证(未处理异常 -> logs/crashes/)
+#include <QColorDialog>  // 验收钩子:SXCL_UI_ACCENT_APPLY 要在真对话框里"挑一个颜色"
+#include <QMouseEvent>   // 验收钩子:取色块靠 mouseReleaseEvent 开对话框,得真发一对鼠标事件
 #include <QLineEdit>       // 验收钩子:SXCL_UI_MODS_QUERY 往搜索框里写字
 #include <QPushButton> // 验收钩子:SXCL_UI_JRE_HOSTED 要找并点设置页上的「开始下载」按钮
 #include <QScrollArea>
@@ -273,6 +276,9 @@ int main(int argc, char *argv[]) {
     SXCL_LOG_I("startup", "日志文件=%s 上限=%llu 字节 保留=%d 份%s%s", sxcl_log_file_path(),
                (unsigned long long)sxcl_log_max_bytes(), sxcl_log_keep_files(),
                logRc != SXCL_LOG_OK ? " 打不开:" : "", logRc != SXCL_LOG_OK ? logError : "");
+    /* 崩溃取证:**日志一开就装** —— 晚装一步,这个窗口期里崩掉就什么都没留下
+     * (用户报"切主题色直接崩"时我们正是手上什么都没有)。 */
+    sxcl::ui::installCrashHandler();
 
     QApplication app(argc, argv);
     // Python main.py:96 —— app.setStyle("Fusion")。不设的话 Windows 默认样式的控件度量
@@ -593,6 +599,107 @@ sxcl::ui::MainWindow window;
             }
             QMetaObject::invokeMethod(&window, "switchToDownloadConfig", Qt::DirectConnection,
                                       Q_ARG(QString, configVersion));
+        });
+    }
+
+    // 验收通路:故意崩一次(SXCL_UI_CRASH_TEST=1)。
+    //   证明"启动器自己崩了会留下东西":logs/crashes/ 下应当出现
+    //   sxcl-ui-crash-<时间>.txt(异常码 + 出错模块 + 符号化调用栈 + 日志路径)与同名 .dmp。
+    if (qEnvironmentVariableIntValue("SXCL_UI_CRASH_TEST") == 1) {
+        QTimer::singleShot(1500, &app, []() {
+            std::fprintf(stderr, "[sxcl-ui] CRASH-TEST: 故意制造一个访问违例\n");
+            std::fflush(stderr);
+            volatile int *boom = reinterpret_cast<volatile int *>(0);
+            *boom = 1; // 让编译器别把这段优化掉
+        });
+    }
+
+    // 验收通路:在**设置页**里改强调色(SXCL_UI_ACCENT_APPLY='#ff8800')。
+    //   为什么要有它:用户报「切主题色直接把窗口搞崩」—— 崩溃只能靠**真路径**复现,
+    //   而这条路的每一步都不在"调核心库"上:切设置页 -> 点真取色块(ColorPickerButton,
+    //   它靠 mouseReleaseEvent 开 QColorDialog)-> 对话框里选色确定 -> 设置页的
+    //   colorChanged -> FluentTheme::setAccent + onThemeChanged(重套 QSS/调色板/广播)。
+    //   所以这里发**一对真鼠标事件**,再在对话框的嵌套事件循环里把颜色定下来。
+    const QString accentApply = qEnvironmentVariable("SXCL_UI_ACCENT_APPLY");
+    if (!accentApply.isEmpty()) {
+        QTimer::singleShot(700, &app, [&app, &window, accentApply]() {
+            QMetaObject::invokeMethod(&window, "switchToRoute", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("settings")));
+            std::fprintf(stderr, "[sxcl-ui] ACCENT: 已切到设置页,准备点取色块 -> %s\n",
+                         accentApply.toUtf8().constData());
+            /* 对话框是**模态**(QColorDialog::getColor 自己跑嵌套事件循环),所以这个定时器
+             * 是在对话框开着的时候才到点的 —— 正好用来"替用户挑一个颜色再确定"。 */
+            QTimer::singleShot(1200, &app, [&app, accentApply]() {
+                QWidget *modal = QApplication::activeModalWidget();
+                std::fprintf(stderr, "[sxcl-ui] ACCENT: 模态窗口=%s\n",
+                             modal != nullptr ? modal->metaObject()->className() : "(没有)");
+                if (auto *cd = qobject_cast<QColorDialog *>(modal)) {
+                    cd->setCurrentColor(QColor(accentApply));
+                    std::fprintf(stderr, "[sxcl-ui] ACCENT: 在对话框里选色 %s 并确定\n",
+                                 accentApply.toUtf8().constData());
+                    cd->accept();
+                }
+            });
+            QWidget *picker = nullptr;
+            const QList<QWidget *> all = QApplication::allWidgets();
+            for (QWidget *w : all) {
+                if (w->isVisible() &&
+                    QString::fromLatin1(w->metaObject()->className()) ==
+                        QLatin1String("ColorPickerButton")) {
+                    picker = w;
+                    break;
+                }
+            }
+            if (picker == nullptr) {
+                std::fprintf(stderr, "[sxcl-ui] ACCENT: 设置页里没找到取色块\n");
+                return;
+            }
+            const QPointF pos(8.0, 8.0);
+            QMouseEvent press(QEvent::MouseButtonPress, pos, picker->mapToGlobal(pos.toPoint()),
+                              Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QMouseEvent release(QEvent::MouseButtonRelease, pos,
+                                picker->mapToGlobal(pos.toPoint()), Qt::LeftButton,
+                                Qt::NoButton, Qt::NoModifier);
+            std::fprintf(stderr, "[sxcl-ui] ACCENT: 点取色块 %s -> 等对话框\n",
+                         picker->metaObject()->className());
+            QApplication::sendEvent(picker, &press);
+            QApplication::sendEvent(picker, &release);   // 这里会阻塞到对话框关闭
+            std::fprintf(stderr, "[sxcl-ui] ACCENT: 取色块已经返回(对话框关掉了)\n");
+        });
+    }
+
+    // 验收通路:在**设置页**里切换主题模式(SXCL_UI_THEME_SWITCH=light|dark|auto)。
+    //   与上一条同一个理由:用户报"切主题把窗口搞崩",而这条路要真的走
+    //   设置页那张卡(下拉 -> indexChanged -> onThemeChanged -> FluentTheme::apply ->
+    //   libqf setTheme/setThemeColor -> 广播 -> ThemeBridge 重刷所有登记窗口)。
+    //   这里**不点下拉**(ComboBox 的弹层是另一套代码),直接把**真下拉**的当前项改掉 ——
+    //   这是产品路径上"用户选了另一项"那一步,信号链一模一样。
+    const QString themeSwitch = qEnvironmentVariable("SXCL_UI_THEME_SWITCH");
+    if (!themeSwitch.isEmpty()) {
+        QTimer::singleShot(700, &app, [&app, &window, themeSwitch]() {
+            QMetaObject::invokeMethod(&window, "switchToRoute", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("settings")));
+            const QString want = themeSwitch == QLatin1String("light") ? QStringLiteral("浅色")
+                                 : themeSwitch == QLatin1String("dark") ? QStringLiteral("深色")
+                                                                        : QStringLiteral("跟随系统");
+            QTimer::singleShot(500, &app, [&window, want]() {
+                const QList<QComboBox *> boxes = window.findChildren<QComboBox *>();
+                for (QComboBox *box : boxes) {
+                    int hit = -1;
+                    for (int i = 0; i < box->count(); ++i) {
+                        if (box->itemText(i).contains(want))
+                            hit = i;
+                    }
+                    if (hit < 0 || !box->isVisible())
+                        continue;
+                    std::fprintf(stderr, "[sxcl-ui] THEME: 下拉里选「%s」(第 %d 项)\n",
+                                 want.toUtf8().constData(), hit);
+                    box->setCurrentIndex(hit);
+                    std::fprintf(stderr, "[sxcl-ui] THEME: setCurrentIndex 返回(没崩)\n");
+                    return;
+                }
+                std::fprintf(stderr, "[sxcl-ui] THEME: 设置页里没找到主题下拉\n");
+            });
         });
     }
 
