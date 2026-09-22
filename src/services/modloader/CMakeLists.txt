@@ -4,6 +4,7 @@
 
 target_sources(sxcl PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/catalog.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/quilt_meta.c
   ${CMAKE_CURRENT_SOURCE_DIR}/processors.c
   ${CMAKE_CURRENT_SOURCE_DIR}/keymap.c
   ${CMAKE_CURRENT_SOURCE_DIR}/keymap_presets.c

@@ -388,7 +388,12 @@ void NavPanel::setWidgetsCompacted(bool compacted) {
         b->setCompacted(compacted);
         // qf NavigationWidget.setCompacted:折叠 40x36,展开 EXPAND_WIDTH(312)x36
         // (navigation_widget.py:73-84;libqf 的 setCompacted 只改状态不改尺寸,这里补齐)
-        const int rowHeight = b->height() > 40 ? 48 : 36; // 两行(名字+路径)的行保持 48
+        /* 折叠态**一律 40x36**(与侧1 同形):两行(名字+路径)的行在折叠时小字根本不画,
+         * 再留着 48 高就比侧1 的行高一截 —— 用户 2026-09-22 晚点名「缩回来为什么不是侧1 的方形」。
+         * 展开态才按内容给高:带小字路径的行 48,普通行 36。 */
+        const NavButton *nav = qobject_cast<NavButton *>(b);
+        const bool two_line = (nav != nullptr) && nav->hasSubtitle();
+        const int rowHeight = (!compacted && two_line) ? 48 : 36;
         b->setFixedSize(compacted ? 40 : NavigationWidget::EXPAND_WIDTH, rowHeight);
         b->setToolTip(compacted ? b->text() : QString());
     }
@@ -425,6 +430,9 @@ void NavPanel::setCollapsed(bool collapsed) {
         connect(m_widthAni, &QPropertyAnimation::finished, this, [this] {
             if (m_collapsed)
                 setWidgetsCompacted(true);
+            /* 动画结束后才通知页面(qf 的 _onExpandAniFinished 同口径):
+             * 页面靠它把底部页脚藏起来/放出来 —— 页脚不收,这一列就撑宽,折起来右边留一大片空白。 */
+            emit collapsedChanged(m_collapsed);
         });
     }
     m_widthAni->stop();

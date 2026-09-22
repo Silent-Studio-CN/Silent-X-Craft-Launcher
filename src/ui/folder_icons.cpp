@@ -21,6 +21,7 @@
 #include <QCursor>
 #include <QDir>
 #include <QGuiApplication>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QScreen>
@@ -236,14 +237,18 @@ QWidget *createFolderIconPicker(const QString &folderPath, const QString &folder
         groupLabel->setTextColor(secondary, secondary);
         lay->addWidget(groupLabel);
 
-        // 流式布局：窗口窄了自动换行 —— 这就是"自适应"，绝不为它拉一条横向滚动条。
-        // **装在子容器里**：QLayout 带 parent 构造会把自己设成那个 widget 的顶层布局，
-        // 而卡片已经有 QVBoxLayout 了（Qt 会警告 "already has a layout" 并把布局关系搞乱）。
+        /* 网格布局(每行 8 个)。
+         * 以前这里是 FlowLayout:它 hasHeightForWidth,而 QWidget 不会主动把 heightForWidth
+         * 传给父布局 —— 于是那个子容器的高度算出来是 0,**所有图标全叠在同一个位置**
+         * (用户 2026-09-22 晚:「版本选择的文件夹LOGO切换堆在一起」)。
+         * 弹窗本来就是"内容多大就多大"的固定小窗,用网格把列数钉死最稳、也最好看。 */
         auto *grid = new QWidget(card);
         grid->setStyleSheet(QStringLiteral("background: transparent;"));
-        auto *flow = new FlowLayout(grid, false, true);
+        auto *flow = new QGridLayout(grid);
+        flow->setContentsMargins(0, 0, 0, 0);
         flow->setHorizontalSpacing(6);
         flow->setVerticalSpacing(6);
+        int cell = 0;
         for (const FolderIconOption &opt : folderIconCatalog()) {
             if (opt.group != group)
                 continue;
@@ -263,7 +268,8 @@ QWidget *createFolderIconPicker(const QString &folderPath, const QString &folder
                 if (onPick)
                     onPick(picked);
             });
-            flow->addWidget(btn);
+            flow->addWidget(btn, cell / 8, cell % 8, Qt::AlignLeft | Qt::AlignTop);
+            ++cell;
         }
         lay->addWidget(grid);
     }
@@ -285,7 +291,14 @@ void showFolderIconPopup(QWidget *anchor, const QString &folderPath, const QStri
     auto *popup = new QWidget(anchor, Qt::Popup);
     popup->setObjectName(QStringLiteral("sxclIconPopup"));
     popup->setAttribute(Qt::WA_DeleteOnClose);
-    popup->setStyleSheet(QStringLiteral("QWidget#sxclIconPopup { background: transparent; }"));
+    /* 弹层是**顶层窗**(Qt::Popup):主窗口那套 QSS 里的卡片底色不一定作用到它身上,
+     * 不自己钉一份的话整块弹窗就是 Qt 默认的浅色底,深色主题下看着像块白板
+     * (真机截图:675x626 里 93% 是 #f8f8f8,图标在浅底上几乎看不见)。
+     * 这里按主题令牌自己铺底 + 描边 + 圆角,与别的卡片同一种观感。 */
+    popup->setStyleSheet(
+        QStringLiteral("QWidget#sxclIconPopup { background: %1; border: 1px solid %2;"
+                       " border-radius: 10px; }")
+            .arg(pageTokenText("card"), pageTokenText("border")));
     auto *lay = new QVBoxLayout(popup);
     lay->setContentsMargins(0, 0, 0, 0);
     lay->setSpacing(0);

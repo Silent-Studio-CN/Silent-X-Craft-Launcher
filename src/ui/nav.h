@@ -81,6 +81,9 @@ public:
     void setSubtitle(const QString &text);
     /** 右侧是否留出动作按钮(齿轮)的位置,免得文字压到它下面。 */
     void setActionReserve(bool reserve) { m_actionReserve = reserve; }
+    /** 这一行是不是"两行"(名字 + 小字路径)。**折叠时只画图标**,高度也要回到 36
+     *  —— 否则它比侧1 的行高(36)高一截,看着就不是方形(用户 2026-09-22 晚点名)。 */
+    bool hasSubtitle() const { return !m_subtitle.isEmpty(); }
 
 protected:
     void paintEvent(QPaintEvent *) override;
@@ -131,6 +134,10 @@ signals:
     void routeChanged(const QString &routeKey);
     /** 某一行右侧的"动作按钮"(NavItem.actionIcon)被点了。参数是那一行的 routeKey。 */
     void itemAction(const QString &routeKey);
+    /** 折叠态变了(**动画结束后**才发,与 qf 的 _onExpandAniFinished 同口径)。
+     *  页面靠它决定"折叠时藏掉底部那块页脚",否则页脚会把这一列撑宽,
+     *  折起来以后右边留一大片空白(用户 2026-09-22 晚:「收回来就不要靠[右]了,靠回最左边」)。 */
+    void collapsedChanged(bool collapsed);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;

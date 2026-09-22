@@ -178,6 +178,12 @@ QWidget *createDownloadPage(QWidget *parent) {
             }
         });
         leftLay->addWidget(foot, 0);
+
+        /* 折叠时**把页脚藏起来**:它比折叠后的轨道(48)宽得多,留着就会把这一列撑到 247 宽,
+         * 折起来以后右边空一大片(用户 2026-09-22 晚:「下载页侧2栏收回来就不要靠[右]了,
+         * 跟原生一样靠回最左边」)。展开时再放回来 —— 与 qf 的折叠语义一致:折叠只留图标轨道。 */
+        QObject::connect(inner, &NavPanel::collapsedChanged, foot,
+                         [foot](bool collapsed) { foot->setVisible(!collapsed); });
     }
     QVBoxLayout *rightLay = page->beginSideLayout(leftCol); // 右列:标题 + 副标题 + 内容
 

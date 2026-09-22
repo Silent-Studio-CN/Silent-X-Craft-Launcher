@@ -706,7 +706,74 @@ sxcl::ui::MainWindow window;
         });
     }
 
-    if (!shot.isEmpty() && popup.isEmpty()) {
+    // 验收通路:把当前页面里那条"侧2"收起来(SXCL_UI_COLLAPSE=1)。
+    //   折叠态的几何(面板 48 宽、按钮 40x36)只能靠图看 —— 用户点名"缩回来不是侧1 的方形",
+    //   所以给一张能复现的取证图。用 NavPanel::setCollapsed(true)(面板自己的公开 API)。
+    if (qEnvironmentVariableIntValue("SXCL_UI_COLLAPSE") == 1) {
+        const int collapseDelay = qEnvironmentVariableIntValue("SXCL_UI_COLLAPSE_DELAY");
+        QTimer::singleShot(collapseDelay > 0 ? collapseDelay : 1200, &app, [&window]() {
+            QWidget *page = window.pageStack() != nullptr ? window.pageStack()->currentWidget()
+                                                          : nullptr;
+            if (page == nullptr) {
+                return;
+            }
+            const QList<sxcl::ui::NavPanel *> panels = page->findChildren<sxcl::ui::NavPanel *>();
+            for (sxcl::ui::NavPanel *panel : panels) {
+                panel->setCollapsed(true);
+                std::fprintf(stderr, "[sxcl-ui] 侧2 已折叠(SXCL_UI_COLLAPSE)\n");
+            }
+        });
+    }
+
+    // 验收通路:打开版本选择页里**文件夹那一行的齿轮**(自定义图标弹窗),抓它本身。
+    //   SXCL_UI_ICON_POPUP=1 + SXCL_UI_SHOT=... :点第一行的动作按钮(NavPanel::actionButton),
+    //   然后抓活动弹层 —— 那个弹窗是 Qt::Popup 顶层窗,window.grab() 抓不到它。
+    if (qEnvironmentVariableIntValue("SXCL_UI_ICON_POPUP") == 1 && !shot.isEmpty()) {
+        QTimer::singleShot(1500, &app, [&window, &app, shot]() {
+            QWidget *page = window.pageStack() != nullptr ? window.pageStack()->currentWidget()
+                                                          : nullptr;
+            sxcl::ui::NavPanel *panel =
+                page != nullptr ? page->findChild<sxcl::ui::NavPanel *>() : nullptr;
+            /* 直接触发 NavPanel::itemAction(那个齿轮被点时发的就是它)——
+             * 齿轮本身是 qf 的 NavToolButton,不是 QAbstractButton,没有 click() 可调。 */
+            QString route;
+            if (panel != nullptr) {
+                for (const sxcl::ui::NavItem &item : panel->items()) {
+                    if (!item.actionIcon.isEmpty()) {
+                        route = item.routeKey;
+                        break;
+                    }
+                }
+            }
+            if (route.isEmpty()) {
+                std::fprintf(stderr, "[sxcl-ui] 找不到带齿轮的文件夹行(需要 SXCL_UI_ROUTE=select)\n");
+                QCoreApplication::quit();
+                return;
+            }
+            QMetaObject::invokeMethod(panel, "itemAction", Qt::DirectConnection,
+                                      Q_ARG(QString, route));
+            std::fprintf(stderr, "[sxcl-ui] 已点文件夹行的齿轮(自定义图标弹窗)\n");
+            QTimer::singleShot(700, &app, [shot]() {
+                QWidget *pop = QApplication::activePopupWidget();
+                if (pop == nullptr) {
+                    std::fprintf(stderr, "[sxcl-ui] 图标弹窗没起来\n");
+                    QCoreApplication::quit();
+                    return;
+                }
+                if (qEnvironmentVariableIntValue("SXCL_UI_DUMP") == 1) {
+                    std::fprintf(stderr, "[sxcl-ui] 控件树 dump(图标弹窗):\n");
+                    dumpWidgetTree(pop, 5);
+                }
+                const QPixmap pm = pop->grab();
+                const bool ok = pm.save(shot);
+                std::fprintf(stderr, "[sxcl-ui] 图标弹窗截图 %s %dx%d %s\n",
+                             shot.toUtf8().constData(), pm.width(), pm.height(), ok ? "OK" : "FAILED");
+                QCoreApplication::quit();
+            });
+        });
+    }
+
+    if (!shot.isEmpty() && popup.isEmpty() && qEnvironmentVariableIntValue("SXCL_UI_ICON_POPUP") != 1) {
         // SXCL_UI_SHOT_DELAY=<ms>:等对话框拿到 user_code / 走到第 6 跳再抓图(默认 1500)。
         const int delayMs = qEnvironmentVariableIntValue("SXCL_UI_SHOT_DELAY");
         const int waitMs = delayMs > 0 ? delayMs : 1500;

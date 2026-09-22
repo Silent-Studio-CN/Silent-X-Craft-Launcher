@@ -303,6 +303,52 @@ int sxcl_loader_flatten_json(const sxcl_json_value *loader_root, const sxcl_json
                              const char *instance_name, const char *base_version, char **out_text,
                              char *err, size_t err_len);
 
+/* ── Quilt:从 meta 直装(不走那个 8.7MB 的安装器 jar) ──
+ *
+ * 背景(docs/22 §16):Quilt 的安装器 jar 只有 maven.quiltmc.org 一家托管,实测 32KB/s 且会停摆,
+ * BMCLAPI 与 Maven Central 都没有 —— 那条路在很多网络里根本走不完。而 meta 里本来就有
+ * launcherMeta.libraries 与 mainClass,照着拼就够。本函数把整条链一次做完:
+ *   取 meta -> 拼「加载器层」-> 与原版**拍平**成能独立启动的单层 JSON(PCL 形态)
+ *   -> **先下库**(带侧车哈希纠偏)-> 最后写 versions/<实例>/<实例>.json。
+ * 顺序是刻意的(与 docs/24 的 P1 同一条纪律):**版本 JSON 最后写** —— 库里下不来就如实失败,
+ * 磁盘上不会留下一个"看着装好了、其实缺库"的实例。
+ * 客户端 jar 不在这里下:启动前补全(P0,见 docs/24)会按 downloads.client 自己兜住。 */
+
+/* 前置声明:sxcl_engine_opts 定义在 sxcl/engine.h —— 这里只用到它的指针,
+ * 不想让 loader.h 依赖 engine.h(调用方自己 include 两个头)。 */
+typedef struct sxcl_engine_opts sxcl_engine_opts;
+
+typedef struct sxcl_quilt_install_request {
+    const char *game_dir;        /**< 必填:游戏根目录 */
+    const char *mc_version;      /**< 必填:原版版本号(实例目录里要有它的版本 JSON 才拍得平) */
+    const char *loader_version;  /**< 必填:Quilt loader 版本(如 "0.20.0-beta.9") */
+    const char *instance_name;   /**< 可空 = "<mc>-quilt-<loader 版本>" */
+    const char *meta_url;        /**< 可空 = 官方 meta.quiltmc.org/v3/versions/loader/<mc> */
+    const char *maven_mirror;    /**< 可空:库的第二候选(与 CLI 的 --mirror 同义) */
+    const sxcl_engine_opts *engine_opts; /**< 必填:取文本与下库都用它(要有 transport_factory) */
+    int retries;                 /**< <=0 = 2(每个源最多试几次;慢/抖的源调高) */
+    void (*on_progress)(void *ud, int percent, const char *text); /**< 可空 */
+    void *progress_ud;
+    int (*is_cancelled)(void *ud); /**< 可空:非 0 = 停(每个文件边界上问一次) */
+    void *cancel_ud;
+} sxcl_quilt_install_request;
+
+typedef struct sxcl_quilt_install_result {
+    char instance[160];      /**< 实际用的实例名 */
+    char version_json[1024]; /**< 写出来的版本 JSON 路径 */
+    int libraries_total;
+    int libraries_downloaded;
+    int libraries_failed;
+    /** 1 = 清单里的哈希与 maven 自己发的 .sha1 不一致(上游重建过文件),已按侧车纠正。
+     *  实测:quilt-loader-0.20.0-beta.9.jar 与 hashed-1.20.1.jar 都是这一种。 */
+    int sha1_from_sidecar;
+    int64_t bytes_done;
+} sxcl_quilt_install_result;
+
+/** 返回 SXCL_LOADER_OK / SXCL_LOADER_ERR_*(err 里是人话原因)。 */
+int sxcl_loader_quilt_install(const sxcl_quilt_install_request *req, sxcl_quilt_install_result *out,
+                              char *err, size_t err_len);
+
 /** 合并 launcher_profiles.json 的**纯文本**入口(不碰磁盘,便于单测):
  *  在 existing_json(可空 = 全新文件)的基础上,把我们的档案并进 profiles[<key>],
  *  并补齐 selectedProfile / clientToken。已经存在同名档案时**保持原样**

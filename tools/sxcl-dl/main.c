@@ -1279,164 +1279,60 @@ static int cmd_launch(int argc, char **argv, const cli_opts *o)
 /* ── Quilt:从 meta 直装(不走安装器 jar;docs/22 §16 的正解)──
  *
  * **不下**那个 8.7MB 的安装器 jar —— 它只有 maven.quiltmc.org 一家托管,实测 32KB/s 且会停摆
- * (BMCLAPI 与 Maven Central 都 404)。meta 里本来就有 launcherMeta.libraries 与 mainClass,
- * 照着拼就够了。链路:
- *   取 meta -> sxcl_loader_quilt_loader_json 拼「加载器层」
- *   -> sxcl_loader_flatten_json 与原版拍平成**能独立启动**的单层 JSON(PCL 形态)
- *   -> 写 versions/<实例>/<实例>.json -> 按清单下库。
- * 客户端 jar 不在这里下:启动前补全(P0)会按 downloads.client 自己兜住。 */
+ * (BMCLAPI 与 Maven Central 都 404)。整条链在**核心库**里(sxcl_loader_quilt_install,见 loader.h):
+ * 取 meta -> 拼加载器层 -> 与原版拍平 -> 先下库 -> **最后**写版本 JSON。
+ * 这里只负责把 CLI 的选项翻译成那次调用 —— 界面走的是同一个入口,两边不会分叉。 */
 static int quilt_install_from_meta(const cli_opts *o, const char *mc_version,
                                    const char *loader_version, const char *game_dir,
                                    const char *instance_opt)
 {
-    char url[512];
-    snprintf(url, sizeof(url), "https://meta.quiltmc.org/v3/versions/loader/%s", mc_version);
+    cli_state st;
+    memset(&st, 0, sizeof(st));
+    st.verbose = o->verbose;
+    sxcl_engine_opts eopts;
+    memset(&eopts, 0, sizeof(eopts));
+    eopts.workers = o->workers;
+    eopts.rate_bps = o->rate;
+    eopts.retry_per_source = o->retries > 0 ? o->retries : 2;
+    eopts.max_conn_per_file = o->conn;
+    eopts.cache_path = o->cache;
+    eopts.on_progress = on_progress; /* 逐文件明细(verbose 时) */
+    eopts.userdata = &st;
+#if defined(SXCL_HAVE_QT_TRANSPORT)
+    sxcl_transport_qt_bootstrap();
+    eopts.transport_factory = make_qt_transport;
+#else
+    fprintf(stderr, "本产物没有编译进任何传输后端(需要 Qt6::Network),装不了 Quilt\n");
+    return 2;
+#endif
+
+    sxcl_quilt_install_request req;
+    memset(&req, 0, sizeof(req));
+    req.game_dir = game_dir;
+    req.mc_version = mc_version;
+    req.loader_version = loader_version;
+    req.instance_name = instance_opt;
+    req.maven_mirror = o->mirror;
+    req.engine_opts = &eopts;
+    req.retries = o->retries;
+
+    printf("Quilt:从 meta 直装(不用安装器 jar)\n");
+    sxcl_quilt_install_result res;
     char err[256];
     err[0] = '\0';
-    printf("Quilt:从 meta 直装(不用安装器 jar)\n  meta: %s\n", url);
-    char *meta = NULL;
-    if (cli_fetch_text(url, &meta, err, sizeof(err)) != 0 || meta == NULL) {
-        fprintf(stderr, "取 meta 失败: %s\n", err[0] ? err : "原因不明");
-        free(meta);
+    if (sxcl_loader_quilt_install(&req, &res, err, sizeof(err)) != SXCL_LOADER_OK) {
+        fprintf(stderr, "Quilt 安装失败: %s\n", err[0] ? err : "原因不明");
         return 1;
     }
-    char *loader_json = NULL;
-    if (sxcl_loader_quilt_loader_json(meta, strlen(meta), loader_version, mc_version, &loader_json,
-                                      err, sizeof(err)) != SXCL_CATALOG_OK) {
-        fprintf(stderr, "拼加载器 JSON 失败: %s\n", err);
-        free(meta);
-        return 1;
+    printf("  实例名: %s\n  版本 JSON: %s\n", res.instance, res.version_json);
+    printf("  依赖库: %d 件(下到 %d 件,%lld 字节)\n", res.libraries_total,
+           res.libraries_downloaded, (long long)res.bytes_done);
+    if (res.sha1_from_sidecar > 0) {
+        printf("  提示: %d 件库的哈希与 meta 不一致,已按 maven 自己的 .sha1 校验(上游重建过)\n",
+               res.sha1_from_sidecar);
     }
-    free(meta);
-
-    char instance_buf[300];
-    const char *instance = (instance_opt != NULL && instance_opt[0] != '\0') ? instance_opt : NULL;
-    if (instance == NULL) {
-        snprintf(instance_buf, sizeof(instance_buf), "%s-quilt-%s", mc_version, loader_version);
-        instance = instance_buf;
-    }
-
-    char base_path[1200];
-    snprintf(base_path, sizeof(base_path), "%s/versions/%s/%s.json", game_dir, mc_version, mc_version);
-    char perr[192];
-    perr[0] = '\0';
-    sxcl_json *base_doc = sxcl_json_parse_file(base_path, perr, sizeof(perr));
-    sxcl_json *loader_doc = sxcl_json_parse(loader_json, strlen(loader_json), perr, sizeof(perr));
-    if (loader_doc == NULL) {
-        fprintf(stderr, "拼出来的加载器 JSON 解析不了: %s\n", perr);
-        free(loader_json);
-        if (base_doc != NULL) {
-            sxcl_json_free(base_doc);
-        }
-        return 1;
-    }
-    char *final_json = NULL;
-    if (base_doc != NULL) {
-        if (sxcl_loader_flatten_json(sxcl_json_root(loader_doc), sxcl_json_root(base_doc), instance,
-                                     mc_version, &final_json, perr, sizeof(perr)) !=
-            SXCL_LOADER_OK) {
-            fprintf(stderr, "拍平失败: %s\n", perr);
-            sxcl_json_free(loader_doc);
-            sxcl_json_free(base_doc);
-            free(loader_json);
-            return 1;
-        }
-        printf("  已与原版合并(拍平,能独立启动): %s\n", base_path);
-    } else {
-        printf("  警告: 原版 %s 的版本 JSON 不在(%s)—— 只写加载器层,启动层会在内存里合并\n",
-               mc_version, base_path);
-        final_json = loader_json; /* 交接所有权,避免 free 两次 */
-        loader_json = NULL;
-    }
-    sxcl_json_free(loader_doc);
-    if (base_doc != NULL) {
-        sxcl_json_free(base_doc);
-    }
-
-    char dir[1200];
-    char json_path[1400];
-    char tmp_path[1500];
-    snprintf(dir, sizeof(dir), "%s/versions/%s", game_dir, instance);
-    snprintf(json_path, sizeof(json_path), "%s/%s.json", dir, instance);
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", json_path);
-    if (sxcl_fs_mkdirs(dir) != 0) {
-        fprintf(stderr, "建不了实例目录: %s\n", dir);
-        free(final_json);
-        return 1;
-    }
-    const size_t flat_len = strlen(final_json);
-    FILE *fh = sxcl_fs_fopen(tmp_path, "wb");
-    if (fh == NULL) {
-        fprintf(stderr, "写不了 %s\n", tmp_path);
-        free(final_json);
-        return 1;
-    }
-    const size_t wrote = fwrite(final_json, 1, flat_len, fh);
-    fclose(fh);
-    if (wrote != flat_len || sxcl_fs_rename_replace(tmp_path, json_path) != 0) {
-        fprintf(stderr, "落盘失败: %s\n", json_path);
-        free(final_json);
-        return 1;
-    }
-    printf("  版本 JSON: %s(%d 字节)\n", json_path, (int)flat_len);
-
-    int rc = 0;
-    sxcl_json *flat_doc = sxcl_json_parse(final_json, flat_len, perr, sizeof(perr));
-    if (flat_doc != NULL) {
-        sxcl_loader_library libs[160];
-        const size_t n = sxcl_loader_collect_libraries(flat_doc, "", libs, 160);
-        printf("  依赖库 %d 件(加载器的 + 原版的都并进来了)\n", (int)n);
-
-        /* 哈希侧车核对(A4 的同一套做法,这次用在库上):
-         * 实测 2026-09-22:maven.quiltmc.org 上 quilt-loader-0.20.0-beta.9.jar 的**实际内容**
-         * 与 meta.quiltmc.org 广告的 sha1 不一致(bed0a01… vs 5f0924…),而 maven **自己的
-         * .sha1 侧车**与实际内容一致 —— 也就是"meta 那份哈希过期了,文件被上游重建过"。
-         * 硬拿 meta 的哈希校验会让 Quilt 永远装不上,而且报的是"校验失败",看着像我们下坏了。
-         * 所以:有侧车就以侧车为准,**并且把这次不一致说出来** —— 不静默放过任何一次对不上。 */
-        for (size_t i = 0; i < n; ++i) {
-            if (libs[i].sha1[0] == '\0' || libs[i].url_full[0] == '\0') {
-                continue;
-            }
-            char sidecar_url[1700];
-            snprintf(sidecar_url, sizeof(sidecar_url), "%s.sha1", libs[i].url_full);
-            char *side = NULL;
-            char serr[128];
-            serr[0] = '\0';
-            if (cli_fetch_text(sidecar_url, &side, serr, sizeof(serr)) != 0 || side == NULL) {
-                continue; /* 没有侧车(有些主机不发布):保留清单里的哈希 */
-            }
-            char hex[41];
-            size_t k = 0;
-            for (const char *p = side; *p != '\0' && k < 40; ++p) {
-                const char c = *p;
-                if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-                    hex[k++] = (c >= 'A' && c <= 'F') ? (char)(c - 'A' + 'a') : c;
-                } else {
-                    break;
-                }
-            }
-            hex[k] = '\0';
-            char have[41];
-            size_t hk = 0;
-            for (const char *p = libs[i].sha1; *p != '\0' && hk < 40; ++p) {
-                const char c = *p;
-                have[hk++] = (c >= 'A' && c <= 'F') ? (char)(c - 'A' + 'a') : c;
-            }
-            have[hk] = '\0';
-            if (k == 40 && strcmp(hex, have) != 0) {
-                printf("  ! %s:清单里的 sha1(%s)与 %s.sha1(%s)不一致 —— 按侧车校验(上游重建过)\n",
-                       libs[i].name, have, libs[i].url_full, hex);
-                snprintf(libs[i].sha1, sizeof(libs[i].sha1), "%s", hex);
-            }
-            free(side);
-        }
-
-        rc = download_libraries_cli(o, game_dir, libs, n);
-        sxcl_json_free(flat_doc);
-    }
-    free(final_json);
-    printf("实例名: %s\n再启动: sxcl-dl launch \"%s\" \"%s\" --dry-run\n", instance, instance, game_dir);
-    return rc;
+    printf("再启动: sxcl-dl launch \"%s\" \"%s\" --dry-run\n", res.instance, game_dir);
+    return 0;
 }
 
 static int cmd_loader(int argc, char **argv, const cli_opts *opts_in)
