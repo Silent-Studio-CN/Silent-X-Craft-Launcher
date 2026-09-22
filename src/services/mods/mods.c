@@ -470,6 +470,161 @@ int sxcl_mods_pick_file(const sxcl_mod_file *files, size_t count, const char *ga
     return 0;
 }
 
+
+/* ── CurseForge（第二个源） ── */
+
+int sxcl_mods_curseforge_loader_type(const char *loader_slug)
+{
+    if (loader_slug == NULL || loader_slug[0] == '\0') {
+        return 0;
+    }
+    if (str_equal_ci(loader_slug, "forge")) {
+        return 1;
+    }
+    if (str_equal_ci(loader_slug, "fabric")) {
+        return 4;
+    }
+    if (str_equal_ci(loader_slug, "quilt")) {
+        return 5;
+    }
+    if (str_equal_ci(loader_slug, "neoforge")) {
+        return 6;
+    }
+    return 0;   /* 认不出来(比如 optifine/iris):不筛,让上游自己排 */
+}
+
+int sxcl_mods_curseforge_class_id(const char *project_type)
+{
+    if (project_type == NULL || project_type[0] == '\0' || str_equal_ci(project_type, "mod")) {
+        return 6;   /* Mods（默认那一栏就是模组） */
+    }
+    if (str_equal_ci(project_type, "shader")) {
+        return 6552;
+    }
+    if (str_equal_ci(project_type, "resourcepack")) {
+        return 12;
+    }
+    if (str_equal_ci(project_type, "datapack")) {
+        return 6945;
+    }
+    if (str_equal_ci(project_type, "plugin")) {
+        return 5;
+    }
+    return 0;
+}
+
+int sxcl_mods_curseforge_search_url(const sxcl_mods_query *q, char *out, size_t out_len)
+{
+    if (q == NULL || out == NULL || out_len == 0) {
+        return -1;
+    }
+    const int limit = (q->limit <= 0) ? 20 : (q->limit > 50 ? 50 : q->limit); /* CF 上限 50 */
+    const int offset = q->offset > 0 ? q->offset : 0;
+    const int class_id = sxcl_mods_curseforge_class_id(q->project_type);
+    const int loader_type = sxcl_mods_curseforge_loader_type(q->loader);
+    char text[400];
+    text[0] = '\0';
+    if (q->text != NULL && q->text[0] != '\0') {
+        url_escape(q->text, text, sizeof(text));
+    }
+    char game[120];
+    game[0] = '\0';
+    if (q->game_version != NULL && q->game_version[0] != '\0') {
+        url_escape(q->game_version, game, sizeof(game));
+    }
+    /* index 0 = 按相关度（与 Modrinth 的 relevance 对齐）；sortOrder 只对其它 index 有意义 */
+    const int n = snprintf(out, out_len,
+                           "https://api.curseforge.com/v1/mods/search?gameId=432&index=%d"
+                           "&pageSize=%d&searchFilter=%s&classId=%d&gameVersion=%s&modLoaderType=%d",
+                           offset, limit, text, class_id, game, loader_type);
+    return (n < 0 || (size_t)n >= out_len) ? -1 : 0;
+}
+
+int sxcl_mods_curseforge_search_parse(const char *json, size_t len, sxcl_mod_page *out, char *err,
+                                      size_t err_len)
+{
+    if (json == NULL || out == NULL) {
+        set_err(err, err_len, "参数不全");
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    char perr[160];
+    perr[0] = '\0';
+    sxcl_json *doc = sxcl_json_parse(json, len, perr, sizeof(perr));
+    if (doc == NULL) {
+        set_err(err, err_len, "响应不是合法 JSON");
+        return -1;
+    }
+    const sxcl_json_value *root = sxcl_json_root(doc);
+    const sxcl_json_value *data = sxcl_json_get(root, "data");
+    const size_t n = sxcl_json_size(data);
+    size_t cap = n > SXCL_MODS_LIST_MAX ? SXCL_MODS_LIST_MAX : n;
+    if (cap > 0) {
+        out->items = (sxcl_mod_hit *)calloc(cap, sizeof(sxcl_mod_hit));
+        if (out->items == NULL) {
+            sxcl_json_free(doc);
+            set_err(err, err_len, "内存不足");
+            return -1;
+        }
+    }
+    for (size_t i = 0; i < cap; ++i) {
+        const sxcl_json_value *mod = sxcl_json_at(data, i);
+        sxcl_mod_hit *dst = &out->items[out->count];
+        const int64_t id = sxcl_json_get_int64(mod, "id", 0);
+        (void)snprintf(dst->id, sizeof(dst->id), "%lld", (long long)id);
+        copy_cap(dst->slug, sizeof(dst->slug), sxcl_json_get_string(mod, "slug", ""));
+        copy_cap(dst->title, sizeof(dst->title), sxcl_json_get_string(mod, "name", ""));
+        copy_cap(dst->description, sizeof(dst->description),
+                 sxcl_json_get_string(mod, "summary", ""));
+        copy_cap(dst->icon_url, sizeof(dst->icon_url),
+                 sxcl_json_get_string(sxcl_json_get(mod, "logo"), "url", ""));
+        copy_cap(dst->updated, sizeof(dst->updated), sxcl_json_get_string(mod, "dateModified", ""));
+        copy_cap(dst->source, sizeof(dst->source), "curseforge");
+        dst->downloads = sxcl_json_get_int64(mod, "downloadCount", 0);
+        /* authors[] 只取第一个名字;categories[] 取 name(CF 给的是显示名,与 Modrinth 的 slug 不同) */
+        {
+            const sxcl_json_value *authors = sxcl_json_get(mod, "authors");
+            const sxcl_json_value *first = sxcl_json_at(authors, 0);
+            copy_cap(dst->author, sizeof(dst->author),
+                     sxcl_json_get_string(first, "name", ""));
+        }
+        {
+            const sxcl_json_value *cats = sxcl_json_get(mod, "categories");
+            const size_t cn = sxcl_json_size(cats);
+            size_t used = 0;
+            dst->categories[0] = '\0';
+            for (size_t k = 0; k < cn && k < 4; ++k) {
+                const char *name = sxcl_json_get_string(sxcl_json_at(cats, k), "name", "");
+                if (name[0] == '\0') {
+                    continue;
+                }
+                const int w = snprintf(dst->categories + used, sizeof(dst->categories) - used,
+                                       "%s%s", used > 0 ? " " : "", name);
+                if (w > 0) {
+                    used += (size_t)w;
+                }
+            }
+        }
+        /* latestFiles[].gameVersions[] 里就是支持的游戏版本（CF 只在文件上给） */
+        {
+            const sxcl_json_value *files = sxcl_json_get(mod, "latestFiles");
+            const sxcl_json_value *first = sxcl_json_at(files, 0);
+            join_strings(sxcl_json_get(first, "gameVersions"), dst->versions,
+                         sizeof(dst->versions), 6);
+        }
+        if (dst->id[0] == '0' && dst->id[1] == '\0') {
+            continue;   /* id = 0:这一条没法用 */
+        }
+        ++out->count;
+    }
+    /* CF 的分页在 pagination 里（index/pageSize/resultCount/totalCount） */
+    out->total = (size_t)sxcl_json_get_int64(sxcl_json_get(root, "pagination"), "totalCount",
+                                             (int64_t)out->count);
+    out->offset = (size_t)sxcl_json_get_int64(sxcl_json_get(root, "pagination"), "index", 0);
+    sxcl_json_free(doc);
+    return 0;
+}
+
 /* ── 落盘目录 ── */
 
 int sxcl_mods_dir(const char *game_dir, const char *instance, const char *kind, int isolated,

@@ -209,11 +209,82 @@ static void test_mods_dir(void) {
     check_int(sxcl_mods_dir("D:/mc", "x", "mods", 1, out, 8), -1, "缓冲不够 = 参数错(不写半截)");
 }
 
+
+/* CurseForge（第二个源）：枚举映射 + URL + 解析。夹具字段名照官方文档（data[]/pagination/
+ * logo.url/latestFiles[].gameVersions[]/authors[].name）。**不联网**。 */
+static const char *kCfSearchJson =
+    "{\"data\":[{\"id\":238222,\"name\":\"Just Enough Items\",\"slug\":\"jei\","
+    "\"summary\":\"View Items and Recipes\",\"downloadCount\":123456789,"
+    "\"logo\":{\"url\":\"https://media.forgecdn.net/avatars/29/334/jei.png\"},"
+    "\"dateModified\":\"2026-09-01T00:00:00Z\","
+    "\"authors\":[{\"id\":1,\"name\":\"mezz\"}],"
+    "\"categories\":[{\"id\":423,\"name\":\"Map and Information\"},{\"id\":426,\"name\":\"API and Library\"}],"
+    "\"latestFiles\":[{\"id\":1,\"gameVersions\":[\"1.20.1\",\"1.20.2\",\"Forge\"]}]}],"
+    "\"pagination\":{\"index\":0,\"pageSize\":20,\"resultCount\":1,\"totalCount\":5432}}";
+
+static void test_curseforge(void) {
+    check_int(sxcl_mods_curseforge_loader_type("forge"), 1, "CF:forge=1");
+    check_int(sxcl_mods_curseforge_loader_type("fabric"), 4, "CF:fabric=4");
+    check_int(sxcl_mods_curseforge_loader_type("quilt"), 5, "CF:quilt=5");
+    check_int(sxcl_mods_curseforge_loader_type("neoforge"), 6, "CF:neoforge=6");
+    check_int(sxcl_mods_curseforge_loader_type("optifine"), 0, "CF:认不出的加载器=不筛");
+    check_int(sxcl_mods_curseforge_loader_type(NULL), 0, "CF:没有加载器=不筛");
+    check_int(sxcl_mods_curseforge_class_id("mod"), 6, "CF:模组 classId=6");
+    check_int(sxcl_mods_curseforge_class_id("shader"), 6552, "CF:光影 classId=6552");
+    check_int(sxcl_mods_curseforge_class_id("resourcepack"), 12, "CF:资源包 classId=12");
+    check_int(sxcl_mods_curseforge_class_id(NULL), 6, "CF:默认当模组");
+
+    sxcl_mods_query q;
+    memset(&q, 0, sizeof(q));
+    char url[1024];
+    q.text = "jei";
+    q.game_version = "1.20.1";
+    q.loader = "forge";
+    q.project_type = "mod";
+    q.limit = 999; /* 会被夹到 CF 的上限 50 */
+    check_int(sxcl_mods_curseforge_search_url(&q, url, sizeof(url)), 0, "CF 搜索 URL 拼得出来");
+    check(strstr(url, "https://api.curseforge.com/v1/mods/search?") == url, "  域名与路径对");
+    check(strstr(url, "gameId=432") != NULL, "  gameId=432(我的世界)");
+    check(strstr(url, "pageSize=50") != NULL, "  pageSize 夹到 50");
+    check(strstr(url, "classId=6") != NULL, "  classId 在");
+    check(strstr(url, "gameVersion=1.20.1") != NULL, "  游戏版本在");
+    check(strstr(url, "modLoaderType=1") != NULL, "  Forge 的 modLoaderType 在");
+    check(strstr(url, "key") == NULL, "  **key 绝不进 URL**(走请求头)");
+
+    sxcl_mod_page page;
+    char err[160];
+    err[0] = '\0';
+    check_int(sxcl_mods_curseforge_search_parse(kCfSearchJson, strlen(kCfSearchJson), &page, err,
+                                                sizeof(err)),
+              0, "CF 搜索结果解析成功");
+    check_int((long)page.count, 1, "  一条");
+    check_int((long)page.total, 5432, "  总数来自 pagination.totalCount");
+    check_str(page.items[0].id, "238222", "  id 由数字转成字符串");
+    check_str(page.items[0].title, "Just Enough Items", "  名字");
+    check_str(page.items[0].slug, "jei", "  短名");
+    check_str(page.items[0].author, "mezz", "  作者(authors[0].name)");
+    check_str(page.items[0].icon_url, "https://media.forgecdn.net/avatars/29/334/jei.png", "  图标");
+    check_str(page.items[0].source, "curseforge", "  来源标记");
+    check_str(page.items[0].categories, "Map and Information API and Library", "  分类(显示名)");
+    check_str(page.items[0].versions, "1.20.1 1.20.2 Forge", "  支持版本(latestFiles[0].gameVersions)");
+    check_int((long)page.items[0].downloads, 123456789, "  下载量");
+    sxcl_mods_page_free(&page);
+
+    err[0] = '\0';
+    check_int(sxcl_mods_curseforge_search_parse("{}", 2, &page, err, sizeof(err)), 0,
+              "空 data 也算成功");
+    check_int((long)page.count, 0, "  0 条");
+    sxcl_mods_page_free(&page);
+    check_int(sxcl_mods_curseforge_search_parse("nope", 4, &page, err, sizeof(err)), -1,
+              "不是 JSON = 失败");
+}
+
 int main(void) {
     test_search_url();
     test_search_parse();
     test_versions_and_pick();
     test_mods_dir();
+    test_curseforge();
     printf("mods 测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

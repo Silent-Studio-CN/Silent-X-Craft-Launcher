@@ -199,6 +199,7 @@ static int usage(void)
            "      └ 读版本 JSON -> 选 Java -> 按实例设置写 options.txt(渲染后端)-> 起进程\n"
            "        -> 每行归类 -> 出一条人话结论(发现 Vulkan 回退会写回 lastGraphicsApi)\n"
            "  sxcl-dl mods search <关键词> [--mc 1.20.1] [--loader fabric] [--type mod|shader] [--limit N]\n"
+           "      [--repo modrinth|curseforge] [--key <CF API KEY>]\n"
            "  sxcl-dl mods files <工程 id|短名> [--mc 1.20.1] [--loader fabric]\n"
            "      └ 模组资源层(docs/22 的 A1):搜索走服务端 facets;挑文件要求版本+加载器都对得上,\n"
            "        不自动换加载器;取 JSON 走我们自己的引擎(候选/UA/缓存)\n"
@@ -2416,6 +2417,8 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
     const char *mc = NULL;
     const char *loader = NULL;
     const char *type = NULL;
+    const char *api_key = NULL;
+    const char *source = NULL;
     int limit = 20;
     if (strcmp(sub, "search") == 0) {
         if (argc < 4) {
@@ -2445,6 +2448,13 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
         } else if (strcmp(a, "--type") == 0 && v) {
             type = v;
             ++i;
+        } else if (strcmp(a, "--key") == 0 && v) {
+            api_key = v;
+            ++i;
+        } else if (strcmp(a, "--repo") == 0 && v) {
+            source = v;   /* 资源来源:modrinth / curseforge。**不能叫 --source**:
+                           * 那个名字已经被"下载源(bmclapi/mojang/auto)"占了。 */
+            ++i;
         } else if (strcmp(a, "--rate") == 0 || strcmp(a, "--workers") == 0 ||
                    strcmp(a, "--conn") == 0 || strcmp(a, "--cache") == 0 ||
                    strcmp(a, "--mirror") == 0 || strcmp(a, "--source") == 0) {
@@ -2455,6 +2465,22 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
             fprintf(stderr, "未知参数: %s\n", a);
             return usage();
         }
+    }
+    /* CurseForge 是**第二个源**:官方 API 必须带 x-api-key(用户自己申请)。
+     * 没配 key 就**如实不查** —— 不假装有结果、也不偷偷退回 Modrinth 冒充双源。 */
+    const int want_cf = source != NULL && _stricmp(source, "curseforge") == 0;
+    if (want_cf) {
+        if (api_key == NULL || api_key[0] == '\0') {
+            fprintf(stderr,
+                    "CurseForge 需要 API key：去 https://console.curseforge.com 申请一个，"
+                    "然后 --key <KEY>（或填进设置 mods.curseforge_api_key）。\n"
+                    "没配 key 就不查这一源 —— 我们不会假装有结果。\n");
+            return 2;
+        }
+        fprintf(stderr,
+                "带了 key，但这一轮的 CurseForge **只接了 URL 与解析**（单测 108 项里 33 项是它）；"
+                "真正的联网查询下一轮补。现在请先看 Modrinth 那一源。\n");
+        return 2;
     }
     char url[1200];
     int is_files = 0;

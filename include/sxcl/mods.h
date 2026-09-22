@@ -100,6 +100,27 @@ int sxcl_mods_modrinth_versions_url(const char *project_id, const char *game_ver
 int sxcl_mods_modrinth_versions_parse(const char *json, size_t len, sxcl_mod_file *out, size_t cap,
                                       size_t *count, char *err, size_t err_len);
 
+/* ── CurseForge（第二个源；官方 API 要 key，见 docs/22 §14） ──
+ *
+ * 与 Modrinth 的两点不同，决定了这一层的形状：
+ *   1. **必须带 x-api-key 头**（用户自己申请的那种）—— 没有 key 就**如实不查**，
+ *      界面显示"未配置 CurseForge API key"，绝不假装有结果；
+ *   2. 加载器与分类是**数字枚举**（modLoaderType / classId），不是 slug。
+ */
+
+/** 加载器 slug -> CurseForge 的 modLoaderType（认不出来返回 0 = 不筛）。
+ *  1=Forge 4=Fabric 5=Quilt 6=NeoForge（官方文档的枚举）。 */
+int sxcl_mods_curseforge_loader_type(const char *loader_slug);
+
+/** 资源类型 -> classId：6=Mods 6552=Shaders 12=Resource Packs 6945=Data Packs 5=Bukkit Plugins。 */
+int sxcl_mods_curseforge_class_id(const char *project_type);
+
+/** CurseForge 搜索 URL（key 不进 URL，走请求头；gameId=432 是 Minecraft）。 */
+int sxcl_mods_curseforge_search_url(const sxcl_mods_query *q, char *out, size_t out_len);
+/** 解析 /v1/mods/search 的响应（{"data":[…]};字段名与官方文档一致）。 */
+int sxcl_mods_curseforge_search_parse(const char *json, size_t len, sxcl_mod_page *out, char *err,
+                                      size_t err_len);
+
 /** 从一批文件里挑"最适合这个实例的那个"：
  *  先按 loaders 里有没有这个加载器、game_versions 里有没有这个版本打分，再优先 primary，
  *  最后取上传时间最新的那个（数组通常已按时间倒序，所以"第一个最高分"就是它）。 */
