@@ -19,6 +19,8 @@
 //     磁盘上不会留下"看着装好了、其实缺库"的实例;
 //   * 哈希不一致**必须说出来**:meta 的 sha1 与 maven 自己发的 .sha1 不一致时按侧车纠正 + 计数,
 //     不静默放过(实测 quilt-loader-0.20.0-beta.9 与 hashed-1.20.1 都撞上了);
+//     纠正要**落进写出去的那份版本 JSON**(sxcl_loader_patch_library_sha1):只纠下载任务的话,
+//     启动器自己的"启动前补全"会把刚装好的文件判成坏件,每回启动都报同样几件失败;
 //   * 进度/取消共用调用方给的钩子(界面与命令行同一套)。
 
 #include "sxcl/loader.h"
@@ -30,6 +32,7 @@
 #include "sxcl/engine.h"
 #include "sxcl/fs.h"
 #include "sxcl/install.h"        /* sxcl_install_http_get_text */
+#include "sxcl/log.h"            /* 侧车纠偏落不回 JSON 时要说一声(别静默) */
 #include "sxcl/json.h"
 #include "sxcl/loader_catalog.h" /* sxcl_loader_quilt_loader_json */
 
@@ -173,18 +176,42 @@ int sxcl_loader_quilt_install(const sxcl_quilt_install_request *req, sxcl_quilt_
     }
 
     /* ── 1. 取 meta ── */
-    quilt_progress(req, 2, "取 Quilt meta");
+    /* meta **必须重试**:那家源实测会"连上以后一个字都不来"(传输停滞看门狗 60 秒就掐掉),
+     * 而一次掐掉就整个加载器层失败 —— 用户看到的是"Quilt 没装上"(真机 2026-09-22 21:41 就是这样)。
+     * 每次掐掉/失败都立刻重试,次数用调用方给的 retries(界面给 6),至少 3 次;
+     * 进度里如实写出"第 n 次",别让界面停在"取 meta"上一动不动。 */
+    int meta_attempts = req->retries > 0 ? req->retries : 3;
+    if (meta_attempts < 3) {
+        meta_attempts = 3;
+    }
     char *meta = NULL;
     char herr[256];
     herr[0] = '\0';
-    if (sxcl_install_http_get_text((void *)req->engine_opts, meta_url, &meta, herr,
-                                   sizeof(herr)) != 0 ||
-        meta == NULL) {
-        char text[360];
-        (void)snprintf(text, sizeof(text), "取 meta 失败: %s(%s)", herr[0] ? herr : "原因不明",
-                       meta_url);
-        quilt_err(err, err_len, text);
+    char last_herr[256];
+    last_herr[0] = '\0';
+    for (int attempt = 1; attempt <= meta_attempts && meta == NULL; ++attempt) {
+        char label[96];
+        (void)snprintf(label, sizeof(label), "取 Quilt meta(第 %d/%d 次)", attempt, meta_attempts);
+        quilt_progress(req, 2, label);
+        if (quilt_cancelled(req)) {
+            quilt_err(err, err_len, "已取消(取 meta 之前)");
+            return SXCL_LOADER_ERR_IO;
+        }
+        herr[0] = '\0';
+        if (sxcl_install_http_get_text((void *)req->engine_opts, meta_url, &meta, herr,
+                                       sizeof(herr)) == 0 &&
+            meta != NULL) {
+            break;
+        }
+        (void)snprintf(last_herr, sizeof(last_herr), "%s", herr[0] ? herr : "原因不明");
         free(meta);
+        meta = NULL;
+    }
+    if (meta == NULL) {
+        char text[420];
+        (void)snprintf(text, sizeof(text), "取 meta 失败(%d 次都没成): %s(%s)", meta_attempts,
+                       last_herr, meta_url);
+        quilt_err(err, err_len, text);
         return SXCL_LOADER_ERR_IO;
     }
     if (quilt_cancelled(req)) {
@@ -286,6 +313,7 @@ int sxcl_loader_quilt_install(const sxcl_quilt_install_request *req, sxcl_quilt_
     }
 
     int sidecar_fixed = 0;
+    int patch_missed = 0;
     for (size_t i = 0; i < n; ++i) {
         if (quilt_cancelled(req)) {
             free(tasks);
@@ -320,6 +348,14 @@ int sxcl_loader_quilt_install(const sxcl_quilt_install_request *req, sxcl_quilt_
                     have[hk] = '\0';
                     if (strcmp(hex, have) != 0) {
                         (void)snprintf(libs[i].sha1, sizeof(libs[i].sha1), "%s", hex);
+                        /* 光纠下载任务不够:要落盘的 JSON 里也得换成真值 —— 否则启动器
+                         * 自己的「启动前补全」会把刚装好的文件判成"校验失败"并每回重下
+                         * (实测这两件每次启动都报 2 件失败,属于自证其罪)。 */
+                        if (!sxcl_loader_patch_library_sha1(final_json, libs[i].path, hex)) {
+                            patch_missed = 1;
+                            SXCL_LOG_W("loader", "侧车纠偏落不回版本 JSON: %s(下次启动会报校验失败)",
+                                       libs[i].name);
+                        }
                         ++sidecar_fixed;
                     }
                 }
@@ -460,6 +496,11 @@ int sxcl_loader_quilt_install(const sxcl_quilt_install_request *req, sxcl_quilt_
         (void)snprintf(out->version_json, sizeof(out->version_json), "%s", json_path);
     }
     free(final_json);
-    quilt_progress(req, 100, flattened ? "装好了(已与原版拍平)" : "装好了(没找到原版,只写了加载器层)");
+    if (patch_missed) {
+        quilt_progress(req, 100, "装好了(有哈希纠偏没能落进版本 JSON,下次启动可能报校验失败)");
+    } else {
+        quilt_progress(req, 100,
+                       flattened ? "装好了(已与原版拍平)" : "装好了(没找到原版,只写了加载器层)");
+    }
     return SXCL_LOADER_OK;
 }

@@ -596,6 +596,28 @@ sxcl::ui::MainWindow window;
         });
     }
 
+    // 验收通路:直接**走一遍下载/安装**(SXCL_UI_DOWNLOAD="<MC>|<实例名>|<加载器>|<加载器版本>")。
+    //   调的就是配置页那个「开始下载」按钮调的方法(MainWindow::switchToDownloadProgress),
+    //   于是 InstallWorker 整条链(原版 + 加载器)都会真的跑起来 —— 用来验收
+    //   "GUI 里装 Quilt"(它不走安装器 jar,走 meta 直装,见 install_worker 的 quiltFromMeta)。
+    const QString downloadSpec = qEnvironmentVariable("SXCL_UI_DOWNLOAD");
+    if (!downloadSpec.isEmpty()) {
+        QTimer::singleShot(700, &app, [&window, downloadSpec]() {
+            const QStringList parts = downloadSpec.split(QLatin1Char('|'));
+            const QString mc = parts.value(0);
+            const QString instance = parts.value(1, mc);
+            const QString loader = parts.value(2);
+            const QString loaderVersion = parts.value(3);
+            std::fprintf(stderr, "[sxcl-ui] 开始安装:MC=%s 实例=%s 加载器=%s %s(SXCL_UI_DOWNLOAD)\n",
+                         mc.toUtf8().constData(), instance.toUtf8().constData(),
+                         loader.isEmpty() ? "(无)" : loader.toUtf8().constData(),
+                         loaderVersion.toUtf8().constData());
+            QMetaObject::invokeMethod(&window, "switchToDownloadProgress", Qt::DirectConnection,
+                                      Q_ARG(QString, mc), Q_ARG(QString, instance),
+                                      Q_ARG(QString, loader), Q_ARG(QString, loaderVersion));
+        });
+    }
+
     // 验收通路:进**子栏**(下载页左侧那三个:Minecraft 版本 / MOD / 光影;版本选择页的文件夹也是)。
     //   SXCL_UI_NAV=<routeKey>(如 download_mod):窗口起来后**点那一条** ——
     //   走产品路径(按钮 clicked -> NavPanel::setCurrent -> routeChanged -> 切 stack),

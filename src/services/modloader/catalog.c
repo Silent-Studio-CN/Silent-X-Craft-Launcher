@@ -742,6 +742,75 @@ int sxcl_loader_quilt_loader_json(const char *meta_json, size_t len, const char 
     return SXCL_CATALOG_OK;
 }
 
+int sxcl_loader_patch_library_sha1(char *json, const char *path, const char *sha1)
+{
+    if (json == NULL || path == NULL || sha1 == NULL) {
+        return 0;
+    }
+    const size_t want = strlen(sha1);
+    const size_t plen = strlen(path);
+    if (plen == 0 || want == 0) {
+        return 0;
+    }
+    for (char *p = strstr(json, "\"path\""); p != NULL; p = strstr(p + 6, "\"path\"")) {
+        char *q = p + 6;
+        while (chr_is_space((unsigned char)*q)) {
+            ++q;
+        }
+        if (*q != ':') {
+            continue;
+        }
+        ++q;
+        while (chr_is_space((unsigned char)*q)) {
+            ++q;
+        }
+        if (*q != '"') {
+            continue;
+        }
+        ++q;
+        if (strncmp(q, path, plen) != 0 || q[plen] != '"') {
+            continue;
+        }
+        /* 只认**这条库自己的 artifact 对象里**那个 sha1:这个对象是平的(url/path/sha1/size),
+         * 于是 path 值之后第一个 '}' 就是它的头 —— sha1 必须在它前面;
+         * 否则视为"这条没带哈希",一个字都不动(免得改到别人的)。 */
+        char *brace = strchr(q + plen, '}');
+        char *next_path = strstr(q + plen, "\"path\"");
+        char *limit = brace;
+        if (limit == NULL || (next_path != NULL && next_path < limit)) {
+            limit = next_path;
+        }
+        if (limit == NULL) {
+            return 0;
+        }
+        char *s = strstr(q + plen, "\"sha1\"");
+        if (s == NULL || s > limit) {
+            return 0;
+        }
+        char *c = strchr(s + 6, ':');
+        if (c == NULL) {
+            return 0;
+        }
+        char *o = strchr(c, '"');
+        if (o == NULL) {
+            return 0;
+        }
+        char *e = strchr(o + 1, '"');
+        if (e == NULL || (size_t)(e - (o + 1)) != want) {
+            return 0;
+        }
+        for (size_t i = 0; i < want; ++i) {
+            const char h = o[1 + i];
+            if (!((h >= '0' && h <= '9') || (h >= 'a' && h <= 'f') || (h >= 'A' && h <= 'F'))) {
+                return 0;
+            }
+        }
+        memcpy(o + 1, sha1, want);
+        return 1;
+    }
+    return 0;
+}
+
 /* ── 解析:OptiFine(BMCLAPI JSON) ── */
 
 size_t sxcl_catalog_parse_optifine_json(const char *json, size_t len, const char *mc,

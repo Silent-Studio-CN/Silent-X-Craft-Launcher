@@ -134,6 +134,19 @@ size_t sxcl_catalog_parse_quilt_json(const char *json, size_t len, const char *m
 int sxcl_loader_quilt_loader_json(const char *meta_json, size_t len, const char *loader_version,
                                   const char *mc_version, char **out_text, char *err, size_t err_len);
 
+/** **把纠过偏的 sha1 落回要写的那份版本 JSON 文本里**(Quilt 直装那条路的收尾)。
+ *
+ *  为什么必须有:meta 给的 sha1 与 maven 侧车 .sha1 不一致时,只纠"下载任务"是不够的 ——
+ *  版本 JSON 里仍留着 meta 的哈希,于是**启动器自己的「启动前补全」会把刚装好的文件判成
+ *  「校验失败」并一直报失败件**(实测 quilt-loader-0.20.0-beta.9 / hashed-1.20.1 两件,
+ *  每回启动都报 "2 件失败")。这里按 downloads.artifact.path 找到那条库记录,
+ *  把它自己范围内第一个 "sha1" 的值原地改成真值。
+ *
+ *  json:可写、NUL 结尾(就是马上要落盘的那份文本)。成功返回 1;
+ *  找不到 path / 这条没有 sha1 键 / 新旧长度不同(不是同类哈希)**一律返回 0,绝不改坏**。
+ */
+int sxcl_loader_patch_library_sha1(char *json, const char *path, const char *sha1);
+
 /** BMCLAPI 的 OptiFine 列表(JSON,带 forge 字段)。 */
 size_t sxcl_catalog_parse_optifine_json(const char *json, size_t len, const char *mc,
                                         sxcl_catalog_entry *out, size_t out_cap);

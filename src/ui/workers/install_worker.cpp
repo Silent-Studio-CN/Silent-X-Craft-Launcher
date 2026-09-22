@@ -681,8 +681,9 @@ void InstallWorker::run() {
         emitLog(QStringLiteral("完成:版本 %1 安装成功(%2)").arg(instance, detail));
         emit finished(true, false, rc, false,
                       QStringLiteral("版本「%1」安装完成").arg(instance), detail);
-    } else if (cancelled) {
-        // **不是成功**:取消是独立终态,界面必须照实显示"已取消"
+    } else if (cancelled || m_cancel.load()) {
+        // **不是成功**:取消是独立终态,界面必须照实显示"已取消"。
+        // (Quilt 那一步失败时若是"用户取消"带出来的,也走这里 —— 否则会报成"安装失败"。)
         SXCL_LOG_W("install", "安装已取消:实例=%s 阶段=%d/%llu 已完成字节=%llu", 
                    instance.toUtf8().constData(), result.stages_done,
                    (unsigned long long)sxcl_install_plan_stage_count(&plan),
@@ -690,6 +691,17 @@ void InstallWorker::run() {
         emitLog(QStringLiteral("完成:已取消(%1)").arg(detail));
         emit finished(false, true, rc, false,
                       QStringLiteral("已取消:未完成的下载产物(.part)已清理"), detail);
+    } else if (!quiltError.isEmpty()) {
+        /* 原版装好了、**加载器(Quilt)那一层没装上**。
+         * 以前这里会报成"失败 [ok] 失败阶段 9/8(未失败)" —— 码是 ok、阶段越界,看着莫名其妙。
+         * 现在如实分开说:原版是好的、加载器没成、原因是什么、要不要重试。 */
+        SXCL_LOG_E("install", "加载器层失败:实例=%s 原因=%s(原版部分是装好的)",
+                   instance.toUtf8().constData(), quiltError.toUtf8().constData());
+        emitLog(QStringLiteral("完成:原版装好了,但 Quilt 加载器没装上 —— %1").arg(quiltError));
+        emit finished(false, false, SXCL_INSTALL_ERR_LOADER, true,
+                      QStringLiteral("原版 1.20.1 已装好,但 Quilt 加载器没装上:%1").arg(quiltError),
+                      detail + QStringLiteral(" · 实例 %1 现在是**原版**;修好网络/重试一次即可")
+                                   .arg(instance));
     } else {
         const QString stageName =
             QString::fromUtf8(sxcl_install_stage_name(result.fail_stage));

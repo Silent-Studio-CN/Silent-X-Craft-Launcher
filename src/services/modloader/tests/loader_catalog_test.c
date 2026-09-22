@@ -746,6 +746,81 @@ static void test_quilt_loader_json(void) {
           "空 meta -> 失败");
 }
 
+/* 侧车纠偏要**落回写出去的那份 JSON**(sxcl_loader_patch_library_sha1)。
+ * 不落的话:启动器自己的"启动前补全"按 JSON 里的 meta 哈希去校验刚下好的文件 ->
+ * 判成 hash-mismatch -> 每回启动都报同样几件失败(真机实测 quilt-loader / hashed 两件)。 */
+static void test_patch_sha1(void)
+{
+    static const char *const two_libs =
+        "{\n"
+        "  \"libraries\": [\n"
+        "    {\n"
+        "      \"name\": \"org.quiltmc:quilt-loader:0.20.0-beta.9\",\n"
+        "      \"downloads\": {\n"
+        "        \"artifact\": {\n"
+        "          \"url\": \"https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-loader/"
+        "0.20.0-beta.9/quilt-loader-0.20.0-beta.9.jar\",\n"
+        "          \"path\": \"org/quiltmc/quilt-loader/0.20.0-beta.9/quilt-loader-0.20.0-beta.9.jar\",\n"
+        "          \"sha1\": \"bed0a01be87c4378d9002611d9642e8f9e9c2cff\",\n"
+        "          \"size\": 1550096\n"
+        "        }\n"
+        "      }\n"
+        "    },\n"
+        "    {\n"
+        "      \"name\": \"com.mojang:brigadier:1.1.8\",\n"
+        "      \"downloads\": {\n"
+        "        \"artifact\": {\n"
+        "          \"path\": \"com/mojang/brigadier/1.1.8/brigadier-1.1.8.jar\",\n"
+        "          \"sha1\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n"
+        "          \"size\": 78672\n"
+        "        }\n"
+        "      }\n"
+        "    }\n"
+        "  ]\n"
+        "}\n";
+    char buf[2048];
+    char *json = buf;
+    memcpy(buf, two_libs, strlen(two_libs) + 1);
+    check(sxcl_loader_patch_library_sha1(json, "org/quiltmc/quilt-loader/0.20.0-beta.9/"
+                                                "quilt-loader-0.20.0-beta.9.jar",
+                                         "5f092442b79a6511f6b25c8d175ae76393444db7") == 1,
+          "纠偏能落回 JSON");
+    check(strstr(json, "5f092442b79a6511f6b25c8d175ae76393444db7") != NULL, "  新哈希写进去了");
+    check(strstr(json, "bed0a01be87c4378d9002611d9642e8f9e9c2cff") == NULL, "  旧哈希没了");
+    check(strstr(json, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") != NULL, "  别人的哈希没被动");
+    check(strstr(json, "\"size\": 1550096") != NULL, "  同一记录里别的字段原样");
+    /* 只有 url 里出现过、没有对应 path 的那条:必须不改任何东西 */
+    memcpy(buf, two_libs, strlen(two_libs) + 1);
+    check(sxcl_loader_patch_library_sha1(json, "org/quiltmc/quilt-loader/0.20.0-beta.9/nope.jar",
+                                         "5f092442b79a6511f6b25c8d175ae76393444db7") == 0,
+          "path 对不上 -> 拒绝改");
+    check(strcmp(buf, two_libs) == 0, "  一个字都没动");
+    /* 长度不同的哈希(不是同类算法)原地改会改坏 JSON,必须拒绝 */
+    memcpy(buf, two_libs, strlen(two_libs) + 1);
+    check(sxcl_loader_patch_library_sha1(json, "com/mojang/brigadier/1.1.8/brigadier-1.1.8.jar",
+                                         "0123456789abcdef") == 0,
+          "新哈希长度不对 -> 拒绝改");
+    check(strcmp(buf, two_libs) == 0, "  一个字都没动(2)");
+    /* 紧凑写法(没有冒号后的空格)也要认 */
+    static const char *const compact =
+        "{\"downloads\":{\"artifact\":{\"path\":\"a/b/c.jar\",\"sha1\":\"0000000000000000000000000000000000000000\"}}}";
+    memcpy(buf, compact, strlen(compact) + 1);
+    check(sxcl_loader_patch_library_sha1(json, "a/b/c.jar", "1111111111111111111111111111111111111111") == 1,
+          "紧凑 JSON 也认");
+    check(strstr(json, "1111111111111111111111111111111111111111") != NULL, "  改到的是 sha1 值");
+    /* 没有 sha1 键的条目:拒绝,别把后面的东西当哈希改 */
+    memcpy(buf, two_libs, strlen(two_libs) + 1);
+    static const char *const no_sha =
+        "{\"downloads\":{\"artifact\":{\"path\":\"x/y.jar\"}},\"sha1\":\"2222222222222222222222222222222222222222\"}";
+    memcpy(buf, no_sha, strlen(no_sha) + 1);
+    check(sxcl_loader_patch_library_sha1(json, "x/y.jar", "3333333333333333333333333333333333333333") == 0,
+          "记录里没有 sha1 键 -> 拒绝改");
+    check(strcmp(buf, no_sha) == 0, "  一个字都没动(3)");
+    check(sxcl_loader_patch_library_sha1(NULL, "a", "b") == 0, "空 JSON -> 0");
+    check(sxcl_loader_patch_library_sha1(buf, NULL, "b") == 0, "空 path -> 0");
+    check(sxcl_loader_patch_library_sha1(buf, "a", NULL) == 0, "空哈希 -> 0");
+}
+
 int main(void)
 {
     test_xml_scanner();
@@ -759,6 +834,7 @@ int main(void)
     test_bad_input();
     test_end_to_end_pick();
     test_quilt_loader_json();
+    test_patch_sha1();
 
     printf("加载器版本目录测试: 通过 %d 失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
