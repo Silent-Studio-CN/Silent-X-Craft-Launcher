@@ -28,6 +28,8 @@
 #include "sxcl/log.h"       // SXCL_LOG_I/E:导出结果进运行日志
 #include "sxcl/logexport.h" // 一键导出日志包(token/uuid/用户名在写盘前就打码)
 
+#include "game_folders.h"   // offlinePlayerName():主页那个离线 ID 输入框存下来的
+#include "main_window.h"     // nextLaunchOffline():主页"离线启动"键的那一次
 #include "dialogs/account.h" // loadAccountSnapshot / accountCanLaunch(现成入口,本页不改账户代码)
 #include "workers/launch_worker.h"
 #include "workers/ui_error.h"
@@ -401,14 +403,23 @@ private:
         //    Java 探测 -> 最终命令行 -> 真起进程 -> stdout/stderr 归类 -> 退出码。
         //    离线身份 = --offline <名字>(SXCL_UI_OFFLINE_NAME,默认 "Player")。
         const AccountSnapshot account = loadAccountSnapshot();
-        m_accountLaunch = accountCanLaunch(account);
+        // 主页那个"离线启动"键会把它置起来:这一次**强制离线**,哪怕账户可用也不用
+        // (用户原话:「我们支持已经登陆正版的玩家以离线登录」)。读一次就清掉,不粘住。
+        auto *mainWindow = qobject_cast<MainWindow *>(window());
+        const bool forceOffline = (mainWindow != nullptr) && mainWindow->nextLaunchOffline();
+        if (mainWindow != nullptr)
+            mainWindow->setNextLaunchOffline(false);
+        m_accountLaunch = !forceOffline && accountCanLaunch(account);
+        // 离线 ID:主页那个输入框存下来的(launch.offline_name,**状态保留**);
+        // 环境变量仍是取证/验收通路上的覆盖项(老行为不变)。
+        const QString envOffline = qEnvironmentVariable("SXCL_UI_OFFLINE_NAME");
+        const QString offlineId = !envOffline.isEmpty() ? envOffline : offlinePlayerName();
         m_identityText = m_accountLaunch
                              ? QStringLiteral("已登录账户 %1(玩家名 %2)")
                                    .arg(account.accountName, account.playerName)
-                             : QStringLiteral("离线身份 %1")
-                                   .arg(qEnvironmentVariable("SXCL_UI_OFFLINE_NAME").isEmpty()
-                                            ? QStringLiteral("Player")
-                                            : qEnvironmentVariable("SXCL_UI_OFFLINE_NAME"));
+                             : QStringLiteral("离线身份 %1%2")
+                                   .arg(offlineId, forceOffline ? QStringLiteral("（你选的是离线启动）")
+                                                                : QString());
 
         // 取证/验收通路:让启动页只准备不起进程(= CLI 的 sxcl-dl launch --dry-run)
         const bool forceDryRun = qEnvironmentVariableIntValue("SXCL_UI_LAUNCH_DRY_RUN") == 1;
@@ -416,8 +427,7 @@ private:
         m_dryRunOnly = forceDryRun || m_accountLaunch;
         request.dryRun = m_dryRunOnly ? 1 : 0;
         if (!m_accountLaunch) {
-            const QString offline = qEnvironmentVariable("SXCL_UI_OFFLINE_NAME");
-            request.offlineName = offline.isEmpty() ? QStringLiteral("Player") : offline;
+            request.offlineName = offlineId;
             if (account.loggedIn) {
                 m_identityText += QStringLiteral("(账户本次用不上:%1)")
                                       .arg(!account.hasMcToken || account.mcExpired

@@ -31,6 +31,9 @@ QWidget *createPageForRoute(const QString &routeKey, QWidget *parent) {
         return createTeamPage(parent);
     if (routeKey == QStringLiteral("more"))
         return createMorePage(parent);
+    // 版本选择页:主页的"更换"按钮点进来的(不在侧边栏,按需建页 —— 见 switchToRoute)。
+    if (routeKey == QStringLiteral("select"))
+        return createVersionsSelectPage(parent);
     return nullptr;
 }
 

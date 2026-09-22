@@ -79,6 +79,11 @@ public:
                                               const QString &loaderType = QStringLiteral("none"),
                                               const QString &loaderVersion = QString());
     Q_INVOKABLE void switchToLaunch(const QString &versionId);
+    // 主页那两个启动键的区别(用户点名"已登录正版的玩家也能以离线登录"):
+    //   false(默认)= 能用账户就用账户身份;true = 这次**强制离线**,别去碰账户。
+    // 主页在 switchToLaunch 之前设置,启动页真正开始时读一次并立刻清掉(不粘住)。
+    void setNextLaunchOffline(bool offline) { m_nextLaunchOffline = offline; }
+    bool nextLaunchOffline() const { return m_nextLaunchOffline; }
     // 临时页自己的"返回"入口:回**版本列表页**并结束会话(main_window.py:266-277)
     Q_INVOKABLE void goBackToVersions();
     Q_INVOKABLE void goBackFromLaunch();
@@ -234,6 +239,7 @@ private:
     // main_window.py:61-65
     QWidget *m_activeTempPage = nullptr; // _active_temp_page
     QString m_tempPageKey;               // _temp_page_key
+    bool m_nextLaunchOffline = false;    // 主页"离线启动"按下的那一次(用完清掉)
     bool m_sessionActive = false;        // _session_active
     QString m_lastNavItem;               // _last_nav_item
 

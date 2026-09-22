@@ -22,6 +22,8 @@ QWidget *createSettingsPage(QWidget *parent);
 QWidget *createDownloadPage(QWidget *parent);
 QWidget *createTeamPage(QWidget *parent);
 QWidget *createMorePage(QWidget *parent);
+// 版本选择页(用户 2026-09-22:主页的"所有安装版本"整块搬到这里,左侧是文件夹列表)
+QWidget *createVersionsSelectPage(QWidget *parent);
 
 // 路由 -> 页面对象(nullptr = 未移植)
 QWidget *createPageForRoute(const QString &routeKey, QWidget *parent);

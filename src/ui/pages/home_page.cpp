@@ -4,595 +4,384 @@
  * All rights reserved.
  */
 
+// 主页 —— **2026-09-22 界面重构**(用户口述,规格见 docs/25 §2)。
+//
+// 用户原话:「原"主页"替换当前游戏版本名(不是版本号,是可以自定义的版本名……区分的方法是
+// versions 下各个文件夹名字)。然后左边栏右侧的大部分空间分为正版启动和离线。我们支持已经
+// 登陆正版的玩家以离线登录。记得离线提供 ID 输入框,也加入状态保留哈。然后,原来的所有安装
+// 版本都堆在主页整体砍掉。改成版本选择页。」
+//
+// 所以这一页现在是:
+//   ① 当前版本卡 —— 大号显示**文件夹名**(可点/「更换」→ 版本选择页 select)
+//   ② 启动区左右两半 —— 左:正版启动(登录/启动) 右:离线启动(ID 输入框 + 启动)
+//   ③ 游戏目录卡(改名"当前文件夹",显示文件夹自己的名字 + 完整路径)
+//   ④ 联机入口卡(Python 版原有,保留)
+// 原来的版本卡网格(renderCards/createVersionCard)整块搬去了 versions_select_page.cpp。
+//
+// 状态保留(写我们自己的设置文件,见 game_folders.h):game.selected_version /
+// launch.offline_name / game.default_dir / game.known_dirs。
+
 #include "page_factory.h"
+#include "game_folders.h"
+#include "page_shell.h" // pageTokenText(取令牌色;与下载/团队/更多同一份)
 
-#include <QAbstractButton>
-#include <QCoreApplication>
-#include <QDesktopServices>
-#include <QDir>
-#include <QFile>
-#include <QFileDialog>
-#include <QFileInfo>
-#include <QFont>
-#include <QHBoxLayout>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QLabel>
-#include <QPushButton>
-#include <QSet>
-#include <QStringList>
-#include <QTimer>
-#include <QUrl>
-#include <QVBoxLayout>
-#include <QVector>
-#include <QWidget>
-
-#include <algorithm>
+#include "dialogs/account.h"
+#include "fluent_theme.h"
+#include "libqf.h"
+#include "main_window.h"
+#include "theme_bridge.h"
+#include "workers/ui_error.h"
 
 #if defined(_MSC_VER)
-#pragma warning(push, 0) // libqf 是外部依赖,头文件在 /W4 下不干净(见 libqf.h 的说明)
+#pragma warning(push, 0)
 #endif
 #include "fluent/fluent_cards.h"
 #include "fluent/fluent_controls.h"
+#include "fluent/fluent_input.h"
 #include "fluent/fluent_labels.h"
 #include "fluent/fluent_scroll.h"
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
 
-#include "fluent_theme.h"
-
-// 账户(正版登录)—— Python 版无此功能,新增;启动接线只用这一个入口(见 launchVersion)
-#include "dialogs/account.h"
-#include "workers/ui_error.h" // 统一错误出口(完整上下文 + 自动复制剪贴板)
-
-#include "main_window.h"
-
-// 我们自己的核心库(sxcl_ui_core 已经链了 sxcl,include/ 也挂着):
-// 游戏目录要读【本启动器的设置】与【核心库的平台默认】,不再读 Python 版旧配置。
-extern "C" {
-#include "sxcl/paths.h"
-#include "sxcl/settings.h"
-} // 联机入口要跳到 multiplayer 路由(Python 里是 mw.switchTo(page))
+#include <QDesktopServices>
+#include <QDir>
+#include <QFileDialog>
+#include <QFont>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QShowEvent>
+#include <QTimer>
+#include <QUrl>
+#include <QVBoxLayout>
 
 namespace sxcl::ui {
 namespace {
 
-// Python 未给目录卡布局设间距,取的是布局默认值。参考图实测 = 6
-// (路径标签左缘 111 = 卡片 28+1 边框 + 20 边距 + 56 标签宽 + 6)。
-// 这里钉死 6,免得跟随平台样式(QWindows11Style)漂移。
-constexpr int kDefaultLayoutSpacing = 6;
-
-// base_page.py:57 —— 副标题的亮/暗两套颜色(不是令牌,Python 里就是这两个字面量)
 const QColor kSubtitleLight(0x60, 0x60, 0x60);
 const QColor kSubtitleDark(0xAA, 0xAA, 0xAA);
 
-// home_page.py:104-106 —— 空态提示(字号/颜色/外边距都是 Python 里的字面量)
-const QString kEmptyHintQss = QStringLiteral("color: #888; font-size: 14px; margin: 60px 0;");
-
-// 按钮:qf 的 PushButton 构造里有一句 setFont(self)(button.py:36 → common/font.py
-// setFont 默认 14px),libqf 的 PushButton::init() 只套了 QSS、没设字号,于是按钮吃了
-// 应用默认字号(9pt≈12px):实测参考图按钮文字墨宽 54(4 字)/28(2 字)、按钮 82x32,
-// C 版只出 46.7/24、76x30。这里按 docs/05-UI-1to1规格.md §4「PushButton 高 32,字体 14」
-// 把字号钉回 14px;libqf 那边补上 setFont 后(已写进交付报告)这段可以删。
-void applyButtonFont(QPushButton *button) {
-    QFont font = button->font();
-    font.setPixelSize(14);
-    font.setWeight(QFont::Normal);
-    button->setFont(font);
-    button->setFixedHeight(32);
-}
-
-// ─────────────────────────────── 游戏目录与版本扫描 ───────────────────────────────
-
-// platform.py:148-152 default_config_directory() —— Windows = %APPDATA%/SilentXCraftLauncher
-QString legacyConfigFilePath() {
-    QString base = qEnvironmentVariable("APPDATA");
-    if (base.isEmpty())
-        base = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-    return base + QStringLiteral("/SilentXCraftLauncher/config.json");
-}
-
-// 读旧版(Python)SXCL 配置里的某一项(launcher_config.py 的分组/键名)。
-// 解析失败、文件不存在、类型不对一律返回空串(等价 Python 里"读不到就用默认值")。
-QString legacyConfigString(const QString &group, const QString &key) {
-    QFile file(legacyConfigFilePath());
-    if (!file.open(QIODevice::ReadOnly))
-        return QString();
-    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-    if (!doc.isObject())
-        return QString();
-    const QJsonValue value = doc.object().value(group).toObject().value(key);
-    return value.isString() ? value.toString() : QString();
-}
-
-// 我们自己的设置文件(与 settings_page.cpp 的 settingsFilePath() 同口径)。
-// 旧版(Python)的 %APPDATA%/SilentXCraftLauncher/config.json 是历史包袱:
-// 安卓上根本没有那个文件,继续读它只会让新设备显示 Windows 路径/空值。
-QString ownSettingsFilePath() {
-#if defined(Q_OS_WIN)
-    QString base = qEnvironmentVariable("APPDATA");
-    if (base.isEmpty())
-        base = QDir::homePath() + QStringLiteral("/AppData/Roaming");
-    return base + QStringLiteral("/SilentXCraftLauncher/settings.conf");
-#elif defined(Q_OS_MACOS)
-    return QDir::homePath() +
-           QStringLiteral("/Library/Application Support/SilentXCraftLauncher/settings.conf");
-#else
-    return QDir::homePath() + QStringLiteral("/.config/SilentXCraftLauncher/settings.conf");
-#endif
-}
-
-// 游戏目录:先读核心库设置 game.default_dir;空则问核心库要平台默认
-// (Windows = %APPDATA%/.minecraft;Android = $SXCL_ANDROID_FILES/.minecraft,见 paths.c)。
-// 两条都拿不到才退回 <home>/.minecraft(与旧行为一致,保底不空)。
-// 最大内存:读我们自己的设置(game.max_memory_mb —— 设置页写的就是这个键)。
-// 读不到返回 0 = 交给核心库按位数取默认(与 CLI 不给 --memory 时的行为一致)。
-int configuredMemoryMb() {
-    if (sxcl_settings *settings = sxcl_settings_open(ownSettingsFilePath().toUtf8().constData())) {
-        const int mb = static_cast<int>(sxcl_settings_get_int(settings, "game.max_memory_mb", 0));
-        sxcl_settings_free(settings);
-        return mb > 0 ? mb : 0;
-    }
-    return 0;
-}
-
-QString resolveGameDirectory() {
-    char err[256];
-    char buf[4096];
-    err[0] = '\0';
-    QString configured;
-    if (sxcl_settings *st = sxcl_settings_open(ownSettingsFilePath().toUtf8().constData())) {
-        configured = QString::fromUtf8(sxcl_settings_game_default_dir(st));
-        sxcl_settings_free(st);
-    }
-    // 一次性迁移:从 Python 版配置里把 gameDirectory 导入我们自己的设置。
-    // 只在我们自己的设置里没有该项时导一次(之后以我们自己的为准),
-    // 这样从 Python 版转过来的用户看到的仍是同一个游戏目录;
-    // Android 上该文件不存在 → 自然跳过,走核心库的 Android 默认。
-    if (configured.isEmpty()) {
-        const QString legacy = legacyConfigString(QStringLiteral("Game"),
-                                                 QStringLiteral("gameDirectory"));
-        if (!legacy.isEmpty()) {
-            const QByteArray own = ownSettingsFilePath().toUtf8();
-            if (sxcl_settings *st = sxcl_settings_open(own.constData())) {
-                sxcl_settings_set(st, "game.default_dir", legacy.toUtf8().constData());
-                sxcl_settings_save(st, own.constData());
-                sxcl_settings_free(st);
-            }
-            configured = legacy;
-        }
-    }
-    if (!configured.isEmpty()) {
-        if (sxcl_paths_resolve_game_dir(configured.toUtf8().constData(), buf, sizeof(buf), err,
-                                        sizeof(err)) == SXCL_PATHS_OK)
-            return QDir::fromNativeSeparators(QString::fromUtf8(buf));
-        return QDir::fromNativeSeparators(configured);
-    }
-    if (sxcl_paths_default_game_dir(buf, sizeof(buf), err, sizeof(err)) == SXCL_PATHS_OK)
-        return QDir::fromNativeSeparators(QString::fromUtf8(buf));
-    return QDir::fromNativeSeparators(QDir::homePath()) + QStringLiteral("/.minecraft");
-}
-
-// installed.py:38-57 get_installed_versions():versions/ 下"jar + json 都齐全"的目录,
-// 名字倒序(sorted(versions, reverse=True))。
-QStringList scanInstalledVersions(const QString &gameDir) {
-    QStringList versions;
-    const QDir versionsDir(gameDir + QStringLiteral("/versions"));
-    if (!versionsDir.exists())
-        return versions;
-    const QFileInfoList entries =
-        versionsDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::NoSort);
-    for (const QFileInfo &entry : entries) {
-        const QString name = entry.fileName();
-        const QString dir = entry.absoluteFilePath();
-        if (QFileInfo::exists(dir + QLatin1Char('/') + name + QStringLiteral(".jar")) &&
-            QFileInfo::exists(dir + QLatin1Char('/') + name + QStringLiteral(".json")))
-            versions.append(name);
-    }
-    std::sort(versions.begin(), versions.end(), [](const QString &a, const QString &b) {
-        return a > b; // Python: sorted(..., reverse=True)(按 Unicode 码位/码元倒序)
-    });
-    return versions;
-}
-
-// home_page.py:212-230 _get_version_info():能解析出版本 JSON 才算数,然后只看**版本 id**
-// 里有没有加载器关键字。
-// 注意(照抄 Python 的判定顺序):先判 "forge",所以 neoforge 永远命中 Forge 分支 ——
-// 这一条在 Python 里就是死代码,移植后也保持同样的结果,不要"顺手修正"。
-QString versionLoaderTag(const QString &gameDir, const QString &versionId) {
-    QFile file(gameDir + QStringLiteral("/versions/") + versionId + QLatin1Char('/') +
-               versionId + QStringLiteral(".json"));
-    if (!file.open(QIODevice::ReadOnly))
-        return QString();
-    QJsonParseError error{};
-    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &error);
-    // Python: data = json.load(...); if not data: return ""(空对象/坏 JSON 都算没有信息)
-    if (error.error != QJsonParseError::NoError || !doc.isObject() || doc.object().isEmpty())
-        return QString();
-    const QString id = versionId.toLower();
-    if (id.contains(QStringLiteral("forge")))
-        return QStringLiteral("Forge");
-    if (id.contains(QStringLiteral("neoforge")))
-        return QStringLiteral("NeoForge");
-    if (id.contains(QStringLiteral("fabric")))
-        return QStringLiteral("Fabric");
-    return QString();
-}
-
-// folders.py:49-101 —— 游戏目录探测(Python 的 GameFolder/_count_versions/_inspect)。
-// 只是"自动检测"按钮用;正式版应改调核心库 sxcl_paths_detect(见报告)。
-struct GameFolder {
-    QString path;
-    QString label;
-    int versions = 0;
-    bool hasAssets = false;
-    bool hasProfiles = false;
-    bool exists = false;
-    int score() const { // folders.py:64-74
-        if (!exists)
-            return -1;
-        int value = versions * 10;
-        if (hasAssets)
-            value += 5;
-        if (hasProfiles)
-            value += 2;
-        return value;
-    }
-};
-
-int countVersionsIn(const QString &folder) { // folders.py:76-91 _count_versions
-    const QDir versionsDir(folder + QStringLiteral("/versions"));
-    if (!versionsDir.exists())
-        return 0;
-    int count = 0;
-    const QFileInfoList entries =
-        versionsDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::NoSort);
-    for (const QFileInfo &entry : entries) {
-        const QString name = entry.fileName();
-        const QString dir = entry.absoluteFilePath();
-        if (QFileInfo::exists(dir + QLatin1Char('/') + name + QStringLiteral(".json")) ||
-            QFileInfo::exists(dir + QLatin1Char('/') + name + QStringLiteral(".jar"))) {
-            ++count;
-        } else if (!QDir(dir).entryList(QStringList() << QStringLiteral("*.json"), QDir::Files).isEmpty()) {
-            ++count; // 加载器版本常常只有 JSON(jar 靠继承)
-        }
-    }
-    return count;
-}
-
-GameFolder inspectFolder(const QString &path, const QString &label) { // folders.py:94-101 _inspect
-    GameFolder folder;
-    folder.path = path;
-    folder.label = label;
-    folder.exists = QFileInfo(path).isDir();
-    folder.versions = countVersionsIn(path);
-    folder.hasAssets = QFileInfo(path + QStringLiteral("/assets")).isDir();
-    folder.hasProfiles = QFileInfo(path + QStringLiteral("/launcher_profiles.json")).isFile();
-    return folder;
-}
-
-// folders.py:112-151 detect_game_folders():候选顺序 —— 启动器目录(便携)/APPDATA/用户目录/
-// 桌面(含"桌面"中文名)/当前配置;按路径去重、只留存在的、按 score 倒序(稳定)。
-QVector<GameFolder> detectGameFolders(const QString &configuredDir) {
-    QVector<GameFolder> candidates;
-    const QString programDir = QDir::fromNativeSeparators(QCoreApplication::applicationDirPath());
-    for (const QString &name : {QStringLiteral(".minecraft"), QStringLiteral("minecraft"),
-                                QStringLiteral("MC")})
-        candidates.append(inspectFolder(programDir + QLatin1Char('/') + name,
-                                        QStringLiteral("启动器目录（便携）")));
-    const QString appData = qEnvironmentVariable("APPDATA");
-    if (!appData.isEmpty())
-        candidates.append(inspectFolder(QDir::fromNativeSeparators(appData) +
-                                            QStringLiteral("/.minecraft"),
-                                        QStringLiteral("官方启动器（APPDATA）")));
-    const QString home = QDir::fromNativeSeparators(QDir::homePath());
-    candidates.append(inspectFolder(home + QStringLiteral("/.minecraft"), QStringLiteral("用户目录")));
-    for (const QString &desktop : {QStringLiteral("Desktop"), QStringLiteral("桌面")})
-        candidates.append(inspectFolder(home + QLatin1Char('/') + desktop +
-                                            QStringLiteral("/.minecraft"),
-                                        QStringLiteral("桌面")));
-    if (!configuredDir.isEmpty())
-        candidates.append(inspectFolder(configuredDir, QStringLiteral("当前配置")));
-
-    QVector<GameFolder> folders;
-    QSet<QString> seen;
-    for (const GameFolder &folder : candidates) {
-        const QString key = QDir(folder.path).absolutePath().toLower();
-        if (seen.contains(key))
-            continue;
-        seen.insert(key);
-        if (folder.exists)
-            folders.append(folder);
-    }
-    std::stable_sort(folders.begin(), folders.end(),
-                     [](const GameFolder &a, const GameFolder &b) { return a.score() > b.score(); });
-    return folders;
-}
-
-// folders.py:154-160 best_game_folder():有版本数的优先,再退回第一个。
-const GameFolder *bestGameFolder(const QVector<GameFolder> &folders) {
-    const GameFolder *first = nullptr;
-    for (const GameFolder &folder : folders) {
-        if (!first)
-            first = &folder;
-        if (folder.versions > 0)
-            return &folder;
-    }
-    return first;
-}
-
-QString describeFolder(const GameFolder &folder) { // folders.py:163-164 describe()
-    return QStringLiteral("%1（%2，%3 个版本）")
-        .arg(folder.path, folder.label)
-        .arg(folder.versions);
-}
-
-// ─────────────────────────────── 页面本体 ───────────────────────────────
+} // namespace
 
 class HomePage : public ScrollArea {
 public:
     explicit HomePage(QWidget *parent);
 
-private:
-    void buildContent();     // home_page.py:68-110  _build_content
-    void refreshInstalled(); // home_page.py:154-157 _refresh_installed
-    void renderCards();      // home_page.py:159-177 _render_cards
-    QWidget *createVersionCard(const QString &versionId); // home_page.py:179-210
-    void checkFs();          // home_page.py:234-241 _check_fs
+protected:
+    void showEvent(QShowEvent *event) override; // 从版本选择页/设置页回来要刷新(版本名可能变了)
 
-    void changeDirectory();     // home_page.py:286-295 _change_directory
-    void autoDetectDirectory(); // home_page.py:260-284 _auto_detect_folder
-    void openDirectory();       // home_page.py:297-314 _open_directory
-    void launchVersion(const QString &versionId); // home_page.py:245-258 _launch
-    void openMultiplayer();     // home_page.py:138-150 _open_multiplayer
+private:
+    void buildContent();
+    void refresh();              // 重读"当前版本"与账户状态,重画两张卡
+    QString currentVersion() const;
+    void changeVersion();        // → 路由 select(版本选择页)
+    void changeDirectory();
+    void autoDetectDirectory();
+    void openDirectory();
+    void launchWithAccount();
+    void launchOffline();
+    void launchFallback(); // window() 不是 MainWindow 时的统一错误出口
+    void openMultiplayer();
 
     QString m_gameDir;
-    QStringList m_installed;
-    QStringList m_lastSnapshot; // Python: self._last_snapshot
-
     QWidget *m_view = nullptr;
     QVBoxLayout *m_vBox = nullptr;
-    BodyLabel *m_dirDisplay = nullptr;
-    BodyLabel *m_emptyHint = nullptr;
-    QWidget *m_grid = nullptr;
-    QVBoxLayout *m_gridLayout = nullptr;
+
+    BodyLabel *m_versionName = nullptr;   // 大号:当前版本(文件夹名)
+    BodyLabel *m_versionDetail = nullptr; // 小字:MC 版本 + 加载器 + 有没有 jar
+    BodyLabel *m_accountState = nullptr;  // 正版卡的状态行
+    PushButton *m_accountButton = nullptr;
+    QLineEdit *m_offlineEdit = nullptr;   // 离线 ID(状态保留)
+    BodyLabel *m_dirName = nullptr;       // 当前文件夹的名字
+    BodyLabel *m_dirDisplay = nullptr;    // 完整路径
 };
 
 HomePage::HomePage(QWidget *parent) : ScrollArea(parent) {
     m_gameDir = resolveGameDirectory();
 
-    // ---- BasePage(src/app/common/base_page.py:41-60)----
-    setObjectName(QStringLiteral("HomePage"));                    // :42
-    setWidgetResizable(true);                                     // :43
-    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);         // :44
-
-    // 页面底色 = 令牌 bg(#202020)。依据 docs/05-UI-1to1规格.md §10.2(内容区设计值 #202020)
-    // 与 §11.2(抓参考图时把页面底色钉成 token(bg),否则 qf StackedWidget 的半透明白
-    // rgba(255,255,255,0.0314) 会让内容区变 #272727、卡片变 #323232)。等价于 Python 抓图脚本的
-    // page.setStyleSheet("QWidget { background: %s }" % token("bg"))。选择器只命中本页,
-    // 子控件各有自己的样式表(标签走 FluentLabelBase、卡片自绘),外观不受影响。
-    // 外壳已把 StackedWidget 的底色做成透明(内容底 = 窗口底 #202020),这一行现在是"保险",
-    // 不留也无碍 —— 删掉它就与 Python 的 BasePage(透明)逐字一致。
+    setObjectName(QStringLiteral("HomePage"));
+    setWidgetResizable(true);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setStyleSheet(QStringLiteral("QScrollArea { background: %1; }")
                       .arg(FluentTheme::instance().tokens().bg.name()));
-    // Python 的 BasePage 继承 qf 的 ScrollArea,没有改 frameShape → 默认 StyledPanel 的 1px 边框,
-    // 视口因此落在页面 (1,1)(probe 实测 viewport=(1,1,1050,700));libqf 的 ScrollArea::initArea()
-    // 把 frameShape 设成 NoFrame,内容会比参考图左上各少 1px。这里按 Python 的行为恢复 1px 边框。
     setFrameShape(QFrame::StyledPanel);
     setLineWidth(1);
 
-    m_view = new QWidget(this);                                   // :46
-    m_view->setStyleSheet(QStringLiteral("background: transparent;")); // :47
-    setWidget(m_view);                                            // :48
+    m_view = new QWidget(this);
+    m_view->setStyleSheet(QStringLiteral("background: transparent;"));
+    setWidget(m_view);
 
-    m_vBox = new QVBoxLayout(m_view);                             // :50
-    m_vBox->setContentsMargins(28, 24, 28, 24);                   // :51
-    m_vBox->setSpacing(16);                                       // :52
-    m_vBox->setAlignment(Qt::AlignTop);                           // :53
+    m_vBox = new QVBoxLayout(m_view);
+    m_vBox->setContentsMargins(28, 24, 28, 24);
+    m_vBox->setSpacing(16);
+    m_vBox->setAlignment(Qt::AlignTop);
 
-    // home_page.py:55-56 title="主页" / subtitle=f"{APP_NAME} v{APP_VERSION}"
-    // (src/core/constants.py:APP_NAME="Silent X Craft Launcher", APP_VERSION="0.1.0")
     auto *title = new TitleLabel(QStringLiteral("主页"), m_view);
-    auto *subtitle =
-        new SubtitleLabel(QStringLiteral("Silent X Craft Launcher v0.1.0"), m_view);
-    subtitle->setTextColor(kSubtitleLight, kSubtitleDark);        // base_page.py:57
-    m_vBox->addWidget(title);                                     // :59
-    m_vBox->addWidget(subtitle);                                  // :60
+    auto *subtitle = new SubtitleLabel(QStringLiteral("Silent X Craft Launcher v0.1.0"), m_view);
+    subtitle->setTextColor(kSubtitleLight, kSubtitleDark);
+    m_vBox->addWidget(title);
+    m_vBox->addWidget(subtitle);
 
     buildContent();
-    refreshInstalled();
+    refresh();
 
-    // home_page.py:62-66:每 8 秒检查一次文件变化(用户手动增删版本后自动刷新)
+    // home_page.py:62-66:每 8 秒检查一次文件变化(用户手动增删版本/换目录后自动刷新)
     auto *watch = new QTimer(this);
     watch->setInterval(8000);
-    connect(watch, &QTimer::timeout, this, [this] { checkFs(); });
+    connect(watch, &QTimer::timeout, this, [this] { refresh(); });
     watch->start();
+}
+
+void HomePage::showEvent(QShowEvent *event) {
+    ScrollArea::showEvent(event);
+    refresh(); // 从"版本选择页"选完回来,这一页必须立刻显示新选中的版本
 }
 
 void HomePage::buildContent() {
     const ThemeTokens &tokens = FluentTheme::instance().tokens();
 
-    // ── 游戏目录卡(home_page.py:69-93)──
-    auto *dirCard = new CardWidget(m_view);                       // :70
-    auto *dirLay = new QHBoxLayout(dirCard);                      // :71
-    dirLay->setContentsMargins(20, 12, 20, 12);                   // :72
-    dirLay->setSpacing(kDefaultLayoutSpacing);                    // :73-92 未设 → 默认 6
-
-    auto *dirLabel = new BodyLabel(QStringLiteral("游戏目录"), dirCard); // :74
-    dirLay->addWidget(dirLabel);                                  // :75
-
-    m_dirDisplay = new BodyLabel(m_gameDir, dirCard);             // :77
-    m_dirDisplay->setTextColor(tokens.textTertiary);              // :78(token("text_tertiary"))
-    dirLay->addWidget(m_dirDisplay, 1);                           // :79
-
-    auto *changeBtn = new PushButton(QStringLiteral("更改"), dirCard);      // :81
+    // ── ① 当前版本卡 ──
+    auto *versionCard = new CardWidget(m_view);
+    auto *versionLay = new QHBoxLayout(versionCard);
+    versionLay->setContentsMargins(20, 16, 20, 16);
+    versionLay->setSpacing(16);
+    {
+        auto *text = new QVBoxLayout();
+        text->setSpacing(4);
+        auto *caption = new BodyLabel(QStringLiteral("当前游戏版本"), versionCard);
+        caption->setTextColor(tokens.textTertiary);
+        text->addWidget(caption);
+        m_versionName = new BodyLabel(QStringLiteral("（还没有已安装的版本）"), versionCard);
+        {
+            QFont font = m_versionName->font();
+            font.setPixelSize(26);
+            font.setWeight(QFont::DemiBold);
+            m_versionName->setFont(font);
+        }
+        text->addWidget(m_versionName);
+        m_versionDetail = new BodyLabel(QString(), versionCard);
+        m_versionDetail->setTextColor(tokens.textTertiary);
+        text->addWidget(m_versionDetail);
+        versionLay->addLayout(text, 1);
+    }
+    auto *changeBtn = new PrimaryPushButton(QStringLiteral("更换"), versionCard);
     applyButtonFont(changeBtn);
-    connect(changeBtn, &QAbstractButton::clicked, this, [this] { changeDirectory(); });
-    dirLay->addWidget(changeBtn);                                 // :83
+    connect(changeBtn, &QAbstractButton::clicked, this, [this] { changeVersion(); });
+    versionLay->addWidget(changeBtn, 0, Qt::AlignVCenter);
+    m_vBox->addWidget(versionCard);
 
-    auto *detectBtn = new PushButton(QStringLiteral("自动检测"), dirCard);  // :85
+    // ── ② 启动区:左正版 / 右离线 ──
+    auto *launchRow = new QWidget(m_view);
+    auto *launchLay = new QHBoxLayout(launchRow);
+    launchLay->setContentsMargins(0, 0, 0, 0);
+    launchLay->setSpacing(16);
+    {
+        // 左:正版启动
+        auto *accountCard = new CardWidget(launchRow);
+        auto *accountLay = new QVBoxLayout(accountCard);
+        accountLay->setContentsMargins(20, 16, 20, 16);
+        accountLay->setSpacing(8);
+        auto *accountTitle = new StrongBodyLabel(QStringLiteral("正版启动"), accountCard);
+        accountTitle->setStyleSheet(
+            QStringLiteral("color: %1; font-size: 15px;").arg(pageTokenText("accent")));
+        accountLay->addWidget(accountTitle);
+        m_accountState = new BodyLabel(QStringLiteral("读取账户状态…"), accountCard);
+        m_accountState->setWordWrap(true);
+        m_accountState->setTextColor(tokens.textTertiary);
+        accountLay->addWidget(m_accountState);
+        accountLay->addStretch(1);
+        m_accountButton = new PrimaryPushButton(QStringLiteral("启动"), accountCard);
+        applyButtonFont(m_accountButton);
+        connect(m_accountButton, &QAbstractButton::clicked, this, [this] { launchWithAccount(); });
+        accountLay->addWidget(m_accountButton, 0, Qt::AlignLeft);
+        launchLay->addWidget(accountCard, 1);
+
+        // 右:离线启动(用户点名:ID 输入框 + 状态保留;已登录正版也能用这一路)
+        auto *offlineCard = new CardWidget(launchRow);
+        auto *offlineLay = new QVBoxLayout(offlineCard);
+        offlineLay->setContentsMargins(20, 16, 20, 16);
+        offlineLay->setSpacing(8);
+        auto *offlineTitle = new StrongBodyLabel(QStringLiteral("离线启动"), offlineCard);
+        offlineTitle->setStyleSheet(
+            QStringLiteral("color: %1; font-size: 15px;").arg(pageTokenText("accent")));
+        offlineLay->addWidget(offlineTitle);
+        auto *offlineNote = new BodyLabel(
+            QStringLiteral("离线 ID 就是游戏里的玩家名；已登录正版的账号也可以用这一路。"), offlineCard);
+        offlineNote->setWordWrap(true);
+        offlineNote->setTextColor(tokens.textTertiary);
+        offlineLay->addWidget(offlineNote);
+        offlineLay->addStretch(1);
+        auto *row = new QWidget(offlineCard);
+        auto *rowLay = new QHBoxLayout(row);
+        rowLay->setContentsMargins(0, 0, 0, 0);
+        rowLay->setSpacing(8);
+        m_offlineEdit = new LineEdit(row);
+        m_offlineEdit->setPlaceholderText(QStringLiteral("离线 ID（默认 Player）"));
+        m_offlineEdit->setText(offlinePlayerName());
+        m_offlineEdit->setFixedHeight(32);
+        rowLay->addWidget(m_offlineEdit, 1);
+        auto *offlineBtn = new PrimaryPushButton(QStringLiteral("启动"), row);
+        applyButtonFont(offlineBtn);
+        connect(offlineBtn, &QAbstractButton::clicked, this, [this] { launchOffline(); });
+        rowLay->addWidget(offlineBtn, 0);
+        offlineLay->addWidget(row);
+        launchLay->addWidget(offlineCard, 1);
+    }
+    m_vBox->addWidget(launchRow);
+
+    // ── ③ 当前文件夹卡(用户:显示文件夹自己的名字,不强制叫 .minecraft)──
+    auto *dirCard = new CardWidget(m_view);
+    auto *dirLay = new QHBoxLayout(dirCard);
+    dirLay->setContentsMargins(20, 12, 20, 12);
+    dirLay->setSpacing(12);
+    dirLay->addWidget(new BodyLabel(QStringLiteral("当前文件夹"), dirCard));
+    m_dirName = new BodyLabel(QString(), dirCard);
+    {
+        QFont font = m_dirName->font();
+        font.setPixelSize(14);
+        font.setWeight(QFont::DemiBold);
+        m_dirName->setFont(font);
+    }
+    dirLay->addWidget(m_dirName);
+    m_dirDisplay = new BodyLabel(m_gameDir, dirCard);
+    m_dirDisplay->setTextColor(tokens.textTertiary);
+    dirLay->addWidget(m_dirDisplay, 1);
+    auto *changeDirBtn = new PushButton(QStringLiteral("更改"), dirCard);
+    applyButtonFont(changeDirBtn);
+    connect(changeDirBtn, &QAbstractButton::clicked, this, [this] { changeDirectory(); });
+    dirLay->addWidget(changeDirBtn);
+    auto *detectBtn = new PushButton(QStringLiteral("自动检测"), dirCard);
     applyButtonFont(detectBtn);
     connect(detectBtn, &QAbstractButton::clicked, this, [this] { autoDetectDirectory(); });
-    dirLay->addWidget(detectBtn);                                 // :87
-
-    auto *openBtn = new PushButton(QStringLiteral("打开"), dirCard);        // :89
+    dirLay->addWidget(detectBtn);
+    auto *openBtn = new PushButton(QStringLiteral("打开"), dirCard);
     applyButtonFont(openBtn);
     connect(openBtn, &QAbstractButton::clicked, this, [this] { openDirectory(); });
-    dirLay->addWidget(openBtn);                                   // :91
+    dirLay->addWidget(openBtn);
+    m_vBox->addWidget(dirCard);
 
-    m_vBox->addWidget(dirCard);                                   // :93
-
-    // ── 联机入口卡(home_page.py:112-136)──
-    auto *mpCard = new CardWidget(m_view);                        // :114
-    auto *mpLay = new QHBoxLayout(mpCard);                        // :115
-    mpLay->setContentsMargins(20, 12, 20, 12);                    // :116
-    mpLay->setSpacing(12);                                        // :117
-
-    auto *mpIcon = new QLabel(mpCard);                            // :119
+    // ── ④ 联机入口卡(home_page.py:112-136,原样保留)──
+    auto *mpCard = new CardWidget(m_view);
+    auto *mpLay = new QHBoxLayout(mpCard);
+    mpLay->setContentsMargins(20, 12, 20, 12);
+    mpLay->setSpacing(12);
+    auto *mpIcon = new QLabel(mpCard);
     mpIcon->setPixmap(fluent::icon(QStringLiteral("Globe"), FluentTheme::instance().isDark())
-                          .pixmap(28, 28));                       // :120 FIF.GLOBE.icon().pixmap(28,28)
-    mpLay->addWidget(mpIcon);                                     // :121
-
-    auto *textBox = new QVBoxLayout();                            // :123
-    textBox->setSpacing(2);                                       // :124
-    textBox->addWidget(new StrongBodyLabel(QStringLiteral("联机 · 和朋友一起玩"), mpCard)); // :125
+                          .pixmap(28, 28));
+    mpLay->addWidget(mpIcon);
+    auto *mpText = new QVBoxLayout();
+    mpText->setSpacing(2);
+    mpText->addWidget(new StrongBodyLabel(QStringLiteral("联机 · 和朋友一起玩"), mpCard));
     auto *mpDesc = new BodyLabel(
-        QStringLiteral("房间码加入 / P2P 打洞 / 中继兜底（开发中，先留入口）"), mpCard); // :126
-    mpDesc->setTextColor(tokens.textTertiary);                    // :127
-    textBox->addWidget(mpDesc);                                   // :128
-    mpLay->addLayout(textBox, 1);                                 // :129
-
-    auto *lookBtn = new PushButton(QStringLiteral("看看方案"), mpCard);     // :131
+        QStringLiteral("房间码加入 / P2P 打洞 / 中继兜底（开发中，先留入口）"), mpCard);
+    mpDesc->setTextColor(tokens.textTertiary);
+    mpText->addWidget(mpDesc);
+    mpLay->addLayout(mpText, 1);
+    auto *lookBtn = new PushButton(QStringLiteral("看看方案"), mpCard);
     applyButtonFont(lookBtn);
     connect(lookBtn, &QAbstractButton::clicked, this, [this] { openMultiplayer(); });
-    mpLay->addWidget(lookBtn);                                    // :133
-    mpCard->setCursor(Qt::PointingHandCursor);                    // :135
-    m_vBox->addWidget(mpCard);                                    // :96
+    mpLay->addWidget(lookBtn);
+    m_vBox->addWidget(mpCard);
 
-    // ── 空态提示(home_page.py:104-108)──
-    m_emptyHint = new BodyLabel(QStringLiteral("暂无已安装的版本\n前往「版本」页下载"), m_view);
-    m_emptyHint->setAlignment(Qt::AlignCenter);
-    m_emptyHint->setStyleSheet(kEmptyHintQss);
-    m_vBox->addWidget(m_emptyHint);                               // :108
-
-    // ── 版本卡网格(home_page.py:99-102,109-110)──
-    m_grid = new QWidget(m_view);                                 // :99
-    m_gridLayout = new QVBoxLayout(m_grid);                       // :100
-    m_gridLayout->setContentsMargins(0, 0, 0, 0);                 // :101
-    m_gridLayout->setSpacing(8);                                  // :102
-    m_vBox->addWidget(m_grid);                                    // :109
-    m_vBox->addStretch(1);                                        // :110
+    m_vBox->addStretch(1);
 }
 
-void HomePage::refreshInstalled() {
-    m_installed = scanInstalledVersions(m_gameDir);               // :156
-    m_lastSnapshot = m_installed;
-    renderCards();                                                // :157
+QString HomePage::currentVersion() const {
+    // 状态键优先;它指向的文件夹没了(用户删了/换目录了)就退回第一个已安装的。
+    const QStringList installed = scanInstalledVersions(m_gameDir);
+    const QString saved = selectedVersionName();
+    if (!saved.isEmpty() && installed.contains(saved))
+        return saved;
+    return installed.isEmpty() ? QString() : installed.first();
 }
 
-void HomePage::renderCards() {
-    // 清掉旧卡片(home_page.py:161-165)
-    while (QLayoutItem *item = m_gridLayout->takeAt(0)) {
-        if (QWidget *widget = item->widget())
-            widget->deleteLater();
-        delete item;
+void HomePage::refresh() {
+    // ① 当前版本
+    const QString version = currentVersion();
+    if (version.isEmpty()) {
+        m_versionName->setText(QStringLiteral("（还没有已安装的版本）"));
+        m_versionDetail->setText(
+            QStringLiteral("去「下载 → Minecraft 版本」装一个，装完这里就能启动"));
+    } else {
+        m_versionName->setText(version);
+        QStringList bits;
+        const QString tag = versionLoaderTag(m_gameDir, version);
+        if (!tag.isEmpty())
+            bits << tag;
+        const QString json = m_gameDir + QStringLiteral("/versions/") + version + QLatin1Char('/') +
+                             version + QStringLiteral(".json");
+        const QString jar = m_gameDir + QStringLiteral("/versions/") + version + QLatin1Char('/') +
+                            version + QStringLiteral(".jar");
+        bits << (QFileInfo::exists(jar) ? QStringLiteral("有自己的 jar")
+                                        : QStringLiteral("靠继承 / 没有 jar"));
+        if (!QFileInfo::exists(json))
+            bits << QStringLiteral("缺版本 JSON");
+        bits << QStringLiteral("目录名就是版本名（可以随便改，不影响启动）");
+        m_versionDetail->setText(bits.join(QStringLiteral(" · ")));
     }
 
-    if (m_installed.isEmpty()) {                                  // :167-170
-        m_emptyHint->setVisible(true);
-        m_grid->setVisible(false);
+    // ② 账户状态(正版卡)
+    const AccountSnapshot account = loadAccountSnapshot();
+    if (accountCanLaunch(account)) {
+        m_accountState->setText(QStringLiteral("已登录：%1（玩家名 %2）")
+                                    .arg(account.accountName, account.playerName));
+        m_accountButton->setText(QStringLiteral("用正版身份启动"));
+        m_accountButton->setEnabled(!version.isEmpty());
+    } else if (account.loggedIn) {
+        m_accountState->setText(
+            QStringLiteral("登录了，但这个账号这次用不上：%1")
+                .arg(!account.hasMcToken || account.mcExpired
+                         ? QStringLiteral("凭据已过期（设置 → 账户 里刷新）")
+                         : QStringLiteral("没有 Java 版档案")));
+        m_accountButton->setText(QStringLiteral("登录 / 刷新"));
+        m_accountButton->setEnabled(true);
+    } else {
+        m_accountState->setText(QStringLiteral("还没登录。登录后可以用正版身份启动；"
+                                               "不想登录就用右边的离线启动。"));
+        m_accountButton->setText(QStringLiteral("登录"));
+        m_accountButton->setEnabled(true);
+    }
+
+    // ③ 当前文件夹(名字 + 路径)
+    const QDir dir(m_gameDir);
+    m_dirName->setText(dir.dirName().isEmpty() ? m_gameDir : dir.dirName());
+    m_dirDisplay->setText(QDir::toNativeSeparators(m_gameDir));
+}
+
+void HomePage::changeVersion() {
+    // 用户点名:"原来的所有安装版本都堆在主页整体砍掉。改成版本选择页。"
+    if (auto *mw = qobject_cast<MainWindow *>(window())) {
+        mw->switchToRoute(QStringLiteral("select"));
         return;
     }
-
-    m_emptyHint->setVisible(false);                               // :172-173
-    m_grid->setVisible(true);
-    for (const QString &versionId : m_installed)                  // :175-177
-        m_gridLayout->addWidget(createVersionCard(versionId));
+    InfoBar::push(InfoBar::Type::Info, QStringLiteral("版本选择"),
+                  QStringLiteral("版本选择页还没接上"), window(), 3000);
 }
 
-QWidget *HomePage::createVersionCard(const QString &versionId) {
-    auto *card = new CardWidget(m_grid);                          // :180
-    card->setFixedHeight(56);                                     // :181
-    card->setCursor(Qt::PointingHandCursor);                      // :182
-
-    auto *lay = new QHBoxLayout(card);                            // :184
-    lay->setContentsMargins(20, 0, 16, 0);                        // :185
-    lay->setSpacing(16);                                          // :186
-
-    auto *name = new BodyLabel(versionId, card);                  // :189
-    name->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 600;")); // :190
-    {
-        // 同一件事再用 QFont 落地一遍:libqf 的 FluentLabelBase 在主题切换时会重套
-        // 自己的 QSS,显式 setFont 保证 15px/DemiBold 不会丢(参考图实测 15px/600)。
-        QFont font = name->font();
-        font.setPixelSize(15);
-        font.setWeight(QFont::DemiBold);
-        name->setFont(font);
-    }
-    lay->addWidget(name);                                         // :191
-
-    const QString info = versionLoaderTag(m_gameDir, versionId);  // :194
-    if (!info.isEmpty()) {                                        // :195
-        auto *detail = new BodyLabel(info, card);
-        // 调用顺序照抄 Python(:197-198):先 setTextColor(tertiary) 再 setStyleSheet
-        // ("font-size: 12px;")—— 后者会顶掉颜色规则,所以参考图里这行是**白色 12px**。
-        detail->setTextColor(FluentTheme::instance().tokens().textTertiary);
-        detail->setStyleSheet(QStringLiteral("font-size: 12px;"));
-        QFont font = detail->font();
-        font.setPixelSize(12);
-        font.setWeight(QFont::Normal);
-        detail->setFont(font);
-        lay->addWidget(detail);                                   // :199
-    }
-
-    lay->addStretch();                                            // :201
-
-    auto *launchBtn = new PrimaryPushButton(QStringLiteral("启动"), card); // :204
-    applyButtonFont(launchBtn);
-    launchBtn->setFixedSize(80, 32);                              // :205
-    connect(launchBtn, &QAbstractButton::clicked, this,
-            [this, versionId] { launchVersion(versionId); });     // :206
-    lay->addWidget(launchBtn);                                    // :207
-    return card;                                                  // :210
-}
-
-void HomePage::checkFs() { // home_page.py:234-241
-    const QStringList current = scanInstalledVersions(m_gameDir);
-    const QSet<QString> currentSet(current.begin(), current.end());
-    const QSet<QString> lastSet(m_lastSnapshot.begin(), m_lastSnapshot.end());
-    if (currentSet != lastSet) {
-        m_lastSnapshot = current;
-        m_installed = current;
-        renderCards();
-    }
-}
-
-void HomePage::changeDirectory() { // home_page.py:286-295
+void HomePage::changeDirectory() {
     const QString dir = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("选择 .minecraft 目录"), m_gameDir);
+        this, QStringLiteral("选择游戏文件夹（不一定要叫 .minecraft）"), m_gameDir);
     if (dir.isEmpty())
         return;
-    // Python 这里还会 qconfig.set + save_config() 落盘;C 版还没有设置层(见报告),
-    // 先只改内存里的当前目录 —— 行为可见部分一致,重启不保留。
     m_gameDir = QDir::fromNativeSeparators(dir);
-    m_dirDisplay->setText(m_gameDir);
-    refreshInstalled();
+    setGameDirectory(m_gameDir); // **状态保留**:以前这里只改内存,重启就回去了
+    refresh();
 }
 
-void HomePage::autoDetectDirectory() { // home_page.py:260-284
+void HomePage::autoDetectDirectory() {
     const QVector<GameFolder> folders = detectGameFolders(m_gameDir);
     const GameFolder *best = bestGameFolder(folders);
     if (!best) {
         InfoBar::push(InfoBar::Type::Warning, QStringLiteral("没找到游戏目录"),
-                      QStringLiteral("点「更改」手动选一个 .minecraft 目录"), window(), 5000);
+                      QStringLiteral("点「更改」手动选一个"), window(), 5000);
         return;
     }
-    // Python: qconfig.set(cfg.gameDirectory, str(best.path)) + save_config() (见上条说明)
     m_gameDir = best->path;
-    m_dirDisplay->setText(m_gameDir);
-    refreshInstalled();
-
+    setGameDirectory(m_gameDir);
+    refresh();
     QString content = describeFolder(*best);
     QStringList others;
     for (const GameFolder &folder : folders) {
@@ -604,30 +393,18 @@ void HomePage::autoDetectDirectory() { // home_page.py:260-284
     InfoBar::push(InfoBar::Type::Success, QStringLiteral("已切换游戏目录"), content, window(), 6000);
 }
 
-void HomePage::openDirectory() { // home_page.py:297-314
-    // Windows 用 ShellExecute 打开资源管理器(Qt 的等价物),macOS/Linux 也由 Qt 分派
+void HomePage::openDirectory() {
     QDesktopServices::openUrl(QUrl::fromLocalFile(m_gameDir));
 }
 
-void HomePage::launchVersion(const QString &versionId) { // home_page.py:245-258
-    // ── 阶段 7:「启动」接线(本文件唯一改动的这一处)──
-    //
-    // 改前:这里先查 Java 设置,没有就挡住;有可用正版账户时**直接**调 startAccountLaunch
-    //       并 return —— 用户根本进不了启动页(看不到 Java 探测结果 / 最终命令行 / 日志归类)。
-    // 改后:**一律切到启动页**,真正的启动由启动页执行(LaunchWorker:Java 探测 -> 最终命令行
-    //       -> 真起进程 -> stdout/stderr 归类 -> 退出码)。身份由启动页决定:
-    //       已登录账户可用就用账户身份(与 CLI 的 --account 同一条核心通路,
-    //       见 tools/sxcl-dl/main.c:898-921),否则用离线身份 --offline <名字>。
-    //
-    // 也因此不再需要"先查 Java 设置":核心库的启动层自己会探测并排序候选 Java
-    // (launch.h:250-263),启动页会把**选中的那一个**显示出来;探测不到时给出的也是
-    // 核心库的人话原因(比"未选择 Java"精确得多)。
-    //
-    // dialogs/account.* 的 startAccountLaunch 一行没动,仍是"一次性正版启动"的独立入口;
-    // 这里只是不再用它把用户挡在启动页外。
+void HomePage::launchWithAccount() {
+    if (currentVersion().isEmpty()) {
+        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("还没有版本可以启动"),
+                      QStringLiteral("先去「下载 → Minecraft 版本」装一个"), window(), 4000);
+        return;
+    }
     const AccountSnapshot account = loadAccountSnapshot();
     if (!accountCanLaunch(account) && account.loggedIn) {
-        // 登录了但这次用不上:先如实说清原因,再按原来的离线路径走(不静默降级、不假装成功)。
         const QString why =
             (!account.hasMcToken || account.mcExpired)
                 ? QStringLiteral("登录凭据已过期：到 设置 → 账户 点「刷新」免密续期；不行就重新登录一次")
@@ -637,25 +414,46 @@ void HomePage::launchVersion(const QString &versionId) { // home_page.py:245-258
     } else if (accountCanLaunch(account)) {
         InfoBar::push(InfoBar::Type::Info, QStringLiteral("用已登录的正版账户启动"),
                       QStringLiteral("%1（玩家名 %2，内存 %3 MB）")
-                          .arg(versionId, account.playerName)
+                          .arg(currentVersion(), account.playerName)
                           .arg(configuredMemoryMb()),
                       window(), 4000);
     }
-
+    // 正版那一路:交给启动页按"能用账户就用"的规则走(可能是登录页/设备码)
     if (auto *mw = qobject_cast<MainWindow *>(window())) {
-        mw->switchToLaunch(versionId);
+        mw->setNextLaunchOffline(false);
+        mw->switchToLaunch(currentVersion());
         return;
     }
+    launchFallback();
+}
+
+void HomePage::launchOffline() {
+    // 用户点名:离线 ID 要能填、要状态保留;已登录正版的玩家也该能走这一路。
+    setOfflinePlayerName(m_offlineEdit->text());
+    if (currentVersion().isEmpty()) {
+        InfoBar::push(InfoBar::Type::Warning, QStringLiteral("还没有版本可以启动"),
+                      QStringLiteral("先去「下载 → Minecraft 版本」装一个"), window(), 4000);
+        return;
+    }
+    m_offlineEdit->setText(offlinePlayerName());
+    if (auto *mw = qobject_cast<MainWindow *>(window())) {
+        mw->setNextLaunchOffline(true); // 强制离线:哪怕账户可用也不用它
+        mw->switchToLaunch(currentVersion());
+        return;
+    }
+    launchFallback();
+}
+
+void HomePage::launchFallback() {
     UiErrorContext ctx;
     ctx.page = QStringLiteral("主页 / home");
-    ctx.action = QStringLiteral("启动 %1").arg(versionId);
+    ctx.action = QStringLiteral("启动 %1").arg(currentVersion());
     ctx.reason = QStringLiteral("启动器未初始化(window() 不是 MainWindow)");
     ctx.title = QStringLiteral("无法启动");
     pushUiError(window(), ctx, 5000);
 }
 
-void HomePage::openMultiplayer() { // home_page.py:138-150
-    // Python: mw = self.window(); page = getattr(mw, "multiplayer_page", None) -> switchTo
+void HomePage::openMultiplayer() {
     if (auto *mw = qobject_cast<MainWindow *>(window())) {
         mw->switchToRoute(QStringLiteral("multiplayer"));
         return;
@@ -663,8 +461,6 @@ void HomePage::openMultiplayer() { // home_page.py:138-150
     InfoBar::push(InfoBar::Type::Info, QStringLiteral("联机"),
                   QStringLiteral("联机页即将上线"), window(), 2500);
 }
-
-} // namespace
 
 QWidget *createHomePage(QWidget *parent) { return new HomePage(parent); }
 
