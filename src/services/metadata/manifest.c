@@ -10,8 +10,9 @@
 
 #include "sxcl/manifest.h"
 
-#include "sxcl/engine.h" /* sxcl_version_plan_fetch:启动前"补全文件"要跑下载引擎 */
+#include "sxcl/engine.h"  /* sxcl_version_plan_fetch:启动前"补全文件"要跑下载引擎 */
 #include "sxcl/fs.h"
+#include "sxcl/natives.h" /* sxcl_natives_classifier_of:老版本 natives 键里的 arch 占位符 */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -480,8 +481,11 @@ sxcl_version_plan *sxcl_version_plan_build(const sxcl_json *version_json, const 
         const sxcl_json_value *natives = sxcl_json_get(lib, "natives");
         const char *native_key = sxcl_json_get_string(natives, os_name, NULL);
         if (native_key && *native_key) {
-            const sxcl_json_value *classifiers = sxcl_json_get(lib_dl, "classifiers");
-            const sxcl_json_value *cls = sxcl_json_get(classifiers, native_key);
+            /* 键里可能有 ${arch} 占位符(1.8.x/1.9.x):交给 natives.h 那个函数统一处理,
+             * 它顺带把"展开后的键"回填 —— 之前这里按原样查,老版本的原生库根本进不了计划。 */
+            char resolved_key[160];
+            const sxcl_json_value *cls = sxcl_natives_classifier_of(lib, os_name, resolved_key,
+                                                                   sizeof(resolved_key));
             const char *cls_path = sxcl_json_get_string(cls, "path", NULL);
             if (cls_path) {
                 char rel[512];

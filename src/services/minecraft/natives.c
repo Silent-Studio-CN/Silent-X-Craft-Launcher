@@ -278,6 +278,78 @@ static int name_classifier(const char *name, char *out, size_t cap)
     return 0;
 }
 
+/** 把键里的 ${arch} 换成给定字符串(只换第一处) —— 见头文件说明。 */
+static void expand_arch(const char *key, const char *arch, char *out, size_t cap)
+{
+    const char *hit = strstr(key, "${arch}");
+    if (!hit) {
+        copy_str(out, cap, key);
+        return;
+    }
+    const size_t head = (size_t)(hit - key);
+    const char *tail = hit + 7; /* strlen("${arch}") */
+    if (head + 1 > cap) {
+        out[0] = '\0';
+        return;
+    }
+    memcpy(out, key, head);
+    out[head] = '\0';
+    const size_t used = head + strlen(arch);
+    if (used + strlen(tail) + 1 > cap) {
+        out[0] = '\0';
+        return;
+    }
+    memcpy(out + head, arch, strlen(arch));
+    copy_str(out + used, cap - used, tail);
+}
+
+const sxcl_json_value *sxcl_natives_classifier_of(const sxcl_json_value *lib, const char *os_name,
+                                                  char *key_out, size_t key_cap)
+{
+    const sxcl_json_value *downloads = sxcl_json_get(lib, "downloads");
+    const sxcl_json_value *natives = sxcl_json_get(lib, "natives");
+    const sxcl_json_value *classifiers = sxcl_json_get(downloads, "classifiers");
+    const char *key = sxcl_json_get_string(natives, os_name, NULL);
+
+    if (key_out && key_cap > 0) {
+        key_out[0] = '\0';
+    }
+    if (!classifiers || !key || !key[0]) {
+        return NULL;
+    }
+    /* (1) 原样 */
+    const sxcl_json_value *cls = sxcl_json_get(classifiers, key);
+    if (cls) {
+        if (key_out && key_cap > 0) {
+            copy_str(key_out, key_cap, key);
+        }
+        return cls;
+    }
+    /* (2) 带 arch 占位符:64 优先,退 32 */
+    if (strstr(key, "${arch}") != NULL) {
+        static const char *const kArch[2] = { "64", "32" };
+        for (size_t i = 0; i < 2; ++i) {
+            char expanded[160];
+            expand_arch(key, kArch[i], expanded, sizeof(expanded));
+            if (expanded[0] == '\0') {
+                break;
+            }
+            cls = sxcl_json_get(classifiers, expanded);
+            if (cls) {
+                if (key_out && key_cap > 0) {
+                    copy_str(key_out, key_cap, expanded);
+                }
+                return cls;
+            }
+        }
+    }
+    /* (3) 都没有:原始键回填,让报错里看得见原样 */
+    if (key_out && key_cap > 0) {
+        copy_str(key_out, key_cap, key);
+    }
+    return NULL;
+}
+
 /** 把一条 library 解析成 natives 规格。
  *  返回 1 = 是 natives 库(已填 spec),0 = 不是 natives 库(跳过),-1 = 出错(err 有原因)。 */
 static int spec_from_lib(const sxcl_json_value *lib, const char *lib_dir, const char *os_name,
@@ -297,8 +369,9 @@ static int spec_from_lib(const sxcl_json_value *lib, const char *lib_dir, const 
     {
         const char *old_key = sxcl_json_get_string(natives, os_name, NULL);
         if (old_key && *old_key) {
-            const sxcl_json_value *cls = sxcl_json_get(sxcl_json_get(downloads, "classifiers"), old_key);
-            copy_str(classifier, sizeof(classifier), old_key);
+            /* 哪个分类器 + arch 占位符的展开都交给它(见 natives.h 的实测事故说明) */
+            const sxcl_json_value *cls =
+                sxcl_natives_classifier_of(lib, os_name, classifier, sizeof(classifier));
             rel = sxcl_json_get_string(cls, "path", NULL);
         }
     }

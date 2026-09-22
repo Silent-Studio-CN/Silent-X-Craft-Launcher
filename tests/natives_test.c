@@ -396,6 +396,83 @@ int main(void) {
         printf("      驱动结果: natives_count=%d dir=%s\n", res.natives_count, res.natives_dir);
     }
 
+
+    /* ── arch 占位符:1.8.x/1.9.x 的 natives 键(实测事故) ──
+     * 启动 PCL 装的 1.8.9-Forge+OptiFine 实例时,库 tv.twitch:twitch-platform:6.5 的
+     * natives.windows 是 "natives-windows-${arch}",而 classifiers 里的键是 -64 / -32。
+     * 按原样查 → "没有下载路径" → 整个启动被拦下。 */
+    {
+        char perr[192];
+        char key[160];
+        perr[0] = '\0';
+        const char *both =
+            "{\"name\":\"tv.twitch:twitch-platform:6.5\","
+            "\"natives\":{\"windows\":\"natives-windows-${arch}\"},"
+            "\"downloads\":{\"classifiers\":{"
+            "\"natives-windows-32\":{\"path\":\"tv/twitch/twitch-platform/6.5/tp-32.jar\",\"sha1\":\"aa\",\"size\":1},"
+            "\"natives-windows-64\":{\"path\":\"tv/twitch/twitch-platform/6.5/tp-64.jar\",\"sha1\":\"bb\",\"size\":2}}}}";
+        char buf[900];
+        snprintf(buf, sizeof(buf), "%s", both);
+        /* 上面那行只是为了让 ${arch} 替换后长度确定;真正解析的是替换后的文本 */
+        sxcl_json *doc = sxcl_json_parse(buf, strlen(buf), perr, sizeof(perr));
+        check(doc != NULL, "arch 夹具能解析");
+        if (doc) {
+            const sxcl_json_value *cls =
+                sxcl_natives_classifier_of(sxcl_json_root(doc), "windows", key, sizeof(key));
+            check(cls != NULL, "arch 占位符:认出了分类器(以前这里是 NULL -> 启动失败)");
+            check(strcmp(key, "natives-windows-64") == 0, "  展开后优先 64 位");
+            check(strcmp(sxcl_json_get_string(cls, "path", ""),
+                         "tv/twitch/twitch-platform/6.5/tp-64.jar") == 0,
+                  "  拿到的是 64 位那条");
+            sxcl_json_free(doc);
+        }
+        const char *only32 =
+            "{\"name\":\"tv.twitch:twitch-platform:6.5\","
+            "\"natives\":{\"windows\":\"natives-windows-${arch}\"},"
+            "\"downloads\":{\"classifiers\":{"
+            "\"natives-windows-32\":{\"path\":\"tv/twitch/twitch-platform/6.5/tp-32.jar\",\"sha1\":\"aa\",\"size\":1}}}}";
+        snprintf(buf, sizeof(buf), "%s", only32);
+        doc = sxcl_json_parse(buf, strlen(buf), perr, sizeof(perr));
+        check(doc != NULL, "只有 32 位的夹具能解析");
+        if (doc) {
+            const sxcl_json_value *cls =
+                sxcl_natives_classifier_of(sxcl_json_root(doc), "windows", key, sizeof(key));
+            check(cls != NULL, "只有 32 位时也能认出来");
+            check(strcmp(key, "natives-windows-32") == 0, "  退到 32 位");
+            sxcl_json_free(doc);
+        }
+        const char *plain =
+            "{\"name\":\"org.lwjgl:lwjgl:2.9.4\","
+            "\"natives\":{\"windows\":\"natives-windows\"},"
+            "\"downloads\":{\"classifiers\":{"
+            "\"natives-windows\":{\"path\":\"org/lwjgl/lwjgl/2.9.4/lwjgl-2.9.4-natives-windows.jar\",\"sha1\":\"cc\",\"size\":3}}}}";
+        snprintf(buf, sizeof(buf), "%s", plain);
+        doc = sxcl_json_parse(buf, strlen(buf), perr, sizeof(perr));
+        check(doc != NULL, "无占位符的夹具能解析");
+        if (doc) {
+            const sxcl_json_value *cls =
+                sxcl_natives_classifier_of(sxcl_json_root(doc), "windows", key, sizeof(key));
+            check(cls != NULL, "原样能找到就用原样的(绝大多数版本)");
+            check(strcmp(key, "natives-windows") == 0, "  键没被改动");
+            sxcl_json_free(doc);
+        }
+        const char *none =
+            "{\"name\":\"tv.twitch:twitch-platform:6.5\","
+            "\"natives\":{\"windows\":\"natives-windows-${arch}\"},"
+            "\"downloads\":{\"classifiers\":{"
+            "\"natives-linux\":{\"path\":\"x.jar\",\"sha1\":\"dd\",\"size\":4}}}}";
+        snprintf(buf, sizeof(buf), "%s", none);
+        doc = sxcl_json_parse(buf, strlen(buf), perr, sizeof(perr));
+        check(doc != NULL, "都对不上的夹具能解析");
+        if (doc) {
+            const sxcl_json_value *cls =
+                sxcl_natives_classifier_of(sxcl_json_root(doc), "windows", key, sizeof(key));
+            check(cls == NULL, "真的没有就返回 NULL(不硬编一个路径出来)");
+            check(strcmp(key, "natives-windows-${arch}") == 0, "  回填的是**原始键**(报错里要看得见原样)");
+            sxcl_json_free(doc);
+        }
+    }
+
     printf("natives 测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
