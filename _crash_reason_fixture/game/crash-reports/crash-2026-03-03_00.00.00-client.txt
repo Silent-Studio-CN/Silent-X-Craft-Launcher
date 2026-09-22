@@ -1,7 +1,0 @@
----- Minecraft Crash Report ----
-Time: 2026-01-01 00:00:00
-Description: Ticking entity
-
-java.lang.OutOfMemoryError: Java heap space
-	at net.minecraft.client.renderer.LevelRenderer.render(LevelRenderer.java:1)
-Caused by: java.lang.OutOfMemoryError: Java heap space

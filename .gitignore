@@ -16,3 +16,7 @@ Thumbs.db
 
 # 测试临时文件
 _verify_tmp/
+# 测试**运行残留**(测试自己在 CWD 下建夹具;从仓库根直接跑 exe 时会落在根目录 ——
+# 2026-09-22 审查发现它们被误提交过,已 git rm 并在这里挡住)
+_*_fixture*/
+_sxcl_ui_resume_fixture_*/

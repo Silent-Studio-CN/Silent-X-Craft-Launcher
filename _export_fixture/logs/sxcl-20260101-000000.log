@@ -1,4 +1,0 @@
-2026-01-01 00:00:00.000 INFO  launch | 启动 --accessToken SUPERSECRETTOKEN
-2026-01-01 00:00:00.100 INFO  game | Setting user: Steve
-2026-01-01 00:00:00.200 INFO  launch | uuid=069a79f4-44e9-4726-a5be-fca90e38aaf5
-2026-01-01 00:00:00.300 INFO  launch | path C:\Users\Steve\.minecraft

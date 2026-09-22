@@ -1,4 +1,0 @@
----- Minecraft Crash Report ----
-Description: Rendering overlay
-Caused by: java.lang.OutOfMemoryError: Java heap space
-	at com.example.Main.tick(Main.java:42)
