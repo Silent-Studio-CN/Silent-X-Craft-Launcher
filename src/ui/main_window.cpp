@@ -6,6 +6,8 @@
 
 #include "main_window.h"
 
+#include <QAbstractAnimation> // 淘汰会话页前先停掉页面上的动画(见 registerSessionPage 的注释)
+
 #include "pages/page_factory.h"
 
 #include <QAbstractButton>
@@ -738,6 +740,19 @@ void MainWindow::registerSessionPage(const QString &key, QWidget *page) { // :24
         if (m_activeTempPage == stale)
             m_activeTempPage = nullptr;
         m_stack->removeWidget(stale);
+        /* **先把这个页面里还在跑的动画停掉,再摘出窗口**（2026-09-23 真机崩溃的现场:
+         * 异常码 0xC0000005,出错指令在 Qt6Core 的 QAbstractAnimation::stop ——
+         * 典型的"动画对象被销毁之后又被 stop()"）。
+         * qf 的 InfoBar / 提示条淡出动画挂在全局管理器上,页面一走它就悬空:
+         * 我们这边能做的就是把**页面自己身上**的动画先停干净,再把页面藏起来、
+         * 用 deleteLater 交给事件循环 —— 别在动画正跑的时候把它连父带子一起拆掉。 */
+        const QList<QAbstractAnimation *> anims = stale->findChildren<QAbstractAnimation *>();
+        for (QAbstractAnimation *anim : anims) {
+            if (anim != nullptr) {
+                anim->stop();
+            }
+        }
+        stale->hide();
         stale->setParent(nullptr);
         stale->deleteLater();
         break; // Python 也只淘汰一个

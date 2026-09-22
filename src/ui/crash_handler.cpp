@@ -85,35 +85,84 @@ QString faultingModule(void *address) {
     return QStringLiteral("%1 + 0x%2").arg(name).arg(addr - base, 0, 16);
 }
 
-/** 把调用栈符号化写成多行文本（DBGHELP 的符号服务；拿不到符号就打模块+偏移）。 */
-QString stackTrace() {
-    const HANDLE proc = GetCurrentProcess();
-    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
-    (void)SymInitializeW(proc, nullptr, TRUE);
+/** exe 所在目录（DBGHELP 的符号搜索路径：本工程的 .pdb 就摆在 exe 旁边）。 */
+QString exeDir() {
+    wchar_t path[MAX_PATH] = {0};
+    if (GetModuleFileNameW(nullptr, path, MAX_PATH) == 0)
+        return QString();
+    return QFileInfo(QString::fromWCharArray(path)).absolutePath();
+}
 
-    void *frames[40] = {0};
-    const USHORT got = CaptureStackBackTrace(0, 40, frames, nullptr);
+/** 把调用栈符号化写成多行文本。
+ *
+ *  用 StackWalk64 + **异常现场的 CONTEXT**（不是 CaptureStackBackTrace）：
+ *  后者从"当前栈"往回抓，而我们现在是在**异常处理里**，栈上先是我们自己的帧、
+ *  再是系统分发帧，抓到"出错那一帧的调用者"就断了 —— 真机第一版报告就是这样，
+ *  只看到 Qt 内部的 stop()，看不到是我们哪一行调进去的（这条报告本来就是为了定位，
+ *  缺了调用者等于白留）。StackWalk64 从 CONTEXT 起走，能一路回到 main。
+ *  符号路径带上 exe 目录：本工程 Release 也出 .pdb（CMake 里开了 ProgramDatabase）。 */
+QString stackTrace(EXCEPTION_POINTERS *info) {
+    const HANDLE proc = GetCurrentProcess();
+    const HANDLE thread = GetCurrentThread();
+    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+    const QString dir = exeDir();
+    (void)SymInitializeW(proc, dir.isEmpty() ? nullptr : reinterpret_cast<const wchar_t *>(dir.utf16()),
+                         TRUE);
+
+    CONTEXT ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    if (info != nullptr && info->ContextRecord != nullptr) {
+        ctx = *info->ContextRecord;
+    } else {
+        RtlCaptureContext(&ctx);
+    }
+
+    STACKFRAME64 frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.AddrPC.Offset = ctx.Rip;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Rsp;
+    frame.AddrStack.Mode = AddrModeFlat;
 
     QStringList lines;
-    for (USHORT i = 0; i < got; ++i) {
-        const DWORD64 addr = reinterpret_cast<DWORD64>(frames[i]);
+    for (int i = 0; i < 48; ++i) {
+        if (StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, thread, &frame, &ctx, nullptr,
+                        SymFunctionTableAccess64, SymGetModuleBase64, nullptr) == FALSE) {
+            break;
+        }
+        if (frame.AddrPC.Offset == 0)
+            break;
+
+        const DWORD64 addr = frame.AddrPC.Offset;
         QString symbol;
         char buf[sizeof(SYMBOL_INFOW) + 256 * sizeof(wchar_t)] = {0};
-        auto *info = reinterpret_cast<SYMBOL_INFOW *>(buf);
-        info->SizeOfStruct = sizeof(SYMBOL_INFOW);
-        info->MaxNameLen = 255;
+        auto *sym = reinterpret_cast<SYMBOL_INFOW *>(buf);
+        sym->SizeOfStruct = sizeof(SYMBOL_INFOW);
+        sym->MaxNameLen = 255;
         DWORD64 disp = 0;
-        if (SymFromAddrW(proc, addr, &disp, info) != 0) {
+        if (SymFromAddrW(proc, addr, &disp, sym) != 0) {
             symbol = QStringLiteral("%1+0x%2")
-                         .arg(QString::fromWCharArray(info->Name, (int)info->NameLen))
+                         .arg(QString::fromWCharArray(sym->Name, (int)sym->NameLen))
                          .arg(disp, 0, 16);
         } else {
             symbol = QStringLiteral("(没符号)");
         }
-        lines << QStringLiteral("  #%1 0x%2 %3  [%4]")
+        IMAGEHLP_LINEW64 line;
+        memset(&line, 0, sizeof(line));
+        line.SizeOfStruct = sizeof(line);
+        DWORD lineDisp = 0;
+        QString where;
+        if (SymGetLineFromAddrW64(proc, addr, &lineDisp, &line) != 0) {
+            where = QStringLiteral(" %1:%2")
+                        .arg(QString::fromWCharArray(line.FileName))
+                        .arg(line.LineNumber);
+        }
+        lines << QStringLiteral("  #%1 0x%2 %3%4  [%5]")
                      .arg(i, 2)
                      .arg(addr, 16, 16, QLatin1Char('0'))
-                     .arg(symbol, faultingModule(frames[i]));
+                     .arg(symbol, where, faultingModule(reinterpret_cast<void *>(addr)));
     }
     (void)SymCleanup(proc);
     return lines.join(QLatin1Char('\n'));
@@ -150,7 +199,7 @@ void writeReport(EXCEPTION_POINTERS *info, const char *how) {
         fprintf(f, "线程: %lu\n", (unsigned long)GetCurrentThreadId());
         fprintf(f, "运行日志: %s\n", sxcl_log_file_path());
         fprintf(f, "版本: %s\n", qVersion());
-        const QString stack = stackTrace();
+        const QString stack = stackTrace(info);
         fprintf(f, "\n调用栈(最内层在最上面):\n%s\n", stack.toUtf8().constData());
         fclose(f);
         SXCL_LOG_E("crash", "启动器崩溃: %s 报告=%s", how != nullptr ? how : "?",

@@ -20,6 +20,12 @@ endif()
 # 源码统一 UTF-8(含中文注释):MSVC 在非 936/1252 代码页下会报 C4819 且执行字符集漂移
 if(MSVC)
   add_compile_options(/utf-8)
+  # Release 也出 .pdb:启动器自己的崩溃报告要能符号化到"我们哪一行"
+  # (2026-09-23 真机第一版报告只有 Qt 内部的 stop(),看不到调用者,等于白留)。
+  # 用 CMAKE_MSVC_DEBUG_INFORMATION_FORMAT 在这个工程上没生效(实测 Release 下一个 .pdb 都没有),
+  # 于是直接写编译/链接开关:简单、可验证。
+  add_compile_options(/Zi)
+  add_link_options(/DEBUG)
 endif()
 
 # ── Qt 运行时部署:把需要的 DLL 放到 exe 同目录 ──
