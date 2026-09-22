@@ -329,9 +329,25 @@ typedef enum sxcl_loader_fail_stage {
 
 const char *sxcl_loader_fail_stage_name(sxcl_loader_fail_stage stage);
 
+/** 数一数"版本 JSON 里声明的依赖库"有几件不在磁盘上(装完的核对,docs/22 的 B9/E5)。
+ *
+ *  为什么要有它:"装了版本 JSON"只证明安装器写了文件,**不证明它声明的库都下齐了**;
+ *  以前缺库要等到**启动**时才在日志里报(driver.c 的"缺什么原样带出去"),用户看到的是一句
+ *  莫名其妙的崩溃。这里只数件数、不判失败 —— 启动前的"补全文件"(docs/24)会把缺的补上,
+ *  但**必须报出来**,不能让用户到启动崩了才知道。
+ *
+ *  instance_dir 里那份 <instance_name>.json 不存在/读不出来时返回 0(当作"没得核对")。
+ *  first_missing(可空)里写第一件缺失的相对路径,便于报错时点名。 */
+int sxcl_loader_count_missing_libraries(const char *game_dir, const char *instance_dir,
+                                        const char *instance_name, char *first_missing,
+                                        size_t first_missing_len);
+
 typedef struct sxcl_loader_install_result {
     int ok;                        /**< 1 = 成功 */
     sxcl_loader_fail_stage fail_stage;
+    /** 装完核对的缺库件数(见 sxcl_loader_count_missing_libraries)。>0 = 装是装上了,库没齐;
+     *  进度回调里会有一条人话说明,启动前补全会把它补上。 */
+    int missing_libraries;
     int used_fallback;             /**< 1 = 方式 A 失败后走了方式 B */
     int used_sandbox;              /**< 1 = 走了临时 APPDATA 沙箱(OptiFine) */
     int percent;                   /**< 最后的进度 0..100 */

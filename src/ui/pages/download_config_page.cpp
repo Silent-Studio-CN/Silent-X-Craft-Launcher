@@ -969,7 +969,22 @@ private:
     // 核心库的 loaders.default_version_name 还没挂到 UI 层(见报告),这里保留
     // "无加载器时 = 原版 id" 这条路径 —— 也正是初始态会走到的分支。
     void updateVersionName() {
-        const QString vn = m_versionId;
+        // 默认名要不要带加载器?**要**(用户点名,见 docs/22 的 B8/E3)。
+        // 不带的话"同一个原版装第二个加载器"必然撞名 —— 引擎在拼路径之前就按
+        // TARGET_JSON 拒装(sxcl_install_target_probe),用户只会看到"版本已存在"。
+        // 命名习惯与核心库的候选名对齐(installer.c 的 adopt_generated):
+        //   Fabric -> fabric-loader-<loader 版本>-<原版>(Fabric 安装器自己的命名,也是 PCL 的习惯)
+        //   其它   -> <原版>-<加载器>-<加载器版本>(Forge/NeoForge/OptiFine 的常见叫法)
+        QString vn = m_versionId;
+        if (!m_selectedLoader.isEmpty() && m_selectedLoader != QLatin1String("none") &&
+            !m_selectedLoaderVersion.isEmpty()) {
+            if (m_selectedLoader == QLatin1String("fabric")) {
+                vn = QStringLiteral("fabric-loader-%1-%2").arg(m_selectedLoaderVersion, m_versionId);
+            } else {
+                vn = QStringLiteral("%1-%2-%3")
+                         .arg(m_versionId, m_selectedLoader, m_selectedLoaderVersion);
+            }
+        }
         if (!m_userEditedName) {
             const QSignalBlocker blocker(m_nameInput); // :344-346 blockSignals
             m_nameInput->setText(vn);

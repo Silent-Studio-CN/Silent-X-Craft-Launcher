@@ -1079,6 +1079,43 @@ static void test_flatten(void) {
     sxcl_json_free(base);
 }
 
+/* ── 10) 装完核对依赖库(docs/22 的 B9):说的库到底在不在磁盘上 ── */
+static void test_missing_libraries(void) {
+    const char *game = "build/_loader_tmp/missing-game";
+    const char *inst = "build/_loader_tmp/missing-game/versions/probe";
+    const char *vjson =
+        "{\"id\":\"probe\",\"type\":\"release\",\"mainClass\":\"net.minecraft.client.main.Main\","
+        "\"libraries\":["
+        "{\"name\":\"com.example:a:1.0\",\"downloads\":{\"artifact\":{\"path\":\"com/example/a/a-1.0.jar\"}}},"
+        "{\"name\":\"com.example:b:1.0\",\"downloads\":{\"artifact\":{\"path\":\"com/example/b/b-1.0.jar\"}}},"
+        "{\"name\":\"com.example:c:1.0\",\"downloads\":{\"artifact\":{\"path\":\"com/example/c/c-1.0.jar\"}}}"
+        "]}";
+    char first[SXCL_LOADER_CMD_ARG_MAX];
+    first[0] = '\0';
+
+    check(write_file("build/_loader_tmp/missing-game/versions/probe/probe.json", vjson) == 0,
+          "写下版本 JSON");
+    check(write_file("build/_loader_tmp/missing-game/libraries/com/example/a/a-1.0.jar", "a") == 0,
+          "摆上第一件库");
+    check(write_file("build/_loader_tmp/missing-game/libraries/com/example/b/b-1.0.jar", "b") == 0,
+          "摆上第二件库");
+    check(sxcl_loader_count_missing_libraries(game, inst, "probe", first, sizeof(first)) == 1,
+          "三件里缺一件 = 1(不去数在的那两件)");
+    check_str(first, "com/example/c/c-1.0.jar", "  点名的是缺的那一件");
+
+    check(write_file("build/_loader_tmp/missing-game/libraries/com/example/c/c-1.0.jar", "c") == 0,
+          "把缺的那件补上");
+    first[0] = 'x';
+    check(sxcl_loader_count_missing_libraries(game, inst, "probe", first, sizeof(first)) == 0,
+          "补齐之后 = 0");
+    check_str(first, "", "  没有缺失就不点名(把 first 清空)");
+
+    first[0] = '\0';
+    check(sxcl_loader_count_missing_libraries(game, "build/_loader_tmp/missing-game/versions/nope",
+                                              "nope", first, sizeof(first)) == 0,
+          "版本 JSON 不在时返回 0(没得核对,不误报)");
+}
+
 int main(void) {
     check(sxcl_fs_mkdirs("build/_loader_tmp") == 0, "建临时目录(否则后面写文件全失败)");
 
@@ -1091,6 +1128,7 @@ int main(void) {
     test_maven();
     test_json_dump();
     test_flatten();
+    test_missing_libraries();
     test_install_args();
 
     printf("loader 测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);

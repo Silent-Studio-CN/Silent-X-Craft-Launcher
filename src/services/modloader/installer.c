@@ -1484,6 +1484,56 @@ static int write_inheriting_json(install_ctx *ctx, const sxcl_json_value *root, 
     return 0;
 }
 
+/* 数"版本 JSON 里声明的依赖库"有几件不在磁盘上 —— 装完的核对(见 loader.h 的说明)。
+ * 判据只看文件在不在:**不做哈希**(那是下载引擎在安装/补全时的活,这里重复做纯属白读盘)。 */
+int sxcl_loader_count_missing_libraries(const char *game_dir, const char *instance_dir,
+                                        const char *instance_name, char *first_missing,
+                                        size_t first_missing_len)
+{
+    if (first_missing && first_missing_len > 0) {
+        first_missing[0] = '\0';
+    }
+    if (!game_dir || !instance_dir || !instance_name || !instance_name[0]) {
+        return 0;
+    }
+    char leaf[SXCL_LOADER_CMD_ARG_MAX];
+    char path[SXCL_LOADER_CMD_ARG_MAX];
+    const int wrote = snprintf(leaf, sizeof(leaf), "%s.json", instance_name);
+    if (wrote <= 0 || (size_t)wrote >= sizeof(leaf) ||
+        join_path(path, sizeof(path), instance_dir, leaf) != 0) {
+        return 0;
+    }
+    sxcl_json *doc = load_json_file(path);
+    if (!doc) {
+        return 0;   /* 没得核对(JSON 不在):调用方自己的 dir_has_json 已经管这件事了 */
+    }
+    const sxcl_json_value *libraries = sxcl_json_get(sxcl_json_root(doc), "libraries");
+    const size_t count = sxcl_json_size(libraries);
+    int missing = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const sxcl_json_value *lib = sxcl_json_at(libraries, i);
+        const char *rel = sxcl_json_get_string(
+            sxcl_json_get(sxcl_json_get(lib, "downloads"), "artifact"), "path", NULL);
+        if (!rel || !rel[0]) {
+            continue;   /* 这条没有 artifact 路径(平台不适用 / 只有 classifiers):不核对 */
+        }
+        char dir[SXCL_LOADER_CMD_ARG_MAX * 2];
+        char file[SXCL_LOADER_CMD_ARG_MAX * 2];
+        if (join_path(dir, sizeof(dir), game_dir, "libraries") != 0 ||
+            join_path(file, sizeof(file), dir, rel) != 0) {
+            continue;
+        }
+        if (!sxcl_fs_exists(file)) {
+            ++missing;
+            if (first_missing && first_missing_len > 0 && first_missing[0] == '\0') {
+                (void)snprintf(first_missing, first_missing_len, "%s", rel);
+            }
+        }
+    }
+    sxcl_json_free(doc);
+    return missing;
+}
+
 /* Python: _extract_install —— 不启动安装器进程,直接从 jar 里拼出版本 JSON(老 Forge 只能这么装)。 */
 static int extract_install(install_ctx *ctx, const char *instance_dir)
 {
@@ -1538,60 +1588,6 @@ static int extract_install(install_ctx *ctx, const char *instance_dir)
     if (!version_root || sxcl_json_type_of(version_root) != SXCL_JSON_OBJECT) {
         ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "安装器里没有 version.json / versionInfo，解包安装做不了");
         goto done;
-    }
-
-    /* 版本 JSON:id = 实例名,**并且拍平**(把原版合并进来)——
-     * 用户点名:「PCL 与 HMCL 装出来的都是能独立启动的版本 JSON,我们肯定要学」。
-     * 只写 inheritsFrom 的话,启动层不解析继承就会缺原版的库、assetIndex 还会退化成 legacy。 */
-    {
-        char leaf[SXCL_LOADER_CMD_ARG_MAX];
-        char target[SXCL_LOADER_CMD_ARG_MAX];
-        target[0] = '\0';
-        const int wrote = snprintf(leaf, sizeof(leaf), "%s.json", req->instance_name);
-        if (wrote <= 0 || (size_t)wrote >= sizeof(leaf) ||
-            join_path(target, sizeof(target), instance_dir, leaf) != 0) {
-            ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "版本 JSON 的落盘路径拼不出来（实例名 %s）",
-                     req->instance_name);
-            goto done;
-        }
-
-        const char *base_id =
-            ctx->base_id[0] ? ctx->base_id : pick_base_id(version_root, req->base_version);
-        char ferr[SXCL_LOADER_ERROR_MAX];
-        ferr[0] = '\0';
-        if (json_has_inherits(version_root)) {
-            /* 靠继承的(1.13+ Forge / NeoForge):必须拍平,不然装出来的东西启动不了。
-             * 合并基准优先用开工前读下的那份(那时候版本目录里还是原版 JSON);
-             * 没有就现找一次(原版自己单独装过的机器上有)。 */
-            sxcl_json *base_doc = ctx->base_doc;
-            int owns_base = 0;
-            if (!base_doc) {
-                base_doc = load_base_doc(req->game_dir, base_id, instance_dir, req->instance_name);
-                owns_base = 1;
-            }
-            const int frc = flatten_write_json(base_doc ? sxcl_json_root(base_doc) : NULL, base_id,
-                                               req->instance_name, version_root, target, ferr,
-                                               sizeof(ferr));
-            if (owns_base) {
-                sxcl_json_free(base_doc);
-            }
-            if (frc == SXCL_LOADER_OK) {
-                ctx_report(ctx, ctx->percent, "版本 JSON 已拍平(合并原版 %s)", base_id);
-            } else {
-                /* 原版 JSON 不在(手动删过 / base_version 没给):退回继承式,**但如实说一声**。 */
-                ctx_report(ctx, ctx->percent, "拍平不了(%s),先按继承式写",
-                           ferr[0] ? ferr : "原因不明");
-                if (write_inheriting_json(ctx, version_root, target, NULL) != 0) {
-                    goto done;
-                }
-            }
-        } else {
-            /* 本来就是独立版本(老 Forge 的 versionInfo 是完整 JSON):只改 id 并补上
-             * clientVersion(PCL 的拍平标记,实例扫描最优先看它)。 */
-            if (write_inheriting_json(ctx, version_root, target, base_id) != 0) {
-                goto done;
-            }
-        }
     }
 
     /* 老格式:通用 jar 在 install.filePath 里,要落到 install.path 指的位置。 */
@@ -1665,6 +1661,67 @@ static int extract_install(install_ctx *ctx, const char *instance_dir)
     }
 
     copy_vanilla_client(req->game_dir, req->base_version, instance_dir, req->instance_name);
+    /* 版本 JSON:id = 实例名,**并且拍平**(把原版合并进来)——
+     * 用户点名:「PCL 与 HMCL 装出来的都是能独立启动的版本 JSON,我们肯定要学」。
+     * 只写 inheritsFrom 的话,启动层不解析继承就会缺原版的库、assetIndex 还会退化成 legacy。
+     *
+     * **顺序(2026-09-22 改,见 docs/22 的 B3/C4)**:这一块是**最后一步**。
+     * 以前是先写 JSON 再解包/下库 —— 于是"目录里有可解析的 JSON"在**装完之前**就成立了:
+     * 中途失败(库没下齐、解包出错)会留下一份"看着装好了、其实缺库"的版本,而装前预检
+     * (sxcl_install_target_probe)正是按"有没有可解析的 JSON"判重的 —— 用户会被自己上次的
+     * 失败挡住,想重装还得先手动删目录。现在:解包 -> 下库 -> 复制原版 jar 全部成功之后才写
+     * JSON,"有 JSON"真正等于"装完了"。 */
+    {
+        char leaf[SXCL_LOADER_CMD_ARG_MAX];
+        char target[SXCL_LOADER_CMD_ARG_MAX];
+        target[0] = '\0';
+        const int wrote = snprintf(leaf, sizeof(leaf), "%s.json", req->instance_name);
+        if (wrote <= 0 || (size_t)wrote >= sizeof(leaf) ||
+            join_path(target, sizeof(target), instance_dir, leaf) != 0) {
+            ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "版本 JSON 的落盘路径拼不出来（实例名 %s）",
+                     req->instance_name);
+            goto done;
+        }
+
+        const char *base_id =
+            ctx->base_id[0] ? ctx->base_id : pick_base_id(version_root, req->base_version);
+        char ferr[SXCL_LOADER_ERROR_MAX];
+        ferr[0] = '\0';
+        if (json_has_inherits(version_root)) {
+            /* 靠继承的(1.13+ Forge / NeoForge):必须拍平,不然装出来的东西启动不了。
+             * 合并基准优先用开工前读下的那份(那时候版本目录里还是原版 JSON);
+             * 没有就现找一次(原版自己单独装过的机器上有)。 */
+            sxcl_json *base_doc = ctx->base_doc;
+            int owns_base = 0;
+            if (!base_doc) {
+                base_doc = load_base_doc(req->game_dir, base_id, instance_dir, req->instance_name);
+                owns_base = 1;
+            }
+            const int frc = flatten_write_json(base_doc ? sxcl_json_root(base_doc) : NULL, base_id,
+                                               req->instance_name, version_root, target, ferr,
+                                               sizeof(ferr));
+            if (owns_base) {
+                sxcl_json_free(base_doc);
+            }
+            if (frc == SXCL_LOADER_OK) {
+                ctx_report(ctx, ctx->percent, "版本 JSON 已拍平(合并原版 %s)", base_id);
+            } else {
+                /* 原版 JSON 不在(手动删过 / base_version 没给):退回继承式,**但如实说一声**。 */
+                ctx_report(ctx, ctx->percent, "拍平不了(%s),先按继承式写",
+                           ferr[0] ? ferr : "原因不明");
+                if (write_inheriting_json(ctx, version_root, target, NULL) != 0) {
+                    goto done;
+                }
+            }
+        } else {
+            /* 本来就是独立版本(老 Forge 的 versionInfo 是完整 JSON):只改 id 并补上
+             * clientVersion(PCL 的拍平标记,实例扫描最优先看它)。 */
+            if (write_inheriting_json(ctx, version_root, target, base_id) != 0) {
+                goto done;
+            }
+        }
+    }
+
     ok = dir_has_json(instance_dir);
     if (!ok) {
         ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "解包安装没有生成版本 JSON：%s", instance_dir);
@@ -2150,6 +2207,21 @@ int sxcl_loader_install(const sxcl_loader_install_request *req, sxcl_loader_inst
         if (!dir_has_json(instance_dir)) {
             ok = 0;
             ctx_fail(&ctx, SXCL_LOADER_FAIL_VERIFY, "版本目录里没有版本 JSON：%s", instance_dir);
+        } else {
+            /* 装完核对依赖库(docs/22 的 B9):"有版本 JSON"不等于"库都下齐了"。
+             * **不判失败**(启动前的"补全文件"会补上),但必须报出来 —— 以前要到启动崩了才知道。 */
+            char first_missing[SXCL_LOADER_CMD_ARG_MAX];
+            const int missing = sxcl_loader_count_missing_libraries(
+                req->game_dir, instance_dir, req->instance_name, first_missing,
+                sizeof(first_missing));
+            out->missing_libraries = missing;
+            if (missing > 0) {
+                ctx_report(&ctx, ctx.percent,
+                           "依赖库没下齐：缺 %d 件（首个 %s）—— 启动前会自动补上",
+                           missing, first_missing);
+            } else {
+                ctx_report(&ctx, ctx.percent, "依赖库已核对：版本 JSON 里的库都在磁盘上");
+            }
         }
     }
 
