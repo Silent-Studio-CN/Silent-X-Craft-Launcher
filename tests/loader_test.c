@@ -681,23 +681,27 @@ static void test_build_commands(void) {
     check_str(cmds[0].args[5], "https://bmclapi2.bangbang93.com/maven/", "镜像地址");
     env.mirror_maven = NULL;
 
-    /* 5c) Fabric 是另一套 CLI(Python: client --mcversion ... --dir ... --name ...) */
+    /* 5c) Fabric 是另一套 CLI,而且参数是**单横线**(实测依据见 installer.c 里 Fabric 分支的注释:
+     *     双横线的写法会被安装器**整段忽略**,它会退到"当前最新正式版"再报 launcher profile 找不到,
+     *     退出码 1 —— 也就是双横线那一版从来没成功过)。 */
+    /* 注意 -dir 是**游戏目录**,不是版本目录:安装器要在这里找 launcher_profiles.json,
+     * 并把版本建到 <游戏目录>/versions/fabric-loader-<loader>-<mc>(由 adopt_generated 收编)。 */
     env.installer_jar = "C:/dl/fabric-installer.jar";
     env.loader_version = "0.15.11";
     env.instance_name = "1.20.1-Fabric 0.15.11";
     count = sxcl_loader_build_commands(SXCL_LOADER_FABRIC, &env, cmds, 4);
     check(count == 2, "Fabric 两组参数");
     check_str(cmds[0].args[2], "client", "子命令 client");
-    check_str(cmds[0].args[3], "--mcversion", "参数名 --mcversion");
+    check_str(cmds[0].args[3], "-mcversion", "参数名 -mcversion(单横线)");
     check_str(cmds[0].args[4], "1.20.1", "MC 版本");
-    check_str(cmds[0].args[5], "--loader", "参数名 --loader");
+    check_str(cmds[0].args[5], "-loader", "参数名 -loader(单横线)");
     check_str(cmds[0].args[6], "0.15.11", "加载器版本");
-    check_str(cmds[0].args[7], "--dir", "参数名 --dir");
+    check_str(cmds[0].args[7], "-dir", "参数名 -dir(单横线)");
     check_str(cmds[0].args[8], "C:/Game Dir/.minecraft", "游戏目录");
-    check_str(cmds[0].args[9], "--name", "参数名 --name");
+    check_str(cmds[0].args[9], "-name", "参数名 -name(单横线)");
     check_str(cmds[0].args[10], "1.20.1-Fabric 0.15.11", "实例名");
     check(cmds[0].argc == 11, "第一组 11 个参数");
-    check(cmds[1].argc == 9, "第二组没有 --name");
+    check(cmds[1].argc == 9, "第二组没有 -name");
     check_str(cmds[0].work_dir, "C:/Game Dir/.minecraft", "Fabric 的工作目录");
 
     /* 5d) OptiFine:沙箱里的假游戏目录 + 必须带上 APPDATA */
@@ -935,6 +939,146 @@ static void test_install_args(void) {
     check_str(sxcl_loader_fail_stage_name(SXCL_LOADER_FAIL_EXTRACT), "extract", "阶段名");
 }
 
+/* ── 9) 拍平(合并原版,产出一份能独立启动的版本 JSON) ──
+ * 用户点名:「PCL 与 HMCL 装出来的都是能独立启动的版本 JSON,我们肯定要学」。
+ * 这里钉住的都是"拍平之后必须成立"的事实,比如:没有 inheritsFrom / 没有 jar、
+ * 加载器钉的库版本不被原版的同名库挡在前面、原版的 assetIndex 与下载信息还在。 */
+static const char *kBaseJson =
+    "{"
+    "\"id\":\"1.20.1\",\"type\":\"release\",\"time\":\"2023-06-12T13:25:51+00:00\","
+    "\"mainClass\":\"net.minecraft.client.main.Main\","
+    "\"assetIndex\":{\"id\":\"5\",\"sha1\":\"aaa\",\"size\":1,\"url\":\"https://piston-meta.mojang.com/5.json\"},"
+    "\"assets\":\"5\","
+    "\"downloads\":{\"client\":{\"sha1\":\"bbb\",\"size\":3,\"url\":\"https://piston-data.mojang.com/client.jar\"}},"
+    "\"javaVersion\":{\"component\":\"java-runtime-gamma\",\"majorVersion\":17},"
+    "\"libraries\":["
+    "{\"name\":\"com.google.guava:guava:31.1-jre\",\"downloads\":{\"artifact\":{\"path\":\"com/google/guava/guava/31.1-jre/guava-31.1-jre.jar\",\"sha1\":\"c\",\"size\":4}}},"
+    "{\"name\":\"org.ow2.asm:asm:9.3\",\"downloads\":{\"artifact\":{\"path\":\"org/ow2/asm/asm/9.3/asm-9.3.jar\",\"sha1\":\"d\",\"size\":5}}},"
+    "{\"name\":\"com.mojang:logging:1.1.1\",\"downloads\":{\"artifact\":{\"path\":\"com/mojang/logging/1.1.1/logging-1.1.1.jar\",\"sha1\":\"e\",\"size\":6}}}"
+    "],"
+    "\"arguments\":{\"jvm\":[\"-Djava.library.path=/natives\",\"-cp\",\"/classpath\"],"
+    "\"game\":[\"--username\",\"/player\"]},"
+    "\"logging\":{\"client\":{\"argument\":\"-Dlog4j.configurationFile=/log4j2.xml\",\"type\":\"log4j2-xml\"}}"
+    "}";
+
+static const char *kLoaderJson =
+    "{"
+    "\"id\":\"1.20.1-forge-47.2.0\",\"inheritsFrom\":\"1.20.1\",\"jar\":\"1.20.1\","
+    "\"type\":\"release\",\"spec\":1,\"clientVersion\":\"9.9.9\","
+    "\"mainClass\":\"cpw.mods.bootstraplauncher.BootstrapLauncher\","
+    "\"libraries\":["
+    "{\"name\":\"org.ow2.asm:asm:9.5\",\"downloads\":{\"artifact\":{\"path\":\"org/ow2/asm/asm/9.5/asm-9.5.jar\",\"sha1\":\"11\",\"size\":8}}},"
+    "{\"name\":\"net.minecraftforge:forge:1.20.1-47.2.0\",\"downloads\":{\"artifact\":{\"path\":\"net/minecraftforge/forge/forge-universal.jar\",\"sha1\":\"12\",\"size\":9}}}"
+    "],"
+    "\"arguments\":{\"jvm\":[\"-Djava.library.path=/natives\",\"-p\",\"/modulepath\"],"
+    "\"game\":[\"--launchTarget\",\"forgeclient\"]},"
+    "\"processors\":[{\"classpath\":[\"net.minecraftforge:installertools:1.3.2\"],\"outputs\":{\"a\":\"b\"}}]"
+    "}";
+
+static void test_flatten(void) {
+    char perr[192];
+    char err[192];
+    perr[0] = '\0';
+    err[0] = '\0';
+    sxcl_json *base = sxcl_json_parse(kBaseJson, strlen(kBaseJson), perr, sizeof(perr));
+    sxcl_json *loader = sxcl_json_parse(kLoaderJson, strlen(kLoaderJson), perr, sizeof(perr));
+    check(base != NULL && loader != NULL, "两份版本 JSON 都能解析");
+    if (!base || !loader) {
+        sxcl_json_free(base);
+        sxcl_json_free(loader);
+        return;
+    }
+
+    char *text = NULL;
+    err[0] = '\0';
+    check(sxcl_loader_flatten_json(sxcl_json_root(loader), sxcl_json_root(base),
+                                   "1.20.1-Forge_47.2.0", "1.20.1", &text, err, sizeof(err)) ==
+              SXCL_LOADER_OK,
+          "拍平成功");
+    check(text != NULL, "拍平有输出");
+    if (text) {
+        check(strstr(text, "inheritsFrom") == NULL, "拍平后没有 inheritsFrom(它不是独立版本的标记)");
+        check(strstr(text, "\"jar\"") == NULL, "拍平后没有 jar 键");
+
+        sxcl_json *back = sxcl_json_parse(text, strlen(text), perr, sizeof(perr));
+        check(back != NULL, "拍平后还是合法 JSON");
+        if (back) {
+            const sxcl_json_value *root = sxcl_json_root(back);
+            check_str(sxcl_json_get_string(root, "id", ""), "1.20.1-Forge_47.2.0", "id = 实例名");
+            check_str(sxcl_json_get_string(root, "clientVersion", ""), "1.20.1",
+                      "clientVersion = 原版版本号(PCL 的拍平标记)");
+            check(sxcl_json_get(root, "inheritsFrom") == NULL, "  读不到 inheritsFrom");
+            check(sxcl_json_get(root, "jar") == NULL, "  读不到 jar");
+            check_str(sxcl_json_get_string(root, "mainClass", ""),
+                      "cpw.mods.bootstraplauncher.BootstrapLauncher", "主类用加载器的");
+            check_str(sxcl_json_get_string(root, "type", ""), "release", "其余键以原版为准");
+            check(sxcl_json_get(root, "assetIndex") != NULL, "原版的 assetIndex 还在");
+            check_str(sxcl_json_get_string(sxcl_json_get(root, "assetIndex"), "id", ""), "5",
+                      "  资源索引还是 5");
+            check_str(sxcl_json_get_string(
+                          sxcl_json_get(sxcl_json_get(root, "downloads"), "client"), "url", ""),
+                      "https://piston-data.mojang.com/client.jar", "原版的 client 下载信息还在");
+            check(sxcl_json_get(root, "javaVersion") != NULL, "javaVersion 还在");
+            check(sxcl_json_get(root, "logging") != NULL, "logging(日志配置)还在");
+
+            /* libraries:加载器的两条在前,原版里没被同名覆盖的两条在后(asm 被加载器钉的 9.5 顶掉) */
+            const sxcl_json_value *libs = sxcl_json_get(root, "libraries");
+            check(sxcl_json_size(libs) == 4, "库 = 加载器 2 条 + 原版未被覆盖的 2 条");
+            check_str(sxcl_json_get_string(sxcl_json_at(libs, 0), "name", ""), "org.ow2.asm:asm:9.5",
+                      "  第一条是加载器钉的 asm 版本(不能被原版的 9.3 挡在前面)");
+            check_str(sxcl_json_get_string(sxcl_json_at(libs, 1), "name", ""),
+                      "net.minecraftforge:forge:1.20.1-47.2.0", "  第二条是 forge 本体");
+            check_str(sxcl_json_get_string(sxcl_json_at(libs, 2), "name", ""),
+                      "com.google.guava:guava:31.1-jre", "  原版独有的库保留");
+            check_str(sxcl_json_get_string(sxcl_json_at(libs, 3), "name", ""), "com.mojang:logging:1.1.1",
+                      "  原版独有的库保留(第二条)");
+            check(count_in_range(text, NULL, "asm:9.3") == 0, "被覆盖的原版库不再出现");
+
+            /* arguments:原版在前、加载器在后;两边都写过的 -Djava.library.path 只留一次 */
+            check(count_in_range(text, NULL, "-Djava.library.path=/natives") == 1,
+                  "重复的 JVM 参数只写一次");
+            check(count_in_range(text, NULL, "--launchTarget") == 1, "加载器的游戏参数在");
+            check(count_in_range(text, NULL, "--username") == 1, "原版的游戏参数在");
+            check(count_in_range(text, NULL, "/modulepath") == 1, "加载器独有的 JVM 参数在");
+
+            /* 加载器独有的键:原样带上(启动用不到,但不该猜着丢) */
+            check(sxcl_json_get(root, "spec") != NULL, "加载器独有的 spec 保留");
+            check(sxcl_json_size(sxcl_json_get(root, "processors")) == 1, "processors 原样保留");
+
+            sxcl_json_free(back);
+        }
+        free(text);
+        text = NULL;
+    }
+
+    /* 没有原版可合并:必须**报错**而不是假装拍平过(调用方据此决定退路) */
+    err[0] = '\0';
+    check(sxcl_loader_flatten_json(sxcl_json_root(loader), NULL, "x", "1.20.1", &text, err,
+                                   sizeof(err)) == SXCL_LOADER_ERR_ARG,
+          "没有原版 = 参数错");
+    check(text == NULL, "  没有输出");
+    check(strstr(err, "没有可合并的原版") != NULL, "  原因写清楚了");
+    /* 实例名是必须的(id 要写成它) */
+    check(sxcl_loader_flatten_json(sxcl_json_root(loader), sxcl_json_root(base), "", "1.20.1", &text,
+                                   err, sizeof(err)) == SXCL_LOADER_ERR_ARG,
+          "没有实例名 = 参数错");
+    /* 原版自己就是完整 JSON(没有继承):照样能拍平,只是键值全来自它 */
+    {
+        char *same = NULL;
+        err[0] = '\0';
+        check(sxcl_loader_flatten_json(sxcl_json_root(loader), sxcl_json_root(base), "1.20.1", NULL,
+                                       &same, err, sizeof(err)) == SXCL_LOADER_OK,
+              "不给原版版本号也能拍(不加 clientVersion)");
+        if (same) {
+            check(strstr(same, "clientVersion") == NULL, "  没有 base_version 就不写 clientVersion");
+            free(same);
+        }
+    }
+
+    sxcl_json_free(loader);
+    sxcl_json_free(base);
+}
+
 int main(void) {
     check(sxcl_fs_mkdirs("build/_loader_tmp") == 0, "建临时目录(否则后面写文件全失败)");
 
@@ -946,6 +1090,7 @@ int main(void) {
     test_progress();
     test_maven();
     test_json_dump();
+    test_flatten();
     test_install_args();
 
     printf("loader 测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);

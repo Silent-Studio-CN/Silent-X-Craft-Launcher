@@ -260,6 +260,36 @@ typedef struct sxcl_loader_json_override {
 int sxcl_loader_json_dump(const sxcl_json_value *root, const sxcl_loader_json_override *overrides,
                           size_t override_count, char **out_text, char *err, size_t err_len);
 
+/* ── 拍平(flatten):产出一份"能独立启动"的单层版本 JSON ── */
+
+/** 把"加载器版本 JSON"合并进"原版版本 JSON"，产出**自包含**的一份单层 JSON。
+ *
+ *  依据(用户点名)：「PCL 与 HMCL 装出来的都是能独立启动的版本 JSON，我们肯定要学」。
+ *  PCL 的形态：id == 文件夹名、没有 inheritsFrom、没有 jar、多一个 clientVersion
+ *  (= 原版版本号，也是我们实例扫描最可靠的身份标记)；HMCL 同样把原版的库并进同一份 JSON。
+ *
+ *  **为什么必须做**：启动层(src/services/launch)从不解析继承 —— 一份"只带加载器库 +
+ *  inheritsFrom"的 JSON 启动时会缺原版库、assetIndex 退化成 legacy。兼容别人的实例时
+ *  驱动层还会拿同一条规则在内存里兜底。
+ *
+ *  合并规则(逐键，与 PCL 的拍平对齐)：
+ *    id                 -> instance_name(== 目录名)
+ *    clientVersion      -> base_version(PCL 的拍平标记)
+ *    inheritsFrom / jar -> 丢掉(这两个键就是"不是独立版本"的标记)
+ *    libraries          -> 加载器的在前 + 原版里没被同名覆盖的(group:artifact 去重)
+ *    arguments          -> { jvm: 原版+加载器, game: 原版+加载器 }，整串相同的项只留一次
+ *    mainClass / minecraftArguments -> 加载器有就用加载器的
+ *    其余键             -> 以原版为准(assetIndex/assets/downloads/logging/javaVersion/…)
+ *    加载器独有的键     -> 原样带上(processors/spec/data/…：启动用不到，但不该猜着丢)
+ *
+ *  纯逻辑：两个已解析的 DOM 进、一段文本出，不碰磁盘(便于单测；落盘由调用方做)。
+ *  base_root 为空/不是对象时返回 SXCL_LOADER_ERR_ARG 并写明"没有原版可合并"——
+ *  **不退回旧行为、也不假装拍平过**，由调用方决定怎么处理。
+ *  成功返回 SXCL_LOADER_OK 并让 *out_text 指向 malloc 出来的文本(调用方 free)。 */
+int sxcl_loader_flatten_json(const sxcl_json_value *loader_root, const sxcl_json_value *base_root,
+                             const char *instance_name, const char *base_version, char **out_text,
+                             char *err, size_t err_len);
+
 /** 合并 launcher_profiles.json 的**纯文本**入口(不碰磁盘,便于单测):
  *  在 existing_json(可空 = 全新文件)的基础上,把我们的档案并进 profiles[<key>],
  *  并补齐 selectedProfile / clientToken。已经存在同名档案时**保持原样**

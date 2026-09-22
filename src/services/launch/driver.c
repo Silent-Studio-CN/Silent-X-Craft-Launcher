@@ -13,6 +13,7 @@
 #include "sxcl/crash.h"   /* 崩溃取证:退出后读 crash-reports 与 logs/latest.log */
 #include "sxcl/fs.h"
 #include "sxcl/instance.h" /* sxcl_instance_read_json:PCL 式目录名与 id 不一致的版本也能启动 */
+#include "sxcl/loader.h"   /* sxcl_loader_flatten_json:继承式版本 JSON 在启动前合并一次(见 docs/23) */
 #include "sxcl/log.h"      /* 游戏输出落盘(模块 game;攒批写,见 log.h 第 5 节) */
 #include "sxcl/natives.h"
 #include "sxcl/options.h"
@@ -315,6 +316,66 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
         set_error_reason(out, err, err_len, msg, SXCL_REASON_PATH_NOT_FOUND);
         goto done;
     }
+    /* ── 1b. 继承式版本 JSON:启动层自己合并一次(拍平的兜底) ──
+     * 我们自己的安装器现在会把版本 JSON **拍平**(PCL/HMCL 装的都是这个形态,见 docs/23),
+     * 但**存量实例**、别家启动器(HMCL/FCL)装的版本、手改过的版本都还是"inheritsFrom 指向原版"。
+     * 启动层以前完全不解析继承:这种版本会缺原版的库、assetIndex 还会退化成 legacy
+     * (实测一个 fabric-loader-* 实例只带 7 个库、一个 jar 都没有)。这里用**安装时同一条合并规则**
+     * 兜底,并在实例自己没有 jar 时改用原版的 client.jar —— 继承语义里"没有自己的 jar"就是这个意思。 */
+    char fallback_jar[SXCL_JAVA_PATH_MAX * 2];
+    fallback_jar[0] = '\0';
+    {
+        /* **先把 inheritsFrom 拷进本地缓冲**:合并成功时下面会把 doc 换成合并后的新文档,
+         * 原文档一释放,指向它内部字符串的指针就成了野指针(第一版就是这么崩的:
+         * ucrtbase strnlen 里 0xC0000005 —— 用-after-free)。 */
+        const char *hit = sxcl_json_get_string(sxcl_json_root(doc), "inheritsFrom", NULL);
+        char parent_id[SXCL_LOADER_CMD_ARG_MAX];
+        parent_id[0] = '\0';
+        if (hit && hit[0]) {
+            (void)snprintf(parent_id, sizeof(parent_id), "%s", hit);
+        }
+        if (parent_id[0]) {
+            char parent_json[SXCL_JAVA_PATH_MAX * 2];
+            sxcl_json *parent_doc = sxcl_instance_read_json(req->game_dir, parent_id, parent_json,
+                                                            sizeof(parent_json), NULL, 0);
+            char *merged_text = NULL;
+            char ferr[192];
+            ferr[0] = '\0';
+            if (parent_doc &&
+                sxcl_loader_flatten_json(sxcl_json_root(doc), sxcl_json_root(parent_doc),
+                                         req->version_name, parent_id, &merged_text, ferr,
+                                         sizeof(ferr)) == SXCL_LOADER_OK &&
+                merged_text) {
+                char merr[192];
+                merr[0] = '\0';
+                sxcl_json *merged = sxcl_json_parse(merged_text, strlen(merged_text), merr,
+                                                    sizeof(merr));
+                if (merged) {
+                    sxcl_json_free(doc);
+                    doc = merged;
+                }
+            }
+            free(merged_text);
+            sxcl_json_free(parent_doc);
+
+            /* 实例自己没有 jar 时用原版的(继承式版本常常就是这么摆的)。 */
+            char own_jar[SXCL_JAVA_PATH_MAX * 2];
+            char pleaf[SXCL_JAVA_PATH_MAX];
+            char pdir[SXCL_JAVA_PATH_MAX * 2];
+            char pversions[SXCL_JAVA_PATH_MAX * 2];
+            /* 本文件的 join_path 是 void 版(拼不出来就留空串),所以这里先拼再看文件在不在。 */
+            (void)snprintf(leaf, sizeof(leaf), "%s.jar", req->version_name);
+            (void)snprintf(pleaf, sizeof(pleaf), "%s.jar", parent_id);
+            join_path(own_jar, sizeof(own_jar), versions_dir, leaf);
+            join_path(pversions, sizeof(pversions), req->game_dir, "versions");
+            join_path(pdir, sizeof(pdir), pversions, parent_id);
+            join_path(fallback_jar, sizeof(fallback_jar), pdir, pleaf);
+            if (!sxcl_fs_exists(own_jar) && !sxcl_fs_exists(fallback_jar)) {
+                fallback_jar[0] = '\0';   /* 原版的 jar 也不在:保持默认(如实走不通) */
+            }
+        }
+    }
+
     (void)leaf;
 
     /* ── 2. 选 Java:指定的优先,没指定才探测 ── */
@@ -427,6 +488,9 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
     ctx.version_name = req->version_name;
     ctx.game_directory = req->game_dir;
     ctx.natives_directory = natives;
+    if (fallback_jar[0]) {
+        ctx.client_jar = fallback_jar;   /* 实例自己没有 jar:用原版那份(见上面 1b) */
+    }
     ctx.launcher_name = req->launcher_name;       /* NULL = 用默认 */
     ctx.launcher_version = req->launcher_version; /* NULL = 用默认 */
     ctx.memory_mb = req->memory_mb;

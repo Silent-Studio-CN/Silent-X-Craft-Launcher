@@ -529,8 +529,17 @@ size_t sxcl_loader_build_commands(sxcl_loader_kind kind, const sxcl_loader_cmd_e
     }
 
     if (kind == SXCL_LOADER_FABRIC || kind == SXCL_LOADER_QUILT) {
-        /* Python: _build_command_variants 的 Fabric 分支
-         *   [client, --mcversion, <mc>, --loader, <lv>, --dir, <目录>, --name, <实例名>] */
+        /* Python: _build_command_variants 的 Fabric 分支,但参数是**单横线**的,而且 -dir 要指
+         * **游戏目录**(安装器在那儿找 launcher_profiles.json,再把版本建到
+         * <游戏目录>/versions/<它自己的名字>,由 adopt_generated 收编)。
+         *
+         * 实测(fabric-installer 1.1.2,2026-09-22):
+         *   单横线 + -dir <游戏目录> -> "Installing 1.21.11 with fabric 0.19.5" + "Creating profile",
+         *                              退出码 0,生成 versions/fabric-loader-0.19.5-1.21.11/;
+         *   双横线(--mcversion …)    -> 参数**全部被忽略**:退到"当前最新正式版"(那天是 26.3),
+         *                              再去 <版本目录> 找 launcher_profiles.json,报
+         *                              "Could not find a valid launcher profile .json",退出码 1。
+         * 也就是:**双横线那一版从来没成功过** —— 之前装出来的 fabric 实例就是被这一条坑的。 */
         const char *base = env->base_version ? env->base_version : "";
         const char *loader = env->loader_version ? env->loader_version : "";
         const char *instance = env->instance_name ? env->instance_name : "";
@@ -542,22 +551,22 @@ size_t sxcl_loader_build_commands(sxcl_loader_kind kind, const sxcl_loader_cmd_e
             if (variant == 0 && !with_name) {
                 continue;   /* 没有实例名时两组参数一模一样,只留一组 */
             }
-            if (cmd_begin(&cmd, env, game_dir, variant == 0 ? "Fabric client --name" : "Fabric client") != 0 ||
+            if (cmd_begin(&cmd, env, game_dir, variant == 0 ? "Fabric client -name" : "Fabric client") != 0 ||
                 cmd_add_arg(&cmd, "client") != 0) {
                 continue;
             }
             int ok = 1;
             if (base[0]) {
-                ok = ok && cmd_add_arg(&cmd, "--mcversion") == 0 && cmd_add_arg(&cmd, base) == 0;
+                ok = ok && cmd_add_arg(&cmd, "-mcversion") == 0 && cmd_add_arg(&cmd, base) == 0;
             }
             if (ok && loader[0]) {
-                ok = ok && cmd_add_arg(&cmd, "--loader") == 0 && cmd_add_arg(&cmd, loader) == 0;
+                ok = ok && cmd_add_arg(&cmd, "-loader") == 0 && cmd_add_arg(&cmd, loader) == 0;
             }
             if (ok) {
-                ok = ok && cmd_add_arg(&cmd, "--dir") == 0 && cmd_add_arg(&cmd, game_dir) == 0;
+                ok = ok && cmd_add_arg(&cmd, "-dir") == 0 && cmd_add_arg(&cmd, game_dir) == 0;
             }
             if (ok && variant == 0) {
-                ok = ok && cmd_add_arg(&cmd, "--name") == 0 && cmd_add_arg(&cmd, instance) == 0;
+                ok = ok && cmd_add_arg(&cmd, "-name") == 0 && cmd_add_arg(&cmd, instance) == 0;
             }
             if (ok) {
                 out[count++] = cmd;
@@ -847,6 +856,11 @@ typedef struct install_ctx {
      * 这就是"退出码 1"背后真正的解释,不给用户看等于让人瞎猜。 */
     char last_lines[3][SXCL_LOADER_TEXT_MAX];
     int last_line_count;
+    /* 拍平用的**合并基准**(原版版本 JSON)。必须在安装器开工**之前**读下来:
+     * 引擎刚把原版 JSON 放在 versions/<实例>/<实例>.json,安装器随后会把它盖掉。
+     * NULL = 找不到(那就拍不了,只能按继承式写,并如实报出来)。 */
+    sxcl_json *base_doc;
+    char base_id[SXCL_LOADER_CMD_ARG_MAX];   /**< 原版版本号(写进 clientVersion) */
 } install_ctx;
 
 static void ctx_report(install_ctx *ctx, int percent, const char *fmt, ...)
@@ -985,6 +999,9 @@ static int run_variant(install_ctx *ctx, const sxcl_loader_cmd *cmd, sxcl_proces
 /* ── 产物判定 ── */
 
 /* Python: _handle_generated_files —— 安装器生成的文件不一定落在我们预设的目录名里,按候选名找回来。 */
+/* 收编安装器生成的目录后要清掉引擎放下的原版 JSON(实现见后面的拍平一节)。 */
+static void drop_stale_vanilla(const char *instance_dir, const char *instance_name);
+
 static int adopt_generated(install_ctx *ctx, const char *versions_dir, const char *instance_dir)
 {
     const char *mc = ctx->req->base_version ? ctx->req->base_version : "";
@@ -1015,6 +1032,13 @@ static int adopt_generated(install_ctx *ctx, const char *versions_dir, const cha
             continue;
         }
         (void)copy_dir_files(candidate, instance_dir);
+        if (!dir_has_json(instance_dir)) {
+            return 0;
+        }
+        /* 版本目录里原本躺着的是**引擎刚放下的原版 JSON**(拍平的合并基准,已经在 ctx->base_doc 里)。
+         * 它和安装器写出来的 JSON 会抢同一个文件名(normalize 把每份 JSON 都改成 <实例名>.json),
+         * 谁赢要看目录顺序 —— 那是不确定的。基准已经拿到手,这里把它清掉,只留安装器那一份。 */
+        drop_stale_vanilla(instance_dir, ctx->req->instance_name);
         return dir_has_json(instance_dir);
     }
     return 0;
@@ -1201,6 +1225,265 @@ static void copy_vanilla_client(const char *game_dir, const char *mc, const char
     }
 }
 
+/* ── 拍平:读原版 -> 合并 -> 原子写盘（规则与理由见 loader.h 的 sxcl_loader_flatten_json） ── */
+
+/* 读一整份文本文件(UTF-8)。失败返回 NULL(不区分"不在"与"读不动")。 */
+static char *read_text_file(const char *path)
+{
+    FILE *fh = open_utf8(path, 0);
+    if (!fh) {
+        return NULL;
+    }
+    if (fseek(fh, 0, SEEK_END) != 0) {
+        (void)fclose(fh);
+        return NULL;
+    }
+    const long size = ftell(fh);
+    if (size < 0 || size > (long)(64L * 1024L * 1024L) || fseek(fh, 0, SEEK_SET) != 0) {
+        (void)fclose(fh);
+        return NULL;
+    }
+    char *text = (char *)malloc((size_t)size + 1);
+    if (!text) {
+        (void)fclose(fh);
+        return NULL;
+    }
+    const size_t got = fread(text, 1, (size_t)size, fh);
+    (void)fclose(fh);
+    text[got] = '\0';
+    return text;
+}
+
+/* 该拿哪个原版来合并:JSON 里的 inheritsFrom 最准(安装器自己写的),其次调用方给的原版版本号。 */
+static const char *pick_base_id(const sxcl_json_value *loader_root, const char *fallback)
+{
+    const char *own = loader_root ? sxcl_json_get_string(loader_root, "inheritsFrom", NULL) : NULL;
+    if (own && own[0]) {
+        return own;
+    }
+    return (fallback && fallback[0]) ? fallback : NULL;
+}
+
+/* has_inherits:这份版本 JSON 是不是"靠继承"的(决定能不能拍平 —— 已经是独立版本的再合并
+ * 会把原版的游戏参数/库**再加一遍**,那是损坏而不是拍平)。 */
+static int json_has_inherits(const sxcl_json_value *root)
+{
+    const char *own = root ? sxcl_json_get_string(root, "inheritsFrom", NULL) : NULL;
+    return (own && own[0]) ? 1 : 0;
+}
+
+/* 读 <game>/versions/<base>/<base>.json -> 拍平 -> 原子写进 target_path。
+ * 失败把原因写进 err:**不静默退回继承式**(拍平不了就是拍平不了,由调用方决定怎么办)。 */
+static int flatten_write_json(const sxcl_json_value *base_root, const char *base_id,
+                              const char *instance_name, const sxcl_json_value *loader_root,
+                              const char *target_path, char *err, size_t err_len)
+{
+    if (err && err_len) {
+        err[0] = '\0';
+    }
+    if (!base_id || !base_id[0]) {
+        if (err && err_len) {
+            (void)snprintf(err, err_len, "不知道原版版本号,拍不出独立版本 JSON");
+        }
+        return SXCL_LOADER_ERR_ARG;
+    }
+
+    if (!base_root) {
+        if (err && err_len) {
+            (void)snprintf(err, err_len, "没有可合并的原版版本 JSON");
+        }
+        return SXCL_LOADER_ERR_ARG;
+    }
+
+    char *merged = NULL;
+    int rc = sxcl_loader_flatten_json(loader_root, base_root, instance_name, base_id, &merged, err,
+                                      err_len);
+    if (rc == SXCL_LOADER_OK && merged) {
+        if (write_text_atomic(target_path, merged) != 0) {
+            rc = SXCL_LOADER_ERR_IO;
+            if (err && err_len) {
+                (void)snprintf(err, err_len, "拍平后的版本 JSON 写不进去：%s", target_path);
+            }
+        }
+    }
+    free(merged);
+    return rc;
+}
+
+/* 一份版本 JSON 是不是"原版"(Mojang 那份):拍平的**合并基准必须是它**。
+ * 判据用 downloads.client —— 原版必有,加载器自己写的版本 JSON 不会有。 */
+static int looks_like_vanilla(const sxcl_json_value *root)
+{
+    if (!root || sxcl_json_type_of(root) != SXCL_JSON_OBJECT || json_has_inherits(root)) {
+        return 0;
+    }
+    return sxcl_json_get(sxcl_json_get(root, "downloads"), "client") != NULL;
+}
+
+/* 读一份版本 JSON 文件并解析(失败返回 NULL)。 */
+static sxcl_json *load_json_file(const char *path)
+{
+    char *text = read_text_file(path);
+    if (!text) {
+        return NULL;
+    }
+    char perr[192];
+    perr[0] = '\0';
+    sxcl_json *doc = sxcl_json_parse(text, strlen(text), perr, sizeof(perr));
+    free(text);
+    return doc;
+}
+
+/* 清掉版本目录里"引擎放下的那份原版 JSON"(它的内容已经作为合并基准读进内存了)。
+ * 只删**确实是原版形态**的那份:安装器自己写出来的 JSON(带 inheritsFrom)绝不动。 */
+static void drop_stale_vanilla(const char *instance_dir, const char *instance_name)
+{
+    char leaf[SXCL_LOADER_CMD_ARG_MAX];
+    char path[SXCL_LOADER_CMD_ARG_MAX];
+    const int wrote = snprintf(leaf, sizeof(leaf), "%s.json", instance_name);
+    if (wrote <= 0 || (size_t)wrote >= sizeof(leaf) ||
+        join_path(path, sizeof(path), instance_dir, leaf) != 0) {
+        return;
+    }
+    sxcl_json *doc = load_json_file(path);
+    if (!doc) {
+        return;
+    }
+    const int vanilla = looks_like_vanilla(sxcl_json_root(doc));
+    sxcl_json_free(doc);
+    if (vanilla) {
+        (void)sxcl_fs_remove(path);
+    }
+}
+
+/* 找拍平用的合并基准(原版版本 JSON),两处找:
+ *   ① versions/<实例>/<实例>.json —— **引擎在 loader_run 之前刚把原版 JSON 放在这儿**
+ *      (install.c 的 version_json 阶段的目标就是它),安装器稍后才会把它盖掉,
+ *      所以调用方必须在开工前读一次(见 sxcl_loader_install 的 ctx.base_doc);
+ *   ② versions/<原版>/<原版>.json —— 原版自己单独装过的情况。
+ * 两处都必须"看着像原版"才算 —— 宁可拍不了,也不拿加载器自己写的 JSON 当基准瞎合。 */
+static sxcl_json *load_base_doc(const char *game_dir, const char *base_version,
+                                const char *instance_dir, const char *instance_name)
+{
+    char leaf[SXCL_LOADER_CMD_ARG_MAX];
+    char path[SXCL_LOADER_CMD_ARG_MAX];
+
+    if (instance_dir && instance_dir[0] && instance_name && instance_name[0]) {
+        const int wrote = snprintf(leaf, sizeof(leaf), "%s.json", instance_name);
+        if (wrote > 0 && (size_t)wrote < sizeof(leaf) &&
+            join_path(path, sizeof(path), instance_dir, leaf) == 0) {
+            sxcl_json *doc = load_json_file(path);
+            if (doc) {
+                if (looks_like_vanilla(sxcl_json_root(doc))) {
+                    return doc;
+                }
+                sxcl_json_free(doc);
+            }
+        }
+    }
+    if (game_dir && game_dir[0] && base_version && base_version[0]) {
+        char sub[SXCL_LOADER_CMD_ARG_MAX];
+        char dir[SXCL_LOADER_CMD_ARG_MAX];
+        const int wrote = snprintf(leaf, sizeof(leaf), "%s.json", base_version);
+        if (wrote > 0 && (size_t)wrote < sizeof(leaf) &&
+            join_path(sub, sizeof(sub), game_dir, "versions") == 0 &&
+            join_path(dir, sizeof(dir), sub, base_version) == 0 &&
+            join_path(path, sizeof(path), dir, leaf) == 0) {
+            sxcl_json *doc = load_json_file(path);
+            if (doc) {
+                if (looks_like_vanilla(sxcl_json_root(doc))) {
+                    return doc;
+                }
+                sxcl_json_free(doc);
+            }
+        }
+    }
+    return NULL;
+}
+
+/* 把 versions/<实例名>/<实例名>.json 拍平一次(方式 A 的安装器产物走这条)。
+ * 已经是独立版本(没有 inheritsFrom)就**什么都不做**并如实说明 —— 再合并会把原版的
+ * 游戏参数与库再加一遍。note 里回一句人话(成功 = 用了哪个原版)。 */
+static int flatten_instance_on_disk(install_ctx *ctx, const char *instance_dir,
+                                    const char *instance_name, char *note, size_t note_len)
+{
+    char leaf[SXCL_LOADER_CMD_ARG_MAX];
+    char path[SXCL_LOADER_CMD_ARG_MAX];
+    const int wrote = snprintf(leaf, sizeof(leaf), "%s.json", instance_name);
+    if (wrote <= 0 || (size_t)wrote >= sizeof(leaf) ||
+        join_path(path, sizeof(path), instance_dir, leaf) != 0) {
+        if (note && note_len) {
+            (void)snprintf(note, note_len, "版本 JSON 的路径拼不出来");
+        }
+        return SXCL_LOADER_ERR_ARG;
+    }
+
+    sxcl_json *doc = load_json_file(path);
+    if (!doc) {
+        if (note && note_len) {
+            (void)snprintf(note, note_len, "读不到 %s", path);
+        }
+        return SXCL_LOADER_ERR_IO;
+    }
+
+    const sxcl_json_value *root = sxcl_json_root(doc);
+    int rc = SXCL_LOADER_OK;
+    if (!json_has_inherits(root)) {
+        if (note && note_len) {
+            (void)snprintf(note, note_len, "版本 JSON 本来就是独立的(没有 inheritsFrom),不用拍平");
+        }
+    } else {
+        sxcl_json *base_doc = ctx->base_doc;
+        int owns_base = 0;
+        if (!base_doc) {
+            base_doc = load_base_doc(ctx->req->game_dir, ctx->base_id, NULL, NULL);
+            owns_base = 1;
+        }
+        char ferr[SXCL_LOADER_ERROR_MAX];
+        ferr[0] = '\0';
+        rc = flatten_write_json(base_doc ? sxcl_json_root(base_doc) : NULL, ctx->base_id, instance_name,
+                                root, path, ferr, sizeof(ferr));
+        if (owns_base) {
+            sxcl_json_free(base_doc);
+        }
+        if (note && note_len) {
+            (void)snprintf(note, note_len, "%s",
+                           rc == SXCL_LOADER_OK ? ctx->base_id : (ferr[0] ? ferr : "原因不明"));
+        }
+    }
+    sxcl_json_free(doc);
+    return rc;
+}
+
+/* 非拍平路径的写法:只改 id(必要时补 clientVersion = 原版版本号,PCL 的拍平标记)。
+ * **不再凭空补 inheritsFrom** —— 独立版本被硬塞一个 inheritsFrom 会让实例扫描报
+ * "前置版本缺失"(PCL 装出来的版本就没有这个键)。 */
+static int write_inheriting_json(install_ctx *ctx, const sxcl_json_value *root, const char *target,
+                                 const char *client_version)
+{
+    const sxcl_loader_json_override overrides[2] = {
+        {"id", ctx->req->instance_name},
+        {"clientVersion", client_version ? client_version : ""},
+    };
+    const size_t count = (client_version && client_version[0]) ? 2u : 1u;
+    char derr[192];
+    derr[0] = '\0';
+    char *text = NULL;
+    if (sxcl_loader_json_dump(root, overrides, count, &text, derr, sizeof(derr)) != SXCL_LOADER_OK ||
+        !text) {
+        ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "版本 JSON 写不出来（%s）", derr[0] ? derr : "格式不对");
+        free(text);
+        return -1;
+    }
+    const int rc = write_text_atomic(target, text);
+    free(text);
+    if (rc != 0) {
+        ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "版本 JSON 落盘失败：%s", target);
+        return -1;
+    }
+    return 0;
+}
+
 /* Python: _extract_install —— 不启动安装器进程,直接从 jar 里拼出版本 JSON(老 Forge 只能这么装)。 */
 static int extract_install(install_ctx *ctx, const char *instance_dir)
 {
@@ -1257,31 +1540,58 @@ static int extract_install(install_ctx *ctx, const char *instance_dir)
         goto done;
     }
 
-    /* 版本 JSON:id = 实例名;inheritsFrom 缺省 = 原版(Python 的 setdefault 语义)。 */
+    /* 版本 JSON:id = 实例名,**并且拍平**(把原版合并进来)——
+     * 用户点名:「PCL 与 HMCL 装出来的都是能独立启动的版本 JSON,我们肯定要学」。
+     * 只写 inheritsFrom 的话,启动层不解析继承就会缺原版的库、assetIndex 还会退化成 legacy。 */
     {
-        const sxcl_loader_json_override overrides[2] = {
-            {"id", req->instance_name},
-            {"inheritsFrom", req->base_version ? req->base_version : ""},
-        };
-        char derr[192];
-        derr[0] = '\0';
-        char *version_text = NULL;
-        if (sxcl_loader_json_dump(version_root, overrides, 2, &version_text, derr, sizeof(derr)) !=
-                SXCL_LOADER_OK || !version_text) {
-            ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "版本 JSON 写不出来（%s）", derr[0] ? derr : "格式不对");
-            free(version_text);
-            goto done;
-        }
         char leaf[SXCL_LOADER_CMD_ARG_MAX];
         char target[SXCL_LOADER_CMD_ARG_MAX];
-        if (snprintf(leaf, sizeof(leaf), "%s.json", req->instance_name) <= 0 ||
-            join_path(target, sizeof(target), instance_dir, leaf) != 0 ||
-            write_text_atomic(target, version_text) != 0) {
-            free(version_text);
-            ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "版本 JSON 落盘失败：%s", target);
+        target[0] = '\0';
+        const int wrote = snprintf(leaf, sizeof(leaf), "%s.json", req->instance_name);
+        if (wrote <= 0 || (size_t)wrote >= sizeof(leaf) ||
+            join_path(target, sizeof(target), instance_dir, leaf) != 0) {
+            ctx_fail(ctx, SXCL_LOADER_FAIL_EXTRACT, "版本 JSON 的落盘路径拼不出来（实例名 %s）",
+                     req->instance_name);
             goto done;
         }
-        free(version_text);
+
+        const char *base_id =
+            ctx->base_id[0] ? ctx->base_id : pick_base_id(version_root, req->base_version);
+        char ferr[SXCL_LOADER_ERROR_MAX];
+        ferr[0] = '\0';
+        if (json_has_inherits(version_root)) {
+            /* 靠继承的(1.13+ Forge / NeoForge):必须拍平,不然装出来的东西启动不了。
+             * 合并基准优先用开工前读下的那份(那时候版本目录里还是原版 JSON);
+             * 没有就现找一次(原版自己单独装过的机器上有)。 */
+            sxcl_json *base_doc = ctx->base_doc;
+            int owns_base = 0;
+            if (!base_doc) {
+                base_doc = load_base_doc(req->game_dir, base_id, instance_dir, req->instance_name);
+                owns_base = 1;
+            }
+            const int frc = flatten_write_json(base_doc ? sxcl_json_root(base_doc) : NULL, base_id,
+                                               req->instance_name, version_root, target, ferr,
+                                               sizeof(ferr));
+            if (owns_base) {
+                sxcl_json_free(base_doc);
+            }
+            if (frc == SXCL_LOADER_OK) {
+                ctx_report(ctx, ctx->percent, "版本 JSON 已拍平(合并原版 %s)", base_id);
+            } else {
+                /* 原版 JSON 不在(手动删过 / base_version 没给):退回继承式,**但如实说一声**。 */
+                ctx_report(ctx, ctx->percent, "拍平不了(%s),先按继承式写",
+                           ferr[0] ? ferr : "原因不明");
+                if (write_inheriting_json(ctx, version_root, target, NULL) != 0) {
+                    goto done;
+                }
+            }
+        } else {
+            /* 本来就是独立版本(老 Forge 的 versionInfo 是完整 JSON):只改 id 并补上
+             * clientVersion(PCL 的拍平标记,实例扫描最优先看它)。 */
+            if (write_inheriting_json(ctx, version_root, target, base_id) != 0) {
+                goto done;
+            }
+        }
     }
 
     /* 老格式:通用 jar 在 install.filePath 里,要落到 install.path 指的位置。 */
@@ -1759,6 +2069,26 @@ int sxcl_loader_install(const sxcl_loader_install_request *req, sxcl_loader_inst
     }
     (void)snprintf(out->version_dir, sizeof(out->version_dir), "%s", instance_dir);
 
+    /* 拍平的合并基准要**在安装器开工前**读:引擎刚从清单把原版 JSON 落到
+     * versions/<实例>/<实例>.json(install.c 的 version_json 阶段),安装器随后会覆盖它。
+     * 读到了就顺带把原版版本号取出来(JSON 里的 id 比调用方填的 base_version 更准)。 */
+    ctx.base_doc = load_base_doc(req->game_dir, req->base_version, instance_dir, req->instance_name);
+    (void)snprintf(ctx.base_id, sizeof(ctx.base_id), "%s", req->base_version ? req->base_version : "");
+    if (ctx.base_doc) {
+        const char *own = sxcl_json_get_string(sxcl_json_root(ctx.base_doc), "id", NULL);
+        if (own && own[0]) {
+            (void)snprintf(ctx.base_id, sizeof(ctx.base_id), "%s", own);
+        }
+        /* 把"引擎刚放下的原版 JSON"从版本目录里**挪走**(内容已经在上面的 ctx.base_doc 里):
+         *  1) 否则 variant_succeeded 的 dir_has_json 会被它骗到 —— 安装器什么都不干也算"安装成功",
+         *     实测就是这样:装完版本 JSON 还是原版那份,mainClass 还是 net.minecraft.client.main.Main;
+         *  2) 否则安装器写出来的 JSON 会和它抢同一个文件名(normalize 把每份 JSON 都改成 <实例名>.json),
+         *     谁赢要看目录顺序 —— 那是不确定的;
+         *  3) 装失败时目录里不留"看着像装好了"的东西。
+         * 原版 JSON 本来就在游戏目录里随用随下(下次装会重新落一份),删掉不影响任何人。 */
+        drop_stale_vanilla(instance_dir, req->instance_name);
+    }
+
     int ok = 0;
     if (!sxcl_fs_exists(req->installer_jar)) {
         ctx_fail(&ctx, SXCL_LOADER_FAIL_PREPARE, "安装器 jar 不在：%s", req->installer_jar);
@@ -1803,6 +2133,20 @@ int sxcl_loader_install(const sxcl_loader_install_request *req, sxcl_loader_inst
     if (ok) {
         ctx_report(&ctx, POST_PERCENT, "整理 %s 文件", name);
         (void)normalize_instance(instance_dir, req->instance_name);
+        /* 方式 A 的产物是**安装器自己写的版本 JSON**(Fabric / Forge 1.13+ 带 inheritsFrom):
+         * 同样拍平一次,让两条路产出同一个形态 —— 能独立启动。已经是独立版本的会被跳过。 */
+        {
+            char note[SXCL_LOADER_TEXT_MAX];
+            note[0] = '\0';
+            if (flatten_instance_on_disk(&ctx, instance_dir, req->instance_name, note,
+                                         sizeof(note)) == SXCL_LOADER_OK) {
+                if (note[0]) {
+                    ctx_report(&ctx, ctx.percent, "版本 JSON：%s", note);
+                }
+            } else {
+                ctx_report(&ctx, ctx.percent, "版本 JSON 没能拍平：%s", note[0] ? note : "原因不明");
+            }
+        }
         if (!dir_has_json(instance_dir)) {
             ok = 0;
             ctx_fail(&ctx, SXCL_LOADER_FAIL_VERIFY, "版本目录里没有版本 JSON：%s", instance_dir);
@@ -1828,6 +2172,8 @@ int sxcl_loader_install(const sxcl_loader_install_request *req, sxcl_loader_inst
     }
 
 finish:
+    sxcl_json_free(ctx.base_doc);
+    ctx.base_doc = NULL;
     if (ok) {
         out->ok = 1;
         out->fail_stage = SXCL_LOADER_FAIL_NONE;
