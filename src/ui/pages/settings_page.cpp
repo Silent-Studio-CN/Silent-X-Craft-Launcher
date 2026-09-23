@@ -2090,6 +2090,20 @@ SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
     // 策略停在默认的 AsNeeded,竖直方向会多占 12px(实测内容区 1051 → 1039、
     // 卡片右缘 1069 → 1057)。这里按 qf 的行为钉死(见交付报告:libqf 侧也该修)。
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    /* 横向**一律不给条**(用户 2026-09-23:「怎么还有横向拖动?跟放不下一样」)。
+     * Qt 的 ScrollBarPolicy 管不到 libqf 自绘的那条平滑条 —— 它是在 initArea() 里塞进去的,
+     * 页面自己 new 的 QScrollArea 策略对它无效,所以这里把**横向那条**直接禁掉;
+     * 内容比视口宽时让它换行/省略,而不是给用户一根横条拖着看。 */
+    for (SmoothScrollBar *bar : findChildren<SmoothScrollBar *>()) {
+        if (bar != nullptr && bar->orientation() == Qt::Horizontal) {
+            bar->setEnabled(false);
+            bar->hide();
+        }
+    }
+    if (widget() != nullptr) {
+        widget()->setMinimumWidth(0); // 允许内容随视口变窄(否则最小宽度顶着视口 -> 出横条)
+    }
+
     // Python 的 BasePage 继承 qf ScrollArea,没改 frameShape → 走 QFrame 默认的 StyledPanel(1px
     // 边框);libqf 的 ScrollArea::initArea() 也不设它(见 fluent_scroll.cpp:204-221 的取证),
     // 这里显式写出来,免得将来被改动时页面整体偏移 1px。
