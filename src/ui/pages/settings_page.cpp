@@ -313,11 +313,18 @@ void loosenHorizontal(QWidget *root) {
     if (root == nullptr) {
         return;
     }
+    /* **不要给所有标签开 wordWrap**(用户 2026-09-23:「所有选项卡下方的副标题字,全部挤压」——
+     * 上一版就是我把它们全开了换行:卡片高度是按"一行"算的,一换行文字就被压成两层挤在一起)。
+     * 正解是让标签在**横向**上可忽略:文字宽度不再参与布局最小宽度(所以窗口变窄时
+     * 卡片能跟着缩、横向条不出来),但**不做换行**(所以不会被压)。 */
     const QList<QLabel *> labels = root->findChildren<QLabel *>();
     for (QLabel *label : labels) {
-        if (label != nullptr && !label->wordWrap()) {
-            label->setWordWrap(true);
+        if (label == nullptr) {
+            continue;
         }
+        QSizePolicy policy = label->sizePolicy();
+        policy.setHorizontalPolicy(QSizePolicy::Ignored);
+        label->setSizePolicy(policy);
     }
     const QList<QWidget *> kids = root->findChildren<QWidget *>();
     for (QWidget *w : kids) {
