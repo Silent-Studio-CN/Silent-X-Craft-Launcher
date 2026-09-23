@@ -98,6 +98,62 @@ public:
     }
 
 private:
+    /* 一整行 = 一个版本:单击选它、悬停出齿轮(用户 2026-09-23 点名)。
+     * 用**事件过滤器**而不是自定义控件:行是 CardWidget(库里给的),里面还有若干子控件,
+     * 任何一个子控件收到鼠标事件都要当成"点了这一行" —— 过滤装在它们每一个身上最省事。 */
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        QWidget *w = qobject_cast<QWidget *>(watched);
+        if (w == nullptr) {
+            return PageShell::eventFilter(watched, event);
+        }
+        QWidget *row = w;
+        while (row != nullptr && !m_rowNames.contains(row)) {
+            row = row->parentWidget();
+        }
+        if (row == nullptr) {
+            return PageShell::eventFilter(watched, event);
+        }
+        NavToolButton *gear = m_rowGears.value(row, nullptr);
+        if (gear != nullptr && (w == gear || gear->isAncestorOf(w))) {
+            return PageShell::eventFilter(watched, event); // 齿轮自己的点击不进"整行选择"
+        }
+        switch (event->type()) {
+        case QEvent::Enter:
+            if (gear != nullptr)
+                gear->setVisible(true);
+            break;
+        case QEvent::Leave:
+            /* 行内的子控件之间来回移动也会来 Leave —— 只有光标真的出了整行才收齿轮,
+             * 否则齿轮会一闪一闪(鼠标从文字移到卡片空白处就没了)。 */
+            if (gear != nullptr && !row->rect().contains(row->mapFromGlobal(QCursor::pos())))
+                gear->setVisible(false);
+            break;
+        case QEvent::MouseButtonRelease: {
+            auto *me = static_cast<QMouseEvent *>(event);
+            if (me->button() == Qt::LeftButton) {
+                choose(m_rowNames.value(row));
+                return true;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+        return PageShell::eventFilter(watched, event);
+    }
+
+    /** 齿轮:选中这一版**并**进版本管理页(那一页才是改它设置的地方)。 */
+    void openVersionSettings(const QString &name) {
+        setSelectedVersionName(name);
+        if (auto *mw = qobject_cast<MainWindow *>(window())) {
+            mw->switchToRoute(QStringLiteral("versions"));
+        }
+        InfoBar::push(InfoBar::Type::Info, QStringLiteral("版本设置"),
+                      QStringLiteral("已选中「%1」,在版本管理页改它的内存 / Java / 渲染后端")
+                          .arg(name),
+                      window(), 4000);
+    }
+
     // ── 骨架：侧 2 栏(NavPanel) + 右内容(版本列表 / 图标选择) ──
     void buildBody() {
         // 侧 2 栏的容器：NavPanel 每次重建（换文件夹/换图标都要重排图标），放容器里好替换。
@@ -341,13 +397,28 @@ private:
                     auto *tag = new BodyLabel(QStringLiteral("当前版本"), card);
                     tag->setTextColor(secondary, secondary);
                     rowLay->addWidget(tag, 0, Qt::AlignVCenter);
-                } else {
-                    auto *pick = new PushButton(QStringLiteral("用这个"), card);
-                    applyButtonFont(pick);
-                    const QString picked = name;
-                    QObject::connect(pick, &QAbstractButton::clicked, this, [this, picked] { choose(picked); });
-                    rowLay->addWidget(pick, 0, Qt::AlignVCenter);
                 }
+                /* 悬停出现的**齿轮**(用户 2026-09-23:「改为单击版本就选择,悬停显示齿轮,进入版本设置」)。
+                 * 以前这里是常显的「用这个」按钮:一屏全是按钮,而且它左边那颗图标在深浅主题下显示异常。
+                 * 现在 整行单击 = 选它;齿轮 = 进版本管理页改它的设置。 */
+                auto *gear = new NavToolButton(QStringLiteral("Setting"), card);
+                gear->setToolTip(QStringLiteral("版本设置(%1)").arg(name));
+                gear->setObjectName(QStringLiteral("versionRowGear"));
+                gear->setVisible(false);
+                rowLay->addWidget(gear, 0, Qt::AlignVCenter);
+                m_rowGears.insert(card, gear);
+                QObject::connect(gear, &NavToolButton::clicked, this,
+                                 [this, name](bool) { openVersionSettings(name); });
+
+                card->setCursor(Qt::PointingHandCursor);
+                card->setToolTip(QStringLiteral("点一下就用它启动(%1)").arg(name));
+                m_rowNames.insert(card, name);
+                card->installEventFilter(this);
+                const QList<QWidget *> kids = card->findChildren<QWidget *>();
+                for (QWidget *kid : kids) {
+                    kid->installEventFilter(this);
+                }
+
                 m_listLay->addWidget(card);
                 ++shown;
             }
@@ -359,9 +430,10 @@ private:
                 QStringLiteral("「%1」里还没有已安装的版本（去「下载 → Minecraft 版本」装一个）")
                     .arg(shownName));
         } else {
-            m_listHint->setText(QStringLiteral("「%1」里有 %2 个版本；点「用这个」把它设为当前版本")
-                                    .arg(shownName)
-                                    .arg(shown));
+            m_listHint->setText(
+                QStringLiteral("「%1」里有 %2 个版本；点一行就用它启动，右上角齿轮进版本设置")
+                    .arg(shownName)
+                    .arg(shown));
         }
     }
 
@@ -379,6 +451,8 @@ private:
     QVBoxLayout *m_navLay = nullptr;
     NavPanel *m_nav = nullptr;
     QWidget *m_lastActionAnchor = nullptr; // 弹窗要锚在用户点的那颗齿轮上
+    QHash<QWidget *, QString> m_rowNames;  // 行 -> 版本名(整行单击用)
+    QHash<QWidget *, NavToolButton *> m_rowGears; // 行 -> 那颗悬停齿轮
     QStackedWidget *m_stack = nullptr;
     QVBoxLayout *m_listLay = nullptr;
     BodyLabel *m_listHint = nullptr;
