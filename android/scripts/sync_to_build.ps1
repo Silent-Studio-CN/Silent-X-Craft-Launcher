@@ -19,7 +19,7 @@ param(
   [string]$TargetSdk     = '34',
   [string]$PackageName   = 'com.silentstudio.sxcl',
   [string]$VersionCode   = '1',
-  [string]$VersionName   = '0.1.0-android',
+  [string]$VersionName   = '0.2.0-android',
   [string]$AbiList       = 'arm64-v8a'
 )
 $ErrorActionPreference = 'Continue'

@@ -125,7 +125,7 @@ HomePage::HomePage(QWidget *parent) : ScrollArea(parent) {
     m_vBox->setAlignment(Qt::AlignTop);
 
     auto *title = new TitleLabel(QStringLiteral("主页"), m_view);
-    auto *subtitle = new SubtitleLabel(QStringLiteral("Silent X Craft Launcher v0.1.0"), m_view);
+    auto *subtitle = new SubtitleLabel(QStringLiteral("Silent X Craft Launcher v0.2.0"), m_view);
     subtitle->setTextColor(kSubtitleLight, kSubtitleDark);
     m_vBox->addWidget(title);
     m_vBox->addWidget(subtitle);

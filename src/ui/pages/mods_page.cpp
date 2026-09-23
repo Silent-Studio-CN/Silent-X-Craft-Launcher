@@ -93,7 +93,7 @@ bool versionIsolationOn() {
     if (st == nullptr) {
         return false;
     }
-    const int on = (int)sxcl_settings_get_int(st, "general.version_isolation", 0);
+    const int on = (int)sxcl_settings_get_int(st, "general.version_isolation", 1);
     sxcl_settings_free(st);
     return on != 0;
 }

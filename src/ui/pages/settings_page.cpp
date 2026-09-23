@@ -90,7 +90,7 @@ namespace {
 
 // src/core/constants.py:34-35
 const char *const kAppName = "Silent X Craft Launcher";
-const char *const kAppVersion = "0.1.0";
+const char *const kAppVersion = "0.2.0";
 const char *const kAppRepoUrl = "https://github.com/"; // src/core/constants.py:37 APP_REPO_URL
 
 // settings_page.py:215/273/339/365/398 —— 五个分组标题
@@ -2316,7 +2316,7 @@ void SettingsPage::buildContent() {
         // 2026-09-22 晚:A2 真落地了 —— 说清"独立的是什么、共用的又是什么",
         QStringLiteral("每个版本各用一套 mods / saves / config / options.txt"
                        "（assets 与 libraries 仍然共用；默认关）"),
-        m_store.flag(kKeyVersionIsolation, false), gameGroup);
+        m_store.flag(kKeyVersionIsolation, true), gameGroup);
     gameGroup->addSettingCard(m_isolationCard); // :283
 
     m_javaCard = new JavaSettingCard(gameGroup); // :285

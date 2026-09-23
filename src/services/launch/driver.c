@@ -614,7 +614,7 @@ int sxcl_launch_run(const sxcl_launch_request *req, sxcl_launch_result *out,
      * 关着(默认)时下面每个分支都退回原来的根目录行为,一个字节都不变。 */
     isolated = 0;
     isolated_dir[0] = '\0';
-    if (settings != NULL && sxcl_settings_get_int(settings, "general.version_isolation", 0) != 0) {
+    if (settings != NULL && sxcl_settings_get_int(settings, "general.version_isolation", 1) != 0) {
         char ierr[256];
         ierr[0] = '\0';
         if (sxcl_launch_prepare_isolated(req->game_dir, req->version_name, ierr, sizeof(ierr)) != 0) {

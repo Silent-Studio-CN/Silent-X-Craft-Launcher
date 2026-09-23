@@ -3,7 +3,7 @@
 # All rights reserved.
 
 cmake_minimum_required(VERSION 3.24)
-project(sxcl_c VERSION 0.1.0 LANGUAGES C CXX)
+project(sxcl_c VERSION 0.2.0 LANGUAGES C CXX)
 
 option(SXCL_BUILD_UI "构建 Qt 界面（需要 Qt6 与 libqf）" OFF)
 option(SXCL_BUILD_TESTS "构建测试" ON)

@@ -8,7 +8,7 @@
 
 const char *sxcl_version_string(void)
 {
-    return "0.1.0";
+    return "0.2.0";
 }
 
 unsigned sxcl_version_features(void)

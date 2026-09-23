@@ -12,10 +12,10 @@ extern "C" {
 #endif
 
 #define SXCL_VERSION_MAJOR 0
-#define SXCL_VERSION_MINOR 1
+#define SXCL_VERSION_MINOR 2
 #define SXCL_VERSION_PATCH 0
 
-/** 返回形如 "0.1.0" 的静态字符串，调用方不得释放。 */
+/** 返回形如 "0.2.0" 的静态字符串，调用方不得释放。 */
 const char *sxcl_version_string(void);
 
 /** 返回编译期特性位掩码，供 UI 判断可选能力是否编译进来。 */

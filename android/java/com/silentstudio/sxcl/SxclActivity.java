@@ -24,7 +24,7 @@ public class SxclActivity extends QtActivity {
 
     private static final String TAG = "sxcl";
     /* bump when the packaged assets change so stale copies are refreshed */
-    private static final String ASSET_STAMP = "sxcl-c-0.1.0-android-1";
+    private static final String ASSET_STAMP = "sxcl-c-0.2.0-android-2";
 
     /* latest instance, so the static helpers below can reach a Context */
     private static SxclActivity instance = null;

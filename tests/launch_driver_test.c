@@ -251,7 +251,12 @@ static int setup(void) {
         return -1;
     }
     /* 每实例设置:case-a 选的是 opengl(驱动要从设置里读出来) */
-    if (write_text(SETTINGS, "instance.case-a.graphicsApi=opengl\r\n") != 0) {
+    /* **显式关掉版本隔离**:这一套用例验的是"根目录 options.txt"那条老路
+     * (隔离开着时 options.txt 落在 versions/<名字>/ 下,由后面的 case 单独验)。
+     * 2026-09-23 起隔离默认是**开**的(用户口径:"我记得应该是要打开"),所以这里必须写死 0,
+     * 否则这 5 条断言会去根目录找文件、看到 'default' —— 那不是回归,是用例的前提变了。 */
+    if (write_text(SETTINGS,
+                   "instance.case-a.graphicsApi=opengl\r\ngeneral.version_isolation=0\r\n") != 0) {
         return -1;
     }
     if (write_fake_java(FAKE_OK, kLinesOk, 0, 1) != 0) {
