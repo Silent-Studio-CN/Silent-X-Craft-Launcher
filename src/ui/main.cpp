@@ -608,6 +608,47 @@ sxcl::ui::MainWindow window;
         });
     }
 
+    // 验收通路:滚动条淡出压力测试(SXCL_UI_SCROLLBAR_STRESS=N)。
+    //   为什么要有它:真机崩了两次(07:41 QAbstractAnimation::stop、08:07 QObject::deleteLater),
+    //   符号栈都指向 libqf 的 ScrollBar::fadeTo —— 那里动画跑完会 deleteLater 自杀,
+    //   而 m_fadeAni 没清空,下一次 fadeTo 就在野指针上 stop()/deleteLater()。
+    //   这里**不碰鼠标**,直接给滚动条发 Enter/Leave 事件(leave 就会 fadeTo),
+    //   每 200ms 一次,足够让上一个动画跑完并被 deleteLater 掉 —— 老代码必崩,
+    //   修好后必须活下来。这就是"崩溃可复现"的那把尺子。
+    const int scrollStress = qEnvironmentVariableIntValue("SXCL_UI_SCROLLBAR_STRESS");
+    if (scrollStress > 0) {
+        QTimer::singleShot(1500, &app, [&app, scrollStress]() {
+            QWidget *bar = nullptr;
+            for (QWidget *w : QApplication::allWidgets()) {
+                if (w->isVisible() &&
+                    QString::fromLatin1(w->metaObject()->className()).endsWith(QLatin1String("ScrollBar"))) {
+                    bar = w;
+                    break;
+                }
+            }
+            if (bar == nullptr) {
+                std::fprintf(stderr, "[sxcl-ui] STRESS: 没找到可见的滚动条\n");
+                return;
+            }
+            auto *state = new int(0);
+            auto *timer = new QTimer(&app);
+            QObject::connect(timer, &QTimer::timeout, &app, [bar, state, scrollStress]() {
+                *state += 1;
+                if (*state > scrollStress) {
+                    std::fprintf(stderr, "[sxcl-ui] STRESS: %d 次 Enter/Leave 之后**还活着**\n", scrollStress);
+                    QCoreApplication::quit();
+                    return;
+                }
+                QEvent enter(QEvent::Enter);
+                QApplication::sendEvent(bar, &enter);
+                QEvent leave(QEvent::Leave);
+                QApplication::sendEvent(bar, &leave);
+                std::fprintf(stderr, "[sxcl-ui] STRESS: 第 %d 次\n", *state);
+            });
+            timer->start(200);
+        });
+    }
+
     // 验收通路:故意崩一次(SXCL_UI_CRASH_TEST=1)。
     //   证明"启动器自己崩了会留下东西":logs/crashes/ 下应当出现
     //   sxcl-ui-crash-<时间>.txt(异常码 + 出错模块 + 符号化调用栈 + 日志路径)与同名 .dmp。
