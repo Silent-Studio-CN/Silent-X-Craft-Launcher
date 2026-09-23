@@ -313,19 +313,12 @@ void loosenHorizontal(QWidget *root) {
     if (root == nullptr) {
         return;
     }
-    /* **不要给所有标签开 wordWrap**(用户 2026-09-23:「所有选项卡下方的副标题字,全部挤压」——
-     * 上一版就是我把它们全开了换行:卡片高度是按"一行"算的,一换行文字就被压成两层挤在一起)。
-     * 正解是让标签在**横向**上可忽略:文字宽度不再参与布局最小宽度(所以窗口变窄时
-     * 卡片能跟着缩、横向条不出来),但**不做换行**(所以不会被压)。 */
-    const QList<QLabel *> labels = root->findChildren<QLabel *>();
-    for (QLabel *label : labels) {
-        if (label == nullptr) {
-            continue;
-        }
-        QSizePolicy policy = label->sizePolicy();
-        policy.setHorizontalPolicy(QSizePolicy::Ignored);
-        label->setSizePolicy(policy);
-    }
+    /* **标签一个字都别动**(两次教训,记在这里免得再犯):
+     *   * 全开 wordWrap -> 卡片高度按一行算,副标题被挤成两层(用户:「全部挤压」);
+     *   * 全设 QSizePolicy::Ignored -> 标题在布局里拿不到宽度,左边字直接消失(用户:「直接消失」)。
+     * 横向条的根子在**滚动区怎么量内容宽度**,不在标签身上:所以只把内容控件自己的
+     * 横向策略设成 Ignored(滚动区永远按视口宽给它),里面布局该裁就裁 —— 标签保持默认。 */
+    Q_UNUSED(root);
     const QList<QWidget *> kids = root->findChildren<QWidget *>();
     for (QWidget *w : kids) {
         if (w != nullptr) {
@@ -340,9 +333,12 @@ void loosenHorizontal(QWidget *root) {
         }
     }
     if (auto *area = qobject_cast<QScrollArea *>(root)) {
-        if (area->widget() != nullptr) {
-            area->widget()->setMinimumWidth(0);
-            area->widget()->updateGeometry();
+        if (QWidget *content = area->widget()) {
+            content->setMinimumWidth(0);
+            QSizePolicy policy = content->sizePolicy();
+            policy.setHorizontalPolicy(QSizePolicy::Ignored); // 内容永远按视口宽,不出横向条
+            content->setSizePolicy(policy);
+            content->updateGeometry();
         }
     }
     root->updateGeometry();
