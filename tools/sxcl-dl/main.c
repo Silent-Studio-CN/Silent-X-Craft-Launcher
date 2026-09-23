@@ -14,6 +14,7 @@
 #include <time.h>
 
 #include "sxcl/auth.h"
+#include "sxcl/console.h" /* 控制台切 UTF-8(否则中文输出在 936 代码页下全是乱码) */
 #include "sxcl/auth_store.h"
 #include "sxcl/engine.h"
 #include "sxcl/fs.h"
@@ -2860,7 +2861,15 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
  * 因为那之后 HTTP 层还会往池子里丢活)。 */
 static int cli_main(int argc, char **argv);
 
+static int sxcl_dl_main(int argc, char **argv);
+
 int main(int argc, char **argv)
+{
+    (void)sxcl_console_set_utf8(); /* 中文输出别在 936 代码页下糊掉(见 sxcl/console.h) */
+    return sxcl_dl_main(argc, argv);
+}
+
+static int sxcl_dl_main(int argc, char **argv)
 {
     const int rc = cli_main(argc, argv);
     sxcl_transport_qt_drain(2000);

@@ -9,11 +9,13 @@
 #   dir.c     目录列举与路径拼接(本模块内部共用)
 #   crash.c   崩溃取证:最近的非空 crash-report + logs/latest.log -> 逐行喂给调用方
 #   export.c  一键导出日志包(zip store 打包 + token/uuid/用户名打码)
+#   console.c 控制台代码页切 UTF-8(不切的话中文输出在 936 下全是乱码)
 target_sources(sxcl PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/text.c
   ${CMAKE_CURRENT_SOURCE_DIR}/dir.c
   ${CMAKE_CURRENT_SOURCE_DIR}/crash.c
   ${CMAKE_CURRENT_SOURCE_DIR}/export.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/console.c
 )
 
 if(SXCL_BUILD_TESTS)

@@ -15,7 +15,8 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QAbstractButton> // 验收钩子:点模组页的搜索按钮(可能是 PrimaryPushButton)
-#include "crash_handler.h" // 启动器自己的崩溃取证(未处理异常 -> logs/crashes/)
+#include "crash_handler.h"   // 启动器自己的崩溃取证(未处理异常 -> logs/crashes/)
+#include "sxcl/console.h"    // 控制台切 UTF-8(否则中文 stderr 在 936 下全是乱码)
 #include <QColorDialog>  // 验收钩子:SXCL_UI_ACCENT_APPLY 要在真对话框里"挑一个颜色"
 #include <QMouseEvent>   // 验收钩子:取色块靠 mouseReleaseEvent 开对话框,得真发一对鼠标事件
 #include <QLineEdit>       // 验收钩子:SXCL_UI_MODS_QUERY 往搜索框里写字
@@ -259,6 +260,9 @@ public:
 } // namespace
 
 int main(int argc, char *argv[]) {
+    // 控制台按 UTF-8 解释我们的字节(不设的话中文在 936 代码页下糊成"鐣岄潰灏辩华")
+    const int consoleCpBefore = sxcl_console_set_utf8();
+
     // ── 运行日志:进程一启动就开 —— "SXCL 启动开始"的每一条都留档 ──
     // 写不进去(目录/文件打不开)只影响日志本身:核心库静默降级,绝不拦住启动。
     // 安卓打包层已经先开过一次(它更早,能看到 boot 文件解析),这里是幂等的第二道。
@@ -279,6 +283,8 @@ int main(int argc, char *argv[]) {
     /* 崩溃取证:**日志一开就装** —— 晚装一步,这个窗口期里崩掉就什么都没留下
      * (用户报"切主题色直接崩"时我们正是手上什么都没有)。 */
     sxcl::ui::installCrashHandler();
+    SXCL_LOG_I("startup", "控制台代码页: 切之前=%d 现在=%s(中文乱码就是这个 936 惹的)",
+               consoleCpBefore, "UTF-8(65001)");
 
     QApplication app(argc, argv);
     // Python main.py:96 —— app.setStyle("Fusion")。不设的话 Windows 默认样式的控件度量
