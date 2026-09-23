@@ -304,46 +304,6 @@ QString currentThemeMode(const ConfigStore &store) {
     return FluentTheme::instance().isDark() ? QStringLiteral("dark") : QStringLiteral("light");
 }
 
-/** 窄窗口下必须自适应(用户 2026-09-23:「横向条还是有。放大点就没了」——
- *  放大就没 = **内容最小宽度顶着视口**的典型症状)。
- *  根子在标签:没开 wordWrap 的 QLabel,minimumSizeHint 就是那一行字的宽度,
- *  卡片布局的最小宽度被它顶住,视口一窄就溢出 -> libqf 那条自绘横向平滑条冒出来。
- *  所以三件事:文字标签全部允许换行 / 子控件最小宽度归零 / 横向平滑条禁掉。 */
-void loosenHorizontal(QWidget *root) {
-    if (root == nullptr) {
-        return;
-    }
-    /* **标签一个字都别动**(两次教训,记在这里免得再犯):
-     *   * 全开 wordWrap -> 卡片高度按一行算,副标题被挤成两层(用户:「全部挤压」);
-     *   * 全设 QSizePolicy::Ignored -> 标题在布局里拿不到宽度,左边字直接消失(用户:「直接消失」)。
-     * 横向条的根子在**滚动区怎么量内容宽度**,不在标签身上:所以只把内容控件自己的
-     * 横向策略设成 Ignored(滚动区永远按视口宽给它),里面布局该裁就裁 —— 标签保持默认。 */
-    Q_UNUSED(root);
-    const QList<QWidget *> kids = root->findChildren<QWidget *>();
-    for (QWidget *w : kids) {
-        if (w != nullptr) {
-            w->setMinimumWidth(0);
-        }
-    }
-    const QList<SmoothScrollBar *> bars = root->findChildren<SmoothScrollBar *>();
-    for (SmoothScrollBar *bar : bars) {
-        if (bar != nullptr && bar->orientation() == Qt::Horizontal) {
-            bar->setEnabled(false);
-            bar->hide();
-        }
-    }
-    if (auto *area = qobject_cast<QScrollArea *>(root)) {
-        if (QWidget *content = area->widget()) {
-            content->setMinimumWidth(0);
-            QSizePolicy policy = content->sizePolicy();
-            policy.setHorizontalPolicy(QSizePolicy::Ignored); // 内容永远按视口宽,不出横向条
-            content->setSizePolicy(policy);
-            content->updateGeometry();
-        }
-    }
-    root->updateGeometry();
-}
-
 // settings_page.py:511-514 _on_theme_changed → apply_theme(qconfig.themeMode.value)
 void applyThemeMode(const QString &mode) {
     if (mode == QLatin1String("light"))
@@ -1349,7 +1309,12 @@ public:
         : SettingCard(FluentIcon::qicon(FluentIcon::DEVELOPER_TOOLS),
                       QStringLiteral("内置 JRE（自托管）"),
                       QStringLiteral("从我们自己的 index.json 下载随包分发的运行时"), parent) {
-        setFixedHeight(132); // 四行:来源输入 / 生效来源 / 已装组件 / 状态
+        /* 三行:来源输入 / 已装组件 / 状态。
+         * 原来还有第四行"生效来源（编译期默认）：https://raw.githubusercontent.com/…" ——
+         * 用户 2026-09-23 点名:「SXCL 有很多这种不应该写出来的文字,应该删掉」:
+         * 那是我们自己内部的取值优先级(环境变量/设置项/编译期默认)与仓库地址,
+         * 对用户一点用没有,还容易看成一堆乱码一样的 URL —— 删掉。 */
+        setFixedHeight(106);
 
         m_urlEdit = new QLineEdit(this);
         m_urlEdit->setMinimumWidth(330);
@@ -1389,6 +1354,7 @@ public:
         topRow->setAlignment(Qt::AlignRight);
 
         rightLayout->addLayout(topRow);
+        /* 只留一条**能动手**的提示(地址都没有时),平时不显示 —— 见 refreshSource()。 */
         rightLayout->addWidget(m_sourceLabel, 0, Qt::AlignRight);
         rightLayout->addWidget(m_installedLabel, 0, Qt::AlignRight);
         rightLayout->addWidget(m_statusLabel, 0, Qt::AlignRight);
@@ -1466,25 +1432,16 @@ private:
         const int rc = sxcl_jre_resolve_index_url(nullptr, setting.isEmpty() ? nullptr : setting.constData(),
                                                   env.isEmpty() ? nullptr : env.constData(), resolved,
                                                   sizeof(resolved));
-        QString level;
-        if (!env.isEmpty())
-            level = QStringLiteral("环境变量 %1").arg(QString::fromUtf8(SXCL_JRE_INDEX_URL_ENV));
-        else if (!setting.isEmpty())
-            level = QStringLiteral("设置项");
-        else
-            level = QStringLiteral("编译期默认");
-
         if (rc != SXCL_JRE_OK) {
-            m_sourceLabel->setText(QStringLiteral("生效来源：没有可用的 index.json 地址"));
+            /* 只有这一种情况值得写字:地址都没有 -> 用户得动手填。其余一律不显示 ——
+             * 用户 2026-09-23:「SXCL 有很多这种不应该写出来的文字,应该删掉」。 */
+            m_sourceLabel->setText(QStringLiteral("还没有可用的 index.json 地址 —— 请在上面填一个"));
             m_sourceLabel->setTextColor(QColor(0xff, 0x4d, 0x4f), QColor(0xff, 0x78, 0x75));
-            m_sourceLabel->setToolTip(QStringLiteral(
-                "三级来源都为空,且编译期默认地址是 <REPO> 占位 —— 请在上面填一个 index.json 地址。"));
+            m_sourceLabel->setToolTip(QString());
             return;
         }
-        const QString url = QString::fromUtf8(resolved);
-        m_sourceLabel->setText(QStringLiteral("生效来源（%1）：%2").arg(level, url));
-        m_sourceLabel->setTextColor(QColor(0x60, 0x60, 0x60), QColor(0xa0, 0xa0, 0xa0));
-        m_sourceLabel->setToolTip(url);
+        m_sourceLabel->clear();
+        m_sourceLabel->setToolTip(QString());
     }
 
     void refreshInstalled() {
@@ -2130,13 +2087,6 @@ SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
     // 策略停在默认的 AsNeeded,竖直方向会多占 12px(实测内容区 1051 → 1039、
     // 卡片右缘 1069 → 1057)。这里按 qf 的行为钉死(见交付报告:libqf 侧也该修)。
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    /* 横向**一律不给条**(用户 2026-09-23:「怎么还有横向拖动?跟放不下一样」)。
-     * Qt 的 ScrollBarPolicy 管不到 libqf 自绘的那条平滑条 —— 它是在 initArea() 里塞进去的,
-     * 页面自己 new 的 QScrollArea 策略对它无效,所以这里把**横向那条**直接禁掉;
-     * 内容比视口宽时让它换行/省略,而不是给用户一根横条拖着看。 */
-    loosenHorizontal(this);
-    QTimer::singleShot(0, this, [this] { loosenHorizontal(this); }); // 卡片全建好后再松一遍
-
     // Python 的 BasePage 继承 qf ScrollArea,没改 frameShape → 走 QFrame 默认的 StyledPanel(1px
     // 边框);libqf 的 ScrollArea::initArea() 也不设它(见 fluent_scroll.cpp:204-221 的取证),
     // 这里显式写出来,免得将来被改动时页面整体偏移 1px。

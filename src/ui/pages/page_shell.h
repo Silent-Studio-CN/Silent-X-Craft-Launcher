@@ -42,16 +42,6 @@ public:
         setObjectName(objectName);                            // base_page.py:42
         setWidgetResizable(true);                             // base_page.py:43
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); // base_page.py:44
-        /* 同上:libqf 自绘的横向平滑条不吃 Qt 的策略,这里显式禁掉(用户 2026-09-23)。 */
-        for (SmoothScrollBar *bar : findChildren<SmoothScrollBar *>()) {
-            if (bar != nullptr && bar->orientation() == Qt::Horizontal) {
-                bar->setEnabled(false);
-                bar->hide();
-            }
-        }
-        if (widget() != nullptr) {
-            widget()->setMinimumWidth(0);
-        }
         // 页面底色钉令牌 bg(#202020):参考图的内容区就是它,不钉会露出内容栈那层半透明白。
         setStyleSheet(QStringLiteral("QScrollArea { background: %1; }")
                           .arg(FluentTheme::instance().tokens().bg.name()));
