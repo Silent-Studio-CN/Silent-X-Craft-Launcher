@@ -133,6 +133,7 @@ const char *const kKeyLanguage = "ui.language";           // 核(默认 zh-CN)
 const char *const kKeyAutoCheckUpdate = "general.auto_check_update";        // 新增,默认开
 const char *const kKeyRefreshInterval = "general.version_refresh_interval"; // 新增,默认 120
 const char *const kKeyVersionIsolation = "general.version_isolation";       // 新增,默认关
+const char *const kKeyToastPosition = "ui.toast_position"; // 新增:消息弹窗落在哪(默认顶部居中)
 const char *const kKeyGameDir = "game.default_dir";       // 核(默认空 = 平台默认)
 const char *const kKeyJavaPath = "game.java_path";        // 新增,默认空
 const char *const kKeyMaxMemory = "game.max_memory_mb";   // 新增,默认 4096
@@ -305,6 +306,23 @@ QString currentThemeMode(const ConfigStore &store) {
 }
 
 // settings_page.py:511-514 _on_theme_changed → apply_theme(qconfig.themeMode.value)
+/** "消息弹窗位置"的取值 -> libqf 的 InfoBarPosition(六个位置,见 fluent_controls.h)。
+ *  默认 top = 顶部**水平居中**(用户口径:「默认居中不行吗」)。 */
+void applyToastPosition(const QString &value) {
+    InfoBarPosition pos{InfoBarPosition::Top};
+    if (value == QLatin1String("bottom"))
+        pos = InfoBarPosition(InfoBarPosition::Bottom);
+    else if (value == QLatin1String("top_left"))
+        pos = InfoBarPosition(InfoBarPosition::TopLeft);
+    else if (value == QLatin1String("top_right"))
+        pos = InfoBarPosition(InfoBarPosition::TopRight);
+    else if (value == QLatin1String("bottom_left"))
+        pos = InfoBarPosition(InfoBarPosition::BottomLeft);
+    else if (value == QLatin1String("bottom_right"))
+        pos = InfoBarPosition(InfoBarPosition::BottomRight);
+    setDefaultInfoBarPosition(pos);
+}
+
 void applyThemeMode(const QString &mode) {
     if (mode == QLatin1String("light"))
         ThemeBridge::instance().setMode(fluent::Theme::Light);
@@ -2039,6 +2057,7 @@ private:
     SwitchSettingCard *m_closeAfterCard = nullptr; // 「结束后关闭」(电脑端;安卓不建)
     ComboBoxSettingCard *m_themeCard = nullptr;
     ColorSettingCard *m_themeColorCard = nullptr;
+    ComboBoxSettingCard *m_toastPosCard = nullptr; // 消息弹窗位置(用户 2026-09-23 点名要的)
     ComboBoxSettingCard *m_languageCard = nullptr;
     ComboBoxSettingCard *m_sourceCard = nullptr;
 
@@ -2299,6 +2318,25 @@ void SettingsPage::buildContent() {
     generalGroup->addSettingCard(m_updateCard);
     generalGroup->addSettingCard(m_themeCard);
     generalGroup->addSettingCard(m_themeColorCard);
+
+    /* 消息弹窗位置(用户 2026-09-23:「设置里加一个消息弹窗位置,可以左/右上下角也可以设置弹出方向」)。
+     * 六个位置直接对应 libqf 的 InfoBarPosition;改完**当场生效**(接口会把已建的管理器一起改)。 */
+    m_toastPosCard = new ComboBoxSettingCard(
+        FluentIcon::qicon(FluentIcon::MESSAGE),
+        trText("page.settings.toast_position", "消息弹窗位置"),
+        QStringLiteral("顶部通知条从哪一侧出现（默认顶部居中）"),
+        {QStringLiteral("顶部居中"), QStringLiteral("底部居中"), QStringLiteral("左上角"),
+         QStringLiteral("右上角"), QStringLiteral("左下角"), QStringLiteral("右下角")},
+        {QStringLiteral("top"), QStringLiteral("bottom"), QStringLiteral("top_left"),
+         QStringLiteral("top_right"), QStringLiteral("bottom_left"), QStringLiteral("bottom_right")},
+        0, generalGroup);
+    generalGroup->addSettingCard(m_toastPosCard);
+    connect(m_toastPosCard, &ComboBoxSettingCard::indexChanged, this,
+            [this](int, const QString &value) {
+                m_store.set(kKeyToastPosition, value);
+                applyToastPosition(value);
+            });
+    applyToastPosition(m_store.text(kKeyToastPosition));
     generalGroup->addSettingCard(m_languageCard);
     generalGroup->addSettingCard(m_sourceCard);
 #if !defined(Q_OS_ANDROID)
