@@ -304,6 +304,43 @@ QString currentThemeMode(const ConfigStore &store) {
     return FluentTheme::instance().isDark() ? QStringLiteral("dark") : QStringLiteral("light");
 }
 
+/** 窄窗口下必须自适应(用户 2026-09-23:「横向条还是有。放大点就没了」——
+ *  放大就没 = **内容最小宽度顶着视口**的典型症状)。
+ *  根子在标签:没开 wordWrap 的 QLabel,minimumSizeHint 就是那一行字的宽度,
+ *  卡片布局的最小宽度被它顶住,视口一窄就溢出 -> libqf 那条自绘横向平滑条冒出来。
+ *  所以三件事:文字标签全部允许换行 / 子控件最小宽度归零 / 横向平滑条禁掉。 */
+void loosenHorizontal(QWidget *root) {
+    if (root == nullptr) {
+        return;
+    }
+    const QList<QLabel *> labels = root->findChildren<QLabel *>();
+    for (QLabel *label : labels) {
+        if (label != nullptr && !label->wordWrap()) {
+            label->setWordWrap(true);
+        }
+    }
+    const QList<QWidget *> kids = root->findChildren<QWidget *>();
+    for (QWidget *w : kids) {
+        if (w != nullptr) {
+            w->setMinimumWidth(0);
+        }
+    }
+    const QList<SmoothScrollBar *> bars = root->findChildren<SmoothScrollBar *>();
+    for (SmoothScrollBar *bar : bars) {
+        if (bar != nullptr && bar->orientation() == Qt::Horizontal) {
+            bar->setEnabled(false);
+            bar->hide();
+        }
+    }
+    if (auto *area = qobject_cast<QScrollArea *>(root)) {
+        if (area->widget() != nullptr) {
+            area->widget()->setMinimumWidth(0);
+            area->widget()->updateGeometry();
+        }
+    }
+    root->updateGeometry();
+}
+
 // settings_page.py:511-514 _on_theme_changed → apply_theme(qconfig.themeMode.value)
 void applyThemeMode(const QString &mode) {
     if (mode == QLatin1String("light"))
@@ -2094,15 +2131,8 @@ SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
      * Qt 的 ScrollBarPolicy 管不到 libqf 自绘的那条平滑条 —— 它是在 initArea() 里塞进去的,
      * 页面自己 new 的 QScrollArea 策略对它无效,所以这里把**横向那条**直接禁掉;
      * 内容比视口宽时让它换行/省略,而不是给用户一根横条拖着看。 */
-    for (SmoothScrollBar *bar : findChildren<SmoothScrollBar *>()) {
-        if (bar != nullptr && bar->orientation() == Qt::Horizontal) {
-            bar->setEnabled(false);
-            bar->hide();
-        }
-    }
-    if (widget() != nullptr) {
-        widget()->setMinimumWidth(0); // 允许内容随视口变窄(否则最小宽度顶着视口 -> 出横条)
-    }
+    loosenHorizontal(this);
+    QTimer::singleShot(0, this, [this] { loosenHorizontal(this); }); // 卡片全建好后再松一遍
 
     // Python 的 BasePage 继承 qf ScrollArea,没改 frameShape → 走 QFrame 默认的 StyledPanel(1px
     // 边框);libqf 的 ScrollArea::initArea() 也不设它(见 fluent_scroll.cpp:204-221 的取证),
