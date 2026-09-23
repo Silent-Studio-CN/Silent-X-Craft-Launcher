@@ -10,13 +10,18 @@
 
 #include "crash_handler.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <thread>
 
+#include <QApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QTimer>
 #include <QFileInfo>
 #include <QString>
 #include <QStringList>
@@ -238,6 +243,81 @@ void onTerminate() {
 } // namespace
 
 namespace sxcl::ui {
+
+
+/* ── 界面卡住(Windows 说"未响应")的取证 ──────────────────────────────
+ * 为什么要有:用户 2026-09-23「启动游戏 SXCL 依旧未响应」—— 进程没崩(所以崩溃报告不写),
+ * 日志也停在半路(因为卡住的是 GUI 线程,它写不出新行)。没有现场就只能猜。
+ * 做法:一个看门狗线程每 500ms 看一次"GUI 线程还跳不跳"(GUI 侧一个 100ms 定时器在
+ * 递增计数器);连续 thresholdMs 没跳 -> 落一份 hang 报告 + 全进程 minidump,
+ * 里面**所有线程的调用栈**都在(dump 用调试器打开就能看到 GUI 线程卡在哪一行)。
+ * 只报一次,不刷屏;写报告绝不动 GUI 线程(不去 SuspendThread,免得把现场弄得更糟)。 */
+namespace {
+
+std::atomic<uint64_t> g_guiTick{0};      // GUI 线程在跳(每 100ms +1)
+std::atomic<int> g_hangReported{0};
+
+void writeHangReport(int blockedMs) {
+    const QString dir = crashDir();
+    if (dir.isEmpty()) {
+        return;
+    }
+    const QString tag = stamp();
+    const QString txt = QDir(dir).filePath(QStringLiteral("sxcl-ui-hang-%1.txt").arg(tag));
+    const QString dmp = QDir(dir).filePath(QStringLiteral("sxcl-ui-hang-%1.dmp").arg(tag));
+    FILE *f = fopen(txt.toUtf8().constData(), "wb");
+    if (f != nullptr) {
+        fprintf(f, "SXCL 启动器**卡住**报告(GUI 线程连续 %d ms 没有响应消息)\n", blockedMs);
+        fprintf(f, "时间: %s\n",
+                QDateTime::currentDateTime().toString(Qt::ISODate).toUtf8().constData());
+        fprintf(f, "运行日志: %s\n", sxcl_log_file_path());
+        fprintf(f, "版本: %s\n", qVersion());
+        fprintf(f, "说明: 这不是崩溃 —— 进程还在,只是界面线程卡住了;对应的 .dmp 里能看到它卡在哪。\n");
+        fclose(f);
+    }
+    HANDLE file = CreateFileW(reinterpret_cast<const wchar_t *>(dmp.utf16()), GENERIC_WRITE, 0,
+                              nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        const MINIDUMP_TYPE type = (MINIDUMP_TYPE)(MiniDumpWithDataSegs | MiniDumpWithHandleData |
+                                                   MiniDumpWithThreadInfo | MiniDumpWithFullMemory);
+        (void)MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type, nullptr,
+                                nullptr, nullptr);
+        CloseHandle(file);
+    }
+    SXCL_LOG_E("crash", "界面卡住 %d ms:报告=%s(全进程 dump 同名)", blockedMs,
+               txt.toUtf8().constData());
+}
+
+} // namespace
+
+void installHangWatchdog(int thresholdMs) {
+    /* GUI 侧的跳表(这个定时器住在主线程上,所以它不跳 = 主线程卡住)。 */
+    auto *tick = new QTimer(qApp);
+    QObject::connect(tick, &QTimer::timeout, [] { g_guiTick.fetch_add(1); });
+    tick->start(100);
+
+    std::thread([thresholdMs]() {
+        uint64_t last = g_guiTick.load();
+        auto lastChange = std::chrono::steady_clock::now();
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            const uint64_t now = g_guiTick.load();
+            if (now != last) {
+                last = now;
+                lastChange = std::chrono::steady_clock::now();
+                continue;
+            }
+            const auto blocked = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - lastChange)
+                                     .count();
+            if (blocked >= thresholdMs && g_hangReported.exchange(1) == 0) {
+                writeHangReport((int)blocked);
+            }
+        }
+    }).detach();
+    SXCL_LOG_I("crash", "界面卡住看门狗已就位(%d ms 阈值 -> logs/crashes/sxcl-ui-hang-*)",
+               thresholdMs);
+}
 
 void installCrashHandler() {
     SetUnhandledExceptionFilter(onUnhandledException);

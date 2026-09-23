@@ -26,4 +26,10 @@ namespace sxcl::ui {
  */
 void installCrashHandler();
 
+/* 界面卡住(Windows"未响应")的取证:看门狗线程盯着 GUI 线程的跳表,连续 thresholdMs
+ * 没跳就落一份 hang 报告 + 全进程 minidump(所有线程的调用栈都在)。
+ * 为什么必须有:用户 2026-09-23「启动游戏 SXCL 依旧未响应」—— 没崩(所以没崩溃报告)、
+ * 日志也停在半路(卡的是 GUI 线程,它写不出新行),不取证就只能猜。 */
+void installHangWatchdog(int thresholdMs = 3000);
+
 } // namespace sxcl::ui

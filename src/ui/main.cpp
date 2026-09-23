@@ -283,6 +283,7 @@ int main(int argc, char *argv[]) {
     /* 崩溃取证:**日志一开就装** —— 晚装一步,这个窗口期里崩掉就什么都没留下
      * (用户报"切主题色直接崩"时我们正是手上什么都没有)。 */
     sxcl::ui::installCrashHandler();
+    sxcl::ui::installHangWatchdog(3000); // 界面卡住也要留现场(用户报过"启动游戏未响应")
     SXCL_LOG_I("startup", "控制台代码页: 切之前=%d 现在=%s(中文乱码就是这个 936 惹的)",
                consoleCpBefore, "UTF-8(65001)");
 
