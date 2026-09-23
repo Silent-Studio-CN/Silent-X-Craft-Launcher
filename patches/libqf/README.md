@@ -64,3 +64,28 @@ $env:SXCL_UI_ROUTE='settings'; $env:SXCL_UI_SCROLLBAR_STRESS='30'
 * **修之前**:第 12 次访问违例(`exit -1073741819`),logs/crashes 里多一份报告;
 * **修之后**:30 次全部走完,打 `[sxcl-ui] STRESS: 30 次 Enter/Leave 之后**还活着**`,
   `rc=0`,不再产生崩溃报告。
+
+
+---
+
+# 补丁 2:顶部通知条做成**长条**(用户 2026-09-23)
+
+**目标文件**:`D:\SilentStudio\PyQf to C\src\fluent\fluent_controls.cpp` 的 `InfoBar::push`
+
+用户原话:「弹窗能不能做长条,就是从顶部下来的那个」—— 原来宽度被卡在 560 以内,
+屏幕上就是中间/右上角一个小方块(真机日志 `ib: shown ... size=264x92`)。
+
+```diff
+-    // 浮层宽度:内容自适应,上限取页面可用宽与 560(内容自动换行,高度随之)
+-    const int pageW = host->width();
+-    const int cap = (pageW > 200) ? qMin(560, pageW - 48) : 560;
+-    bar->setMaximumWidth(cap);
++    // 长条:铺满宿主宽度(左右各留 24) —— 管理器按 bar 实际宽度算 x,条一变宽自然横贯顶部
++    const int pageW = host->width();
++    const int stripW = (pageW > 200) ? (pageW - 48) : pageW;
++    bar->setFixedWidth(stripW);
+```
+
+**验收**:`SXCL_UI_ROUTE=versions` + `SXCL_UI_SHOT` -> 日志里
+`ib: shown at ... size=1052x92`(窗口 1100,左右各留 24),截图 `build/shots/infobar_strip.png`。
+
