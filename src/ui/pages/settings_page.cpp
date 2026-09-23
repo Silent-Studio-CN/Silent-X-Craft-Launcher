@@ -1337,7 +1337,7 @@ public:
         m_urlEdit = new QLineEdit(this);
         m_urlEdit->setMinimumWidth(330);
         m_urlEdit->setPlaceholderText(
-            QStringLiteral("index.json 地址（留空 = 用环境变量或编译期默认）"));
+            QStringLiteral("index.json 地址"));
         m_urlEdit->setToolTip(QStringLiteral("设置键：%1\n留空表示不覆盖——环境变量 %2 优先，"
                                              "其次是编译期默认的 GitHub raw 地址。")
                                   .arg(QString::fromUtf8(SXCL_JRE_INDEX_URL_SETTING),

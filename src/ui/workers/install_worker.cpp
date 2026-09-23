@@ -453,7 +453,7 @@ void InstallWorker::run() {
     SXCL_LOG_E("install", "没开始就失败:本次构建没有链接 Qt Network 传输后端(sxcl_net_qt)");
     emit finished(false, false, SXCL_INSTALL_ERR_IO, false,
                   QStringLiteral("本次构建没有链接 Qt Network 传输后端(sxcl_net_qt),无法下载"),
-                  QStringLiteral("需要重新配置 -DSXCL_BUILD_QT_TRANSPORT=ON 后重建界面"));
+            QStringLiteral("这个构建没有带网络组件，装完整版再试"));
     m_running.store(false);
     return;
 #endif
