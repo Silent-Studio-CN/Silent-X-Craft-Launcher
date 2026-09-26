@@ -1,16 +1,28 @@
 ﻿# (C) Silent X Craft Launcher -- "edition icons" acceptance (docs/27 S11/S12).
-# Download page side-2 footer = [Java cup] | [Bedrock block]: two clickable icons with a
+# Download page side-2 footer = [Java cup] | [Bedrock LOGO]: two clickable icons with a
 # vertical separator between them (#sxclEditionJavaButton / #sxclEditionBedrockButton,
 # both sxcl::ui::IconSelectButton, container #sxclEditionPickRow).
+# Icons (original assets, provenance in assets/icons/edition/NOTICE.md):
+#   java_logo.svg    = official Java cup (devicon java-original, #0074BD), 20 logical px box
+#   bedrock_logo.png = official MINECRAFT title logo from the user's Bedrock APK (1937x333 RGBA),
+#                      20 logical px box -> width comes from the asset aspect (5.82 -> 116 px)
 # What it proves, per run (all numbers measured on this machine, nothing guessed):
-#   1) both buttons show up in SXCL_UI_DUMP with sane geometry and are not hidden
-#   2) the icons are NOT blank: pixels inside the icon box differ from the card background
-#      (a missing/blanked asset gives 0) and each one carries its own official colours
-#      (Java cup = the #0074BD family; Bedrock block = the APK's gray rock palette)
-#   3) the selected state really moves: only the selected button carries accent-coloured
-#      pixels in the ring around the icon (theme token accent), the other one carries none
-#   4) the vertical separator between the two icons is exactly ONE device pixel wide and
-#      runs vertically over the whole button height (container paintEvent + QPen(token, 0))
+#   1) both buttons show up in SXCL_UI_DUMP with sane geometry and are not hidden, and the
+#      LOGO button really is the WIDE box the asset aspect asks for (not a square 24x24)
+#   2) the assets are NOT blank:
+#      - asset level: the RGBA LOGO is scanned for non-transparent pixels (count / ratio)
+#      - screen level: inside each icon box the pixels differ from the card background, and
+#        each icon carries its own colours (Java cup = #0074BD family; LOGO = light letters
+#        on its dark plate)
+#      - the cup footprint and the LOGO footprint come out the same visual height (physical px)
+#   3) the selected state is the indicator LINE UNDER THE ICON (user's final call: no box):
+#      in the band "icon bottom +2..+6 logical px" the selected button has accent pixels and
+#      the other one has exactly 0
+#   3b) the [cup] | [LOGO] group is horizontally centred in the side-2 footer: group centre x
+#      vs container centre x <= 1 logical pixel (container #sxclEditionPickRow, from the dump)
+#   4) the vertical separator between the two icons is exactly ONE device pixel wide, runs
+#      vertically over the whole button height, and sits within +/-1 px of the geometric
+#      midpoint of the two buttons (container paintEvent + QPen(token, 0))
 #   5) clicking goes through the product path (SXCL_UI_EDITION -> button->click()) and the
 #      settings file really says game.edition=<picked> afterwards
 # Run A clicks bedrock, run B clicks java again, run C restarts with NO click at all and
@@ -22,6 +34,7 @@ $ErrorActionPreference = 'Continue'
 $exe = Join-Path $PSScriptRoot '..\build-ui\src\ui\Release\sxcl-ui.exe'
 # acceptance/temp files live under D:\SilentStudio\_test (never %TEMP% / C:)
 $work = 'D:\SilentStudio\_test\edition_icons'
+$assets = Join-Path $PSScriptRoot '..\assets\icons\edition'
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 $fail = 0
 Add-Type -AssemblyName System.Drawing
@@ -45,18 +58,62 @@ function Get-Dist($a, $b) {
 }
 function Near($p, $r, $g, $b, $tol) { return ((Get-Dist $p @($r, $g, $b)) -le $tol) }
 
-# ---- one button rect: ink vs card background, accent ring, official icon colours ----
+# ---- asset level: the RGBA title LOGO must be a real image, not an empty canvas ----
+function Get-LogoAssetStats([string]$png) {
+  $bmp = New-Object System.Drawing.Bitmap($png)
+  $total = $bmp.Width * $bmp.Height
+  $opaque = 0; $light = 0
+  $mnX = 999999; $mnY = 999999; $mxX = -1; $mxY = -1
+  for ($y = 0; $y -lt $bmp.Height; $y++) {
+    for ($x = 0; $x -lt $bmp.Width; $x++) {
+      $c = $bmp.GetPixel($x, $y)
+      if ($c.A -le 0) { continue }
+      $opaque++
+      $mean = ($c.R + $c.G + $c.B) / 3.0
+      if ($mean -gt 100 -and $c.A -gt 128) {
+        $light++
+        if ($x -lt $mnX) { $mnX = $x }
+        if ($x -gt $mxX) { $mxX = $x }
+        if ($y -lt $mnY) { $mnY = $y }
+        if ($y -gt $mxY) { $mxY = $y }
+      }
+    }
+  }
+  $w = $bmp.Width; $h = $bmp.Height
+  $bmp.Dispose()
+  return @{ w = $w; h = $h; total = $total; opaque = $opaque; light = $light;
+            letterW = $mxX - $mnX + 1; letterH = $mxY - $mnY + 1;
+            aspect = $w / [double]$h; letterAspect = ($mxX - $mnX + 1) / [double]($mxY - $mnY + 1) }
+}
+
+# ---- one button rect: icon footprint (vs the card background), accent ring, icon colours ----
 # dump coordinates are LOGICAL, the screenshot is PHYSICAL (dpr), so everything scales.
+# The icon box is the button minus the 2 px padding on every side; the ring (that padding)
+# is where the accent frame/backdrop lives, so the icon's own colours never pollute the
+# selection test, and the footprint bbox taken in the UNSELECTED state is the icon itself.
 function Get-ButtonStats([string]$png, [int]$x, [int]$y, [int]$w, [int]$h, [double]$dpr,
-                         [int]$iconSide, [int]$pad, [int[]]$cardRef) {
+                         [int]$padX, [int]$padTop, [int]$padBottom, [int[]]$cardRef) {
   $bmp = New-Object System.Drawing.Bitmap($png)
   $x0 = [int][math]::Floor($x * $dpr); $y0 = [int][math]::Floor($y * $dpr)
   $x1 = [int][math]::Ceiling(($x + $w) * $dpr); $y1 = [int][math]::Ceiling(($y + $h) * $dpr)
-  # the icon box sits centered inside the button, pad pixels from every edge
-  $ix0 = [int][math]::Floor(($x + $pad) * $dpr); $ix1 = [int][math]::Ceiling(($x + $pad + $iconSide) * $dpr)
-  $iy0 = [int][math]::Floor(($y + $pad) * $dpr); $iy1 = [int][math]::Ceiling(($y + $pad + $iconSide) * $dpr)
-  $colors = @{}; $ink = 0; $inner = 0; $innerVsCard = 0; $ringBlue = 0; $bluePx = 0
-  $rockLight = 0; $rockMid = 0; $total = 0
+  # icon box: padX on the sides, padTop above, and below it the 4 px gap + 2 px indicator line
+  # + 2 px bottom pad (IconSelectButton::sizeHint) -- so height = h - padTop - padBottom
+  $ix0 = [int][math]::Floor(($x + $padX) * $dpr); $ix1 = [int][math]::Ceiling(($x + $w - $padX) * $dpr)
+  $iy0 = [int][math]::Floor(($y + $padTop) * $dpr); $iy1 = [int][math]::Ceiling(($y + $h - $padBottom) * $dpr)
+  # the indicator band: "icon bottom +2..+6 logical px"
+  $bx0 = $ix0; $bx1 = $ix1
+  $by0 = [int][math]::Floor($iy1 + 2 * $dpr); $by1 = [int][math]::Ceiling($iy1 + 6 * $dpr)
+  $colors = @{}; $ink = 0; $inner = 0; $innerVsCard = 0; $bandAccent = 0; $bandTotal = 0
+  $bluePx = 0; $lightPx = 0; $platePx = 0; $total = 0
+  for ($py = $by0; $py -lt $by1; $py++) {
+    for ($px = $bx0; $px -lt $bx1; $px++) {
+      $pb = Get-Rgb $bmp $px $py
+      $bandTotal++
+      # accent (theme token) is blue-dominant: #4CC2FF in dark mode, #0067C0 in light mode
+      if (($pb[2] - $pb[0]) -gt 40 -and $pb[2] -gt 110) { $bandAccent++ }
+    }
+  }
+  $mnX = 999999; $mnY = 999999; $mxX = -1; $mxY = -1
   for ($py = $y0; $py -lt $y1; $py++) {
     for ($px = $x0; $px -lt $x1; $px++) {
       $p = Get-Rgb $bmp $px $py
@@ -66,18 +123,20 @@ function Get-ButtonStats([string]$png, [int]$x, [int]$y, [int]$w, [int]$h, [doub
       $isInner = ($px -ge $ix0 -and $px -lt $ix1 -and $py -ge $iy0 -and $py -lt $iy1)
       if ($isInner) {
         $inner++
-        if ((Get-Dist $p $cardRef) -gt 12) { $innerVsCard++ }
-        # the official Java cup is the #0074BD family (blue-dominant; measured 67 unselected /
-        # 129 selected on this machine, and 0..6 in the bedrock box -- clean separation)
+        if ((Get-Dist $p $cardRef) -gt 12) {
+          $innerVsCard++
+          # footprint of the icon itself (only meaningful while the button is unselected:
+          # once it is selected the accent backdrop covers the whole box)
+          if ($px -lt $mnX) { $mnX = $px }
+          if ($px -gt $mxX) { $mxX = $px }
+          if ($py -lt $mnY) { $mnY = $py }
+          if ($py -gt $mxY) { $mxY = $py }
+        }
+        # the official Java cup is the #0074BD family (blue-dominant)
         if (($p[2] - $p[0]) -gt 40 -and $p[2] -gt 110) { $bluePx++ }
-        # the official bedrock block: its own gray rock faces from the APK texture
-        # (light #979797/#808080, mid #575757/#636363). Distance to the card #2B2B2B is >= 132
-        # for these, so a blank/uniform button can never score here: measured 0 in the java box.
-        if ((Near $p 0x97 0x97 0x97 20) -or (Near $p 0x80 0x80 0x80 12)) { $rockLight++ }
-        if ((Near $p 0x57 0x57 0x57 14) -or (Near $p 0x63 0x63 0x63 14)) { $rockMid++ }
-      } else {
-        # ring = the padding around the icon: only the backdrop / accent frame lives there
-        if (($p[2] - $p[0]) -gt 18) { $ringBlue++ }
+        $mean = ($p[0] + $p[1] + $p[2]) / 3.0
+        if ($mean -gt 100) { $lightPx++ }   # LOGO letters / cup lines
+        if ($mean -lt 40) { $platePx++ }    # LOGO dark plate
       }
     }
   }
@@ -89,11 +148,14 @@ function Get-ButtonStats([string]$png, [int]$x, [int]$y, [int]$w, [int]$h, [doub
     if ((Get-Dist $q $modal) -gt 30) { $ink += $colors[$k] }
   }
   return @{ ink = $ink; total = $total; inner = $inner; innerVsCard = $innerVsCard;
-            ringBlue = $ringBlue; bluePx = $bluePx; rockLight = $rockLight; rockMid = $rockMid;
+            bandAccent = $bandAccent; bandTotal = $bandTotal;
+            bluePx = $bluePx; lightPx = $lightPx; platePx = $platePx;
+            footW = $(if ($mxX -ge 0) { $mxX - $mnX + 1 } else { 0 });
+            footH = $(if ($mxY -ge 0) { $mxY - $mnY + 1 } else { 0 });
             modal = $modal }
 }
 
-# ---- the vertical separator: must be exactly ONE device pixel, vertical ----
+# ---- the vertical separator: exactly ONE device pixel, vertical, on the geometric midpoint ----
 function Get-SeparatorStats([string]$png, [int]$leftRight, [int]$rightLeft, [int]$top, [int]$height, [double]$dpr) {
   $bmp = New-Object System.Drawing.Bitmap($png)
   $x0 = [int][math]::Floor($leftRight * $dpr) + 1
@@ -119,9 +181,14 @@ function Get-SeparatorStats([string]$png, [int]$leftRight, [int]$rightLeft, [int
       if ((Get-Dist (Get-Rgb $bmp $lineCols[0] $ry) $bgTriple) -gt 12) { $vertical++ }
     }
   }
+  # geometric midpoint of the two buttons, in the same device pixel space the painter uses
+  $midLogical = [int](($leftRight + $rightLeft) / 2)
+  $midDevice = $midLogical * $dpr
   $bmp.Dispose()
   return @{ width = $lineCols.Count; col = $(if ($lineCols.Count -ge 1) { $lineCols[0] } else { -1 });
             span = @($x0, $x1); rows = $rows; bg = (Get-Hex $bgTriple); vertical = $vertical;
+            midLogical = $midLogical; midDevice = $midDevice;
+            offBy = $(if ($lineCols.Count -ge 1) { [math]::Abs($lineCols[0] - $midDevice) } else { -1 });
             color = $(if ($lineColor) { Get-Hex $lineColor } else { '-' }) }
 }
 
@@ -201,7 +268,7 @@ function Invoke-EditionRun([string]$tag, [string]$pick, [string]$expect, [string
     }
   }
 
-  # 4) pixel scan: icons not blank, official colours present, accent only on the selected one
+  # 4) pixel scan: icons not blank, official colours, accent only on the selected one
   if (-not (Test-Path $png)) {
     Write-Output ('    -> FAIL screenshot missing: ' + $png)
     $script:fail++
@@ -226,37 +293,50 @@ function Invoke-EditionRun([string]$tag, [string]$pick, [string]$expect, [string
   $stats = @{}
   foreach ($name in @('sxclEditionJavaButton', 'sxclEditionBedrockButton')) {
     $r = $rects[$name]
-    $s = Get-ButtonStats $png $r[0] $r[1] $r[2] $r[3] $dpr 20 2 $cardRef
+    # icon box = button minus 2 px on the sides/top and 8 px at the bottom (4 gap + 2 line + 2 pad);
+    # the LOGO box is wide because the asset is wide
+    $boxLogical = @(($r[2] - 4), ($r[3] - 10))
+    $boxPhys = @([math]::Round($boxLogical[0] * $dpr, 1), [math]::Round($boxLogical[1] * $dpr, 1))
+    $s = Get-ButtonStats $png $r[0] $r[1] $r[2] $r[3] $dpr 2 2 8 $cardRef
     $stats[$name] = $s
-    Write-Output ('    ' + $name + ': rect=' + ($r -join ',') + ' ink=' + $s.ink + '/' + $s.total +
-                  ' innerVsCard=' + $s.innerVsCard + '/' + $s.inner + ' accentRingPx=' + $s.ringBlue +
-                  ' javaBluePx=' + $s.bluePx + ' rockLightPx=' + $s.rockLight + ' rockMidPx=' + $s.rockMid +
-                  ' modal=' + (Get-Hex $s.modal))
+    Write-Output ('    ' + $name + ': rect=' + ($r -join ',') + ' iconBox=' + ($boxLogical -join 'x') +
+                  ' logical (' + ($boxPhys -join 'x') + ' phys) ink=' + $s.ink + '/' + $s.total +
+                  ' innerVsCard=' + $s.innerVsCard + '/' + $s.inner +
+                  ' indicatorBandAccentPx=' + $s.bandAccent + '/' + $s.bandTotal +
+                  ' javaBluePx=' + $s.bluePx + ' lightPx=' + $s.lightPx + ' platePx=' + $s.platePx +
+                  ' footprint=' + $s.footW + 'x' + $s.footH + ' modal=' + (Get-Hex $s.modal))
     if ($s.innerVsCard -lt 60) {
       Write-Output ('    -> FAIL ' + $name + ' icon looks BLANK (innerVsCard=' + $s.innerVsCard + ')')
       $script:fail++
     }
   }
-  # each icon must carry its OWN official colours, and not the other one's
+
+  # the container that holds the group (used for the "group is centred" assertion)
+  $hostRect = $null
+  $hostHit = $txt | Select-String -Pattern '#sxclEditionPickRow \((\d+),(\d+) (\d+)x(\d+)\)' | Select-Object -First 1
+  if ($hostHit) {
+    $null = ($hostHit.Line -match '\((\d+),(\d+) (\d+)x(\d+)\)')
+    $hostRect = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4])
+    Write-Output ('    container #sxclEditionPickRow (' + ($hostRect -join ',') + ')')
+  } else {
+    Write-Output '    -> FAIL container #sxclEditionPickRow not found in dump'
+    $script:fail++
+  }
+
+  # 4a) each side must carry its own official colours
   if ($stats['sxclEditionJavaButton'].bluePx -lt 40) {
     Write-Output ('    -> FAIL java button does not show the official #0074BD cup (javaBluePx=' +
                   $stats['sxclEditionJavaButton'].bluePx + ', threshold 40)')
     $script:fail++
   }
-  if ($stats['sxclEditionJavaButton'].rockMid -ne 0) {
-    Write-Output ('    -> FAIL java button carries bedrock rock pixels (rockMidPx=' +
-                  $stats['sxclEditionJavaButton'].rockMid + ')')
+  if ($stats['sxclEditionBedrockButton'].lightPx -lt 200) {
+    Write-Output ('    -> FAIL bedrock button does not show the LOGO letters (lightPx=' +
+                  $stats['sxclEditionBedrockButton'].lightPx + ', threshold 200)')
     $script:fail++
   }
-  if ($stats['sxclEditionBedrockButton'].rockMid -lt 100 -or $stats['sxclEditionBedrockButton'].rockLight -lt 50) {
-    Write-Output ('    -> FAIL bedrock button does not show the official gray block (rockMidPx=' +
-                  $stats['sxclEditionBedrockButton'].rockMid + ' rockLightPx=' +
-                  $stats['sxclEditionBedrockButton'].rockLight + ', thresholds 100/50)')
-    $script:fail++
-  }
-  if ($stats['sxclEditionBedrockButton'].bluePx -gt 10) {
-    Write-Output ('    -> FAIL bedrock button carries java-cup blue pixels (javaBluePx=' +
-                  $stats['sxclEditionBedrockButton'].bluePx + ')')
+  if ($stats['sxclEditionBedrockButton'].platePx -lt 200) {
+    Write-Output ('    -> FAIL bedrock button does not show the LOGO plate (platePx=' +
+                  $stats['sxclEditionBedrockButton'].platePx + ', threshold 200)')
     $script:fail++
   }
 
@@ -270,6 +350,8 @@ function Invoke-EditionRun([string]$tag, [string]$pick, [string]$expect, [string
                 ' line col=' + $sep.col + ' (logical x=' + [math]::Round($sep.col / $dpr, 2) + ')' +
                 ' width=' + $sep.width + ' device px color=' + $sep.color +
                 ' rows hit ' + $sep.vertical + '/3 bg=' + $sep.bg)
+  Write-Output ('    separator midpoint check: geometric mid logical=' + $sep.midLogical +
+                ' -> device ' + $sep.midDevice + ' ; line is off by ' + $sep.offBy + ' device px')
   if ($sep.width -ne 1) {
     Write-Output ('    -> FAIL separator is not exactly 1 device pixel wide (cols differing from bg = ' + $sep.width + ')')
     $script:fail++
@@ -278,7 +360,12 @@ function Invoke-EditionRun([string]$tag, [string]$pick, [string]$expect, [string
     Write-Output ('    -> FAIL separator does not run vertically over the button height (rows hit ' + $sep.vertical + '/3)')
     $script:fail++
   }
+  if ($sep.offBy -lt 0 -or $sep.offBy -gt 1) {
+    Write-Output ('    -> FAIL separator is not on the midpoint of the two buttons (off by ' + $sep.offBy + ' device px)')
+    $script:fail++
+  }
 
+  # 6) selection state = the indicator LINE UNDER THE ICON (user's final call: no box)
   if ($selectName -ne '') {
     $selName = $selectName
   } elseif ($pick -eq 'bedrock') {
@@ -288,11 +375,69 @@ function Invoke-EditionRun([string]$tag, [string]$pick, [string]$expect, [string
   }
   $otherName = if ($selName -eq 'sxclEditionBedrockButton') { 'sxclEditionJavaButton' } else { 'sxclEditionBedrockButton' }
   $sel = $stats[$selName]; $other = $stats[$otherName]
-  Write-Output ('    selected=' + $selName + ' accentRingPx=' + $sel.ringBlue +
-                ' | other=' + $otherName + ' accentRingPx=' + $other.ringBlue)
-  if ($sel.ringBlue -lt 20) { Write-Output '    -> FAIL selected button carries no accent pixels in its ring'; $script:fail++ }
-  if ($other.ringBlue -gt 5) { Write-Output '    -> FAIL unselected button also carries accent pixels'; $script:fail++ }
+  Write-Output ('    indicator band (icon bottom +2..+6 logical px): selected=' + $selName +
+                ' accentPx=' + $sel.bandAccent + '/' + $sel.bandTotal + ' | unselected=' +
+                $otherName + ' accentPx=' + $other.bandAccent + '/' + $other.bandTotal)
+  if ($sel.bandAccent -lt 30) {
+    Write-Output ('    -> FAIL the selected button has no accent line under its icon (band accentPx=' +
+                  $sel.bandAccent + ', threshold 30)')
+    $script:fail++
+  }
+  if ($other.bandAccent -ne 0) {
+    Write-Output ('    -> FAIL the unselected button also draws an accent line under its icon (band accentPx=' +
+                  $other.bandAccent + ')')
+    $script:fail++
+  }
+
+  # 7) the whole [cup] | [LOGO] group must be centred in the footer container
+  if ($hostRect -ne $null) {
+    $groupLeft = [math]::Min($jr[0], $br[0])
+    $groupRight = [math]::Max($jr[0] + $jr[2], $br[0] + $br[2])
+    $groupCentre = ($groupLeft + $groupRight) / 2.0
+    $hostCentre = $hostRect[0] + $hostRect[2] / 2.0
+    $delta = [math]::Abs($groupCentre - $hostCentre)
+    Write-Output ('    group centre x=' + $groupCentre + ' (group ' + $groupLeft + '..' + $groupRight +
+                  ') vs container centre x=' + $hostCentre + ' (container ' + $hostRect[0] + '..' +
+                  ($hostRect[0] + $hostRect[2]) + ') -> delta=' + [math]::Round($delta, 2) + ' logical px')
+    if ($delta -gt 1.0) {
+      Write-Output ('    -> FAIL the icon group is not centred in the container (delta=' +
+                    [math]::Round($delta, 2) + ' logical px, threshold 1)')
+      $script:fail++
+    }
+  }
+  # the unselected one is where the icon's own footprint can be measured cleanly
+  Write-Output ('    icon footprint of the UNSELECTED side (' + $otherName + ') = ' + $other.footW + 'x' +
+                $other.footH + ' phys = ' + [math]::Round($other.footW / $dpr, 2) + 'x' +
+                [math]::Round($other.footH / $dpr, 2) + ' logical')
   $script:runStats = $stats
+  $script:unselName = $otherName
+  $script:unselFoot = @($other.footW, $other.footH)
+  $script:selBand = $sel.bandAccent
+  $script:unselBand = $other.bandAccent
+  $script:runDpr = $dpr
+}
+
+# ---- asset-level readings (printed once, they do not depend on a run) ----
+$logoPng = Join-Path $assets 'bedrock_logo.png'
+Write-Output 'asset check (original files in the repo):'
+if (-not (Test-Path $logoPng)) {
+  Write-Output ('  -> FAIL missing ' + $logoPng)
+  $fail++
+} else {
+  $logo = Get-LogoAssetStats $logoPng
+  $ratio = [math]::Round(100.0 * $logo.opaque / $logo.total, 2)
+  Write-Output ('  bedrock_logo.png ' + $logo.w + 'x' + $logo.h + ' RGBA: non-transparent pixels = ' +
+                $logo.opaque + ' / ' + $logo.total + ' = ' + $ratio + '%')
+  Write-Output ('  letters (opaque, mean>100) = ' + $logo.light + ' px, bbox ' + $logo.letterW + 'x' +
+                $logo.letterH + ' -> letter ink height is ' +
+                [math]::Round(100.0 * $logo.letterH / $logo.h, 1) + '% of the canvas, aspect ' +
+                [math]::Round($logo.letterAspect, 2) + ', canvas aspect ' + [math]::Round($logo.aspect, 3))
+  if ($logo.opaque -lt 100000 -or $ratio -lt 50 -or $ratio -gt 99) {
+    Write-Output ('  -> FAIL the LOGO asset does not look like the official title art (opaque=' +
+                  $logo.opaque + ' ratio=' + $ratio + '%)')
+    $fail++
+  }
+  if ($logo.letterW -lt 1000) { Write-Output '  -> FAIL the LOGO asset has no letter ink'; $fail++ }
 }
 
 Write-Output 'run A: click bedrock'
@@ -300,44 +445,88 @@ $before = (Select-String -Path $ini -Pattern 'game\.edition=(\w+)' | Select-Obje
 Write-Output ('  start state: ' + $before)
 Invoke-EditionRun 'bedrock' 'bedrock' 'bedrock'
 $statsA = $script:runStats
+$cupFoot = $script:unselFoot      # run A leaves JAVA unselected -> the cup footprint
+$cupFootName = $script:unselName
+$dpr = $script:runDpr
 
 Write-Output 'run B: click java again'
 Invoke-EditionRun 'java' 'java' 'java'
 $statsB = $script:runStats
+$logoFoot = $script:unselFoot     # run B leaves BEDROCK unselected -> the LOGO footprint
+$logoFootName = $script:unselName
 
 Write-Output 'run C: restart with NO click (the choice must come back from the settings file)'
 Set-Content -Path $ini -Value ('game.default_dir=' + $work + '\.minecraft') -Encoding utf8
 Add-Content -Path $ini -Value 'game.edition=bedrock'
-$restoreLine = (Select-String -Path $ini -Pattern 'game\.edition=(\w+)' | Select-Object -Last 1).Line.Trim()
+$restoreLine = (Select-String -Path $ini -Pattern 'game.edition=(\w+)' | Select-Object -Last 1).Line.Trim()
 Write-Output ('  settings before run C: ' + $restoreLine)
 Invoke-EditionRun 'restore' '' '' 'sxclEditionBedrockButton'
 $statsC = $script:runStats
 if ($statsC.Count -eq 2) {
-  if ($statsC['sxclEditionBedrockButton'].ringBlue -lt 20) {
-    Write-Output '  -> FAIL after restart the bedrock button is not the selected one (no accent pixels)'
+  Write-Output ('  restart: bedrock indicator band accentPx=' + $statsC['sxclEditionBedrockButton'].bandAccent +
+                ', java indicator band accentPx=' + $statsC['sxclEditionJavaButton'].bandAccent)
+  if ($statsC['sxclEditionBedrockButton'].bandAccent -lt 30) {
+    Write-Output '  -> FAIL after restart the bedrock button is not the selected one (no accent line)'
     $fail++
   }
-  if ($statsC['sxclEditionJavaButton'].ringBlue -gt 5) {
-    Write-Output '  -> FAIL after restart the java button wrongly carries accent pixels'
+  if ($statsC['sxclEditionJavaButton'].bandAccent -ne 0) {
+    Write-Output '  -> FAIL after restart the java button wrongly draws an accent line'
     $fail++
   }
 }
 
-# cross-run: the same button must look different when it is the selected one
+# cross-run: the same button must draw the accent line only when it is the selected one
 if ($statsA.Count -eq 2 -and $statsB.Count -eq 2) {
   foreach ($name in @('sxclEditionJavaButton', 'sxclEditionBedrockButton')) {
-    $a = $statsA[$name].ringBlue; $b = $statsB[$name].ringBlue
-    Write-Output ('  cross-run ' + $name + ': accentRingPx A=' + $a + ' B=' + $b)
-    if ($a -eq $b) { Write-Output ('  -> FAIL ' + $name + ' ring looks identical in both runs'); $fail++ }
+    $a = $statsA[$name].bandAccent; $b = $statsB[$name].bandAccent
+    Write-Output ('  cross-run ' + $name + ': indicator band accentPx A=' + $a + ' B=' + $b)
+    if ($a -eq $b) { Write-Output ('  -> FAIL ' + $name + ' indicator looks identical in both runs'); $fail++ }
   }
+}
+
+# ---- the sizing claim: both icons must come out the same visual height ----
+Write-Output 'sizing cross-check (each side measured while UNSELECTED):'
+Write-Output ('  cup  (' + $cupFootName + ', run A) footprint = ' + $cupFoot[0] + 'x' + $cupFoot[1] +
+              ' phys = ' + [math]::Round($cupFoot[0] / $dpr, 2) + 'x' + [math]::Round($cupFoot[1] / $dpr, 2) +
+              ' logical')
+Write-Output ('  LOGO (' + $logoFootName + ', run B) footprint = ' + $logoFoot[0] + 'x' + $logoFoot[1] +
+              ' phys = ' + [math]::Round($logoFoot[0] / $dpr, 2) + 'x' + [math]::Round($logoFoot[1] / $dpr, 2) +
+              ' logical ; asset canvas aspect 5.817 -> screen aspect ' +
+              [math]::Round($logoFoot[0] / [double]$logoFoot[1], 3))
+Write-Output ('  LOGO letters inside that canvas = ' + [math]::Round(100.0 * $logo.letterH / $logo.h, 1) +
+              '% of the height -> ' + [math]::Round($logoFoot[1] * $logo.letterH / [double]$logo.h / $dpr, 2) +
+              ' logical px tall on screen')
+if ([math]::Abs($cupFoot[1] - $logoFoot[1]) -gt 2) {
+  Write-Output ('  -> FAIL the two icons are not the same visual height (cup ' + $cupFoot[1] +
+                ' phys vs LOGO ' + $logoFoot[1] + ' phys)')
+  $fail++
+}
+if ($logoFoot[1] -lt 28 -or $logoFoot[1] -gt 32) {
+  Write-Output ('  -> FAIL LOGO footprint height ' + $logoFoot[1] + ' phys is not the expected 30 (20 logical)')
+  $fail++
+}
+if ($logoFoot[0] -lt 168 -or $logoFoot[0] -gt 180) {
+  Write-Output ('  -> FAIL LOGO footprint width ' + $logoFoot[0] + ' phys is not the expected 174 (116 logical)')
+  $fail++
+}
+$screenAspect = $logoFoot[0] / [double]$logoFoot[1]
+if ([math]::Abs($screenAspect - 5.817) / 5.817 -gt 0.10) {
+  Write-Output ('  -> FAIL the LOGO is not rendered at its own aspect (' + [math]::Round($screenAspect, 3) +
+                ' vs 5.817) -- it would be distorted or not the official art')
+  $fail++
+}
+if ($cupFoot[0] -lt 15 -or $cupFoot[1] -lt 25) {
+  Write-Output ('  -> FAIL cup footprint ' + $cupFoot[0] + 'x' + $cupFoot[1] + ' phys looks blank/too small')
+  $fail++
 }
 
 Write-Output 'both icons clickable: run A -> bedrock button, run B -> java button (product path button->click())'
 Write-Output 'icon sources (kept in sync with assets/icons/edition/NOTICE.md):'
 Write-Output '  java_logo.svg    <- https://raw.githubusercontent.com/devicons/devicon/master/icons/java/java-original.svg'
 Write-Output '                      (same bytes also at https://unpkg.com/devicon@latest/icons/java/java-original.svg ; sha256 7582E518A9C02425F97155E5A3BD39D1A3A7D421B78CAF9C8DF7443DAD3EDC5D)'
-Write-Output '  bedrock_logo.png <- D:\SilentStudio\AdbGUI\APK\Minecraft_1.26.40.5.apk : assets/assets/resource_packs/vanilla/textures/blocks/bedrock.png'
-Write-Output '                      (16x16 sha256 20CED86BA8CB89E29E2115F76C758278893E145575A73CA311BCC4305C140D04, scaled 4x nearest)'
+Write-Output '  bedrock_logo.png <- D:\SilentStudio\AdbGUI\APK\Minecraft_1.26.40.5.apk : assets/assets/resource_packs/vanilla/textures/ui/title.png'
+Write-Output '                      (1937x333 RGBA 86796 bytes, sha256 1AB368C3719A0FA0C273A0040BD5D3E8C47A9678B8DFF22A09AA1BF570781662 ; byte-identical copy)'
+Write-Output '  bedrock_block.png (spare, not used by the UI) <- same APK: assets/assets/resource_packs/vanilla/textures/blocks/bedrock.png'
 
 # the required banner says "luo pan yi zhi" (settings files agree) in Chinese; built from code
 # points so THIS FILE STAYS PURE ASCII while the printed line is the exact required wording.

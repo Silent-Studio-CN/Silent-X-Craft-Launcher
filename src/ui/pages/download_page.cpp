@@ -26,12 +26,16 @@
 //   用户 2026-09-26 原话:「我想要的是咖啡杯代表 Java,然后基岩版再找一个代表,
 //   点这两个所代表的图标,而不是一个按钮,非常诡异啊」。
 //   版面是 [图标 A] | [图标 B]:中间一条**竖直分隔线**,两颗图标各自可点;
-//   咖啡杯   = assets/icons/edition/java_logo.svg(官方 Java 咖啡杯:devicon 的 java-original,
-//              128x128 矢量,fill #0074BD —— 不再用原先那枚自绘的简化咖啡杯图标);
-//   基岩方块 = assets/icons/edition/bedrock_logo.png(官方基岩方块:用户本机基岩版 APK 里
-//              vanilla/textures/blocks/bedrock.png 的 4 倍最近邻放大,原样像素、未重绘)。
-//   两枚素材的下载/解包出处逐条写在 assets/icons/edition/NOTICE.md。
-//   选中态 = 主题令牌 accent(描边 + 淡底);分隔线 = 容器 paintEvent + QPen(令牌 separator, 0)
+//   咖啡杯     = assets/icons/edition/java_logo.svg(官方 Java 咖啡杯:devicon 的 java-original,
+//                128x128 矢量,fill #0074BD —— 不用任何自绘替代品);
+//   基岩版 LOGO = assets/icons/edition/bedrock_logo.png(用户本机基岩版 APK 里
+//                assets/assets/resource_packs/vanilla/textures/ui/title.png 的**官方 MINECRAFT
+//                标题 LOGO**,1937x333 RGBA,原样像素、未重绘;同一 APK 里扒出来的那枚 16x16
+//                基岩方块留作备用文件 bedrock_block.png,界面里不用它)。
+//   两枚素材的解包/下载出处与 sha256 逐条写在 assets/icons/edition/NOTICE.md。
+//   选中态 = 图标**下方**一条 2 逻辑像素的 accent 指示条(长度 = 图标宽度,距图标下缘 4 像素;
+//   用户点名不要"蓝色方框");整组在页脚里**水平居中**(前后各一个伸缩项);分隔线 = 容器
+//   paintEvent + QPen(令牌 separator, 0)
 //   —— 恒定 1 个**设备**像素,不是控件(docs/27 §12 第 1 条)。
 //   点选只写状态键 game.edition,不弹任何解释性弹窗(docs/27 §11.5 文字纪律);"还没接入"这件事
 //   只留在基岩版那枚图标的 tooltip 里(悬停才出现),折叠区/日志区也没有多余文案。
@@ -189,7 +193,7 @@ QWidget *createDownloadPage(QWidget *parent) {
     // 形态「非常诡异啊」:要的是**咖啡杯 / 基岩方块两个图标本身可点**。
     // 改后照 docs/27 §11「按钮最少化」+ §11.5「文字纪律」:
     //   * 动作给图标**(透明底,悬停一档提亮)**,文字只进 tooltip,不占版面、不写废话;
-    //   * 当前态用**主题令牌**表达(选中 = accent 描边 + accent 淡底,见 IconSelectButton);
+    //   * 当前态用**主题令牌**表达(选中 = 图标下方一条 2 逻辑像素的 accent 指示条);
     //   * 点选只做一件事:写 game.edition 并立即存盘(重启后记得住),不弹任何解释性弹窗。
     {
         auto *foot = new CardWidget(leftCol);
@@ -205,11 +209,19 @@ QWidget *createDownloadPage(QWidget *parent) {
         auto *javaBtn = new IconSelectButton(rowHost);
         javaBtn->setObjectName(QStringLiteral("sxclEditionJavaButton")); // dump/验收按它认这个钮
         javaBtn->setIconFile(QStringLiteral("java_logo.svg")); // 官方咖啡杯 = Java 版
+        // 视觉高度:绘制盒高 20 逻辑像素(杯子墨迹正好铺满这个盒 = 墨迹 20 逻辑像素高、
+        // 14.67 逻辑像素宽,实测见 tools/ui_edition_icons.ps1 的读数)
+        javaBtn->setIconHeight(20);
         javaBtn->setToolTip(QStringLiteral("Java 版"));
 
         auto *bedrockBtn = new IconSelectButton(rowHost);
         bedrockBtn->setObjectName(QStringLiteral("sxclEditionBedrockButton"));
-        bedrockBtn->setIconFile(QStringLiteral("bedrock_logo.png")); // 官方基岩方块 = 基岩版
+        bedrockBtn->setIconFile(QStringLiteral("bedrock_logo.png")); // 官方 MINECRAFT 标题 LOGO
+        // 视觉高度:LOGO 是 5.82:1 的宽幅图(原图 1937x333),所以这里给的是**绘制盒高度**,
+        // 宽度由控件按素材横纵比算(20 -> 116 逻辑像素)。给 20 = 与咖啡杯那枚同高:
+        // 两侧"墨迹外框"实测都是 30 物理像素高(20 逻辑像素 @dpr1.5),见验收脚本读数;
+        // LOGO 内部那 82% 高的字母墨迹因此落在 16.4 逻辑像素(24.6 物理),一并写在报告里。
+        bedrockBtn->setIconHeight(20);
         // 未接入这件事**只在这里说**(tooltip = 悬停才出现,不占版面);
         // 以前那条"基岩版还没接入"的 InfoBar 是弹在脸上的废话,已删。
         bedrockBtn->setToolTip(QStringLiteral("基岩版\n还没接入：下载与启动目前只有 Java 版"));
@@ -221,10 +233,13 @@ QWidget *createDownloadPage(QWidget *parent) {
         row->addWidget(bedrockBtn, 0, Qt::AlignVCenter);
         rowHost->setButtons(javaBtn, bedrockBtn);
 
-        // 页脚里**左对齐**:图标行靠左,剩下的横向空间留给伸缩项
+        // 页脚里**整组水平居中**(用户 2026-09-26 最终口径):前后各一个伸缩项,组里的两颗图标
+        // 之间有那条 1 设备像素的竖线。容器 #sxclEditionPickRow 的中心 = 页脚内容区的中心,
+        // 验收按 dump 里"组中心 x - 容器中心 x <= 1 逻辑像素"核对。
         auto *outer = new QHBoxLayout();
         outer->setContentsMargins(0, 0, 0, 0);
-        outer->addWidget(rowHost, 0, Qt::AlignLeft);
+        outer->addStretch(1);
+        outer->addWidget(rowHost, 0, Qt::AlignVCenter);
         outer->addStretch(1);
         fl->addLayout(outer);
 
