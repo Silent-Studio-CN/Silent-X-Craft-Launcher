@@ -63,6 +63,7 @@
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPainter>
 #include <QStackedWidget>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -77,6 +78,10 @@ namespace {
 const char *const kFolderPrefix = "folder:";
 const char *const kImportKey = "folder_import";
 
+// 当前版本那条指示条:贴着卡片左缘(卡片自己的描边在 x=1,所以从 2 起)、上下各留 12
+constexpr int kMarkX = 2;
+constexpr int kMarkInset = 12;
+
 QString normPath(const QString &path) {
     return QDir::cleanPath(QDir::fromNativeSeparators(path));
 }
@@ -88,6 +93,33 @@ bool samePath(const QString &a, const QString &b) {
     return normPath(a) == normPath(b);
 #endif
 }
+
+/* 当前版本 = **左侧那条强调色指示条**(用户 2026-09-26 口径:「用得着你告诉用户当前是什么」)。
+ *
+ * 形态与侧栏那条选中指示条是**同一套语言**(nav.cpp:144-174:3 逻辑像素宽、圆角 1.5、颜色取主题色),
+ * 不再写"当前版本"四个字、也不再往版本名后面缀"← 当前"(两处都删掉了)。
+ * 它**不占布局**(卡片里的行内容一个像素都不动),位置由 SelectPage::eventFilter 的 Resize 分支给。 */
+class CurrentVersionMark : public QWidget {
+public:
+    explicit CurrentVersionMark(QWidget *parent) : QWidget(parent) {
+        setAttribute(Qt::WA_TransparentForMouseEvents); // 点它 = 点这一行(整行仍然是"选它")
+        setObjectName(QStringLiteral("sxclCurrentVersionMark")); // 验收 dump 按它认这条指示条
+        setFixedWidth(kMarkWidth);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(ThemeBridge::instance().accent());
+        painter.drawRoundedRect(QRectF(rect()), kMarkRadius, kMarkRadius);
+    }
+
+private:
+    static constexpr int kMarkWidth = 3;
+    static constexpr qreal kMarkRadius = 1.5;
+};
 
 class SelectPage : public PageShell {
 public:
@@ -125,6 +157,15 @@ private:
             return PageShell::eventFilter(watched, event); // 齿轮自己的点击不进"整行选择"
         }
         switch (event->type()) {
+        case QEvent::Resize:
+            /* 当前版本那条指示条:卡片高度由内容与布局定(横向宽度也是自适应的),跟着量一次。
+             * 索引里没有 = 这一行不是当前版本,什么都不做。 */
+            if (CurrentVersionMark *mark = m_rowMarks.value(row, nullptr)) {
+                mark->setGeometry(kMarkX, kMarkInset, mark->width(),
+                                  qMax(0, row->height() - 2 * kMarkInset));
+                mark->raise();
+            }
+            break;
         case QEvent::Enter:
             if (gear != nullptr)
                 gear->setVisible(true);
@@ -401,6 +442,7 @@ private:
     }
 
     void clearVersionRows() {
+        m_rowMarks.clear(); // 卡片马上要被删:先撤掉指示条的登记,免得留下悬空指针
         while (QLayoutItem *item = m_listLay->takeAt(0)) {
             if (QWidget *widget = item->widget())
                 widget->deleteLater();
@@ -433,6 +475,7 @@ private:
         clearVersionRows();
         m_rowNames.clear();
         m_rowGears.clear();
+        m_rowMarks.clear();
         const QString shownName = shortName();
         const QString saved = selectedVersionName();
         const QColor secondary = pageTokenColor("textSecondary");
@@ -450,10 +493,9 @@ private:
                 text->setSpacing(2);
                 const QString name = inst.id;
                 const bool isCurrent = (name == saved);
-                QString titleText = name;
-                if (isCurrent)
-                    titleText += QStringLiteral("　← 当前");
-                auto *title = new BodyLabel(titleText, card);
+                /* 当前版本**不再加文字后缀**(用户 2026-09-26:不许再写一句"当前是什么")——
+                 * 它只由下面那条左侧强调色指示条表达。 */
+                auto *title = new BodyLabel(name, card);
                 {
                     QFont font = title->font();
                     font.setPixelSize(15);
@@ -493,9 +535,14 @@ private:
                 }
 
                 if (isCurrent) {
-                    auto *tag = new BodyLabel(QStringLiteral("当前版本"), card);
-                    tag->setTextColor(secondary, secondary);
-                    rowLay->addWidget(tag, 0, Qt::AlignVCenter);
+                    /* 当前版本:**只**留左侧那条强调色指示条(文字标签整条删掉 —— 用户原话
+                     * 「用得着你告诉用户当前是什么」)。几何在 eventFilter 的 Resize 分支里给,
+                     * 这里先按卡片的初始高度放一个位置,免得第一帧闪一下没有条。 */
+                    auto *mark = new CurrentVersionMark(card);
+                    mark->setGeometry(kMarkX, kMarkInset, mark->width(),
+                                      qMax(0, card->minimumHeight() - 2 * kMarkInset));
+                    mark->raise();
+                    m_rowMarks.insert(card, mark);
                 }
                 /* 悬停出现的**齿轮**(用户 2026-09-23:「改为单击版本就选择,悬停显示齿轮,进入版本设置」)。
                  * 以前这里是常显的「用这个」按钮:一屏全是按钮,而且它左边那颗图标在深浅主题下显示异常。
@@ -570,6 +617,7 @@ private:
     QWidget *m_lastActionAnchor = nullptr; // 弹窗要锚在用户点的那颗齿轮上
     QHash<QWidget *, QString> m_rowNames;  // 行 -> 版本名(整行单击用)
     QHash<QWidget *, NavToolButton *> m_rowGears; // 行 -> 那颗悬停齿轮
+    QHash<QWidget *, CurrentVersionMark *> m_rowMarks; // 行 -> 当前版本那条强调色指示条(只有当前版本有)
     QStackedWidget *m_stack = nullptr;
     QVBoxLayout *m_listLay = nullptr;
     BodyLabel *m_listHint = nullptr;

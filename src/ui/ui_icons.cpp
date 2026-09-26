@@ -41,20 +41,19 @@ qreal dpr() {
     return 1.0;
 }
 
-} // namespace
-
-QByteArray uiWarningSvg(const QColor &color) {
-    QFile file(uiIconPath(QStringLiteral("warning.svg")));
-    if (!file.open(QIODevice::ReadOnly))
+/** 读一份 assets/icons/ui/*.svg，把 currentColor 换成本次要用的颜色。 */
+QByteArray uiSvgBytes(const QString &file, const QColor &color) {
+    QFile handle(uiIconPath(file));
+    if (!handle.open(QIODevice::ReadOnly))
         return QByteArray();
-    QByteArray bytes = file.readAll();
+    QByteArray bytes = handle.readAll();
     const QByteArray hex = color.name(QColor::HexRgb).toLatin1();
     bytes.replace("currentColor", hex);
     return bytes;
 }
 
-QPixmap uiWarningPixmap(int size, const QColor &color) {
-    const QByteArray svg = uiWarningSvg(color);
+/** 把一份 SVG 按逻辑尺寸画成位图（DPR 参与，缩放后不糊）。 */
+QPixmap uiSvgPixmap(const QByteArray &svg, int size) {
     if (svg.isEmpty() || size <= 0)
         return QPixmap();
     const qreal scale = dpr();
@@ -66,6 +65,28 @@ QPixmap uiWarningPixmap(int size, const QColor &color) {
     p.setRenderHint(QPainter::Antialiasing, true);
     renderer.render(&p, QRectF(0, 0, size, size));
     return pm;
+}
+
+} // namespace
+
+QByteArray uiWarningSvg(const QColor &color) {
+    return uiSvgBytes(QStringLiteral("warning.svg"), color);
+}
+
+QPixmap uiWarningPixmap(int size, const QColor &color) {
+    return uiSvgPixmap(uiWarningSvg(color), size);
+}
+
+QByteArray uiCrossSvg(const QColor &color) {
+    return uiSvgBytes(QStringLiteral("cross.svg"), color);
+}
+
+QPixmap uiCrossPixmap(int size, const QColor &color) {
+    return uiSvgPixmap(uiCrossSvg(color), size);
+}
+
+QIcon uiCrossIcon(int size, const QColor &color) {
+    return QIcon(uiCrossPixmap(size, color));
 }
 
 QPixmap uiBedrockLogoPixmap(int height) {

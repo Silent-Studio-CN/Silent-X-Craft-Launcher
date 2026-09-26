@@ -240,7 +240,7 @@ private:
         titleLayout->addWidget(m_stageLabel);
         titleLayout->addStretch(1);
 
-        m_statusBadge = new BodyLabel(QStringLiteral("● 进行中"), card);      // :212
+        m_statusBadge = new BodyLabel(QStringLiteral("进行中"), card);      // :212
         m_statusBadge->setStyleSheet(QStringLiteral("color: %1; font-weight: 500;")
                                          .arg(FluentTheme::instance().tokenText(
                                              QStringLiteral("accent"))));      // :213
@@ -433,8 +433,8 @@ private:
                 // 现在按当前路由回读,切没切上如实报。
                 const QString now = host->currentRouteKey();
                 uiTrace(QStringLiteral("task | 点侧栏「任务」-> 当前路由=%1 %2")
-                            .arg(now, now == QLatin1String("tasks") ? QStringLiteral("✓ 已切到任务页")
-                                                                    : QStringLiteral("✗ 没切上")));
+                            .arg(now, now == QLatin1String("tasks") ? QStringLiteral("已切到任务页")
+                                                                    : QStringLiteral("没切上")));
             });
         }
     }
@@ -483,7 +483,7 @@ private:
         m_barState = QStringLiteral("running");
         m_progressBar->setValue(p.percent);                             // :343-345
         m_percentLabel->setText(QStringLiteral("%1%").arg(p.percent));
-        m_statusBadge->setText(QStringLiteral("● 进行中"));
+        m_statusBadge->setText(QStringLiteral("进行中"));
         styleProgress(m_barState);
 
         // 顶部大字:核心库给的中文阶段名(**永远非空**) + 在本计划里的位置
@@ -535,7 +535,7 @@ private:
             }
             m_progressBar->setValue(100);
             m_percentLabel->setText(QStringLiteral("100%"));
-            m_statusBadge->setText(QStringLiteral("✓ 完成"));
+            m_statusBadge->setText(QStringLiteral("完成"));
             m_stageLabel->setText(QStringLiteral("安装完成"));
             m_detailLabel->setText(detail.isEmpty() ? message : detail);
             callTaskState("setTaskDone");
@@ -551,7 +551,7 @@ private:
         styleProgress(m_barState);
         if (cancelled) {
             // **取消是独立终态**:界面必须说"已取消",不能显示成成功,也不该说成"失败"。
-            m_statusBadge->setText(QStringLiteral("⊘ 已取消"));
+            m_statusBadge->setText(QStringLiteral("已取消"));
             m_statusBadge->setStyleSheet(
                 QStringLiteral("color: %1; font-weight: 500;")
                     .arg(FluentTheme::instance().tokenText(QStringLiteral("warning"))));
@@ -576,7 +576,7 @@ private:
                 break;
             }
         }
-        m_statusBadge->setText(QStringLiteral("✗ 失败"));
+        m_statusBadge->setText(QStringLiteral("失败"));
         m_statusBadge->setStyleSheet(QStringLiteral("color: %1; font-weight: 500;")
                                          .arg(FluentTheme::instance().tokenText(
                                              QStringLiteral("danger"))));

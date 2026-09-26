@@ -24,6 +24,7 @@
 #include <QMetaObject>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPointer>
 #include <QPropertyAnimation>
 #include <QPushButton>
@@ -45,6 +46,7 @@
 #include "fluent/fluent_cards.h"
 #include "fluent/fluent_controls.h"
 #include "fluent/fluent_labels.h"
+#include "fluent/fluent_icon.h" // FluentIcon:段头那两枚图标(自绘 emoji 的替代)
 #include "fluent/fluent_input.h"
 #include "fluent/fluent_scroll.h"
 #if defined(_MSC_VER)
@@ -108,12 +110,76 @@ protected:
     }
 };
 
+/* 展开箭头(自绘):用户 2026-09-26 —— 界面里不许再拿 "▾ / ▴" 这类字符当图标
+ * (字号/字形/颜色全看字体,换台机器就不是这个样)。一个小 12x12 的折角,颜色取主题令牌。
+ * 朝向与原来那两个字符**逐个对应**:展开 = 朝上(点一下收起),收起 = 朝下。 */
+class ExpandChevron : public QWidget {
+public:
+    explicit ExpandChevron(QWidget *parent = nullptr) : QWidget(parent) { setFixedSize(12, 12); }
+
+    void setPointingUp(bool up) {
+        m_up = up;
+        update();
+    }
+    void setChevronColor(const QColor &color) {
+        m_color = color;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QPen pen(m_color, 1.5);
+        pen.setCapStyle(Qt::RoundCap);
+        pen.setJoinStyle(Qt::RoundJoin);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        const QRectF box = QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5);
+        QPainterPath path;
+        if (m_up) {
+            path.moveTo(box.left(), box.bottom());
+            path.lineTo(box.center().x(), box.top());
+            path.lineTo(box.right(), box.bottom());
+        } else {
+            path.moveTo(box.left(), box.top());
+            path.lineTo(box.center().x(), box.bottom());
+            path.lineTo(box.right(), box.top());
+        }
+        painter.drawPath(path);
+    }
+
+private:
+    QColor m_color;
+    bool m_up = false;
+};
+
+/* 段头小图标(16x16):把 libqf 主题图标(QIcon)画出来。
+ * 原来这里是 📝 / 🔧 两个 emoji(用户 2026-09-26:界面里不许再有 emoji)——
+ * 现在用 FluentIcon(EDIT = 起名字那件事;CONSTRACT = 装加载器那件事),颜色随主题。 */
+class SectionIcon : public QWidget {
+public:
+    explicit SectionIcon(const QIcon &icon, QWidget *parent = nullptr)
+        : QWidget(parent), m_icon(icon) {
+        setFixedSize(16, 16);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        m_icon.paint(&painter, rect());
+    }
+
+private:
+    QIcon m_icon;
+};
+
 // ───────────────────────── SectionCard(section_card.py:57-165)──────────────────────────
 
 class SectionCard : public QWidget {
 public:
-    SectionCard(const QString &title, const QString &icon, QWidget *parent)
-        : QWidget(parent), m_iconText(icon) {
+    SectionCard(const QString &title, const QIcon &icon, QWidget *parent)
+        : QWidget(parent) {
         setObjectName(QStringLiteral("SectionCard"));   // :71
         setAttribute(Qt::WA_StyledBackground, true);    // :72
 
@@ -129,15 +195,15 @@ public:
         head->setContentsMargins(14, 0, 14, 0);
         head->setSpacing(10);
 
-        // :88-95 —— icon 不在 ICON_KINDS 里就退化成 StrongBodyLabel(📝/🔧 走的就是这条)
-        head->addWidget(new StrongBodyLabel(m_iconText, m_header));
+        // :88-95 —— 图标位:主题图标(原来是 📝/🔧 两个 emoji,已换成 FluentIcon)
+        head->addWidget(new SectionIcon(icon, m_header));
         head->addWidget(new StrongBodyLabel(title, m_header)); // :97-98
         head->addStretch(1);                                   // :99
 
         m_summaryLabel = new BodyLabel(QString(), m_header);   // :101-103
         head->addWidget(m_summaryLabel);
 
-        m_arrowLabel = new BodyLabel(QStringLiteral("▾"), m_header); // :105-107
+        m_arrowLabel = new ExpandChevron(m_header); // :105-107(自绘折角,原来的 "▾" 字符已删)
         head->addWidget(m_arrowLabel);
         outer->addWidget(m_header);                            // :108
 
@@ -161,7 +227,7 @@ public:
     // 等待远大于 190ms,最终几何与"直接展开"完全相同(参考图就是这么来的)。
     void setExpanded(bool expanded, bool animate = true) {
         m_expanded = expanded;
-        m_arrowLabel->setText(m_expanded ? QStringLiteral("▴") : QStringLiteral("▾")); // :156
+        m_arrowLabel->setPointingUp(m_expanded); // :156(展开 = 朝上,与原来的 "▴" 逐字对应)
         if (m_expanded) {
             m_body->setVisible(true);
             if (animate) {
@@ -213,15 +279,14 @@ private:
         setStyleSheet(FluentTheme::instance().sectionCardQss());
         const QColor tertiary = FluentTheme::instance().tokens().textTertiary;
         m_summaryLabel->setTextColor(tertiary);
-        m_arrowLabel->setTextColor(tertiary);
+        m_arrowLabel->setChevronColor(tertiary);
     }
 
-    QString m_iconText;
     ClickableHeader *m_header = nullptr;
     QWidget *m_body = nullptr;
     QVBoxLayout *m_bodyLayout = nullptr;
     BodyLabel *m_summaryLabel = nullptr;
-    BodyLabel *m_arrowLabel = nullptr;
+    ExpandChevron *m_arrowLabel = nullptr;
     QPropertyAnimation *m_anim = nullptr;
     bool m_expanded = true; // section_card.py:73 self._expanded = True
 };
@@ -530,7 +595,7 @@ public:
         m_summary = new BodyLabel(QStringLiteral("加载中…"), m_header); // :188-190
         head->addWidget(m_summary);
 
-        m_arrow = new BodyLabel(QStringLiteral("▾"), m_header);       // :192-194
+        m_arrow = new ExpandChevron(m_header);                        // :192-194(自绘折角)
         head->addWidget(m_arrow);
         outer->addWidget(m_header);                                   // :196
 
@@ -602,7 +667,7 @@ public:
         } else {
             animateHeight(0);
         }
-        m_arrow->setText(m_expanded ? QStringLiteral("▴") : QStringLiteral("▾"));
+        m_arrow->setPointingUp(m_expanded);
         if (m_expanded) {
             for (LoaderRow *row : m_group) {
                 if (row->m_expanded)
@@ -762,7 +827,7 @@ private:
 
     void applyColors() {                                             // :408-411
         refreshSummaryColor();
-        m_arrow->setTextColor(FluentTheme::instance().tokens().textTertiary);
+        m_arrow->setChevronColor(FluentTheme::instance().tokens().textTertiary);
         m_hint->setTextColor(FluentTheme::instance().tokens().textTertiary);
     }
 
@@ -777,7 +842,7 @@ private:
     ClickableHeader *m_header = nullptr;
     QLabel *m_logo = nullptr;
     BodyLabel *m_summary = nullptr;
-    BodyLabel *m_arrow = nullptr;
+    ExpandChevron *m_arrow = nullptr;
     BodyLabel *m_hint = nullptr;
     QWidget *m_body = nullptr;
     SearchLineEdit *m_search = nullptr;
@@ -850,7 +915,9 @@ public:
 private:
     void buildContent() { // :153-246
         // ── 返回按钮(:155-164)──
-        auto *back = new QPushButton(QStringLiteral("←  返回版本列表"), m_view);
+        // 返回箭头:原来是 "←" 字符,现在用主题图标(RETURN)—— 文字只留"返回版本列表"
+        auto *back = new QPushButton(FluentIcon::qicon(FluentIcon::RETURN),
+                                     QStringLiteral("返回版本列表"), m_view);
         back->setCursor(Qt::PointingHandCursor);
         back->setStyleSheet(QStringLiteral(
                                 "QPushButton { border: none; color: %1; font-size: 13px;\n"
@@ -861,7 +928,8 @@ private:
         m_vBox->insertWidget(0, back);                          // :164
 
         // ── Section 1: 版本名称(:166-180)──
-        m_nameSection = new SectionCard(QStringLiteral("版本名称"), QStringLiteral("📝"), m_view);
+        m_nameSection = new SectionCard(QStringLiteral("版本名称"),
+                                        FluentIcon::qicon(FluentIcon::EDIT), m_view);
         m_nameInput = new QLineEdit(m_view);                    // :168
         m_nameInput->setPlaceholderText(QStringLiteral("输入自定义版本名称…")); // :169
         m_nameInput->setText(m_versionId);                      // :170
@@ -877,7 +945,8 @@ private:
         m_vBox->addWidget(m_nameSection);                                            // :180
 
         // ── Section 2: 模组加载器(:182-227)──
-        m_loaderSection = new SectionCard(QStringLiteral("模组加载器"), QStringLiteral("🔧"), m_view);
+        m_loaderSection = new SectionCard(QStringLiteral("模组加载器"),
+                                          FluentIcon::qicon(FluentIcon::CONSTRACT), m_view);
 
         const struct {
             const char *type;
@@ -1293,7 +1362,7 @@ private:
             return;
         const bool supported = ok && count > 0;
         const ThemeTokens &tokens = FluentTheme::instance().tokens();
-        m_optifineStatus->setText(supported ? QStringLiteral("✅ 支持") : QStringLiteral("—"));
+        m_optifineStatus->setText(supported ? QStringLiteral("支持") : QStringLiteral("—"));
         m_optifineStatus->setTextColor(supported ? tokens.success : tokens.textTertiary);
         uiTrace(QStringLiteral("【loader-ui | kind=optifine mc=%1 count=%2 status=%3】")
                     .arg(m_versionId, QString::number(count), m_optifineStatus->text()));

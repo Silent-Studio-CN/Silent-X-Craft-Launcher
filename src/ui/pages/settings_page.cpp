@@ -11,12 +11,16 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDir>
+#include <QEvent>
 #include <QFileDialog>
+#include <QFontMetrics>
 #include <QGuiApplication>
 #include <QInputDialog>
+#include <QLayout>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSizePolicy>
 #include <QStringList>
 #include <QFileInfo>
 #include <QFont>
@@ -945,7 +949,7 @@ public:
                 }
                 if (!anyUsable && !m_installations.isEmpty()) {
                     const JavaEntry &first = m_installations.first();
-                    m_statusLabel->setText(QStringLiteral("✗ 检测到 Java 但都用不了：%1")
+                    m_statusLabel->setText(QStringLiteral("检测到 Java 但都用不了：%1")
                                                .arg(first.verdictText));
                     m_statusLabel->setTextColor(QColor(0xfa, 0x8c, 0x16),
                                                 QColor(0xff, 0xa9, 0x40));
@@ -1001,16 +1005,16 @@ private:
     void updateStatus(const JavaEntry &entry) {
         const ThemeTokens &tokens = FluentTheme::instance().tokens();
         if (!entry.usable) { // 检测到但用不了:状态行说清结论 + 原因,别显示"✓ 兼容"骗人
-            m_statusLabel->setText(QStringLiteral("✗ %1：%2").arg(entry.verdictText, entry.reason));
+            m_statusLabel->setText(QStringLiteral("%1：%2").arg(entry.verdictText, entry.reason));
             m_statusLabel->setTextColor(tokens.danger);
             m_statusLabel->setToolTip(entry.hint);
             return;
         }
         if (entry.compatible) {
-            m_statusLabel->setText(QStringLiteral("✓ %1").arg(entry.compatibilityLabel));
+            m_statusLabel->setText(QStringLiteral("%1").arg(entry.compatibilityLabel));
             m_statusLabel->setTextColor(tokens.success);
         } else {
-            m_statusLabel->setText(QStringLiteral("✗ %1").arg(entry.compatibilityLabel));
+            m_statusLabel->setText(QStringLiteral("%1").arg(entry.compatibilityLabel));
             m_statusLabel->setTextColor(tokens.danger);
         }
     }
@@ -1243,7 +1247,7 @@ private:
                            const QString &javaPath) {
         m_downloadButton->setText(QStringLiteral("下载 Java"));
         if (ok) {
-            m_statusLabel->setText(QStringLiteral("✅ 已安装官方 JRE"));
+            m_statusLabel->setText(QStringLiteral("已安装官方 JRE"));
             m_statusLabel->setTextColor(QColor(0x52, 0xc4, 0x1a), QColor(0x73, 0xd1, 0x3d));
             refresh(javaPath); // :244 装完立刻选中它
             if (m_onSelection)
@@ -1254,7 +1258,7 @@ private:
             m_statusLabel->setText(QStringLiteral("已取消下载"));
             m_statusLabel->setTextColor(QColor(0xfa, 0x8c, 0x16), QColor(0xff, 0xa9, 0x40));
         } else {
-            m_statusLabel->setText(QStringLiteral("❌ %1").arg(detail.left(80)));
+            m_statusLabel->setText(QStringLiteral("%1").arg(detail.left(80)));
             m_statusLabel->setTextColor(QColor(0xff, 0x4d, 0x4f), QColor(0xff, 0x78, 0x75));
             UiErrorContext ctx;
             ctx.page = QStringLiteral("设置页 / settings");
@@ -1733,7 +1737,7 @@ private:
                            const QString &stage, const QString &indexUrl, int code) {
         m_downloadButton->setText(QStringLiteral("开始下载"));
         if (ok) {
-            m_statusLabel->setText(QStringLiteral("✅ 已装好：%1").arg(home));
+            m_statusLabel->setText(QStringLiteral("已装好：%1").arg(home));
             m_statusLabel->setTextColor(QColor(0x52, 0xc4, 0x1a), QColor(0x73, 0xd1, 0x3d));
             InfoBar::push(InfoBar::Type::Success, QStringLiteral("内置 JRE 安装完成"),
                           QStringLiteral("%1（版本 %2）").arg(home, detail), window(), 6000);
@@ -1741,7 +1745,7 @@ private:
             m_statusLabel->setText(QStringLiteral("已取消下载"));
             m_statusLabel->setTextColor(QColor(0xfa, 0x8c, 0x16), QColor(0xff, 0xa9, 0x40));
         } else {
-            m_statusLabel->setText(QStringLiteral("❌ %1").arg(detail.left(80)));
+            m_statusLabel->setText(QStringLiteral("%1").arg(detail.left(80)));
             m_statusLabel->setTextColor(QColor(0xff, 0x4d, 0x4f), QColor(0xff, 0x78, 0x75));
             // 统一错误出口:完整上下文进剪贴板 + 进运行日志(界面只显示原因的前 300 字)
             UiErrorContext ctx;
@@ -2068,6 +2072,118 @@ private:
     std::function<void(const QString &)> m_onSave;
 };
 
+// ───────────── 设置卡"跟着窗口自适应"(用户 2026-09-26 点名;别再回退)─────────────
+//
+// 用户原话:「左右默认大小下还能左右拖放,让你适配到自缩放不行吗」。
+// 根因(真机 dump,1100x750):视口 1051、内容 1081 —— 卡片里那两行文字是**不换行**的 QLabel,
+// 而 QLabel::minimumSizeHint() 就是"整行文字的宽度",于是
+//   "最长那行副标题 + 右侧一排控件" 直接把卡片最小宽度顶到 1025(内容 = 1025 + 左右各 28 页边距)
+// 就比视口宽了。libqf 的 SmoothScrollBar 按 `maximum() > 0` 决定显不显示
+// (fluent_scroll.cpp:264/312),横向条因此冒出来 —— 用户看到的就是"能左右拖"。
+//
+// 三条硬要求(**这三条踩过,别再犯**):
+//   1. **绝不换行**:卡片高度是固定值(50/70/96/100/106),开 wordWrap 的后果是副标题被挤成
+//      两行、与标题叠在一起;
+//   2. **文字绝不消失**:只把横向策略改成 Ignored 会让布局把这一列压到 0 宽(左边字没了),
+//      所以同时给一个**显式最小宽度** kCardLabelMinWidth —— 布局再挤也留这么多;
+//   3. **装不下就省略号**:ElidedLabelFilter 在 resize 时按当前宽度重写文案(Qt::ElideRight),
+//      宽度够时**一字不改**。
+// 另外把"标题列"的拉伸因子抬到 1、这一列里的其余弹簧归零:多余宽度全给文字列,所以
+// 宽屏显示整句、窄屏才省略;右侧控件仍钉在自己的最小宽度上(观感与改动前一致)。
+constexpr int kCardLabelMinWidth = 160;
+
+/** 单个标签的"单行 + 省略号"守门人:resize 时按当前宽度重写文案。
+ *  文案会被外部改(游戏目录 / Java 状态 / 账户状态都会 setContent),所以这里认"我们上次写进去的
+ *  那一版" —— 当前文本与它不一致 = 外部刚 setText 了新文案,把它记成新的"完整版"。 */
+class ElidedLabelFilter : public QObject {
+public:
+    explicit ElidedLabelFilter(QLabel *label) : QObject(label), m_label(label) {
+        label->installEventFilter(this); // 挂上才收得到 resize(父对象关系不管事件)
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (event->type() == QEvent::Resize || event->type() == QEvent::Show)
+            apply();
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    void apply() {
+        if (m_busy || m_label == nullptr)
+            return;
+        const QString current = m_label->text();
+        if (current != m_shown)
+            m_full = current; // 外部 setText 了新文案
+        const int available = m_label->width();
+        if (available <= 0 || m_full.isEmpty()) {
+            m_shown.clear();
+            return;
+        }
+        const QString shown = QFontMetrics(m_label->font()).elidedText(m_full, Qt::ElideRight, available);
+        m_shown = shown;
+        if (shown == current)
+            return;
+        m_busy = true;
+        m_label->setText(shown); // 只有真的变了才写回,避免与布局互相触发
+        m_busy = false;
+    }
+
+    QLabel *m_label = nullptr;
+    QString m_full;  // 完整文案
+    QString m_shown; // 我们最后写进去的那一版(用来区分"外部改的"与"我们改的")
+    bool m_busy = false;
+};
+
+/** 一张设置卡:标题/副标题两行文字可压缩 + 省略号,多余宽度给这两行。 */
+void makeSettingCardFit(SettingCard *card) {
+    QHBoxLayout *row = card->hBox();
+    if (row == nullptr)
+        return;
+    /* SettingCard 的构造顺序固定:先标题 QLabel、再副标题 QLabel(fluent_setting_cards.cpp:59-61),
+     * findChildren 按创建顺序返回,所以 first() 就是标题行。 */
+    const QList<QLabel *> labels = card->findChildren<QLabel *>(QString(), Qt::FindDirectChildrenOnly);
+    QLayout *titleColumn = nullptr;
+    if (!labels.isEmpty()) {
+        for (int i = 0; i < row->count() && titleColumn == nullptr; ++i) {
+            QLayout *nested = row->itemAt(i)->layout();
+            if (nested != nullptr && nested->indexOf(labels.first()) >= 0)
+                titleColumn = nested;
+        }
+    }
+    if (titleColumn == nullptr)
+        return;
+    for (QLabel *label : labels) {
+        /* **只碰标题列里那两行**:状态行/提示行有自己的嵌套列与对齐(例如"用内置默认…"那行
+         * 是右对齐的),对它们改策略会把右边的字挤没。 */
+        if (titleColumn->indexOf(label) < 0)
+            continue;
+        label->setWordWrap(false);                        // ① 不换行
+        label->setMinimumWidth(kCardLabelMinWidth);       // ② 文字不消失
+        QSizePolicy policy = label->sizePolicy();
+        policy.setHorizontalPolicy(QSizePolicy::Ignored); // ③ sizeHint 不再当最小宽度
+        label->setSizePolicy(policy);
+        new ElidedLabelFilter(label);
+    }
+    /* 让这两行**吃满整列宽**(不按"文字宽"定位):否则标签宽 = 上次省略后的宽度,
+     * 窗口再放大也回不到整句 —— 省略号只该在真的装不下时出现。 */
+    for (int i = 0; i < titleColumn->count(); ++i) {
+        if (QWidget *widget = titleColumn->itemAt(i)->widget())
+            titleColumn->setAlignment(widget, Qt::Alignment());
+    }
+    /* 多余宽度全给标题列:弹簧(以及子类自己加的弹簧)一律归零 —— 与改动前的观感一致
+     * (右侧控件本来就钉在自己的最小宽度上,多的宽度以前给弹簧,现在给文字列)。 */
+    for (int i = 0; i < row->count(); ++i) {
+        QLayoutItem *item = row->itemAt(i);
+        if (item->layout() == titleColumn) {
+            row->setStretch(i, 1);
+            continue;
+        }
+        if (item->layout() == nullptr && item->widget() == nullptr)
+            row->setStretch(i, 0);
+    }
+}
+
 // ─────────────────────────── 页面本体 ───────────────────────────
 
 class SettingsPage : public ScrollArea {
@@ -2240,6 +2356,13 @@ SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
 
     buildContent();
     bindEvents();
+
+    /* 自适应:必须在**卡片全部建完**之后跑一遍(见 makeSettingCardFit 的说明)。
+     * 卡片文案以后还会变(游戏目录/Java 状态/账户状态),省略号由 ElidedLabelFilter
+     * 在每次 resize 时自己重算,这里不用再管。 */
+    const QList<SettingCard *> cards = findChildren<SettingCard *>();
+    for (SettingCard *card : cards)
+        makeSettingCardFit(card);
 }
 
 void SettingsPage::refreshPageBackground() {
@@ -2464,7 +2587,7 @@ void SettingsPage::buildContent() {
     m_skipFileCheckCard = new SwitchSettingCard(
         FluentIcon::qicon(FluentIcon::CERTIFICATE), QStringLiteral("关闭文件校验"),
         QStringLiteral("启动前补全时「存在就算过」：不比对大小与哈希、也不补资源文件。"
-                       "代价是文件坏了不会被发现（PCL 同名开关同口径，默认关）"),
+                       "代价是文件坏了不会被发现（默认关）"),
         m_store.flag(kKeySkipFileCheck, false), gameGroup);
     m_assetsLevelCard = new ComboBoxSettingCard(
         FluentIcon::qicon(FluentIcon::UPDATE), QStringLiteral("启动前补全资源"),

@@ -1097,7 +1097,8 @@ QWidget *createKeymapPage(QWidget *parent) {
         const QStringList errors = layout.validate();
         const QVector<KConflict> conflicts = layout.conflicts();
         for (const QString &message : errors) {
-            auto *item = new QListWidgetItem(QStringLiteral("✗ ") + message);
+            // 错误行:以前是 "✗ " 这个字符 + 红字,现在用**自绘 svg 叉号**(ui_icons),颜色取 danger
+            auto *item = new QListWidgetItem(uiCrossIcon(16, danger), message);
             item->setForeground(QBrush(danger));
             conflictList->addItem(item);
         }
@@ -1111,7 +1112,7 @@ QWidget *createKeymapPage(QWidget *parent) {
         }
         if (errors.isEmpty() && conflicts.isEmpty())
             conflictList->addItem(
-                new QListWidgetItem(QString::fromUtf8("✓ 没有发现问题，可以直接用")));
+                new QListWidgetItem(QString::fromUtf8("没有发现问题，可以直接用")));
 
         guideList->clear();
         for (const KGuideStep &step : buildGuide(layout)) {
@@ -1294,7 +1295,7 @@ QWidget *createKeymapPage(QWidget *parent) {
             sxcl_keymap_layout_free(&core);
             if (errors > 0) {
                 InfoBar::push(InfoBar::Type::Warning, QString::fromUtf8("这份布局还有问题"),
-                              QString::fromUtf8("有 %1 处 ✗（见左边冲突检查），手机端也会照单全收")
+                              QString::fromUtf8("有 %1 处问题（见左边冲突检查），手机端也会照单全收")
                                   .arg(errors),
                               page, 4000);
             }

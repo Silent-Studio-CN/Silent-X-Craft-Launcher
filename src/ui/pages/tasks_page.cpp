@@ -9,6 +9,9 @@
 #include <QEnterEvent>
 #include <QHBoxLayout>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPen>
 #include <QPushButton>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -52,7 +55,10 @@ QString tokenQss(const QString &name) {
 
 // ──────────────────────────────────────────────────────────────── _StatusIcon
 
-// tasks_page.py:40-96 —— 任务状态图标:进行中 = 转轮,完成 = ✓,失败 = ✕
+// tasks_page.py:40-96 —— 任务状态图标:进行中 = 转圈,完成 = 对勾,失败 = 叉。
+// **三个状态全部自绘**(用户 2026-09-22 与 09-26 两次点名:「emoji 去掉,改成 svg」)——
+// 以前这里用 "⠋⠙⠹…" 盲文转轮和 "✓/✕" 两个字符:它们落到哪个字体由系统决定,
+// 大小 / 颜色 / 基线都不受控(在别的机器上就是 emoji 的观感)。颜色仍取主题令牌。
 class TaskStatusIcon : public QWidget {
     Q_OBJECT
 public:
@@ -60,18 +66,11 @@ public:
 
     explicit TaskStatusIcon(QWidget *parent = nullptr) : QWidget(parent) {
         setFixedSize(24, 24);
-        m_label = new BodyLabel(QStringLiteral("⠋"), this);
-        m_label->setAlignment(Qt::AlignCenter);
-        m_label->setStyleSheet(QStringLiteral("font-size: 16px;"));
-        auto *layout = new QHBoxLayout(this);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->addWidget(m_label);
         m_timer = new QTimer(this);
         m_timer->setInterval(120);
         connect(m_timer, &QTimer::timeout, this, &TaskStatusIcon::tick);
-        connect(&FluentTheme::instance(), &FluentTheme::changed, this,
-                [this] { refreshTheme(); });
-        refreshTheme();
+        connect(&FluentTheme::instance(), &FluentTheme::changed, this, [this] { update(); });
+        m_timer->start();
     }
 
     void setState(int state) {
@@ -79,66 +78,56 @@ public:
         if (state == Running) {
             m_timer->start();
             setCursor(Qt::ArrowCursor);
-        } else if (state == Done) {
+        } else {
             m_timer->stop();
-            m_label->setText(QStringLiteral("✓"));
-            setCursor(Qt::ArrowCursor);
-        } else if (state == Failed) {
-            m_timer->stop();
-            m_label->setText(QStringLiteral("✕"));
-            setCursor(Qt::PointingHandCursor);
+            setCursor(state == Failed ? Qt::PointingHandCursor : Qt::ArrowCursor);
         }
-        refreshTheme();
+        update(); // 状态变了立刻重画,不等下一帧
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QRectF box = QRectF(rect()).adjusted(3.5, 3.5, -3.5, -3.5);
+        if (m_state == Running) { // 转圈:每 tick 转 30°,画 3/4 圈
+            QPen pen(FluentTheme::instance().accent(), 2.0);
+            pen.setCapStyle(Qt::RoundCap);
+            painter.setPen(pen);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawArc(box, m_spin * 30 * 16, 270 * 16);
+            return;
+        }
+        const ThemeTokens &tokens = FluentTheme::instance().tokens();
+        QPen pen(m_state == Failed ? tokens.danger : tokens.success, 2.0);
+        pen.setCapStyle(Qt::RoundCap);
+        pen.setJoinStyle(Qt::RoundJoin);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        QPainterPath path; // 完成 = 对勾;失败 = 叉
+        if (m_state == Failed) {
+            path.moveTo(box.left(), box.top());
+            path.lineTo(box.right(), box.bottom());
+            path.moveTo(box.right(), box.top());
+            path.lineTo(box.left(), box.bottom());
+        } else {
+            path.moveTo(box.left(), box.center().y() + 1.0);
+            path.lineTo(box.center().x() - 1.0, box.bottom());
+            path.lineTo(box.right(), box.top());
+        }
+        painter.drawPath(path);
     }
 
 private:
-    void tick() { // tasks_page.py:94-96
-        m_spin = (m_spin + 1) % kSpinChars.size();
-        m_label->setText(kSpinChars.at(m_spin));
+    void tick() { // tasks_page.py:94-96(帧推进;这里推的是自绘弧的角度)
+        m_spin = (m_spin + 1) % 12;
+        update();
     }
 
-    void refreshTheme() { // tasks_page.py:66-77
-        QString color;
-        QString weight;
-        QString text;
-        switch (m_state) {
-        case Done:
-            text = QStringLiteral("✓");
-            color = tokenCss(QStringLiteral("success"));
-            weight = QStringLiteral("bold");
-            break;
-        case Failed:
-            text = QStringLiteral("✕");
-            color = tokenCss(QStringLiteral("danger"));
-            weight = QStringLiteral("bold");
-            break;
-        default:
-            text = QStringLiteral("⠋");
-            color = tokenCss(QStringLiteral("accent"));
-            weight = QStringLiteral("normal");
-            break;
-        }
-        // 进行中时不覆盖转轮当前帧(与 Python 的 "if state != RUNNING and text not in (✓,✕)" 同义)
-        if (m_state != Running && m_label->text() != QStringLiteral("✓") &&
-            m_label->text() != QStringLiteral("✕"))
-            m_label->setText(text);
-        else if (m_state == Running && m_label->text().isEmpty())
-            m_label->setText(text);
-        m_label->setStyleSheet(QStringLiteral("color: %1; font-size: 16px; font-weight: %2;")
-                                   .arg(color, weight));
-    }
-
-    static const QStringList kSpinChars; // tasks_page.py:55
-    BodyLabel *m_label = nullptr;
     QTimer *m_timer = nullptr;
     int m_state = Running;
     int m_spin = 0;
 };
-
-const QStringList TaskStatusIcon::kSpinChars = {
-    QStringLiteral("⠋"), QStringLiteral("⠙"), QStringLiteral("⠹"), QStringLiteral("⠸"),
-    QStringLiteral("⠼"), QStringLiteral("⠴"), QStringLiteral("⠦"), QStringLiteral("⠧"),
-    QStringLiteral("⠇"), QStringLiteral("⠏")};
 
 // ──────────────────────────────────────────────────────────────── _DeleteBtn
 

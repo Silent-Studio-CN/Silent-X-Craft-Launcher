@@ -21,7 +21,12 @@
 #include <QApplication>
 #include <QCursor>
 #include <QEasingCurve>
+#include <QIcon>
 #include <QLabel>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPen>
+#include <QPixmap>
 #include <QPropertyAnimation>
 #include <QTimer>
 #include <QToolButton>
@@ -51,6 +56,39 @@ const Tokens kLight{"#f6f6f8", "#eeeef1", "#ffffff", "#f0f0f4", "#16161a",
                     "#5c5c66", "#0f6cbd", "#e2e2e8"};
 
 bool g_dark = true;
+
+/* ── 标题行那两枚小图标:**自绘**(用户 2026-09-26:界面里不许再拿 "☰ / ◐" 这类字符当图标 ——
+ *    它们最终由系统字体决定字形,大小/颜色/基线都不受控)。颜色取当前主题的文字令牌,
+ *    与原来那条 QSS 里给字符上色的令牌是同一个(t.text2)。 ── */
+QPixmap ui2Glyph(int size, const QColor &color, bool hamburger) {
+    const qreal scale = 2.0; // 小图标按 2x 画,缩放屏上也清楚
+    QPixmap pm(int(size * scale), int(size * scale));
+    pm.setDevicePixelRatio(scale);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    QPen pen(color, 1.6);
+    pen.setCapStyle(Qt::RoundCap);
+    p.setPen(pen);
+    if (hamburger) { // 三横
+        for (int i = 0; i < 3; ++i) {
+            const qreal y = size * (0.28 + 0.22 * i);
+            p.drawLine(QPointF(size * 0.22, y), QPointF(size * 0.78, y));
+        }
+        return pm;
+    }
+    // 主题切换:一个"半明半暗"的圆(与原来的 "◐" 同义)
+    const QRectF box(size * 0.2, size * 0.2, size * 0.6, size * 0.6);
+    p.drawEllipse(box);
+    QPainterPath half;
+    half.moveTo(box.center().x(), box.top());
+    half.arcTo(box, 90, -180);
+    half.closeSubpath();
+    p.setPen(Qt::NoPen);
+    p.setBrush(color);
+    p.drawPath(half);
+    return pm;
+}
 
 /* ── 全站唯一曲线表(§10.2.1 第 2 条:页面只写语义名) ── */
 QEasingCurve ease(const char *name) {
@@ -111,7 +149,8 @@ public:
         hl->setSpacing(10);
         auto *burger = new QToolButton(head);
         burger->setObjectName(QStringLiteral("sxcl2Hamburger"));
-        burger->setText(QStringLiteral("☰"));
+        burger->setIconSize(QSize(18, 18));
+        m_burger = burger;
         burger->setFixedSize(28, 28);
         burger->setCursor(Qt::PointingHandCursor);
         connect(burger, &QToolButton::clicked, this, [this] { toggleSub(); });
@@ -125,7 +164,8 @@ public:
         hl->addStretch(1);
         auto *theme = new QToolButton(head);
         theme->setObjectName(QStringLiteral("sxcl2Hamburger"));
-        theme->setText(QStringLiteral("◐"));
+        theme->setIconSize(QSize(18, 18));
+        m_themeButton = theme;
         theme->setFixedSize(28, 28);
         theme->setCursor(Qt::PointingHandCursor);
         connect(theme, &QToolButton::clicked, this, [this] {
@@ -250,9 +290,22 @@ private:
 
     void applyTheme() {
         setStyleSheet(qss());     // 唯一一处样式入口
+        refreshIcons();           // 图标颜色也跟主题(自绘,不吃 QSS 的 color)
         update();
     }
 
+    /** 标题行两枚自绘图标按当前主题重画(t.text2 = 原来 QSS 给那两个字符上的色)。 */
+    void refreshIcons() {
+        const Tokens &t = g_dark ? kDark : kLight;
+        const QColor color(QString::fromLatin1(t.text2));
+        if (m_burger != nullptr)
+            m_burger->setIcon(QIcon(ui2Glyph(18, color, true)));
+        if (m_themeButton != nullptr)
+            m_themeButton->setIcon(QIcon(ui2Glyph(18, color, false)));
+    }
+
+    QToolButton *m_burger = nullptr;
+    QToolButton *m_themeButton = nullptr;
     QWidget *m_sub = nullptr;
     QLabel *m_subTitle = nullptr;
     QLabel *m_contentTitle = nullptr;

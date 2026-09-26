@@ -1216,8 +1216,14 @@ sxcl::ui::MainWindow window;
             if (qEnvironmentVariableIntValue("SXCL_UI_DUMP") == 1) {
                 // 深度 6:页面 → 视口 → view → 分组 → 卡片 → 卡片里的标签/按钮
                 // (少了这一层就只能看到卡片本身,看不到卡片上的文字 —— 实测踩过)
+                // SXCL_UI_DUMP_DEPTH=<n>:有些页层级更深(版本选择页"一行一个版本"里的
+                // 自绘指示条在卡片里面),按需加深。不设 = 6,既有脚本的读数逐字不变。
+                const int dumpDepthEnv = qEnvironmentVariableIntValue("SXCL_UI_DUMP_DEPTH");
+                const int dumpDepth = dumpDepthEnv > 0 ? dumpDepthEnv : 6;
                 std::fprintf(stderr, "[sxcl-ui] 控件树 dump(当前页面):\n");
-                dumpWidgetTree(window.pageStack()->currentWidget(), 6);
+                if (dumpDepth != 6)
+                    std::fprintf(stderr, "[sxcl-ui] dump 深度=%d(SXCL_UI_DUMP_DEPTH)\n", dumpDepth);
+                dumpWidgetTree(window.pageStack()->currentWidget(), dumpDepth);
                 if (auto *dialog = window.findChild<sxcl::ui::AuthLoginDialog *>()) {
                     if (dialog->isVisible()) {
                         std::fprintf(stderr, "[sxcl-ui] 控件树 dump(登录对话框):\n");

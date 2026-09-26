@@ -5,6 +5,7 @@
  */
 
 #include "page_factory.h"
+#include "../ui_icons.h" // 自绘 svg 小图标（警示图；原来那个 emoji 的替代）
 
 #include "fluent_theme.h"
 #include "libqf.h"
@@ -23,6 +24,7 @@
 #endif
 
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -85,7 +87,7 @@ QColor tokenColor(const char *name) { return ThemeBridge::instance().token(QLati
 // Python :151-153 _not_ready():InfoBar.info(..., TOP, isClosable=True, duration=2500)
 void notReady(QWidget *host) {
     InfoBar::push(InfoBar::Type::Info, QString::fromUtf8("还没上线"),
-                  QString::fromUtf8("联机功能在开发中，先把位置占住 😄"), host, 2500);
+                  QString::fromUtf8("联机功能在开发中，先把位置占住"), host, 2500);
 }
 
 // ---------------------------------------------------------------- _status_card
@@ -96,11 +98,22 @@ CardWidget *buildStatusCard(QWidget *parent) {
     layout->setContentsMargins(20, 16, 20, 16);             // :73
     layout->setSpacing(6);                                  // :74
 
-    auto *title = new StrongBodyLabel(QString::fromUtf8("🚧 联机功能正在开发"), card); // :76
+    /* "🚧" 换成**自绘 svg 警示图**(ui_icons;用户 2026-09-26:界面里不许再有 emoji):
+     * 图标与文字并排,颜色都取 warning 令牌 —— 与原来那个字符表达的是同一件事。 */
+    auto *titleRow = new QHBoxLayout();
+    titleRow->setContentsMargins(0, 0, 0, 0);
+    titleRow->setSpacing(6);
+    auto *warn = new QLabel(card);
+    warn->setFixedSize(15, 15);
+    warn->setPixmap(uiWarningPixmap(15, tokenColor("warning")));
+    titleRow->addWidget(warn);
+    auto *title = new StrongBodyLabel(QString::fromUtf8("联机功能正在开发"), card); // :76
     // Python :77 title.setStyleSheet(f"color: {token('warning')}; font-size: 15px;")
     title->setStyleSheet(QStringLiteral("color: %1; font-size: 15px;")
                              .arg(tokenText("warning")));
-    layout->addWidget(title);                               // :78
+    titleRow->addWidget(title);
+    titleRow->addStretch(1);
+    layout->addLayout(titleRow);                            // :78
 
     auto *body = new BodyLabel(
         QString::fromUtf8("第一版会做的四件事：\n"

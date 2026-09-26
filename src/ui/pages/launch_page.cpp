@@ -196,7 +196,7 @@ private:
         m_phaseLabel = new StrongBodyLabel(QStringLiteral("准备启动"), card); // :541
         titleRow->addWidget(m_phaseLabel);
         titleRow->addStretch(1);
-        m_statusBadge = new BodyLabel(QStringLiteral("● 准备中"), card);      // :544
+        m_statusBadge = new BodyLabel(QStringLiteral("准备中"), card);      // :544
         titleRow->addWidget(m_statusBadge);
         layout->addLayout(titleRow);
 
@@ -522,7 +522,7 @@ private:
         const int percent = total > 0 ? int((double(index) / double(total)) * 100.0) : 0;
         m_progressBar->setValue(percent);
         m_barState = QStringLiteral("running");
-        m_statusBadge->setText(QStringLiteral("● 进行中"));
+        m_statusBadge->setText(QStringLiteral("进行中"));
         applyThemeStyles();
         updateTaskCard(percent, QStringLiteral("%1%").arg(percent), name);
     }
@@ -658,7 +658,7 @@ private:
             applyThemeStyles();
             m_progressBar->setValue(100);
             m_phaseLabel->setText(QStringLiteral("准备完成（未起进程）"));
-            m_statusBadge->setText(QStringLiteral("✓ 已准备"));
+            m_statusBadge->setText(QStringLiteral("已准备"));
             m_logOutput->setText(detail.left(80));
             m_logView->appendPlainText(QStringLiteral("[info] %1").arg(message));
             callTaskState("setTaskDone");
@@ -677,7 +677,7 @@ private:
             applyThemeStyles();
             m_progressBar->setValue(100);
             m_phaseLabel->setText(QStringLiteral("游戏已退出"));
-            m_statusBadge->setText(QStringLiteral("✓ 退出码 0"));
+            m_statusBadge->setText(QStringLiteral("退出码 0"));
             m_logOutput->setText(QStringLiteral("退出码 0 | %1").arg(detail).left(80));
             m_logView->appendPlainText(QStringLiteral("[info] 游戏已退出(退出码 0)"));
             callTaskState("setTaskDone");
@@ -690,7 +690,7 @@ private:
         m_barState = QStringLiteral("failed");
         applyThemeStyles();
         if (cancelled) {
-            m_statusBadge->setText(QStringLiteral("⊘ 已取消"));
+            m_statusBadge->setText(QStringLiteral("已取消"));
             m_statusBadge->setStyleSheet(
                 QStringLiteral("color: %1; font-weight: 500;")
                     .arg(FluentTheme::instance().tokenText(QStringLiteral("warning"))));
@@ -712,7 +712,7 @@ private:
                 break;
             }
         }
-        m_statusBadge->setText(QStringLiteral("✗ 失败"));
+        m_statusBadge->setText(QStringLiteral("失败"));
         m_statusBadge->setStyleSheet(QStringLiteral("color: %1; font-weight: 500;")
                                          .arg(FluentTheme::instance().tokenText(
                                              QStringLiteral("danger"))));
@@ -758,7 +758,7 @@ private:
         applyThemeStyles();
         m_progressBar->setValue(40);
         m_phaseLabel->setText(QStringLiteral("启动游戏进程（正版身份）"));
-        m_statusBadge->setText(QStringLiteral("● 正版启动中"));
+        m_statusBadge->setText(QStringLiteral("正版启动中"));
         m_logView->appendPlainText(QStringLiteral(
             "[info] 准备完成。正版身份交给账户入口执行:access_token 由账户模块从加密存储读取后"
             "直接交给核心库启动层,不经过启动页(所以上面命令行是离线形态,已打码)。"));
@@ -779,7 +779,7 @@ private:
         m_barState = QStringLiteral("failed");
         applyThemeStyles();
         m_phaseLabel->setText(QStringLiteral("正版启动入口拒绝启动"));
-        m_statusBadge->setText(QStringLiteral("✗ 失败"));
+        m_statusBadge->setText(QStringLiteral("失败"));
         m_logView->appendPlainText(
             QStringLiteral("[error] startAccountLaunch 返回空(参数不合法:目录/版本/Java 路径)"));
         callTaskState("setTaskFailed");
@@ -806,7 +806,7 @@ private:
             }
             m_progressBar->setValue(100);
             m_phaseLabel->setText(QStringLiteral("游戏已退出"));
-            m_statusBadge->setText(QStringLiteral("✓ 退出码 0"));
+            m_statusBadge->setText(QStringLiteral("退出码 0"));
             m_logView->appendPlainText(QStringLiteral("[info] %1 · %2").arg(title, detail));
             callTaskState("setTaskDone");
             InfoBar::push(InfoBar::Type::Success, title, detail, this, 5000);
@@ -822,7 +822,7 @@ private:
             }
         }
         m_phaseLabel->setText(title.left(40));
-        m_statusBadge->setText(QStringLiteral("✗ 失败"));
+        m_statusBadge->setText(QStringLiteral("失败"));
         m_logView->appendPlainText(QStringLiteral("[error] %1 · %2").arg(title, detail));
         callTaskState("setTaskFailed");
         updateTaskCard(m_progressBar->value(), QStringLiteral("失败"), title);
@@ -841,7 +841,7 @@ private:
     void onProcessStarted(qint64 pid) {
         m_gamePid = pid;
         m_phaseLabel->setText(QStringLiteral("等待游戏窗口"));
-        m_statusBadge->setText(QStringLiteral("● 运行中 · PID %1").arg(pid));
+        m_statusBadge->setText(QStringLiteral("运行中 · PID %1").arg(pid));
         m_logView->appendPlainText(
             QStringLiteral("[info] 游戏进程已启动：PID %1（独立进程；结束游戏不会退出启动器）").arg(pid));
         uiTrace(QStringLiteral("launch | 界面收到 pid=%1").arg(pid));
@@ -861,7 +861,7 @@ private:
         m_finished = true;
         m_needInstall = true;
         m_phaseLabel->setText(QStringLiteral("这个版本还没安装"));
-        m_statusBadge->setText(QStringLiteral("⊘ 未安装"));
+        m_statusBadge->setText(QStringLiteral("未安装"));
         m_barState = QStringLiteral("failed");
         applyThemeStyles();
         m_logView->appendPlainText(
