@@ -38,6 +38,8 @@ set(SXCL_UI_SOURCES
   pages/mods_page.cpp
   # 启动器**自己**崩了要留现场(用户报"切主题色直接崩"时我们手上什么都没有,见 crash_handler.h)
   crash_handler.cpp        crash_handler.h
+  # 新界面(docs/27):M1 外壳 + 令牌/QSS + 折叠动画。老界面一行不删,SXCL_UI2=1 切换。
+  ui2/ui2.cpp              ui2/ui2.h
   # 工作线程层(阶段 7:下载->安装->启动 的界面接线)
   #   ui_paths.*       界面层共用的运行期取值(游戏目录/设置文件/内存/进度追踪)
   #   install_worker.* 把阻塞的 sxcl_install_run 放工作线程,阶段/进度/速度/取消回填 UI
