@@ -1018,14 +1018,14 @@ int sxcl_instance_read_pcl_setup(const char *game_dir, const char *instance_id,
         return SXCL_INSTANCE_ERR_ARG;
     }
     if (!sxcl_fs_exists(path)) {
-        inst_err(err, err_len, "这个实例没有 PCL 的 Setup.ini（%s）", path);
+        inst_err(err, err_len, "这个实例没有 Setup.ini（%s）", path);
         return SXCL_INSTANCE_ERR_IO;
     }
     char *text = NULL;
     size_t len = 0;
     char io_err[SXCL_DIR_ERROR_MAX];
     if (sxcl_dir_read_file(path, &text, &len, io_err, sizeof(io_err)) != 0) {
-        inst_err(err, err_len, "读 PCL/Setup.ini 失败：%s", io_err);
+        inst_err(err, err_len, "读 Setup.ini 失败：%s", io_err);
         return SXCL_INSTANCE_ERR_IO;
     }
     out->exists = 1;
@@ -1106,7 +1106,7 @@ int sxcl_instance_read_forced_java(const char *game_dir, const char *instance_id
     }
     char path[SXCL_INSTANCE_PATH_MAX + 32];
     if (inst_join(path, sizeof(path), vdir, "PCL/config.json") != 0) {
-        inst_err(err, err_len, "路径太长,拼不出 PCL/config.json 的路径");
+        inst_err(err, err_len, "路径太长,拼不出 config.json 的路径");
         return SXCL_INSTANCE_ERR_ARG;
     }
     if (!sxcl_fs_exists(path)) {
@@ -1262,7 +1262,7 @@ static int inst_scan_one_impl(const char *game_dir, const char *version_id,
         return 1;
     }
     if (!have_json && inst_is_skip_name(version_id)) {
-        inst_err(err, err_len, "PCL 会跳过的目录名（%s）", version_id);
+        inst_err(err, err_len, "这个目录名会被跳过（%s）", version_id);
         return 1;
     }
     out->has_json = have_json;

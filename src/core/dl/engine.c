@@ -378,7 +378,7 @@ static void source_note_failure(sxcl_engine *e, const char *url, int http_status
     if (http_status == 403 || http_status == 429) {
         if (is_bmclapi_url(url)) {
             sxcl_log_write(SXCL_LOG_DEBUG, "net",
-                           "BMCLAPI 返回 %d(高频请求限流,不算源失败:PCL 同款口径) url=%s",
+                           "BMCLAPI 返回 %d(高频请求限流,不算源失败) url=%s",
                            http_status, url ? url : "(空)");
             return;
         }
