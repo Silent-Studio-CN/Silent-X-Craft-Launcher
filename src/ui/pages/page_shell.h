@@ -42,6 +42,18 @@ public:
         setObjectName(objectName);                            // base_page.py:42
         setWidgetResizable(true);                             // base_page.py:43
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); // base_page.py:44
+        /* **去掉 ScrollArea 那 1 逻辑像素的原生 frame**(QScrollArea 默认 QFrame::StyledPanel,
+         * frameWidth()==1 -> viewport 从 (1,1) 起算)。为什么必须去:
+         *   页面里的两栏版式(beginSideLayout)要求侧2 栏**贴着页面左边缘**,而页面自己的
+         *   那 1px frame 会把它整体推到 +1 —— 真机 dump 实测(sxcl-ui、dpr=1.5、1100x750、
+         *   SXCL_UI_ROUTE=select):ScrollArea #sxclPage_select (49,49) 而里面的
+         *   NavPanel #sxclVersionFolderNav (50,50),差的正是这 1px;截图扫列也能量到
+         *   页面左缘那条更深的 1px 线(浅色 243/219/187,那条 187 就是 frame)。
+         *   去掉之后两条栏的左边线才是同一条(用户 2026-09-26:「侧1 与侧2 要严丝合缝」)。
+         * 分隔线**不靠控件**:由外壳(MainWindow::paintEvent)用 QPen(宽度 0 = cosmetic)
+         * 画 1 个**设备**像素 —— docs/27 §12:1 逻辑像素的控件线在 dpr=1.5 上会占 1~2 个
+         * 物理像素(实测"一粗一细"),QFrame::VLine 还会因 Fusion 的浅色调色板变白线。 */
+        setFrameShape(QFrame::NoFrame);
         // 页面底色钉令牌 bg(#202020):参考图的内容区就是它,不钉会露出内容栈那层半透明白。
         setStyleSheet(QStringLiteral("QScrollArea { background: %1; }")
                           .arg(FluentTheme::instance().tokens().bg.name()));

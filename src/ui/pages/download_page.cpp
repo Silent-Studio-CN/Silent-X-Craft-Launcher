@@ -114,6 +114,8 @@ QWidget *createDownloadPage(QWidget *parent) {
 
     // 第二层:与窗口左边那条**同一个组件**,所以动画/几何/选中态天然一致。
     auto *inner = new NavPanel(leftCol);
+    // 与版本选择页那条同名口径:给这层侧栏一个**能找到的名字**(dump / 验收按它认这一层)。
+    inner->setObjectName(QStringLiteral("sxclDownloadNav"));
     const NavItem kDownloadNav[] = {
         {QStringLiteral("download_mc"), QString(), QStringLiteral("vanilla"),
          QStringLiteral("Minecraft 版本"), false, -1},

@@ -100,6 +100,9 @@ public:
      * 页面(版本选择页 / 下载页)建好自己的 NavPanel 之后调它登记 —— 状态由**外壳**持有,
      * 栏自己只上报"我展开了/我收起了"(NavPanel::collapsedChanged)。 */
     void registerRail(NavPanel *rail);
+    /** 把**一整页**里的侧栏都登记进来(findChildren<NavPanel*>,内部去重)。
+     *  每一处"建好一页"的地方都要调:漏一条,那条栏就不受状态机管(实测:下载页)。 */
+    void registerPageRails(QWidget *page);
     QStackedWidget *pageStack() const { return m_stack; }
     const QVector<NavItem> &navItems() const;
     QString currentRouteKey() const;

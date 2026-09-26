@@ -214,6 +214,13 @@ private:
         // 这一列自己吃掉整条高度,右栏才是被挤的那一边 —— 以前 AlignTop 让面板只有内容高,
         // 视觉上像"东西被压到下面去了"。
         m_navLay->addWidget(m_nav, 1);
+        /* 这条侧栏是**重建**出来的(换文件夹/换图标都走这里 -> 老那条 deleteLater):
+         * 外壳的登记不能只做一次,否则状态机盯的是那条已经被删掉的老栏 ——
+         * 重建之后"展开主栏"就收不回这一条(实测:SXCL_UI_RAILS_TEST 两步 expanded=2)。
+         * 页面构造期 window() 还不是 MainWindow(那时页面还没有父),自动跳过;
+         * 外壳在把页面挂进内容栈时会登记一次。 */
+        if (auto *mw = qobject_cast<MainWindow *>(window()))
+            mw->registerRail(m_nav);
 
         QVector<GameFolder> folders = detectGameFolders(m_gameDir);
         bool currentListed = false;

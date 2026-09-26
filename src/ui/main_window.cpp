@@ -570,6 +570,7 @@ void MainWindow::buildUi() {
             page = makePlaceholderPage(item);
         m_pages.insert(item.routeKey, page);
         m_stack->addWidget(page);
+        registerPageRails(page); // 构造期建好的页也要进状态机(下载页那条侧栏以前就是漏的)
         m_nav->addItem(item);
     }
     // ---- 不在侧边栏、但**必须和侧边栏一样早就存在**的 3 页(2026-09-22 重构) ----
@@ -586,6 +587,7 @@ void MainWindow::buildUi() {
             continue;
         m_pages.insert(key, page);
         m_stack->addWidget(page);
+        registerPageRails(page);
     }
     connect(m_nav, &NavPanel::routeChanged, this, &MainWindow::switchToRoute);
     switchToRoute(QStringLiteral("home"));
@@ -640,6 +642,21 @@ const QVector<NavItem> &MainWindow::navItems() const { return m_nav->items(); }
 
 QString MainWindow::currentRouteKey() const { return m_nav->currentRouteKey(); }
 
+/* 页面里的侧栏**统一在这里登记**(页面自己不用知道 MainWindow)。
+ * 为什么要做成一个函数、且**每一处建页都调**:登记漏一条,状态机就管不住那一条 ——
+ * 实测(2026-09-26,真机 SXCL_UI_RAILS_TEST)下载页那条就是漏的:它是构造期就建好的常驻页,
+ * 而登记当时只在 switchToRoute 的"按需建页"分支里做过一次,于是"展开主栏"之后
+ * 展开条数=2(主栏 322 + 下载页侧栏 322),违反"同一时刻最多一条栏展开"。 */
+void MainWindow::registerPageRails(QWidget *page) {
+    if (page == nullptr) {
+        return;
+    }
+    const QList<NavPanel *> rails = page->findChildren<NavPanel *>();
+    for (NavPanel *rail : rails) {
+        registerRail(rail); // 内部按指针去重,重复调是安全的
+    }
+}
+
 void MainWindow::registerRail(NavPanel *rail) {
     if (rail == nullptr) {
         return;
@@ -656,8 +673,19 @@ void MainWindow::registerRail(NavPanel *rail) {
         if (collapsed) {
             return;
         }
+        /* **只认看得见的栏**。页面在构造期就把自己的侧栏展开(下载页与版本选择页都是
+         * setCollapsed(false)),但那一页在别的页面上是**藏着的**;让藏着的栏参与
+         * "最多一条展开",它就会把当前页那条正用着的栏收掉 —— 实测(2026-09-26,
+         * SXCL_UI_RAILS_TEST 真机):route=select 启动后,侧2 被隐藏的下载页那条栏
+         * 顶成了 48(用户看到的是"进了版本选择页却没展开")。
+         * 反过来的那一半仍然由这里管:切到下载页之后那条栏就在眼前了,主栏一展开,
+         * 它必须收起来(这正是修好"下载页那条栏从来没进过状态机"之后新增的那条路)。 */
+        if (!rail->isVisibleTo(window())) {
+            return;
+        }
         for (const QPointer<NavPanel> &other : m_rails) {
-            if (other != nullptr && other != rail && !other->collapsed()) {
+            if (other != nullptr && other != rail && other->isVisibleTo(window()) &&
+                !other->collapsed()) {
                 other->setCollapsed(true);
             }
         }
@@ -694,14 +722,12 @@ void MainWindow::switchToRoute(const QString &routeKey) {
         // 只有占位页(makePlaceholderPage)才需要按路由拼一个名字。
         m_pages.insert(routeKey, page);
         m_stack->addWidget(page);
-        /* 新页面里的侧栏(版本选择页 / 下载页的侧2)**在这里统一登记** ——
-         * 页面自己不用知道 MainWindow(它们是自由函数建的),规则也只有一份:
-         * 同一时刻最多一条栏展开(docs/27 §11,用户 2026-09-26 口径)。 */
-        const QList<NavPanel *> rails = page->findChildren<NavPanel *>();
-        for (NavPanel *rail : rails) {
-            registerRail(rail);
-        }
     }
+    /* 这一页的侧栏(版本选择页 / 下载页的侧2)登记一遍 —— 规则只有一份:
+     * 同一时刻最多一条栏展开(docs/27 §11,用户 2026-09-26 口径)。
+     * **每次进这一页都登记**(不是只在建页那一次):页面会重建自己的侧栏
+     * (版本选择页换文件夹/换图标都 new 一条新的),只登记一次就会盯住被 deleteLater 掉的老那条。 */
+    registerPageRails(page);
 
     // Python main_window.py:127-147 _onCurrentInterfaceChanged(挂在 FluentWindow 的
     // stackedWidget.currentChanged 上):切到"版本"且会话没结束时,**恢复活动临时页**并把

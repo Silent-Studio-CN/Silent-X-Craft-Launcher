@@ -258,6 +258,110 @@ public:
     }
 };
 
+// ── 验收通路:侧栏状态机的**真机**验收(SXCL_UI_RAILS_TEST)────────────────────
+// docs/27 §12 的第 2 条(「同一时刻最多一条栏展开」必须是**外壳**的状态机)只能靠真机验:
+// 这里把三步串起来 —— 展开侧2 -> 展开主栏 -> 收起主栏,每一步都等动画**落定**再量一次。
+//   * 为什么必须等落定:NavPanel::collapsedChanged 是**动画结束**才发的(qf 的
+//     _onExpandAniFinished 同口径),外壳再去收另一条栏又要 150ms —— 量在过渡态上
+//     只会自己造假 FAIL(§12 第 3 条);
+//   * 量什么:当前可见界面上**没折叠**的 NavPanel 条数(外壳的状态机要求每步 <= 1;
+//     「全收起」那一步 == 0),另外把两条栏当时的**宽度**一起打出来(322 展开 / 48 折叠);
+//   * 动作走**产品路径**:点栏上那颗真的汉堡键 -> NavPanel::setCollapsed,不直接改状态
+//     (那样验不到"手点"与"程序调用"是一条时间线);
+//   * 时间全用 QTimer::singleShot/定时器串,不用 sleep(窗口还得重绘)。
+// 输出(每步一行,stderr):
+//   [rails] step=<n> expanded=<展开条数> nav=<主栏宽> sub=<侧2 宽> name=<侧2 名> route=<路由>
+struct SxclRailsProbe {
+    sxcl::ui::MainWindow *window = nullptr;
+    QTimer *timer = nullptr;
+    int step = 0;  // 已经报告过的步数
+    int total = 3; // 展开侧2 / 展开主栏 / 收起主栏
+};
+
+// 这一步该算进来的栏:主栏 + **当前页**里的栏(常驻页与临时页同一口径)。
+static QList<sxcl::ui::NavPanel *> sxclRailsOnScreen(sxcl::ui::MainWindow *window) {
+    QList<sxcl::ui::NavPanel *> rails;
+    if (sxcl::ui::NavPanel *mainRail = window->navPanel())
+        rails.append(mainRail);
+    QWidget *page = window->pageStack() != nullptr ? window->pageStack()->currentWidget() : nullptr;
+    if (page != nullptr) {
+        const QList<sxcl::ui::NavPanel *> inner = page->findChildren<sxcl::ui::NavPanel *>();
+        for (sxcl::ui::NavPanel *rail : inner) {
+            if (!rails.contains(rail))
+                rails.append(rail);
+        }
+    }
+    return rails;
+}
+
+// 当前页里那条"侧2":版本选择页有专名(用例按它找),别的页只有一条时取第一条。
+static sxcl::ui::NavPanel *sxclPageRail(sxcl::ui::MainWindow *window) {
+    QWidget *page = window->pageStack() != nullptr ? window->pageStack()->currentWidget() : nullptr;
+    if (page == nullptr)
+        return nullptr;
+    if (sxcl::ui::NavPanel *named =
+            page->findChild<sxcl::ui::NavPanel *>(QStringLiteral("sxclVersionFolderNav")))
+        return named;
+    const QList<sxcl::ui::NavPanel *> all = page->findChildren<sxcl::ui::NavPanel *>();
+    return all.isEmpty() ? nullptr : all.first();
+}
+
+// 把这条栏带到目标态:**需要变才点**它自己的汉堡键(真控件 -> NavigationWidget::clicked
+// -> NavPanel::setCollapsed);已经是目标态就什么都不做(点了反而会翻过去)。
+static void sxclRailsEnsure(sxcl::ui::NavPanel *rail, bool wantExpanded, const char *who) {
+    if (rail == nullptr) {
+        std::fprintf(stderr, "[rails] %s: 这一页没有侧栏\n", who);
+        return;
+    }
+    if ((!rail->collapsed()) == wantExpanded) {
+        std::fprintf(stderr, "[rails] %s: 本来就已经%s(不点)\n", who,
+                     wantExpanded ? "展开" : "收起");
+        return;
+    }
+    rail->menuButton()->click();
+    std::fprintf(stderr, "[rails] %s: 已点汉堡键 -> %s\n", who, wantExpanded ? "展开" : "收起");
+}
+
+// 一拍:先报**上一步做完之后**的读数,再做下一步;三步报完就退出。
+static void sxclRailsProbeTick(SxclRailsProbe *st) {
+    sxcl::ui::MainWindow *window = st->window;
+    sxcl::ui::NavPanel *mainRail = window->navPanel();
+    sxcl::ui::NavPanel *pageRail = sxclPageRail(window);
+    const QList<sxcl::ui::NavPanel *> rails = sxclRailsOnScreen(window);
+    int expanded = 0;
+    for (sxcl::ui::NavPanel *rail : rails) {
+        if (!rail->collapsed())
+            ++expanded;
+    }
+    const QByteArray name = (pageRail != nullptr && !pageRail->objectName().isEmpty())
+                                ? pageRail->objectName().toUtf8()
+                                : QByteArray("-");
+    std::fprintf(stderr, "[rails] step=%d expanded=%d nav=%d sub=%d name=%s route=%s\n", st->step,
+                 expanded, mainRail != nullptr ? mainRail->width() : -1,
+                 pageRail != nullptr ? pageRail->width() : -1, name.constData(),
+                 window->currentRouteKey().toUtf8().constData());
+    std::fflush(stderr);
+    if (st->step >= st->total) {
+        st->timer->stop();
+        QCoreApplication::quit();
+        return;
+    }
+    ++st->step;
+    switch (st->step) {
+    case 1:
+        sxclRailsEnsure(pageRail, true, "侧2");
+        break;
+    case 2:
+        sxclRailsEnsure(mainRail, true, "主栏");
+        break;
+    case 3:
+        sxclRailsEnsure(mainRail, false, "主栏");
+        break;
+    default:
+        break;
+    }
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -937,6 +1041,24 @@ sxcl::ui::MainWindow window;
                 panel->setCollapsed(true);
                 std::fprintf(stderr, "[sxcl-ui] 侧2 已折叠(SXCL_UI_COLLAPSE)\n");
             }
+        });
+    }
+
+    // 验收通路:侧栏状态机的真机验收(SXCL_UI_RAILS_TEST=1;套路见本文件上方
+    // SxclRailsProbe 的说明)。三步:展开侧2 -> 展开主栏 -> 收起主栏;每步等 600ms
+    // (150ms 展开动画 + 外壳收另一条栏的 150ms,再留余量),末尾 qApp->quit()。
+    // 需要 SXCL_UI_ROUTE=<有侧栏的页>(select / download),否则"侧2"这一步没有对象。
+    if (qEnvironmentVariableIntValue("SXCL_UI_RAILS_TEST") == 1) {
+        auto *probe = new SxclRailsProbe();
+        probe->window = &window;
+        probe->timer = new QTimer(&app);
+        probe->timer->setInterval(600);
+        QObject::connect(probe->timer, &QTimer::timeout, &app, [probe]() { sxclRailsProbeTick(probe); });
+        // 先让页面/布局/图标落定(与别的钩子同一个 900ms),再拍第 0 拍并开始走时钟
+        QTimer::singleShot(900, &app, [probe]() {
+            sxclRailsProbeTick(probe);
+            if (probe->timer != nullptr)
+                probe->timer->start();
         });
     }
 
