@@ -975,6 +975,19 @@ void MainWindow::paintEvent(QPaintEvent *) {
     // (SXCL 侧:main_window.py:298 FluentWindow { background-color: token(bg) } = #202020)
     QPainter p(this);
     p.fillRect(rect(), ThemeBridge::instance().token(QStringLiteral("bg")));
+    /* **严丝合缝的分隔线**:侧栏右缘画 1 个**设备**像素(QPen 宽度 0 = cosmetic)。
+     * 为什么在 paintEvent 里画、不用控件:1 逻辑像素的控件在 dpr=1.5 上会占 1~2 个物理像素
+     * (实测"一粗一细"),QFrame::VLine 还会因为 Fusion 的浅色调色板变成白线(docs/27 §12)。 */
+    {
+        QPainter qp(this);
+        qp.setPen(QPen(ThemeBridge::instance().token(QStringLiteral("separator")), 0));
+        for (const QPointer<NavPanel> &rail : m_rails) {
+            if (rail != nullptr && rail->isVisible()) {
+                const int x = rail->x() + rail->width();
+                qp.drawLine(x, rail->y(), x, rail->y() + rail->height());
+            }
+        }
+    }
 }
 
 void MainWindow::changeEvent(QEvent *e) {

@@ -94,7 +94,9 @@ public:
         auto *right = new QWidget(m_view);
         right->setStyleSheet(QStringLiteral("background: transparent;"));
         auto *rightLay = new QVBoxLayout(right);
-        rightLay->setContentsMargins(0, 24, 0, 0); // 标题的顶距只算在右列头上
+        /* 顶距 24 -> 0:内容列与侧2 **同一个顶线**开始(用户 2026-09-26 反复说
+         * 「侧2 被那行字压下去」;标题仍在,只是不再给内容列再加一层顶距)。 */
+        rightLay->setContentsMargins(0, 0, 0, 0);
         rightLay->setSpacing(16);
         rightLay->setAlignment(Qt::AlignTop);
         rightLay->addWidget(m_title);
