@@ -260,36 +260,46 @@ public:
 
 // ── 验收通路:侧栏状态机的**真机**验收(SXCL_UI_RAILS_TEST)────────────────────
 // docs/27 §12 的第 2 条(「同一时刻最多一条栏展开」必须是**外壳**的状态机)只能靠真机验:
-// 这里把三步串起来 —— 展开侧2 -> 展开主栏 -> 收起主栏,每一步都等动画**落定**再量一次。
+// 这里把七步串起来,每一步都等动画**落定**再量一次。
+//   step 动作(每一步都是产品路径;切页走 switchToRoute —— 导航项的 routeChanged 直连它):
+//     1 **切回版本选择页**(起点规范化:三次运行才是同一条时间线)+ 确保侧2 展开
+//     2 主栏展开(状态机要立刻把侧2 收成 48)
+//     3 **切到下载页**(它那条侧栏也是生来就展开的:外壳必须收敛 —— 主栏让位)
+//     4 切回版本选择页(那一步两条都是 48:0 条也合法,我们不主动展开)
+//     5 在版本选择页把侧2 再展开
+//     6 再切到下载页(侧2 这时**藏在**别的页上、还展开着:它不该被算进"看得见的栏")
+//     7 再切回版本选择页(那条一直没被收起:仍然是唯一一条展开的)
+//   第 3 步就是 docs/27 §12 末尾那条已知边界("主栏展开着的时候切到生来就展开的页面,
+//   那一步没有任何 collapsedChanged 发出来")的复现路径;第 6/7 步验"藏着的栏不参与"。
 //   * 为什么必须等落定:NavPanel::collapsedChanged 是**动画结束**才发的(qf 的
 //     _onExpandAniFinished 同口径),外壳再去收另一条栏又要 150ms —— 量在过渡态上
 //     只会自己造假 FAIL(§12 第 3 条);
-//   * 量什么:当前可见界面上**没折叠**的 NavPanel 条数(外壳的状态机要求每步 <= 1;
-//     「全收起」那一步 == 0),另外把两条栏当时的**宽度**一起打出来(322 展开 / 48 折叠);
+//   * 量什么:界面上**看得见**(isVisibleTo(window()),与外壳同一条判据)且**没折叠**的
+//     NavPanel 条数(要求每步 <= 1;全收起 = 0 也合法),另外把两条栏当时的**宽度**一起打出来
+//     (322 展开 / 48 折叠),以及这一步**是哪几条**在展开(who=...,便于读数超 1 时定位);
 //   * 动作走**产品路径**:点栏上那颗真的汉堡键 -> NavPanel::setCollapsed,不直接改状态
 //     (那样验不到"手点"与"程序调用"是一条时间线);
 //   * 时间全用 QTimer::singleShot/定时器串,不用 sleep(窗口还得重绘)。
 // 输出(每步一行,stderr):
-//   [rails] step=<n> expanded=<展开条数> nav=<主栏宽> sub=<侧2 宽> name=<侧2 名> route=<路由>
+//   [rails] step=<n> expanded=<展开条数> nav=<主栏宽> sub=<侧2 宽> name=<侧2 名> route=<路由> who=<展开的栏名>
 struct SxclRailsProbe {
     sxcl::ui::MainWindow *window = nullptr;
     QTimer *timer = nullptr;
     int step = 0;  // 已经报告过的步数
-    int total = 3; // 展开侧2 / 展开主栏 / 收起主栏
+    int total = 7; // 见上方步骤表(切回选择页 / 展开主栏 / 切下载 / 切回 / 侧2 再展开 / 切下载 / 切回)
 };
 
-// 这一步该算进来的栏:主栏 + **当前页**里的栏(常驻页与临时页同一口径)。
+/* 这一步该算进来的栏 = 外壳那条判据的原样复刻:**窗口里看得见的**所有 NavPanel。
+ * (以前是"主栏 + 当前页里的栏";换成 isVisibleTo 之后,藏着的页自己就把自己排除了 ——
+ *  量的是"屏幕上真有哪几条在展开",不是"我以为哪几条在场"。) */
 static QList<sxcl::ui::NavPanel *> sxclRailsOnScreen(sxcl::ui::MainWindow *window) {
     QList<sxcl::ui::NavPanel *> rails;
     if (sxcl::ui::NavPanel *mainRail = window->navPanel())
         rails.append(mainRail);
-    QWidget *page = window->pageStack() != nullptr ? window->pageStack()->currentWidget() : nullptr;
-    if (page != nullptr) {
-        const QList<sxcl::ui::NavPanel *> inner = page->findChildren<sxcl::ui::NavPanel *>();
-        for (sxcl::ui::NavPanel *rail : inner) {
-            if (!rails.contains(rail))
-                rails.append(rail);
-        }
+    const QList<sxcl::ui::NavPanel *> all = window->findChildren<sxcl::ui::NavPanel *>();
+    for (sxcl::ui::NavPanel *rail : all) {
+        if (rail != nullptr && !rails.contains(rail) && rail->isVisibleTo(window))
+            rails.append(rail);
     }
     return rails;
 }
@@ -322,7 +332,14 @@ static void sxclRailsEnsure(sxcl::ui::NavPanel *rail, bool wantExpanded, const c
     std::fprintf(stderr, "[rails] %s: 已点汉堡键 -> %s\n", who, wantExpanded ? "展开" : "收起");
 }
 
-// 一拍:先报**上一步做完之后**的读数,再做下一步;三步报完就退出。
+/* 切页:走**产品路径** —— 导航项的 routeChanged 直连的就是 MainWindow::switchToRoute,
+ * 所以这里调它和"用户点了一下侧边栏"是同一条时间线(不直接改任何控件状态)。 */
+static void sxclRailsRoute(sxcl::ui::MainWindow *window, const char *route) {
+    std::fprintf(stderr, "[rails] 切页: switchToRoute(%s)\n", route);
+    window->switchToRoute(QString::fromLatin1(route));
+}
+
+// 一拍:先报**上一步做完之后**的读数,再做下一步;七步报完就退出。
 static void sxclRailsProbeTick(SxclRailsProbe *st) {
     sxcl::ui::MainWindow *window = st->window;
     sxcl::ui::NavPanel *mainRail = window->navPanel();
@@ -336,10 +353,21 @@ static void sxclRailsProbeTick(SxclRailsProbe *st) {
     const QByteArray name = (pageRail != nullptr && !pageRail->objectName().isEmpty())
                                 ? pageRail->objectName().toUtf8()
                                 : QByteArray("-");
-    std::fprintf(stderr, "[rails] step=%d expanded=%d nav=%d sub=%d name=%s route=%s\n", st->step,
-                 expanded, mainRail != nullptr ? mainRail->width() : -1,
+    // who= 这一步**是哪几条**在展开(空 = 全收起)。读数超 1 时靠它定位,不用猜。
+    QStringList expandedNames;
+    for (sxcl::ui::NavPanel *rail : rails) {
+        if (rail != nullptr && !rail->collapsed()) {
+            expandedNames.append(rail->objectName().isEmpty() ? QStringLiteral("(无名)")
+                                                              : rail->objectName());
+        }
+    }
+    const QByteArray who = expandedNames.isEmpty()
+                               ? QByteArray("-")
+                               : expandedNames.join(QLatin1Char(',')).toUtf8();
+    std::fprintf(stderr, "[rails] step=%d expanded=%d nav=%d sub=%d name=%s route=%s who=%s\n",
+                 st->step, expanded, mainRail != nullptr ? mainRail->width() : -1,
                  pageRail != nullptr ? pageRail->width() : -1, name.constData(),
-                 window->currentRouteKey().toUtf8().constData());
+                 window->currentRouteKey().toUtf8().constData(), who.constData());
     std::fflush(stderr);
     if (st->step >= st->total) {
         st->timer->stop();
@@ -349,13 +377,28 @@ static void sxclRailsProbeTick(SxclRailsProbe *st) {
     ++st->step;
     switch (st->step) {
     case 1:
-        sxclRailsEnsure(pageRail, true, "侧2");
+        // 起点规范化:不管 SXCL_UI_ROUTE 给的是 select 还是 download,时间线从版本选择页开始
+        // (不这么做的话,"download 起点"的每一步读数都与另一条时间线错位,断言就没法写死)。
+        sxclRailsRoute(window, "select");
+        sxclRailsEnsure(sxclPageRail(window), true, "侧2(select)");
         break;
     case 2:
         sxclRailsEnsure(mainRail, true, "主栏");
         break;
     case 3:
-        sxclRailsEnsure(mainRail, false, "主栏");
+        sxclRailsRoute(window, "download"); // **切页**:主栏还展开着(322),下载页侧栏生来展开
+        break;
+    case 4:
+        sxclRailsRoute(window, "select"); // 切回来:上一次让位之后两条都是 48(0 条也合法)
+        break;
+    case 5:
+        sxclRailsEnsure(sxclPageRail(window), true, "侧2(回到 select 后)");
+        break;
+    case 6:
+        sxclRailsRoute(window, "download"); // 侧2 展开着但**藏着**:不该被算进来
+        break;
+    case 7:
+        sxclRailsRoute(window, "select"); // 那条一直没被收起 -> 仍然是唯一一条展开的
         break;
     default:
         break;
@@ -1045,9 +1088,11 @@ sxcl::ui::MainWindow window;
     }
 
     // 验收通路:侧栏状态机的真机验收(SXCL_UI_RAILS_TEST=1;套路见本文件上方
-    // SxclRailsProbe 的说明)。三步:展开侧2 -> 展开主栏 -> 收起主栏;每步等 600ms
+    // SxclRailsProbe 的说明)。七步:切回选择页(+确保侧2) -> 展开主栏 -> 切下载页 ->
+    // 切回选择页 -> 侧2 再展开 -> 再切下载页 -> 再切回选择页;每步等 600ms
     // (150ms 展开动画 + 外壳收另一条栏的 150ms,再留余量),末尾 qApp->quit()。
-    // 需要 SXCL_UI_ROUTE=<有侧栏的页>(select / download),否则"侧2"这一步没有对象。
+    // SXCL_UI_ROUTE 给 select 或 download 都行(第 1 步会把起点规范化到 select),
+    // 但"侧2"必须存在 —— 这两个页面各有一条。
     if (qEnvironmentVariableIntValue("SXCL_UI_RAILS_TEST") == 1) {
         auto *probe = new SxclRailsProbe();
         probe->window = &window;

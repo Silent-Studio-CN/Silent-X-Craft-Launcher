@@ -563,6 +563,13 @@ void MainWindow::buildUi() {
     // 根布局是 qf 的 1:1 摆法(导航 + 内容列),不动它一个小数点。
     buildMiniPanel();
 
+    /* ---- **切页 = 收敛的时机**(docs/27 §12 末尾那条已知边界)----
+     * 挂在**内容栈**的 currentChanged 上,而不是挂在 switchToRoute 这个入口上:所有换页路径
+     * (导航项、临时页、会话页恢复)都过这一处,不存在"还有一条路没接上"(§12 第 3 条:
+     * 判词/收敛不能挂在某个调用入口上)。真正那次收敛推迟一拍做 —— 见 scheduleRailConverge。 */
+    connect(m_stack, &QStackedWidget::currentChanged, this,
+            [this](int) { scheduleRailConverge(); });
+
     // ---- 侧边栏那 6 页 ----
     for (const NavItem &item : kNavSpec) {
         QWidget *page = createPageForRoute(item.routeKey, nullptr);
@@ -689,6 +696,85 @@ void MainWindow::registerRail(NavPanel *rail) {
                 other->setCollapsed(true);
             }
         }
+    });
+}
+
+/* **切页时的收敛**(口径与理由见 main_window.h 的 convergeRails)。
+ *
+ * 实现上只有两件事:
+ *   * convergeRails(preferred):preferred 展开且可见 -> 其它可见且展开的收起来(主栏在内);
+ *     preferred 为空/收起/藏着 -> **一行都不动**(绝不主动展开);
+ *   * scheduleRailConverge():把这件事**推迟一拍**(QTimer::singleShot(0))—— 页面侧栏
+ *     "生来就展开"只有等页面真的可见之后才看得见。
+ *
+ * 为什么不能在这里"顺手展开 preferred":用户口径是**页面自己的侧栏优先**(它展开着就让主栏
+ * 让位),而不是"切进某页就替用户把侧栏拉开" —— 那会在构造期/隐藏页上连锁收起别的栏
+ * (§12 末尾那条已知边界的成因)。 */
+void MainWindow::convergeRails(NavPanel *preferred) {
+    if (m_inShutdown || preferred == nullptr) {
+        return;
+    }
+    // 只认**看得见且展开**的 preferred:藏着的、已经收起的,都没有"让位诉求"。
+    if (preferred->collapsed() || !preferred->isVisibleTo(window())) {
+        return;
+    }
+    int collapsed = 0;
+    for (const QPointer<NavPanel> &other : m_rails) {
+        if (other == nullptr || other == preferred) {
+            continue;
+        }
+        if (!other->isVisibleTo(window()) || other->collapsed()) {
+            continue;
+        }
+        other->setCollapsed(true); // 主栏也在这张表里 -> 一起让位
+        ++collapsed;
+    }
+    // 证据行(真机验收按它核对"这一步到底收了谁");没收到任何一条就不打,免得刷屏。
+    if (collapsed > 0) {
+        const QByteArray name = preferred->objectName().isEmpty()
+                                    ? QByteArray("(无名)")
+                                    : preferred->objectName().toUtf8();
+        std::fprintf(stderr, "[rails] converge: preferred=%s -> 收起 %d 条可见且展开的栏\n",
+                     name.constData(), collapsed);
+        std::fflush(stderr);
+    }
+}
+
+/* 这一页里"展开且可见"的那条栏(外壳认为它该优先)。
+ * 只找**当前页自己**的栏:别页的栏即使展开着也是藏着的,不参与。 */
+NavPanel *MainWindow::preferredRailIn(QWidget *page) const {
+    if (page == nullptr) {
+        return nullptr;
+    }
+    const QList<NavPanel *> rails = page->findChildren<NavPanel *>();
+    for (NavPanel *rail : rails) {
+        if (rail != nullptr && !rail->collapsed() && rail->isVisibleTo(window())) {
+            return rail;
+        }
+    }
+    return nullptr;
+}
+
+/* 换页之后**推迟一拍**再收敛。
+ *   * 立刻做会量到"上一页"的可见性(内容栈刚 setCurrentWidget,新页面的显示还没落定);
+ *   * **构造期**也走 switchToRoute(起始路由),那时窗口还没 show():推迟一拍正好跳过构造期,
+ *     否则"页面构造期就把侧栏展开"这件事会在建页阶段连锁收起主栏(§12 第 1 条的经验:
+ *     只认看得见的栏 —— 而"看得见"只有窗口出来后才有意义);
+ *   * 回调里**重新问一次当前页**:连切两页只收敛最后那一页(幂等)。 */
+void MainWindow::scheduleRailConverge() {
+    if (m_inShutdown || m_stack == nullptr) {
+        return;
+    }
+    QPointer<QWidget> page = m_stack->currentWidget();
+    if (page == nullptr) {
+        return;
+    }
+    QTimer::singleShot(0, this, [this, page]() {
+        if (m_inShutdown || m_stack == nullptr || page == nullptr ||
+            m_stack->currentWidget() != page.data()) {
+            return; // 又切走了(或页面被淘汰了):那一次自己的收敛负责
+        }
+        convergeRails(preferredRailIn(page.data()));
     });
 }
 
@@ -1437,6 +1523,9 @@ void MainWindow::showEvent(QShowEvent *e) {
     // 从托盘回来时置顶标志会被系统清掉,这里补回来(最大化形态必须仍然悬在上面)
     if (!m_inShutdown && m_mode == WindowMode::Maximized)
         applyTopMost(true);
+    /* 窗口**藏着的这段时间**里也可能换过页(装完自动回版本页之类):那时"看得见的栏"是空集,
+     * 收敛无从下手 —— 所以再现的时候再问一次,把藏着时攒下的"两条 322"收掉。 */
+    scheduleRailConverge();
 }
 
 void MainWindow::hideEvent(QHideEvent *e) {

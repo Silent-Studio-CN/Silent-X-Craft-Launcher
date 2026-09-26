@@ -103,6 +103,21 @@ public:
     /** 把**一整页**里的侧栏都登记进来(findChildren<NavPanel*>,内部去重)。
      *  每一处"建好一页"的地方都要调:漏一条,那条栏就不受状态机管(实测:下载页)。 */
     void registerPageRails(QWidget *page);
+    /* **切页时的收敛**(2026-09-26 收尾;口径:页面自己的侧栏优先)。
+     *
+     * 为什么光有 registerRail 不够:那个钩子挂在 NavPanel::collapsedChanged 上 ——
+     * 它只在**状态变化**时发。切到一条**生来就展开**的页内侧栏(版本选择页
+     * #sxclVersionFolderNav / 下载页 #sxclDownloadNav,两者都在构造期 setCollapsed(false))
+     * 那一步**没有任何状态变化**,外壳无从知道 —— 主栏已经展开着的时候切过去就是**两条 322**
+     * (docs/27 §12 末尾记着的那条已知边界,当时**没有实测**,因为三步验收不覆盖切页)。
+     *
+     * 规则(产品已拍板,照做):
+     *   * preferred(当前页那条栏)是**展开且可见**的 -> 把其它可见且展开的收起(**主栏在内**);
+     *   * preferred 为空或未展开 -> **什么都不做**(绝不主动展开任何栏)。
+     * 目标始终是:任一时刻"可见且展开"的栏数 <= 1(全收起 = 0 也合法)。
+     * 幂等、不递归:它只调 setCollapsed(true),而那条钩子对"收起"直接 return。
+     * 调用时机见 scheduleRailConverge —— **不能**在建页/构造期调。 */
+    void convergeRails(NavPanel *preferred);
     QStackedWidget *pageStack() const { return m_stack; }
     const QVector<NavItem> &navItems() const;
     QString currentRouteKey() const;
@@ -228,6 +243,15 @@ private:
     void buildUi();
     void layoutTitleBar();
     QWidget *makePlaceholderPage(const NavItem &item);
+
+    // ── 侧栏收敛(实现见 .cpp;口径见上面 convergeRails)──
+    /** 切页/窗口再现之后**推迟一拍**再收敛:页面侧栏"生来就展开"这件事,只有等页面
+     *  真的可见(isVisibleTo(window()))之后才看得见 —— 构造期窗口还没 show(),
+     *  那时收敛会把当前页那条正在用的栏连锁收掉(§12 第 1 条的经验)。回调里重新问一次
+     *  当前页,所以连切两页只收敛最后那一页(幂等)。 */
+    void scheduleRailConverge();
+    /** 这一页里"展开且可见"的那条栏(外壳认为它该优先;没有就是 nullptr)。 */
+    NavPanel *preferredRailIn(QWidget *page) const;
 
     // ---- 临时页机制(main_window.py:153-264)----
     void showTempPage(QWidget *page, const QString &key);   // _show_temp_page
