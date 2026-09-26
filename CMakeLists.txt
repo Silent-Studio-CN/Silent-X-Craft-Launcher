@@ -373,6 +373,10 @@ if(SXCL_BUILD_UI)
   set(PYQFTO_BUILD_DEMO OFF)
   set(PYQFTO_BUILD_TESTS OFF)   # 它自带的黄金文件测试不该混进我们的 ctest
   add_subdirectory(src/ui)
+if(SXCL_BUILD_UI)
+  # 侧边栏叠层实验台(用户点名的"有 LOG 的 demo")—— 只依赖 Qt Widgets
+  add_subdirectory(tools/rails_demo)
+endif()
   # 兜底断言:哪天有人把 demo/多媒体放回来,这里当场配置失败 ——
   # 而不是等"干净机器上少了 Qt6Multimedia.dll / multimedia/ 插件"才发现。
   if(TARGET fluent_demo)
