@@ -278,8 +278,11 @@ void writeHangReport(int blockedMs) {
     HANDLE file = CreateFileW(reinterpret_cast<const wchar_t *>(dmp.utf16()), GENERIC_WRITE, 0,
                               nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file != INVALID_HANDLE_VALUE) {
-        const MINIDUMP_TYPE type = (MINIDUMP_TYPE)(MiniDumpWithDataSegs | MiniDumpWithHandleData |
-                                                   MiniDumpWithThreadInfo | MiniDumpWithFullMemory);
+        /* **不要 FullMemory**:那玩意儿一份就是几百 MB(实测我这边几份 dump 吃掉 C 盘 2.8GB,
+         * 用户 2026-09-26:「太卡了」)。定位卡死只要**所有线程的调用栈**,MiniDumpNormal +
+         * WithThreadInfo 就够(几十 KB ~ 几百 KB)。 */
+        const MINIDUMP_TYPE type =
+            (MINIDUMP_TYPE)(MiniDumpNormal | MiniDumpWithThreadInfo | MiniDumpWithDataSegs);
         (void)MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type, nullptr,
                                 nullptr, nullptr);
         CloseHandle(file);
@@ -289,6 +292,16 @@ void writeHangReport(int blockedMs) {
 }
 
 } // namespace
+
+/** 只留最近几份现场(不留 = 用户磁盘被我们吃光;用户 2026-09-26 就撞上了)。 */
+void pruneOldReports(const QString &dir, const QString &prefix, int keep) {
+    QDir d(dir);
+    const QStringList names = d.entryList(QStringList() << (prefix + QStringLiteral("*")),
+                                          QDir::Files, QDir::Time);
+    for (int i = keep; i < names.size(); ++i) {
+        (void)d.remove(names.at(i));
+    }
+}
 
 void installHangWatchdog(int thresholdMs) {
     /* GUI 侧的跳表(这个定时器住在主线程上,所以它不跳 = 主线程卡住)。 */
@@ -312,6 +325,11 @@ void installHangWatchdog(int thresholdMs) {
                                      .count();
             if (blocked >= thresholdMs && g_hangReported.exchange(1) == 0) {
                 writeHangReport((int)blocked);
+                const QString dir = crashDir();
+                if (!dir.isEmpty()) {
+                    pruneOldReports(dir, QStringLiteral("sxcl-ui-hang-"), 3);  // 各留 3 份
+                    pruneOldReports(dir, QStringLiteral("sxcl-ui-crash-"), 3);
+                }
             }
         }
     }).detach();
