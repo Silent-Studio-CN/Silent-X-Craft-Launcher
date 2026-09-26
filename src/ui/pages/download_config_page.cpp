@@ -730,7 +730,10 @@ public:
                                              .arg(tags.join(QStringLiteral(" / "))); // :305
             labels.append({item.version, item.version + suffix});
         }
-        m_hint->setText(QStringLiteral("共 %1 个版本，点一行选中").arg(labels.size())); // :309
+        /* 用户 2026-09-26(文字纪律):「共多少个版本也用你说吗?」—— 计数与"点一行选中"这句
+         * 都不写(列表就在眼前,点一行会选中是点一下就知道的事)。这一行只在**筛选没结果**时说话。 */
+        m_hint->setText(labels.isEmpty() ? QStringLiteral("没有匹配的版本") : QString()); // :309
+        m_hint->setVisible(!m_hint->text().isEmpty()); // 没话说就别占那一行
         fillList(labels);
         if (!labels.isEmpty())                                        // :312-313
             select(labels.first().first);

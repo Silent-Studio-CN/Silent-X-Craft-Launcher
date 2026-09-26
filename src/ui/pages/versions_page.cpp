@@ -748,23 +748,35 @@ QVector<GameVersion> filterVersions(const QVector<GameVersion> &all, const QStri
 
 // ──────────────────────────────────────────────────────────────── 页面
 
-class VersionsPage : public PageScaffold {
+/* **裸内容**:工具栏 + 状态行 + 版本列表。它有两种"住法":
+ *
+ *   * 嵌在下载页右列那一格(草方块那一栏)—— 下载页自己已经有**一层**滚动外壳(PageShell),
+ *     这里再自带 ScrollArea 就是**套两层**:用户 2026-09-26 原话「右面儿的菜单上下不要再套两层了;
+ *     套两层压缩完只有 1/4 大小」。实测(1100x750、修复前)版本框只有 643x349,而右列可用区是
+ *     701x677 —— 里面那层的 28px 页边距 + 标题副标题又吃掉一圈,列表被压成不到一半。
+ *   * 独立路由页(侧边栏"版本"那一项,或版本选择页齿轮进来的"版本管理")——
+ *     由 VersionsRoutePage 在外面**包一层** PageScaffold(页名 + 页面边距 + 滚动),
+ *     内容一模一样。
+ * 列表自己会滚(QListView),所以"只留一层容器"之后竖向滚动仍然可用。 */
+class VersionsPage : public QWidget {
 public:
-    explicit VersionsPage(QWidget *parent = nullptr)
-        // 标题按用户 2026-09-22 的要求改成"Minecraft 版本"(以前叫"游戏版本");
-        // 这一页现在住在"下载"的第一格(草方块),见 docs/25 §4。
-        : PageScaffold(QStringLiteral("Minecraft 版本"),
-                       QStringLiteral("要装哪个版本 · 官方 / 镜像双路"), parent) {
+    explicit VersionsPage(QWidget *parent = nullptr) : QWidget(parent) {
         setObjectName(QStringLiteral("VersionsPage"));
+        m_box = new QVBoxLayout(this); // 页边距 = 0:外层(下载页右列 / VersionsRoutePage)负责留白
+        m_box->setContentsMargins(0, 0, 0, 0);
+        m_box->setSpacing(16);
+        m_box->setAlignment(Qt::AlignTop);
         m_fetch = new BgTask(this);
         buildContent();
         loadVersions();
     }
 
+    QVBoxLayout *box() const { return m_box; }
+
 private:
     void buildContent() {
         // ---- 工具栏(versions_page.py:321-348)----
-        auto *toolbar = new QWidget(view());
+        auto *toolbar = new QWidget(this);
         auto *toolbarLayout = new QHBoxLayout(toolbar);
         toolbarLayout->setContentsMargins(0, 0, 0, 0);
         toolbarLayout->setSpacing(12);
@@ -795,7 +807,7 @@ private:
         box()->addWidget(toolbar);
 
         // ---- 加载中(居中旋转圈 + 文字,versions_page.py:352-363)----
-        m_loading = new QWidget(view());
+        m_loading = new QWidget(this);
         auto *loadingLayout = new QVBoxLayout(m_loading);
         loadingLayout->setAlignment(Qt::AlignCenter);
         m_spinner = new IndeterminateProgressRing(m_loading);
@@ -813,12 +825,12 @@ private:
         // 用户口径(2026-09-26):失败不能只写一行红字 —— 得给一个**能点**的重试。
         // 所以状态行与「重试」并排:平时重试藏着,清单没拿到时露出来(点它重跑一遍
         // 加载:本地扫描 + 清单双路,全部在工作线程里)。
-        m_status = new BodyLabel(QString(), view());
+        m_status = new BodyLabel(QString(), this);
         m_status->setVisible(false);
-        m_retry = new PushButton(QStringLiteral("重试"), view());
+        m_retry = new PushButton(QStringLiteral("重试"), this);
         m_retry->setVisible(false);
         connect(m_retry, &QPushButton::clicked, this, [this] { loadVersions(); });
-        auto *statusRow = new QWidget(view());
+        auto *statusRow = new QWidget(this);
         auto *statusLay = new QHBoxLayout(statusRow);
         statusLay->setContentsMargins(0, 0, 0, 0);
         statusLay->setSpacing(12);
@@ -827,7 +839,7 @@ private:
         box()->addWidget(statusRow);
 
         // ---- 虚拟化列表(versions_page.py:370-392)----
-        m_list = new VersionListView(view());
+        m_list = new VersionListView(this);
         m_list->setObjectName(QStringLiteral("versionList"));
         m_list->setUniformItemSizes(true);
         m_list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
@@ -933,8 +945,7 @@ private:
                   bool fromCache, const QString &notice) {
         m_refresh->setEnabled(true);
         m_loading->setVisible(false);
-        m_status->setVisible(true);
-        refreshInstalled();
+        refreshInstalled(); // 状态行的可见性由 setStatusText()/错误分支按"有没有话说"决定
 
         if (ok) {
             m_manifestOk = true;
@@ -966,6 +977,7 @@ private:
                       .arg(m_all.size());
         m_manifestNote = QStringLiteral("版本清单加载失败：%1 · %2").arg(reason, localNote);
         m_status->setText(m_manifestNote);
+        m_status->setVisible(true); // 错误必须有话说(这一行 + 重试键都要露出来)
         m_retry->setVisible(true); // 失败也要能用:给一个能点的重试(不是只写一行红字)
         // 统一错误出口:InfoBar 里只放短句,**完整上下文(页面/操作/原始原因/路径/版本)
         // 一并进剪贴板** —— 用户报障时直接粘,不用再问"什么错"。
@@ -1068,21 +1080,20 @@ private:
         std::sort(parts.begin(), parts.end());
         return QStringLiteral(" | ") + parts.join(QStringLiteral("、"));
     }
-    void setStatusText() { // versions_page.py:475-503
-        // 清单没拿到时状态行写的是**错误原因**(见 onLoaded),这句汇总不能把它盖掉。
+    void setStatusText() { // versions_page.py:475-503(本版按用户 2026-09-26 的文字纪律改了)
+        /* 用户 2026-09-26:「共多少个版本也用你说吗?」—— 状态行只在**真的有事要说**时才出现:
+         *   * 清单没拿到:写清原因 + 给「重试」(见 onLoaded 的错误分支);
+         *   * 筛完一个都不剩:一句"没有匹配的版本"(否则列表空着像坏了);
+         * 其余情况**一个字都不写** —— "共 N 个版本 / 当前显示 N 个 / Forge N 个…" 这类计数
+         * 全删(列表就在眼前,计数不改变任何操作)。 */
         if (!m_manifestOk) {
             m_status->setText(m_manifestNote);
-            return;
+        } else if (m_filtered.isEmpty() && !m_all.isEmpty()) {
+            m_status->setText(QStringLiteral("没有匹配的版本"));
+        } else {
+            m_status->clear();
         }
-        const QString head = QStringLiteral("共 %1 个版本，已安装 %2 个")
-                                 .arg(m_all.size())
-                                 .arg(m_installed.size());
-        if (m_filtered.isEmpty()) {
-            m_status->setText(m_all.isEmpty() ? head : QStringLiteral("没有匹配的版本"));
-            return;
-        }
-        m_status->setText(head + QStringLiteral(" | 当前显示 %1 个").arg(m_filtered.size()) +
-                          loaderSummaryText());
+        m_status->setVisible(!m_status->text().isEmpty()); // 没话说就别占那一行(会挤列表)
     }
 
     // ---- 交互 ----
@@ -1139,10 +1150,30 @@ private:
     QHash<QString, QVariantList> m_loaders;
     QHash<QString, QString> m_problems;
     QVector<InstalledInstance> m_instances;
+    QVBoxLayout *m_box = nullptr; // 这一格自己的竖布局(页边距 0;留白由外面那层给)
+};
+
+/* 独立路由页(侧边栏"版本"那一项、版本选择页的齿轮进来):在外面**包一层** PageScaffold ——
+ * 那是**页面级**的页名与页面边距,不是下载页右列里的重复标题。
+ * 用户 2026-09-26 点名删掉的那些话("要装哪个版本 · 官方 / 镜像双路")在这里也没了。 */
+class VersionsRoutePage : public PageScaffold {
+public:
+    explicit VersionsRoutePage(QWidget *parent)
+        : PageScaffold(QStringLiteral("Minecraft 版本"), QString(), parent) {
+        setObjectName(QStringLiteral("sxclPage_versions"));
+        if (QWidget *subtitle = subtitleLabel())
+            subtitle->setVisible(false); // 副标题是空串(那句"要装哪个版本…"是废话,已删)
+        box()->addWidget(new VersionsPage(this), 1);
+    }
 };
 
 } // namespace
 
-QWidget *createVersionsPage(QWidget *parent) { return new VersionsPage(parent); }
+/* embedded=true:**嵌在下载页右列那一格**——只给裸内容(下载页自己那层滚动是唯一的容器);
+ * embedded=false:独立路由页(自带页名 + 页面边距 + 滚动)。 */
+QWidget *createVersionsPage(QWidget *parent, bool embedded) {
+    return embedded ? static_cast<QWidget *>(new VersionsPage(parent))
+                    : static_cast<QWidget *>(new VersionsRoutePage(parent));
+}
 
 } // namespace sxcl::ui

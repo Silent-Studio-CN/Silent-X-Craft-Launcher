@@ -13,7 +13,8 @@ class QWidget;
 namespace sxcl::ui {
 
 QWidget *createHomePage(QWidget *parent);
-QWidget *createVersionsPage(QWidget *parent);
+// embedded=true:嵌在下载页右列那一格(**不许**再自带 ScrollArea/标题 —— 见 versions_page.cpp 的说明)
+QWidget *createVersionsPage(QWidget *parent, bool embedded = false);
 QWidget *createTasksPage(QWidget *parent);
 QWidget *createKeymapPage(QWidget *parent);
 QWidget *createMultiplayerPage(QWidget *parent);

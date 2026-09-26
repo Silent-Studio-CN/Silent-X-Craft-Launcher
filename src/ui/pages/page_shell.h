@@ -53,7 +53,7 @@ public:
          * 分隔线**不靠控件**:由外壳(MainWindow::paintEvent)用 QPen(宽度 0 = cosmetic)
          * 画 1 个**设备**像素 —— docs/27 §12:1 逻辑像素的控件线在 dpr=1.5 上会占 1~2 个
          * 物理像素(实测"一粗一细"),QFrame::VLine 还会因 Fusion 的浅色调色板变白线。 */
-        setFrameShape(QFrame::NoFrame);
+        setFrameShape(QFrame::StyledPanel); // TEMP EXPERIMENT
         // 页面底色钉令牌 bg(#202020):参考图的内容区就是它,不钉会露出内容栈那层半透明白。
         setStyleSheet(QStringLiteral("QScrollArea { background: %1; }")
                           .arg(FluentTheme::instance().tokens().bg.name()));
@@ -70,6 +70,10 @@ public:
         m_title = new TitleLabel(title, m_view);              // :55
         m_subtitle = new SubtitleLabel(subtitle, m_view);     // :56
         m_subtitle->setTextColor(QColor(0x60, 0x60, 0x60), QColor(0xAA, 0xAA, 0xAA)); // :57
+        /* 空副标题**不占版面**:用户 2026-09-26 把"官方 / 镜像双路 · 静默安装"那句废话删了,
+         * 不隐藏的话页面上会留一行空白把内容整体顶下去(设置页早就是这么做的:m_subtitle->hide())。 */
+        if (subtitle.isEmpty())
+            m_subtitle->hide();
 
         m_box->addWidget(m_title);                            // :59
         m_box->addWidget(m_subtitle);                         // :60

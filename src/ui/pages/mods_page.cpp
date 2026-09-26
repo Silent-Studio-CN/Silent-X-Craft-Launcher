@@ -265,21 +265,24 @@ private:
             return;
         }
         if (!curseforge()) {
-            m_sourceNote->setText(QStringLiteral("免 key，直接就能搜。"));
+            /* 用户 2026-09-26(文字纪律):Modrinth 这一源"免 key、直接能搜"是**解释我们怎么实现**,
+             * 删掉 —— 没有这句话照样能搜(搜索框与结果就是答案)。 */
+            m_sourceNote->clear();
             if (m_keyRow != nullptr) {
                 m_keyRow->setVisible(false);
             }
             return;
         }
         if (m_cfKey.isEmpty()) {
+            // 这一句是"让他动手"的:保留动作与后果,去掉"官方 API 要求带 x-api-key"这半句实现解释。
             m_sourceNote->setText(QStringLiteral(
-                "官方 API 要求带 x-api-key。还没配 key —— 这一源**不会发请求**，请把上面那栏填上。"));
+                "还没配 key —— 这一源不会发请求，请把上面那栏填上。"));
             if (m_keyRow != nullptr) {
                 m_keyRow->setVisible(true);
             }
         } else {
-            m_sourceNote->setText(QStringLiteral("已配置 key（%1…）—— 请求时放在 x-api-key 头里，不进 URL。")
-                                      .arg(m_cfKey.left(4)));
+            // 状态就写状态:"放在哪个请求头里"是实现细节,删。
+            m_sourceNote->setText(QStringLiteral("已配置 key（%1…）").arg(m_cfKey.left(4)));
             if (m_keyRow != nullptr) {
                 m_keyRow->setVisible(false);
             }
@@ -322,14 +325,22 @@ private:
                 m_mc = head;
             }
         }
-        m_currentText = QStringLiteral("当前实例：%1 · 游戏版本 %2 · 加载器 %3 · %4 · 源 %5")
-                            .arg(m_instance.isEmpty() ? QStringLiteral("（还没选版本）") : m_instance,
-                                 m_mc.isEmpty() ? QStringLiteral("不筛") : m_mc,
-                                 m_loader.isEmpty() ? QStringLiteral("原版（不筛加载器）") : m_loader,
-                                 versionIsolationOn()
-                                     ? QStringLiteral("版本隔离已开（装进实例自己的目录）")
-                                     : QStringLiteral("版本隔离没开，会装进根目录"),
-                                 curseforge() ? QStringLiteral("CurseForge") : QStringLiteral("Modrinth"));
+        /* 用户 2026-09-26(文字纪律):「能推断出来的信息一个字都不写」。
+         * 这一行原来还写 "· 版本隔离已开（装进实例自己的目录）· 源 Modrinth":
+         *   * 源 —— 上面那个滑块本身就是答案(Modrinth / CurseForge 两个选项就在眼前),删;
+         *   * "（装进实例自己的目录）" / "会装进根目录" —— 解释我们怎么实现,删(只留开/关);
+         *   * "不筛" 这类空话删(没筛就不写)。
+         * 留下的三件**不看就不知道**:装进哪个实例、它的原版与加载器(有才写)、隔离开关的状态
+         * (它决定文件落到实例目录还是游戏根目录)。 */
+        QStringList bits;
+        bits << QStringLiteral("当前实例：%1")
+                    .arg(m_instance.isEmpty() ? QStringLiteral("（还没选版本）") : m_instance);
+        if (!m_mc.isEmpty())
+            bits << QStringLiteral("原版 %1").arg(m_mc);
+        if (!m_loader.isEmpty())
+            bits << m_loader;
+        bits << (versionIsolationOn() ? QStringLiteral("版本隔离：开") : QStringLiteral("版本隔离：关"));
+        m_currentText = bits.join(QStringLiteral(" · "));
         m_context->setText(m_currentText);
     }
 

@@ -154,7 +154,9 @@ QWidget *buildPlaceholderTab(const QString &title, const QString &body, QWidget 
 } // namespace
 
 QWidget *createDownloadPage(QWidget *parent) {
-    auto *page = new PageShell(QStringLiteral("下载"), QStringLiteral("官方 / 镜像双路 · 静默安装"),
+    /* 副标题**删掉**(用户 2026-09-26:「官方 / 镜像双路,这个用你说吗?」)—— 页名"下载"够了;
+     * 空副标题由 PageShell 自己隐藏(否则会留一行空白把内容顶下去)。 */
+    auto *page = new PageShell(QStringLiteral("下载"), QString(),
                                QStringLiteral("sxclPage_download"), parent);
 
     // ── 双层侧边栏 + 右内容区 ──
@@ -276,7 +278,9 @@ QWidget *createDownloadPage(QWidget *parent) {
     QVBoxLayout *rightLay = page->beginSideLayout(leftCol); // 右列:标题 + 副标题 + 内容
 
     auto *stack = new QStackedWidget(page->view());
-    stack->addWidget(createVersionsPage(stack));
+    // embedded=true:版本页以**裸内容**进这一格 —— 这一页自己已经有那**一层**滚动外壳,
+    // 再套一层 ScrollArea 就是用户点名的"套两层,压缩完只有 1/4 大小"(见 versions_page.cpp)。
+    stack->addWidget(createVersionsPage(stack, true));
     // MOD 那一栏:接上 sxcl/mods.h 的资源来源层(搜索/挑文件/装进隔离后的 mods)
     stack->addWidget(createModsPage(stack, false));
     // 光影那一栏:同一个组件(kind=shaderpacks;搜索还只在模组那一类上,下一轮补 project_type)
