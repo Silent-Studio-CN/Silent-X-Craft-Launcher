@@ -94,6 +94,12 @@ public:
     Q_INVOKABLE void notifyInstallFinished(bool ok, bool cancelled);
 
     NavPanel *navPanel() const { return m_nav; }
+
+    /* **副栏登记 + "同一时刻最多一条栏展开"**(docs/27 §11;用户 2026-09-26 口径:
+     * 「不管有多少栏,同时只保持有一个栏可以伸出来」)。
+     * 页面(版本选择页 / 下载页)建好自己的 NavPanel 之后调它登记 —— 状态由**外壳**持有,
+     * 栏自己只上报"我展开了/我收起了"(NavPanel::collapsedChanged)。 */
+    void registerRail(NavPanel *rail);
     QStackedWidget *pageStack() const { return m_stack; }
     const QVector<NavItem> &navItems() const;
     QString currentRouteKey() const;
@@ -232,6 +238,7 @@ private:
     FluentTitleBar *m_titleBar = nullptr;
     QLabel *m_iconLabel = nullptr; // qf 的 18x18 窗口图标位(未设窗口图标 -> 空白占位)
     NavPanel *m_nav = nullptr;
+    QVector<QPointer<NavPanel>> m_rails; // 主栏 + 各页面登记的副栏(同一时刻只允许一条展开)
     StackedWidget *m_stack = nullptr; // libqf 的 StackedWidget(类名要能被 QSS 命中,见 .cpp)
     // 会话页面池(main_window.py:59 self._session_pages):6 个常驻页 + 全部临时页
     QHash<QString, QWidget *> m_pages;

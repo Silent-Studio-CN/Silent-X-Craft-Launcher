@@ -83,8 +83,11 @@ public:
         m_box->removeWidget(m_subtitle);
         m_box->setContentsMargins(0, 0, 28, 24);
         auto *row = new QHBoxLayout();
+        /* **零间距**:左栏(侧2)与右内容之间不留缝 —— 用户 2026-09-26 一直在说
+         * 「侧1 与侧2 要严丝合缝」;以前这里 spacing=12,加上外层的 margin,
+         * 就是那道"肉眼可见的隔阂"。分隔线改由外壳用 QPen(width=0) 画 1 个设备像素。 */
         row->setContentsMargins(0, 0, 0, 0);
-        row->setSpacing(12);
+        row->setSpacing(0);
         if (side != nullptr) {
             row->addWidget(side, 0);
         }

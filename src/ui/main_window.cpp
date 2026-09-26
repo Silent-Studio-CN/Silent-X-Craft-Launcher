@@ -446,6 +446,7 @@ void MainWindow::buildUi() {
 
     // 导航面板:占满整窗高(0..H),含标题栏那 48px 那一段(qf 的 navigationInterface 也是这样)
     m_nav = new NavPanel(this);
+    registerRail(m_nav); // 主栏也进状态机:它展开时,别的栏要收起来
     row->addWidget(m_nav);
 
     auto *body = new QWidget(this);
@@ -639,6 +640,30 @@ const QVector<NavItem> &MainWindow::navItems() const { return m_nav->items(); }
 
 QString MainWindow::currentRouteKey() const { return m_nav->currentRouteKey(); }
 
+void MainWindow::registerRail(NavPanel *rail) {
+    if (rail == nullptr) {
+        return;
+    }
+    for (const QPointer<NavPanel> &existing : m_rails) {
+        if (existing == rail) {
+            return;
+        }
+    }
+    m_rails.push_back(QPointer<NavPanel>(rail));
+    /* 只认**状态变化**:谁(鼠标/键盘/程序)把它展开的都一样 —— 手点与脚本必须是一条时间线
+     * (用户 2026-09-26 在 demo 上抓到:把钩子挂在某个调用入口上 -> 两条路两条时间线)。 */
+    connect(rail, &NavPanel::collapsedChanged, this, [this, rail](bool collapsed) {
+        if (collapsed) {
+            return;
+        }
+        for (const QPointer<NavPanel> &other : m_rails) {
+            if (other != nullptr && other != rail && !other->collapsed()) {
+                other->setCollapsed(true);
+            }
+        }
+    });
+}
+
 void MainWindow::switchToRoute(const QString &routeKey) {
     // ---- 验收/自检通路:三个临时页不在导航里,但要能像常驻页一样被 SXCL_UI_ROUTE 直接打开 ----
     // (main.cpp:60-63 只做 window.switchToRoute(SXCL_UI_ROUTE);临时页的创建参数需要版本 id,
@@ -669,6 +694,13 @@ void MainWindow::switchToRoute(const QString &routeKey) {
         // 只有占位页(makePlaceholderPage)才需要按路由拼一个名字。
         m_pages.insert(routeKey, page);
         m_stack->addWidget(page);
+        /* 新页面里的侧栏(版本选择页 / 下载页的侧2)**在这里统一登记** ——
+         * 页面自己不用知道 MainWindow(它们是自由函数建的),规则也只有一份:
+         * 同一时刻最多一条栏展开(docs/27 §11,用户 2026-09-26 口径)。 */
+        const QList<NavPanel *> rails = page->findChildren<NavPanel *>();
+        for (NavPanel *rail : rails) {
+            registerRail(rail);
+        }
     }
 
     // Python main_window.py:127-147 _onCurrentInterfaceChanged(挂在 FluentWindow 的
