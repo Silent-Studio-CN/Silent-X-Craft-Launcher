@@ -11,7 +11,6 @@
 #include "pages/page_factory.h"
 
 #include <QAbstractButton>
-#include <QAbstractScrollArea> // makePageSeamless:页面那 1px StyledPanel frame 的落点
 #include <QApplication>
 #include <QBoxLayout>
 #include <QCloseEvent>
@@ -192,53 +191,50 @@ protected:
     }
 };
 
-/* 内容框 = **外壳底色的无缝延续**(用户 2026-09-26 口径,推翻上一版)。
+/* 内容框 = **libqf 的 StackedWidget,外观完全交给库自己的样式表**(用户 2026-09-26 最终口径:
+ * 「这个拐角,我让你做圆润的…用得着你手绘吗?QF 不是自带吗?」)。
  *
- * 用户原话:「左上边框这两个连起来的颜色…就给我跟他们主页儿一个颜色」「这个主页面和上边框、
- *           左边框都有很大很明显的一块儿缝」。
- * 所以内容区这一格**什么都不许画**:不画边框、不画底色带、不画圆角。
+ * qf 原生那条"圆角拐弯"的出处(读的是库源码,不是猜的):
+ *   * 参考实现 reference/qfluentwidgets/window/fluent_window.py:122,129 ——
+ *       self.stackedWidget = StackedWidget(self)
+ *       FluentStyleSheet.FLUENT_WINDOW.apply(self.stackedWidget)
+ *     libqf 的入口同名同义:FluentStyleSheet::apply(widget, FLUENT_WINDOW)
+ *     (fluent_window.h:100-105 的注释就写着"内容卡片(白底圆角)";fluent_style.cpp:309-319)。
+ *   * 圆角与那条线**全在那份样式表的一条规则里**:
+ *       libqf resources/qf/qfluentwidgets/qss/dark/fluent_window.qss:63-69
+ *         StackedWidget { border: 1px solid rgba(0,0,0,0.18);
+ *                         border-right: none; border-bottom: none;
+ *                         border-top-left-radius: 10px;
+ *                         background-color: rgba(255,255,255,0.0314); }
+ *       (浅色同形:light/fluent_window.qss:1-7,border rgba(0,0,0,0.068) / bg rgba(255,255,255,0.5))
+ *     圆角外侧露出来的是**窗口底色**(库的 FluentWidget::paintEvent,fluent_window.cpp:839-846;
+ *     参考实现 fluent_window.py:66-71)—— 所以本文件的 paintEvent 只铺那一层底色,别的什么都不画。
  *
- * 为什么必须换掉 libqf 的 StackedWidget 默认外观(qf fluent_window.qss:63-69):
- *   StackedWidget { border: 1px solid rgba(0,0,0,0.18); border-top-left-radius: 10px;
- *                   background-color: rgba(255,255,255,0.0314); }
- * 这三样在 dpr=1.5 的真机上正好落在内容区左缘那 3 个设备像素上,实测(深色,逻辑 y=300,
- * 物理 x=71..75):
+ * 上一版错在哪(实测,不是推测):自己用 QPainterPath 画 竖线+四分之一弧+横线,而内容框是**不透明**的,
+ * 弧线中段(x 逻辑 49..52)整段被内容框盖掉 —— 真机上只剩"竖线往上顶"和"右边一个拐弯"两截断线
+ * (修前截图扫列:device y=72 有横线、y=74..77 整段消失、y=78 起才有竖线)。
+ * 现在这条线是 StackedWidget 自己的 border,画在卡片边界上,谁也不会盖掉谁。
  *
- *     #202020(左栏) | #303030(容器那条分隔线) | #242424(内容框自己的亮底带)
- *     | #191919(页面 1px frame) | #202020(页面)   <- 中间三格就是用户看到的"缝"
- *
- * 修后同一条扫描必须是 **一整片 #202020**。所以:
- *   * paintEvent 只铺令牌 bg(主题切换跟着走,不留旧色);
- *   * **不**调 FluentStyleSheet::apply(..., FLUENT_WINDOW) —— 边框/圆角/亮底带就是它画的;
- *   * 页面的 1px StyledPanel frame 由外壳统一抹掉(见 makePageSeamless)。
- *
- * 类名仍是 libqf 的 StackedWidget(不写 Q_OBJECT -> metaObject 类名不变),
- * 因为别处按它找内容栈;只是绘制被覆盖掉了,和三个窗口按钮同一套做法。 */
-class SeamlessStack : public StackedWidget {
-public:
-    explicit SeamlessStack(QWidget *parent) : StackedWidget(parent) {}
+ * 类名就是 libqf 的 StackedWidget:样式表的类型选择器 `StackedWidget` 才命中得了
+ * (自己重新 setStyleSheet 糊一个圆角 = 又一处自造,口径里明确不许)。 */
 
-protected:
-    void paintEvent(QPaintEvent *) override {
-        QPainter p(this);
-        p.fillRect(rect(), ThemeBridge::instance().token(QStringLiteral("bg")));
-    }
-};
-
-/* 页面的 1px StyledPanel frame = 外壳与内容之间那条缝的另一半。
+/* **外壳不再改页面的 frame**(上一版这里有个 makePageSeamless:把每一页的
+ * QScrollArea 原生 1px 描边统一抹成 NoFrame —— 已删,原因有两条,都是实测出来的):
  *
- * 页面自己是**故意**设的(download_config_page.cpp:818 / home_page.cpp:115 / launch_page.cpp:124
- * / download_progress_page.cpp:156 / settings_page.cpp:2169 —— 那是为了对齐 Python 参考实现的
- * 1px 描边)。但用户 2026-09-26 的口径是"外壳与内容严丝合缝、同一个底色":那条描边就画在
- * 内容区左缘/上缘上,正是"很大很明显的一块儿缝"。
- * 统一由**外壳**抹掉(而不是回去删页面里那 5 处):缝是外壳的事,新页面也自动是对的 ——
- * 和 docs/27 §12 第 2 条"状态/规则归外壳"同一条思路。 */
-void makePageSeamless(QWidget *page) {
-    if (page == nullptr)
-        return;
-    if (auto *area = qobject_cast<QAbstractScrollArea *>(page))
-        area->setFrameShape(QFrame::NoFrame);
-}
+ *   1) **它就是库那条圆角的收尾**。库的 StackedWidget 圆角(左上 10px)在不透明页面面前只剩
+ *      外侧一薄层可见,拐角 45° 那一段(x/y 都在页面里)看不见 —— 实测(1100x750/dpr=1.5/
+ *      route=home,深色):横边框在 device x=80 就断了、竖边框到 device y=80 才开始,中间
+ *      device x=74..79 / y=74..79 是空的(用户看到的"一条线顶上去 + 右边一个拐弯"就是它)。
+ *      页面自己那 1px frame 正好把这段接上:参考图 build/ref/py_home.png 里那条连续的
+ *      拐角线就是这个组合(卡片 border + 卡片底色 + 页面 frame),我们去掉页面 frame 的那版
+ *      与参考图在拐角区就不一致了。
+ *   2) **每个页面的 frame 是页面自己定的、而且各有理由**:老页面(home_page.cpp:115 /
+ *      launch_page.cpp:124 / download_config_page.cpp:886 / settings_page.cpp:2285 /
+ *      download_progress_page.cpp:156)显式 setFrameShape(QFrame::StyledPanel) —— 对齐 Python
+ *      参考实现;新页面(PageShell,page_shell.h:56)显式 NoFrame —— 为了让页内侧栏贴着页面
+ *      左边缘(dx=dy=0,用户 2026-09-26「侧1 与侧2 要严丝合缝」)。外壳一刀切是**替页面做决定**,
+ *      而且正好把老页面的参考实现几何改掉了。
+ * 所以:外壳只管内容卡片(哪些是库的、哪些是我们画的,见上一条),页面自己的边框归页面。 */
 
 // ─────────────────────────────────────────────────────────────────────────
 // 窗口行为用的小工具(四条语义的规则见 docs/13-窗口行为.md)
@@ -501,30 +497,23 @@ void MainWindow::buildUi() {
 
     auto *body = new QWidget(this);
     auto *bodyLay = new QVBoxLayout(body);
-    /* qf fluent_window.py:271 self.widgetLayout.setContentsMargins(0, 48, 0, 0) —— 顶边那 48
-     * 让给标题栏(标题栏是浮层,不在布局里)。
-     *
-     * 左/上各再让出 **1 逻辑像素**:那 1px 是外壳画"三种面相交那条线"的地方(见 paintEvent)。
-     * 为什么必须让:内容框(SeamlessStack)是**不透明**的,它从 x=导航宽/y=48 起铺底色 —— 容器
-     * 在同一个位置画的线会被它整个盖掉(实测过)。让出 1px 后线画在缝里,缝的底色与内容同色,
-     * 所以看到的是**一条线**,不是一条带;右边/下边不画线,靠近窗口边缘,不让。
-     * 参考实现同一件事:Python 版页面几何就是 (49,49)(docs/27 §12 的三尺寸实测表)。 */
-    bodyLay->setContentsMargins(1, kTitleBarHeight + 1, 0, 0);
+    /* qf fluent_window.py:270-271 self.widgetLayout.addWidget(self.stackedWidget) +
+     * self.widgetLayout.setContentsMargins(0, 48, 0, 0) —— 顶边那 48 让给标题栏(标题栏是浮层,
+     * 不在布局里),**左边一点都不让**:内容卡片紧贴导航栏右缘,与库的几何逐值一致。
+     * 上一版在这里多让了 1 逻辑像素(0,48,0,0 -> 1,49,0,0),为的是给自己手绘的那条线腾位置 ——
+     * 手绘没了,这段"腾位置"的辅助代码也一起删掉(它同时还是那截断弧被切掉的直接原因)。 */
+    bodyLay->setContentsMargins(0, kTitleBarHeight, 0, 0);
     bodyLay->setSpacing(0);
 
-    /* 内容框:**外壳底色的无缝延续**(用户 2026-09-26 口径)。
-     *
-     * 这里曾经按 libqf 的原样给内容框套 FluentStyleSheet::FLUENT_WINDOW —— 它画
-     *   1px 边框(rgba(0,0,0,0.18))+ 左上 10px 圆角 + rgba(255,255,255,0.0314) 的底色带。
-     * 用户在真机上看到的就是这三样叠出来的那条"缝"(内容区左缘/上缘各 3 个设备像素:
-     * #303030 / #242424 / #191919,而四周底色是 #202020)。口径改了,所以:
-     *   * 不套 FLUENT_WINDOW(边框/圆角/亮底带全部不画);
-     *   * 用 SeamlessStack(类注释见文件上方)自己铺令牌 bg —— 主题切换跟着走;
-     *   * 页面自己那 1px StyledPanel frame 由 makePageSeamless 抹掉。
-     * 于是"左栏 / 上栏 / 主页"三者同色同底,零缝(验收见 tools/ui_corner_check.ps1)。
-     * 页面的不透明底色仍然各自钉着(那是内容本身的底),只去掉描边那一圈。 */
-    m_stack = new SeamlessStack(body);
+    /* 内容卡片 = libqf 的 StackedWidget + **库自带的那份样式表**(qf 原生圆角就是这么来的;
+     * 证据与出处见文件上方"内容框 = libqf 的 StackedWidget"那段注释)。我们只做两件事:
+     *   1) 建库的类(不是自己的子类);
+     *   2) 按库的写法把 FLUENT_WINDOW 套上去。
+     * 圆角(10px,左上)、那条线(1px border)、深/浅色值全部由库的 QSS 决定,本文件不写一个像素;
+     * 主题切换由 libqf 的 FluentStyle 订阅机制跟着换(fluent_style.cpp:126-137)。 */
+    m_stack = new StackedWidget(body);
     m_stack->setObjectName(QStringLiteral("sxclStack"));
+    FluentStyleSheet::apply(m_stack, FluentStyleSheet::FLUENT_WINDOW);
     bodyLay->addWidget(m_stack);
     row->addWidget(body, 1);
 
@@ -635,7 +624,6 @@ void MainWindow::buildUi() {
         if (!page)
             page = makePlaceholderPage(item);
         m_pages.insert(item.routeKey, page);
-        makePageSeamless(page); // 页面的 1px StyledPanel frame = 外壳与内容之间那条缝
         m_stack->addWidget(page);
         registerPageRails(page); // 构造期建好的页也要进状态机(下载页那条侧栏以前就是漏的)
         m_nav->addItem(item);
@@ -653,7 +641,6 @@ void MainWindow::buildUi() {
         if (!page)
             continue;
         m_pages.insert(key, page);
-        makePageSeamless(page);
         m_stack->addWidget(page);
         registerPageRails(page);
     }
@@ -867,7 +854,6 @@ void MainWindow::switchToRoute(const QString &routeKey) {
         // 而按需建页是"页面自己的身份"最要紧的时候(测试与调试都靠它找页面)。
         // 只有占位页(makePlaceholderPage)才需要按路由拼一个名字。
         m_pages.insert(routeKey, page);
-        makePageSeamless(page); // 按需建页也过同一道:缝是外壳的事
         m_stack->addWidget(page);
     }
     /* 这一页的侧栏(版本选择页 / 下载页的侧2)登记一遍 —— 规则只有一份:
@@ -901,7 +887,6 @@ void MainWindow::showTempPage(QWidget *page, const QString &key) { // :153-166
         m_stack->removeWidget(m_activeTempPage);
     }
     if (m_stack->indexOf(page) < 0) {
-        makePageSeamless(page);    // 临时页同样不许带 1px 描边
         m_stack->addWidget(page); // :159-160
     }
 
@@ -1152,49 +1137,30 @@ void MainWindow::paintEvent(QPaintEvent *) {
     QPainter p(this);
     p.fillRect(rect(), theme.token(QStringLiteral("bg")));
 
-    /* **一整块同色**:左导航栏、上标题栏、内容区三者都是这一个 bg(用户 2026-09-26 口径 ——
-     * 「就给我跟他们主页儿一个颜色」「主页面和上边框、左边框都有很大很明显的一块儿缝」)。
-     * 这里铺的是唯一的底色;导航栏与标题栏自己不刷底色(qf 的 FluentTitleBar 就是 transparent),
-     * 内容框也不刷边框/底色带(见文件上方 SeamlessStack),所以整块分不出缝。
-     * 主题切换跟着令牌走(深 #202020 / 浅 #f3f3f3),不写死。 */
-    /* ── 三种面相交的地方:**各一条 1 设备像素的线**(用户 2026-09-26 最终口径)──
-     *   * 竖线:左导航栏右缘(x = 导航宽),从内容区顶(标题带下缘 y = 48)到窗口底;
-     *   * 横线:标题带下缘(y = 48),从左导航栏右缘到窗口右缘。
-     * 两条在 (导航宽, 48) 接成一个角;线以外**全是同一个底色**(见上面那条 fillRect),
-     * 所以既不缺线、也没有"更亮/更暗的一条带"。
+    /* **整窗就这一层底色**:左导航栏、上标题栏与内容卡片外圈都是它,主题切换跟着令牌走
+     * (深 #202020 / 浅 #f3f3f3),不写死。
      *
-     * 为什么必须是 QPen(颜色, 0) + 容器 paintEvent:宽度 0 = cosmetic = 恒定 **1 个设备像素**
-     * (dpr=1.5 下也是 1 个物理像素);1 逻辑像素的**控件**当线会占 1~2 个物理像素("一粗一细"),
-     * QFrame::VLine 更糟 —— Fusion 的默认调色板是浅色的,深色界面里直接画成白线(docs/27 §12)。
-     * 颜色只取令牌 separator(深 #383838 / 浅 #e8e8e8),不写死。
-     * 线画在 bodyLay 让出的那 1 逻辑像素缝里:**内容框是不透明的**,它从 x=导航宽 / y=48 起
-     * 铺底色,容器在同一位置画的线会被整个盖掉(实测过)。
+     * 库的同一层:FluentWidget::paintEvent(fluent_window.cpp:839-846,p.drawRect(rect()))与
+     * FluentWindow 的 QFrame#chrome(fluent_window.cpp:604-608)。这层底色的唯一作用,是让内容
+     * 卡片左上角那 10px 圆角**外侧**有东西可露(圆角与那条线都是 StackedWidget 的 QSS 画的,
+     * 见 buildUi 与文件上方那段注释)。
      *
-     * 页面内自己那条侧栏(side2)的竖线照旧画:它在内容区**里面**,是栏与正文之间的分隔。 */
-    if (m_nav != nullptr && m_nav->isVisibleTo(this)) {
-        const int navRight = m_nav->x() + m_nav->width(); // 折叠 48 / 展开 322,跟着动画变
-        QPainter qp(this);
-        qp.setPen(QPen(theme.token(QStringLiteral("separator")), 0));
-        /* **圆角拐弯**(用户 2026-09-26 最终口径:「QF 都给你铺好路的人家默认就是圆角」——
-         * 直角硬拼和"干脆没有线"都被否了)。两条线用**一段四分之一圆弧**接起来:
-         * 竖线从窗口底往上到 (navRight, top+r),圆弧转到 (navRight+r, top),再水平拉到右缘;
-         * 半径 8 与 qf 一致(其它圆角口径:卡片 12 / 按钮 10 / 小标签 6,嵌合处 8)。
-         * 笔宽 0 = cosmetic = 恒定 1 个设备像素,弧上也不变粗(docs/27 §12)。 */
-        constexpr qreal kCornerRadius = 8.0;
-        QPainterPath elbow;
-        elbow.moveTo(navRight, height());
-        elbow.lineTo(navRight, kTitleBarHeight + kCornerRadius);
-        elbow.arcTo(QRectF(navRight, kTitleBarHeight, kCornerRadius * 2, kCornerRadius * 2), 180.0,
-                    -90.0);
-        elbow.lineTo(width(), kTitleBarHeight);
-        qp.setBrush(Qt::NoBrush);
-        qp.drawPath(elbow);
-        for (const QPointer<NavPanel> &rail : m_rails) {
-            if (rail == nullptr || rail == m_nav || !rail->isVisible())
-                continue; // 主栏那两条上面已经画了(位置相同),这里只补页面侧栏
-            const int x = rail->x() + rail->width();
-            qp.drawLine(x, rail->y(), x, rail->y() + rail->height());
-        }
+     * 这里**不画任何线**:曾经那条 QPainterPath(竖线 + 四分之一弧 + 横线)按用户口径拆掉了;
+     * 拐角归库。 */
+    if (m_nav == nullptr || !m_nav->isVisibleTo(this))
+        return;
+
+    /* 页面内自己那条侧栏(side2)与正文之间的分隔线仍由外壳画 —— 它在**内容卡片里面**,
+     * 不是拐角那条线(卡片边框归 StackedWidget 的 QSS),规则见 docs/27 §12 第 1 条:
+     * 栏与栏零间距,线由容器用 QPen(令牌 separator, 0) 画;宽度 0 = cosmetic = 恒定
+     * **1 个设备像素**(用 1 逻辑像素的控件当线会占 1~2 个物理像素,真机上是"一粗一细")。 */
+    QPainter qp(this);
+    qp.setPen(QPen(theme.token(QStringLiteral("separator")), 0));
+    for (const QPointer<NavPanel> &rail : m_rails) {
+        if (rail == nullptr || rail == m_nav || !rail->isVisible())
+            continue; // 主栏那条线 = 内容卡片的左边框(库画的),这里只补页面自己的侧栏
+        const int x = rail->x() + rail->width();
+        qp.drawLine(x, rail->y(), x, rail->y() + rail->height());
     }
 }
 
@@ -2173,6 +2139,19 @@ void MainWindow::runSelfCheckStep() {
         hideToTray();
     } else if (step == QLatin1String("show")) {
         showMainWindow();
+    } else if (step == QLatin1String("nav") || step == QLatin1String("nav322")
+               || step == QLatin1String("nav48")) {
+        /* 主栏 48 <-> 322(验收通路:左上角那条线/圆角在两种导航宽下都要对得上 ——
+         * 拐角跟着主栏右缘走,拐角列的物理 x = 导航宽 x dpr)。
+         * 动作走**产品路径**:点栏上那颗真的汉堡键(NavPanel::menuButton -> setCollapsed),
+         * 与用户手点同一条时间线;nav322 / nav48 只在方向不对时才点(点两下会翻回去)。
+         * 宽度不在这里打印:验收脚本直接从截图里量(拐角左侧第一条线的物理列 / dpr)。 */
+        if (m_nav != nullptr && m_nav->menuButton() != nullptr) {
+            const bool wantExpand = step == QLatin1String("nav322")
+                                    || (step == QLatin1String("nav") && m_nav->collapsed());
+            if ((!m_nav->collapsed()) != wantExpand)
+                m_nav->menuButton()->click();
+        }
     } else if (step.startsWith(QLatin1String("download:"))) {
         const QString versionId = step.mid(int(qstrlen("download:")));
         switchToDownloadProgress(versionId, versionId);

@@ -53,7 +53,7 @@ public:
          * 分隔线**不靠控件**:由外壳(MainWindow::paintEvent)用 QPen(宽度 0 = cosmetic)
          * 画 1 个**设备**像素 —— docs/27 §12:1 逻辑像素的控件线在 dpr=1.5 上会占 1~2 个
          * 物理像素(实测"一粗一细"),QFrame::VLine 还会因 Fusion 的浅色调色板变白线。 */
-        setFrameShape(QFrame::StyledPanel); // TEMP EXPERIMENT
+        setFrameShape(QFrame::NoFrame);
         // 页面底色钉令牌 bg(#202020):参考图的内容区就是它,不钉会露出内容栈那层半透明白。
         setStyleSheet(QStringLiteral("QScrollArea { background: %1; }")
                           .arg(FluentTheme::instance().tokens().bg.name()));
