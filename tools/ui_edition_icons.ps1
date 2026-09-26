@@ -44,6 +44,17 @@ if (-not (Test-Path $exe)) {
   exit 1
 }
 
+# This script drives the real exe three times. A leftover instance from an aborted run keeps
+# running and can write game.edition into the same settings file while we measure (that is
+# exactly how a restart run once reported the wrong side), so refuse to start while another
+# sxcl-ui.exe is alive instead of producing a bogus verdict.
+$busy = @(Get-Process -Name 'sxcl-ui' -ErrorAction SilentlyContinue)
+if ($busy.Count -gt 0) {
+  Write-Output ('EDITION-ICONS: FAIL (another sxcl-ui.exe is running, pid ' + ($busy.Id -join ',') +
+                ' -- close it or wait, then re-run)')
+  exit 1
+}
+
 $ini = Join-Path $work 'edition.ini'
 Set-Content -Path $ini -Value ('game.default_dir=' + $work + '\.minecraft') -Encoding utf8
 Add-Content -Path $ini -Value 'game.edition=java'
@@ -438,6 +449,16 @@ if (-not (Test-Path $logoPng)) {
     $fail++
   }
   if ($logo.letterW -lt 1000) { Write-Output '  -> FAIL the LOGO asset has no letter ink'; $fail++ }
+  # the canvas must be cropped to the letter ink (that is why the two icons can be the same ink height):
+  # any black margin left on top/bottom would make the letters smaller than the cup at the same box height
+  if ($logo.letterH -lt 0.95 * $logo.h -or $logo.letterW -lt 0.95 * $logo.w) {
+    Write-Output ('  -> FAIL the LOGO canvas is not cropped to the letter ink (letters ' + $logo.letterW +
+                  'x' + $logo.letterH + ' vs canvas ' + $logo.w + 'x' + $logo.h + ')')
+    $fail++
+  } else {
+    Write-Output ('  canvas is cropped to the letter ink: letters ' + $logo.letterW + 'x' + $logo.letterH +
+                  ' vs canvas ' + $logo.w + 'x' + $logo.h + ' (>= 95% both ways)')
+  }
 }
 
 Write-Output 'run A: click bedrock'
@@ -491,28 +512,32 @@ Write-Output ('  cup  (' + $cupFootName + ', run A) footprint = ' + $cupFoot[0] 
               ' logical')
 Write-Output ('  LOGO (' + $logoFootName + ', run B) footprint = ' + $logoFoot[0] + 'x' + $logoFoot[1] +
               ' phys = ' + [math]::Round($logoFoot[0] / $dpr, 2) + 'x' + [math]::Round($logoFoot[1] / $dpr, 2) +
-              ' logical ; asset canvas aspect 5.817 -> screen aspect ' +
+              ' logical ; asset canvas aspect ' + [math]::Round($logo.aspect, 3) + ' -> screen aspect ' +
               [math]::Round($logoFoot[0] / [double]$logoFoot[1], 3))
-Write-Output ('  LOGO letters inside that canvas = ' + [math]::Round(100.0 * $logo.letterH / $logo.h, 1) +
-              '% of the height -> ' + [math]::Round($logoFoot[1] * $logo.letterH / [double]$logo.h / $dpr, 2) +
-              ' logical px tall on screen')
-if ([math]::Abs($cupFoot[1] - $logoFoot[1]) -gt 2) {
-  Write-Output ('  -> FAIL the two icons are not the same visual height (cup ' + $cupFoot[1] +
-                ' phys vs LOGO ' + $logoFoot[1] + ' phys)')
+# the ink height is what must match between the two icons (1 logical pixel tolerance)
+$cupInkLogical = $cupFoot[1] / $dpr
+$logoInkLogical = $logoFoot[1] / $dpr
+Write-Output ('  ink height: cup = ' + [math]::Round($cupInkLogical, 2) + ' logical (' + $cupFoot[1] +
+              ' phys), LOGO = ' + [math]::Round($logoInkLogical, 2) + ' logical (' + $logoFoot[1] +
+              ' phys) -> difference ' + [math]::Round([math]::Abs($cupInkLogical - $logoInkLogical), 2) +
+              ' logical px (allowed <= 1)')
+if ([math]::Abs($cupInkLogical - $logoInkLogical) -gt 1.0) {
+  Write-Output ('  -> FAIL the two icons do not have the same ink height (cup ' + [math]::Round($cupInkLogical, 2) +
+                ' vs LOGO ' + [math]::Round($logoInkLogical, 2) + ' logical px)')
   $fail++
 }
 if ($logoFoot[1] -lt 28 -or $logoFoot[1] -gt 32) {
-  Write-Output ('  -> FAIL LOGO footprint height ' + $logoFoot[1] + ' phys is not the expected 30 (20 logical)')
+  Write-Output ('  -> FAIL LOGO ink height ' + $logoFoot[1] + ' phys is not the expected 30 (20 logical)')
   $fail++
 }
-if ($logoFoot[0] -lt 168 -or $logoFoot[0] -gt 180) {
-  Write-Output ('  -> FAIL LOGO footprint width ' + $logoFoot[0] + ' phys is not the expected 174 (116 logical)')
+if ($logoFoot[0] -lt 204 -or $logoFoot[0] -gt 212) {
+  Write-Output ('  -> FAIL LOGO ink width ' + $logoFoot[0] + ' phys is not the expected 208.5 (139 logical)')
   $fail++
 }
 $screenAspect = $logoFoot[0] / [double]$logoFoot[1]
-if ([math]::Abs($screenAspect - 5.817) / 5.817 -gt 0.10) {
+if ([math]::Abs($screenAspect - $logo.aspect) / $logo.aspect -gt 0.10) {
   Write-Output ('  -> FAIL the LOGO is not rendered at its own aspect (' + [math]::Round($screenAspect, 3) +
-                ' vs 5.817) -- it would be distorted or not the official art')
+                ' vs ' + [math]::Round($logo.aspect, 3) + ') -- it would be distorted or not the official art')
   $fail++
 }
 if ($cupFoot[0] -lt 15 -or $cupFoot[1] -lt 25) {
@@ -525,7 +550,9 @@ Write-Output 'icon sources (kept in sync with assets/icons/edition/NOTICE.md):'
 Write-Output '  java_logo.svg    <- https://raw.githubusercontent.com/devicons/devicon/master/icons/java/java-original.svg'
 Write-Output '                      (same bytes also at https://unpkg.com/devicon@latest/icons/java/java-original.svg ; sha256 7582E518A9C02425F97155E5A3BD39D1A3A7D421B78CAF9C8DF7443DAD3EDC5D)'
 Write-Output '  bedrock_logo.png <- D:\SilentStudio\AdbGUI\APK\Minecraft_1.26.40.5.apk : assets/assets/resource_packs/vanilla/textures/ui/title.png'
-Write-Output '                      (1937x333 RGBA 86796 bytes, sha256 1AB368C3719A0FA0C273A0040BD5D3E8C47A9678B8DFF22A09AA1BF570781662 ; byte-identical copy)'
+Write-Output '                      original 1937x333 RGBA 86796 bytes sha256 1AB368C3719A0FA0C273A0040BD5D3E8C47A9678B8DFF22A09AA1BF570781662'
+Write-Output '                      in-repo file = SAME PIXELS, canvas only cropped to the letter ink (19,17)..(1916,289) -> 1898x273 151064 bytes'
+Write-Output '                      sha256 C9102616002FEEA5890406F9BB2054D3E2DCED3CB5C8104AA954D28A1B7D3FC7 (no keying, no recolouring, no scaling)'
 Write-Output '  bedrock_block.png (spare, not used by the UI) <- same APK: assets/assets/resource_packs/vanilla/textures/blocks/bedrock.png'
 
 # the required banner says "luo pan yi zhi" (settings files agree) in Chinese; built from code

@@ -30,8 +30,9 @@
 //                128x128 矢量,fill #0074BD —— 不用任何自绘替代品);
 //   基岩版 LOGO = assets/icons/edition/bedrock_logo.png(用户本机基岩版 APK 里
 //                assets/assets/resource_packs/vanilla/textures/ui/title.png 的**官方 MINECRAFT
-//                标题 LOGO**,1937x333 RGBA,原样像素、未重绘;同一 APK 里扒出来的那枚 16x16
-//                基岩方块留作备用文件 bedrock_block.png,界面里不用它)。
+//                标题 LOGO**;原图 1937x333 RGBA,**只裁画布**(裁到字母墨迹包围盒 ->
+//                1898x273,像素逐字节未改、没有抠底改色),这样"画布高 = 字母墨迹高";
+//                同一 APK 里扒出来的那枚 16x16 基岩方块留作备用文件 bedrock_block.png,界面不用)。
 //   两枚素材的解包/下载出处与 sha256 逐条写在 assets/icons/edition/NOTICE.md。
 //   选中态 = 图标**下方**一条 2 逻辑像素的 accent 指示条(长度 = 图标宽度,距图标下缘 4 像素;
 //   用户点名不要"蓝色方框");整组在页脚里**水平居中**(前后各一个伸缩项);分隔线 = 容器
@@ -217,10 +218,10 @@ QWidget *createDownloadPage(QWidget *parent) {
         auto *bedrockBtn = new IconSelectButton(rowHost);
         bedrockBtn->setObjectName(QStringLiteral("sxclEditionBedrockButton"));
         bedrockBtn->setIconFile(QStringLiteral("bedrock_logo.png")); // 官方 MINECRAFT 标题 LOGO
-        // 视觉高度:LOGO 是 5.82:1 的宽幅图(原图 1937x333),所以这里给的是**绘制盒高度**,
-        // 宽度由控件按素材横纵比算(20 -> 116 逻辑像素)。给 20 = 与咖啡杯那枚同高:
-        // 两侧"墨迹外框"实测都是 30 物理像素高(20 逻辑像素 @dpr1.5),见验收脚本读数;
-        // LOGO 内部那 82% 高的字母墨迹因此落在 16.4 逻辑像素(24.6 物理),一并写在报告里。
+        // 视觉高度:LOGO 裁完画布后是 6.95:1 的宽幅图(1898x273,画布高就是字母墨迹高),
+        // 这里给的是**绘制盒高度**,宽度由控件按素材横纵比算(20 -> 139 逻辑像素)。
+        // 给 20 = 与咖啡杯那枚的墨迹同高:两侧墨迹实测都是 30 物理像素高(20 逻辑像素 @dpr1.5),
+        // 见 tools/ui_edition_icons.ps1 的"ink height"读数。
         bedrockBtn->setIconHeight(20);
         // 未接入这件事**只在这里说**(tooltip = 悬停才出现,不占版面);
         // 以前那条"基岩版还没接入"的 InfoBar 是弹在脸上的废话,已删。
