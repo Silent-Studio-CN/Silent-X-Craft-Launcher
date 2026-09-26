@@ -51,6 +51,10 @@ set(SXCL_UI_SOURCES
   workers/ui_error.cpp        workers/ui_error.h
   #   mods_worker.* 模组页的取文本/下文件(工作线程;模组下载不碰安装编排)
   workers/mods_worker.cpp     workers/mods_worker.h
+  #   bg_task.*     通用"一次性后台任务"(阻塞代码进工作线程,结果回界面线程;界面线程零等待)
+  workers/bg_task.cpp         workers/bg_task.h
+  #   instance_scan.* 已安装版本扫描(sxcl_instance_scan)的界面层唯一实现;**只许工作线程调**
+  workers/instance_scan.cpp   workers/instance_scan.h
   # 账户(正版登录)—— Python 版没有这个功能,新增:
   #   account.*     账户快照 + 工作线程任务(登录/续期/注销/正版启动;主线程绝不阻塞)
   #   auth_dialog.* 设备码登录对话框(qf 风格的 MessageBoxBase)

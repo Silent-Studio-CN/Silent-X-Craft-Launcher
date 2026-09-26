@@ -570,9 +570,22 @@ void MainWindow::buildUi() {
     connect(m_stack, &QStackedWidget::currentChanged, this,
             [this](int) { scheduleRailConverge(); });
 
+    /* 每一页的构造耗时(sxcl-ui 启动**可见时间**的大头就在这里)。
+     * 为什么要逐页量:用户报"启动慢/未响应"时,只有"总共 1.4 秒"没法知道该动哪一页 ——
+     * 实测(2026-09-26)设置页一页就占了大头(它在构造期起 java 进程 + 扫游戏目录);
+     * 这行数字是"该挪到工作线程的是谁"的判据,不是装饰。 */
+    auto timedPage = [](const QString &key) {
+        QElapsedTimer timer;
+        timer.start();
+        QWidget *page = createPageForRoute(key, nullptr);
+        std::fprintf(stderr, "[sxcl-ui] startup-page: %s 构造耗时 %lld ms\n",
+                     key.toUtf8().constData(), (long long)timer.elapsed());
+        return page;
+    };
+
     // ---- 侧边栏那 6 页 ----
     for (const NavItem &item : kNavSpec) {
-        QWidget *page = createPageForRoute(item.routeKey, nullptr);
+        QWidget *page = timedPage(item.routeKey);
         if (!page)
             page = makePlaceholderPage(item);
         m_pages.insert(item.routeKey, page);
@@ -589,7 +602,7 @@ void MainWindow::buildUi() {
     static const char *const kHiddenRoutes[] = {"versions", "tasks", "keymap"};
     for (const char *route : kHiddenRoutes) {
         const QString key = QString::fromLatin1(route);
-        QWidget *page = createPageForRoute(key, nullptr);
+        QWidget *page = timedPage(key);
         if (!page)
             continue;
         m_pages.insert(key, page);

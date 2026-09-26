@@ -19,12 +19,13 @@
 #include <thread>
 
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
-#include <QTimer>
 #include <QFileInfo>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 
 #include "sxcl/log.h"
 
@@ -256,6 +257,11 @@ namespace {
 
 std::atomic<uint64_t> g_guiTick{0};      // GUI 线程在跳(每 100ms +1)
 std::atomic<int> g_hangReported{0};
+QTimer *g_tickTimer = nullptr;           // 跳表(只在武装之后存在,见 armHangWatchdog)
+std::atomic<int> g_armed{0};
+
+/** 没到报告阈值、但已经够用户感觉到的停摆:留一行数字给验收脚本(实测 2000ms 上下最常见)。 */
+constexpr int kStallWarnMs = 800;
 
 void writeHangReport(int blockedMs) {
     const QString dir = crashDir();
@@ -304,20 +310,29 @@ void pruneOldReports(const QString &dir, const QString &prefix, int keep) {
 }
 
 void installHangWatchdog(int thresholdMs) {
-    /* GUI 侧的跳表(这个定时器住在主线程上,所以它不跳 = 主线程卡住)。 */
-    auto *tick = new QTimer(qApp);
-    QObject::connect(tick, &QTimer::timeout, [] { g_guiTick.fetch_add(1); });
-    tick->start(100);
-
+    /* 只起**看门狗线程**,跳表等 armHangWatchdog() 再启动 —— 这是 2026-09-26 修掉的那个
+     * 假报告根因:以前这里在 QApplication 之前 new QTimer(qApp)+start(),那时主线程**还没有
+     * 事件分发器**,startTimer 直接失败(Qt 只打一句 qWarning),于是跳表一次都不跳 ——
+     * 看门狗看到的永远是"连续 3 秒没跳",**每条路由都落一份 hang 报告**(实测 home /
+     * versions / select 各一次,全是假的:报告时间 = 安装时刻 + 3s,与界面卡不卡无关)。
+     *
+     * 现在:跳表只在**事件循环真的跑起来**之后才存在(armHangWatchdog 在 app.exec() 之前调),
+     * 计时也从"跳表第一次跳"开始 —— 只报真正的界面卡死。 */
     std::thread([thresholdMs]() {
+        /* 未武装之前不计时:先等跳表跳起来(否则启动期的正常耗时会被当成卡死)。 */
+        while (g_armed.load() == 0 || g_guiTick.load() == 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
         uint64_t last = g_guiTick.load();
         auto lastChange = std::chrono::steady_clock::now();
+        int stallLogged = 0; // 一次停摆只记一行(500ms 轮询会连着看到同一个停摆)
         for (;;) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             const uint64_t now = g_guiTick.load();
             if (now != last) {
                 last = now;
                 lastChange = std::chrono::steady_clock::now();
+                stallLogged = 0;
                 continue;
             }
             const auto blocked = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -330,11 +345,30 @@ void installHangWatchdog(int thresholdMs) {
                     pruneOldReports(dir, QStringLiteral("sxcl-ui-hang-"), 3);  // 各留 3 份
                     pruneOldReports(dir, QStringLiteral("sxcl-ui-crash-"), 3);
                 }
+            } else if (blocked >= kStallWarnMs && stallLogged == 0) {
+                /* 没到报告阈值,但已经够用户感觉到了 —— 留一行数字,验收脚本据此判"抖不抖"。
+                 * 一行/次停摆,不刷屏。 */
+                stallLogged = 1;
+                std::fprintf(stderr, "[sxcl-ui] ui-stall: %lld ms\n", (long long)blocked);
+                SXCL_LOG_W("crash", "界面线程被按住 %lld ms(报告阈值 %d ms)",
+                           (long long)blocked, thresholdMs);
             }
         }
     }).detach();
-    SXCL_LOG_I("crash", "界面卡住看门狗已就位(%d ms 阈值 -> logs/crashes/sxcl-ui-hang-*)",
+    SXCL_LOG_I("crash", "界面卡住看门狗已就位(%d ms 阈值 -> logs/crashes/sxcl-ui-hang-*;"
+                        "跳表等事件循环起来再启动)",
                thresholdMs);
+}
+
+void armHangWatchdog() {
+    if (g_armed.exchange(1) != 0)
+        return;
+    /* GUI 侧的跳表:必须建在**已经有事件分发器**的线程上(调用点在 QApplication 之后、
+     * app.exec() 之前)。这个定时器住在主线程,所以它不跳 = 主线程被按住了。 */
+    g_tickTimer = new QTimer(QCoreApplication::instance());
+    QObject::connect(g_tickTimer, &QTimer::timeout, [] { g_guiTick.fetch_add(1); });
+    g_tickTimer->start(100);
+    std::fprintf(stderr, "[sxcl-ui] 看门狗跳表已武装(100ms 一跳)\n");
 }
 
 void installCrashHandler() {
@@ -350,6 +384,7 @@ void installCrashHandler() {
 namespace sxcl::ui {
 
 void installCrashHandler() {}
+void armHangWatchdog() {}
 
 } // namespace sxcl::ui
 

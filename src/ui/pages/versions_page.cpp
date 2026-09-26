@@ -27,7 +27,6 @@
 #include <QSet>
 #include <QStringList>
 #include <QStyledItemDelegate>
-#include <QThread>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -52,6 +51,8 @@
 
 #include "fluent_theme.h"
 #include "sxcl_icons.h"
+#include "workers/bg_task.h"       // 一次性后台任务(阻塞活进工作线程,结果回界面线程)
+#include "workers/instance_scan.h" // 已安装版本扫描(界面层唯一实现;**只许工作线程调**)
 #include "workers/ui_error.h"  // 统一错误出口:完整上下文 + 自动复制剪贴板
 #include "workers/ui_paths.h"  // uiLauncherDataRoot():缓存/配置根必须跨平台(Android 没有 %APPDATA%)
 
@@ -70,7 +71,7 @@
 
 // 注意:sxcl_ui_core 目前没有源码树 include/ 目录的搜索路径(include/ 只挂在可执行目标
 // sxcl-ui 上),所以这里**够不着** sxcl/instance.h。等主代理把那行 include 目录补进
-// sxcl_ui_core(或让 sxcl_ui_core 链 sxcl)之后,把 scanLocalInstances() 换成
+// sxcl_ui_core(或让 sxcl_ui_core 链 sxcl)之后,把本地扫描换成
 // sxcl_instance_scan(),加载器小标签与 problem 提示就会跟着来(见最终报告)。
 
 namespace sxcl::ui {
@@ -507,58 +508,10 @@ QString gameDirectory() {
     return QDir::fromNativeSeparators(QDir::homePath()) + QStringLiteral("/.minecraft");
 }
 
-// ── 本地已安装实例:走核心库 sxcl_instance_scan ──
-// Python scan_installed():versions/<id>/ 下只要有版本 JSON 就算"装好了"
-// (Forge 1.13+/Fabric 的实例没有自己的 jar,按 jar+json 判会全漏);
-// C 版核心库那份还多给了加载器标签(Forge/Fabric/…)与 problem 人话,
-// 以前界面层自己读 JSON 是拿不到这些的(文件头那条 TODO 就是这件事)。
-struct LocalInstance {
-    QString id;
-    QString type;
-    QString releaseTime;
-    QString summary;  // "原版" / "Forge 47.2.0 + OptiFine I6"
-    QString problem;  // 不能启动时的原因(空 = 没问题)
-    bool launchable = true;
-    QVariantList loaders; // QVariantList<QStringList{kind_id, version}>,与模型/委托的约定一致
-};
-
-QVector<LocalInstance> scanLocalInstances(const QString &gameDir, QString *errorOut) {
-    QVector<LocalInstance> out;
-    if (errorOut)
-        errorOut->clear();
-    sxcl_instance_list list;
-    std::memset(&list, 0, sizeof(list));
-    char err[SXCL_INSTANCE_ERROR_MAX];
-    err[0] = '\0';
-    const int rc = sxcl_instance_scan(gameDir.toUtf8().constData(), nullptr, &list, err, sizeof(err));
-    if (rc != SXCL_INSTANCE_OK) {
-        if (errorOut)
-            *errorOut = QString::fromUtf8(err[0] ? err : "扫描本地实例失败");
-        return out;
-    }
-    out.reserve(static_cast<int>(list.count));
-    for (size_t i = 0; i < list.count; ++i) {
-        const sxcl_instance &inst = list.items[i];
-        LocalInstance item;
-        item.id = QString::fromUtf8(inst.id);
-        item.type = QString::fromUtf8(inst.version_type[0] ? inst.version_type : "release");
-        item.summary = QString::fromUtf8(inst.summary);
-        item.problem = QString::fromUtf8(inst.problem);
-        item.launchable = inst.launchable != 0;
-        for (size_t k = 0; k < inst.loader_count; ++k) {
-            const sxcl_instance_loader &ld = inst.loaders[k];
-            // 内层是 QStringList{kind_id, version} —— 与模型/委托的约定一致
-            // (委托用 item.toStringList() 读它;写成 QVariantList 会让加载器小标签**静默消失**)
-            item.loaders.append(QStringList{
-                QString::fromUtf8(sxcl_instance_kind_id(ld.kind)),
-                QString::fromUtf8(ld.version),
-            });
-        }
-        out.append(item);
-    }
-    sxcl_instance_list_free(&list);
-    return out;
-}
+// ── 本地已安装实例:走 workers/instance_scan.h(界面层唯一实现)──
+// 原来这里自己抄了一份"枚举 + 装箱";现在两页(版本页 / 版本选择页)共用同一份,
+// 而且**只在工作线程里调**(界面线程一次都不许直接扫盘 —— 见 loadVersions 的说明)。
+// 判据、加载器标签、problem 人话全部来自核心库 sxcl_instance_scan。
 
 const char *kManifestOfficialUrl = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
@@ -803,6 +756,7 @@ public:
         : PageScaffold(QStringLiteral("Minecraft 版本"),
                        QStringLiteral("要装哪个版本 · 官方 / 镜像双路"), parent) {
         setObjectName(QStringLiteral("VersionsPage"));
+        m_fetch = new BgTask(this);
         buildContent();
         loadVersions();
     }
@@ -855,10 +809,22 @@ private:
         loadingLayout->addStretch(3);
         box()->addWidget(m_loading);
 
-        // ---- 状态行(versions_page.py:366-367)----
+        // ---- 状态行(versions_page.py:366-367)+ 失败时的**重试**键 ----
+        // 用户口径(2026-09-26):失败不能只写一行红字 —— 得给一个**能点**的重试。
+        // 所以状态行与「重试」并排:平时重试藏着,清单没拿到时露出来(点它重跑一遍
+        // 加载:本地扫描 + 清单双路,全部在工作线程里)。
         m_status = new BodyLabel(QString(), view());
         m_status->setVisible(false);
-        box()->addWidget(m_status);
+        m_retry = new PushButton(QStringLiteral("重试"), view());
+        m_retry->setVisible(false);
+        connect(m_retry, &QPushButton::clicked, this, [this] { loadVersions(); });
+        auto *statusRow = new QWidget(view());
+        auto *statusLay = new QHBoxLayout(statusRow);
+        statusLay->setContentsMargins(0, 0, 0, 0);
+        statusLay->setSpacing(12);
+        statusLay->addWidget(m_status, 1);
+        statusLay->addWidget(m_retry, 0, Qt::AlignVCenter);
+        box()->addWidget(statusRow);
 
         // ---- 虚拟化列表(versions_page.py:370-392)----
         m_list = new VersionListView(view());
@@ -913,34 +879,35 @@ private:
     // ---- 数据 ----
 
     void loadVersions() { // versions_page.py:399-410
+        // 骨架先出来:转圈 + 一行"正在加载…",列表清空、刷新键禁用(避免连点排队)
         m_loading->setVisible(true);
         m_loadingLabel->setText(QStringLiteral("正在加载版本清单…"));
         m_status->setVisible(false);
+        m_retry->setVisible(false);
         m_model->setVersions({}, m_installed);
         m_refresh->setEnabled(false);
 
         // 取数据放到工作线程(对应 Python 的 FetchWorker);UI 线程只负责回填。
-        auto *thread = QThread::create([this] {
-            // 1) 本地已安装实例:与清单**各算各的**(清单不通也要能显示"你装了哪些")
-            m_instances = scanLocalInstances(gameDirectory(), nullptr);
-            // 2) 远端清单:核心库双路(官方 -> BMCLAPI),失败才退缓存
-            QString error;
-            QString notice; // "官方源超时,已切 BMCLAPI" 这类要弹给用户看的话
-            bool fromCache = false;
-            const QByteArray text = fetchManifestText(&error, &fromCache, &notice);
-            QVector<GameVersion> versions;
-            if (!text.isEmpty())
-                versions = parseManifest(text, &error);
-            const bool ok = !versions.isEmpty();
-            QMetaObject::invokeMethod(
-                this,
-                [this, versions, error, ok, fromCache, notice] {
-                    onLoaded(versions, error, ok, fromCache, notice);
-                },
-                Qt::QueuedConnection);
-        });
-        connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-        thread->start();
+        // 两件阻塞活都在这一条工作线程上:**本地已安装扫描**(扫盘)+ **远端清单双路**
+        // (官方 -> BMCLAPI,失败才退缓存)。界面线程一个字节都不等。
+        if (m_fetch->running())
+            return; // 上一轮还在跑:等它回来(刷新键此时是禁用的)
+        m_fetch->start(
+            QStringLiteral("versions-manifest"),
+            [this] {
+                // ① 本地已安装实例:与清单**各算各的**(清单不通也要能显示"你装了哪些")
+                m_instances = scanInstalledInstances(gameDirectory(), nullptr);
+                // ② 远端清单:核心库双路(官方 -> BMCLAPI),失败才退缓存
+                m_fetchError.clear();
+                m_fetchNotice.clear();
+                m_fetchFromCache = false;
+                const QByteArray text = fetchManifestText(&m_fetchError, &m_fetchFromCache, &m_fetchNotice);
+                m_fetchVersions.clear();
+                if (!text.isEmpty())
+                    m_fetchVersions = parseManifest(text, &m_fetchError);
+                // 线程取证在 BgTask 里统一打(bg-task[versions-manifest] 那一行)
+            },
+            [this] { onLoaded(m_fetchVersions, m_fetchError, !m_fetchVersions.isEmpty(), m_fetchFromCache, m_fetchNotice); });
     }
 
     // 只剩"本地已安装"时用来铺列表:此时状态行会**明说**这不是版本清单,
@@ -948,7 +915,7 @@ private:
     QVector<GameVersion> installedOnlyVersions() const {
         QVector<GameVersion> out;
         out.reserve(m_instances.size());
-        for (const LocalInstance &inst : m_instances) {
+        for (const InstalledInstance &inst : m_instances) {
             GameVersion v;
             v.id = inst.id;
             v.type = inst.type;
@@ -999,6 +966,7 @@ private:
                       .arg(m_all.size());
         m_manifestNote = QStringLiteral("版本清单加载失败：%1 · %2").arg(reason, localNote);
         m_status->setText(m_manifestNote);
+        m_retry->setVisible(true); // 失败也要能用:给一个能点的重试(不是只写一行红字)
         // 统一错误出口:InfoBar 里只放短句,**完整上下文(页面/操作/原始原因/路径/版本)
         // 一并进剪贴板** —— 用户报障时直接粘,不用再问"什么错"。
         UiErrorContext ctx;
@@ -1027,7 +995,7 @@ private:
                      m_status->text().toUtf8().constData());
         /* 加载器汇总另打一行**纯 ASCII**(kind=数量),免得中文/编码把取证信息糊掉 */
         QString ascii;
-        for (const LocalInstance &inst : m_instances) {
+        for (const InstalledInstance &inst : m_instances) {
             for (const QVariant &entry : inst.loaders) {
                 const QStringList pair = entry.toStringList();
                 if (!pair.isEmpty())
@@ -1064,7 +1032,7 @@ private:
         m_installed.clear();
         m_loaders.clear();
         m_problems.clear();
-        for (const LocalInstance &inst : m_instances) {
+        for (const InstalledInstance &inst : m_instances) {
             m_installed.insert(inst.id);
             if (!inst.loaders.isEmpty())
                 m_loaders.insert(inst.id, inst.loaders);
@@ -1081,7 +1049,7 @@ private:
     // 加载器汇总(versions_page.py:475-503 的那段):"Forge 2 个、Fabric 1 个"
     QString loaderSummaryText() const {
         QHash<QString, int> counts;
-        for (const LocalInstance &inst : m_instances) {
+        for (const InstalledInstance &inst : m_instances) {
             for (const QVariant &entry : inst.loaders) {
                 const QStringList pair = entry.toStringList();
                 if (pair.isEmpty())
@@ -1144,9 +1112,16 @@ private:
                       QStringLiteral("即将进入 %1 服务端下载页 (功能开发中)").arg(v.id), this, 3000);
     }
 
+    BgTask *m_fetch = nullptr;     // 清单 + 本地扫描的工作线程外壳(loadVersions 里起)
+    QVector<GameVersion> m_fetchVersions; // 工作线程写、界面线程读(队列投递保证先后)
+    QString m_fetchError;
+    QString m_fetchNotice;
+    bool m_fetchFromCache = false;
+
     SearchLineEdit *m_search = nullptr;
     ComboBox *m_category = nullptr;
     PushButton *m_refresh = nullptr;
+    PushButton *m_retry = nullptr; // 清单没拿到时才露出来(失败也要能用)
     QTimer *m_reloadTimer = nullptr;
     QWidget *m_loading = nullptr;
     IndeterminateProgressRing *m_spinner = nullptr;
@@ -1163,7 +1138,7 @@ private:
     QSet<QString> m_installed;
     QHash<QString, QVariantList> m_loaders;
     QHash<QString, QString> m_problems;
-    QVector<LocalInstance> m_instances;
+    QVector<InstalledInstance> m_instances;
 };
 
 } // namespace

@@ -40,6 +40,10 @@
 #include "libqf.h"
 #include "main_window.h"
 
+#include "workers/bg_task.h"        // 一次性后台任务(阻塞活进工作线程,结果回界面线程)
+#include "workers/ui_error.h"      // 统一错误出口(错误态要能写进剪贴板,不只一行红字)
+#include "workers/instance_scan.h"  // 已安装版本扫描(界面层唯一实现;**只许工作线程调**)
+
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
 #endif
@@ -92,6 +96,9 @@ public:
                     QStringLiteral("认的是文件夹名，不是 MC 版本号 · 悬停文件夹可换图标"),
                     QStringLiteral("sxclPage_select"), parent) {
         m_gameDir = resolveGameDirectory();
+        m_folders = foldersWithoutProbe(); // 先给一份"不碰磁盘"的表:当前目录 + 用过的历史(探测在工作线程)
+        m_scan = new BgTask(this);
+        m_probe = new BgTask(this);
         buildBody();
         rebuildNav(true);
         reloadVersions();
@@ -184,7 +191,18 @@ private:
         m_listHint->setWordWrap(true);
         const QColor secondary = pageTokenColor("textSecondary");
         m_listHint->setTextColor(secondary, secondary);
-        lay->addWidget(m_listHint);
+        /* 失败也要能用:扫不出/扫不动时给一个**能点**的「重试」(用户口径,2026-09-26)。
+         * 平时藏着,只有这一栏进错误态才露出来。 */
+        m_retry = new PushButton(QStringLiteral("重试"), pane);
+        m_retry->setVisible(false);
+        connect(m_retry, &QPushButton::clicked, this, [this] { reloadVersions(); });
+        auto *hintRow = new QWidget(pane);
+        auto *hintLay = new QHBoxLayout(hintRow);
+        hintLay->setContentsMargins(0, 0, 0, 0);
+        hintLay->setSpacing(12);
+        hintLay->addWidget(m_listHint, 1);
+        hintLay->addWidget(m_retry, 0, Qt::AlignVCenter);
+        lay->addWidget(hintRow);
 
         auto *scroll = new ScrollArea(pane);
         scroll->setWidgetResizable(true);
@@ -200,9 +218,25 @@ private:
         return pane;
     }
 
-    // ── 侧 2 栏：文件夹 ──
+    /* ── 侧 2 栏：文件夹 ──
+     *
+     * 侧栏**只建一次**(探测结果回来那一刻)。为什么不是"先建一条只有当前目录的栏、
+     * 探测回来再重建":重建会造出第二条 NavPanel(老的 deleteLater 还没走),外壳的状态机
+     * 与"展开条数"读数都会跟着抖 —— 实测(tools/ui_rail_assert.ps1 route=select):
+     * 侧2 被顶成 48、step2 的 expanded 变成 2。一次建好就没有第二条栏可言,
+     * 与从前"构造期一次建好"是同一条时间线,只是那一次现在发生在工作线程给出结果之后。
+     *
+     * 展开状态**先按页面上那一条**(没有就按参数)定下来,建的时候一次到位。 */
     void rebuildNav(bool expand = false) {
-        const bool expanded = expand || (m_nav && !m_nav->collapsed());
+        if (expand || m_nav == nullptr)
+            m_navExpanded = true;
+        else
+            m_navExpanded = !m_nav->collapsed();
+        probeFolders(); // 磁盘探测在工作线程;回来 -> buildNavPanel()(只建一次)
+    }
+
+    // 真正把侧栏建出来(界面线程;文件夹表来自工作线程的探测结果)
+    void buildNavPanel(bool expanded) {
         if (m_nav) {
             m_navLay->removeWidget(m_nav);
             m_nav->deleteLater();
@@ -222,7 +256,10 @@ private:
         if (auto *mw = qobject_cast<MainWindow *>(window()))
             mw->registerRail(m_nav);
 
-        QVector<GameFolder> folders = detectGameFolders(m_gameDir);
+        /* 文件夹表(m_folders)由**工作线程**探测后回填(probeFolders)。这一趟只用手上这份:
+         * 构造期 = 当前目录 + 用过的历史(读一次设置,不碰磁盘)。探测结果回来会**再重建一次**
+         * 侧栏(顺序/图标/命中集合与从前 detectGameFolders 同步跑时完全一致)。 */
+        QVector<GameFolder> folders = m_folders;
         bool currentListed = false;
         for (const GameFolder &f : folders) {
             if (samePath(f.path, m_gameDir))
@@ -291,6 +328,48 @@ private:
         m_nav->setCollapsed(!expanded);
     }
 
+    /* 文件夹探测(每个候选都要数 <dir>/versions 里的版本 —— 磁盘活)在工作线程里跑;
+     * 结果回来才建侧栏。同一条栏被替换的那两处(换文件夹/换图标)走的是同一条路:
+     * rebuildNav() -> probeFolders() -> buildNavPanel()。 */
+    void probeFolders() {
+        if (m_probe->running())
+            return;
+        m_probe->start(QStringLiteral("folder-probe"),
+                       [this] { m_foldersProbed = detectGameFolders(m_gameDir); },
+                       [this] {
+                           if (m_probe->cancelled())
+                               return;
+                           m_folders = m_foldersProbed;
+                           buildNavPanel(m_navExpanded);
+                       });
+    }
+
+    // 不碰磁盘的那份表:当前目录 + 用过的历史(与 detectGameFolders 的前半段同口径)
+    QVector<GameFolder> foldersWithoutProbe() const {
+        QVector<GameFolder> out;
+        GameFolder self;
+        self.path = normPath(m_gameDir);
+        self.label = QStringLiteral("当前配置");
+        self.exists = true;
+        out.append(self);
+        for (const QString &known : knownGameDirs()) {
+            if (samePath(known, m_gameDir))
+                continue;
+            GameFolder f;
+            f.path = normPath(known);
+            f.label = QStringLiteral("用过/导入的");
+            f.exists = true;
+            out.append(f);
+        }
+        return out;
+    }
+
+    // 当前文件夹的显示名(状态行用)
+    QString shortName() const {
+        const QString name = QDir(m_gameDir).dirName();
+        return name.isEmpty() ? m_gameDir : name;
+    }
+
     void importFolder() {
         // 只有"导入一个磁盘上的文件夹"这一步需要系统目录选择器（没有别的办法拿到任意路径）；
         // 页面本身与挑图标都不用它 —— 用户反对的是页面的"原生点选画风"。
@@ -330,23 +409,36 @@ private:
     }
 
     // ── 右栏：这个文件夹下的已安装版本 ──
+    /* 扫描**在工作线程里**(sxcl_instance_scan 是磁盘活:每个 <dir>/versions/<id>/ 都要看
+     * JSON/jar)。以前它同步跑在这里 —— 换文件夹、点进这一页、甚至页面构造期都在界面线程上
+     * 扫盘;那正是"点一下卡一下"的来源之一。现在:先把"正在读取…"画出来,结果回来再填。
+     *
+     * 三态(与版本页同一套口径):扫到了 -> 列出来;扫到了但一个都没有 -> 空态文案;
+     * 扫不动(目录不存在/读不了) -> **错误态 + 能点的「重试」**,绝不只写一行红字。 */
     void reloadVersions() {
         clearVersionRows();
-        const QString currentName = QDir(m_gameDir).dirName();
-        const QString shownName = currentName.isEmpty() ? m_gameDir : currentName;
+        m_rowNames.clear();
+        m_rowGears.clear();
+        m_retry->setVisible(false);
+        m_listHint->setText(QStringLiteral("正在读取「%1」里的已安装版本…").arg(shortName()));
+        if (m_scan->running())
+            return; // 上一轮还在跑:结果回来填**最新**那个文件夹(切得快也不会排两次队)
+        m_scan->start(QStringLiteral("installed-scan"),
+                      [this] { m_scanned = scanInstalledInstances(m_gameDir, &m_scanError); },
+                      [this] { fillVersions(); });
+    }
 
-        sxcl_instance_list list;
-        memset(&list, 0, sizeof(list));
-        char err[256];
-        err[0] = '\0';
-        const int rc =
-            sxcl_instance_scan(m_gameDir.toUtf8().constData(), nullptr, &list, err, sizeof(err));
+    // 界面线程:把工作线程扫到的结果画成行(每行的判据/文案与从前逐字一致)
+    void fillVersions() {
+        clearVersionRows();
+        m_rowNames.clear();
+        m_rowGears.clear();
+        const QString shownName = shortName();
         const QString saved = selectedVersionName();
         const QColor secondary = pageTokenColor("textSecondary");
         int shown = 0;
-        if (rc == 0) {
-            for (size_t i = 0; i < list.count; ++i) {
-                const sxcl_instance &inst = list.items[i];
+        if (m_scanError.isEmpty()) {
+            for (const InstalledInstance &inst : m_scanned) {
                 auto *card = new CardWidget(m_listLay->parentWidget());
                 card->setMinimumHeight(62);
                 card->setCursor(Qt::PointingHandCursor);
@@ -356,7 +448,7 @@ private:
 
                 auto *text = new QVBoxLayout();
                 text->setSpacing(2);
-                const QString name = QString::fromUtf8(inst.id);
+                const QString name = inst.id;
                 const bool isCurrent = (name == saved);
                 QString titleText = name;
                 if (isCurrent)
@@ -373,19 +465,19 @@ private:
                 text->addWidget(title);
 
                 QStringList bits;
-                if (inst.summary[0] != '\0')
-                    bits << QString::fromUtf8(inst.summary);
+                if (!inst.summary.isEmpty())
+                    bits << inst.summary;
                 // 只在**确信**时才说原版是哪个：以前会显示"原版 1.12.2(猜的)"，
                 // 用户 2026-09-22 晚点名嫌它难看（"我真没绷住"）——猜的就别写出来。
-                if (inst.base_version[0] != '\0' && inst.base_reliable)
-                    bits << QStringLiteral("原版 %1").arg(QString::fromUtf8(inst.base_version));
-                bits << (inst.has_jar ? QStringLiteral("有 jar") : QStringLiteral("无自己的 jar"));
+                if (!inst.baseVersion.isEmpty() && inst.baseReliable)
+                    bits << QStringLiteral("原版 %1").arg(inst.baseVersion);
+                bits << (inst.hasJar ? QStringLiteral("有 jar") : QStringLiteral("无自己的 jar"));
                 if (!inst.launchable)
                     bits << QStringLiteral("不能启动：%1")
-                                .arg(QString::fromUtf8(inst.problem[0] != '\0'
-                                                           ? inst.problem
-                                                           : sxcl_instance_problem_default_text(
-                                                                 inst.problem_code)));
+                                .arg(inst.problem.isEmpty()
+                                         ? QString::fromUtf8(sxcl_instance_problem_default_text(
+                                               static_cast<sxcl_instance_problem>(inst.problemCode)))
+                                         : inst.problem);
                 auto *detail = new BodyLabel(bits.join(QStringLiteral(" · ")), card);
                 detail->setWordWrap(true);
                 detail->setTextColor(secondary, secondary);
@@ -429,14 +521,24 @@ private:
                 m_listLay->addWidget(card);
                 ++shown;
             }
+        } else {
+            /* 扫不动 = 错误态:照实说原因 + 给能点的重试(不是只写一行红字) */
+            m_listHint->setText(QStringLiteral("「%1」读不出来：%2").arg(shownName, m_scanError));
+            m_retry->setVisible(true);
+            pushUiError(this,
+                        UiErrorContext{QStringLiteral("版本选择页 / select"),
+                                       QStringLiteral("读取已安装版本"),
+                                       m_scanError,
+                                       QStringLiteral("游戏目录：%1").arg(m_gameDir),
+                                       QStringLiteral("读取已安装版本失败")},
+                        6000);
         }
-        sxcl_instance_list_free(&list);
 
-        if (shown == 0) {
+        if (m_scanError.isEmpty() && shown == 0) {
             m_listHint->setText(
                 QStringLiteral("「%1」里还没有已安装的版本（去「下载 → Minecraft 版本」装一个）")
                     .arg(shownName));
-        } else {
+        } else if (m_scanError.isEmpty()) {
             m_listHint->setText(
                 QStringLiteral("「%1」里有 %2 个版本；点一行就用它启动，右上角齿轮进版本设置")
                     .arg(shownName)
@@ -454,6 +556,14 @@ private:
     }
 
     QString m_gameDir;
+    BgTask *m_scan = nullptr;   // 已安装版本扫描(工作线程)
+    BgTask *m_probe = nullptr;  // 游戏文件夹探测(工作线程)
+    QVector<InstalledInstance> m_scanned; // 工作线程写、界面线程读(队列投递保证先后)
+    QString m_scanError;
+    QVector<GameFolder> m_folders;        // 当前用于建侧栏的文件夹表
+    QVector<GameFolder> m_foldersProbed;  // 工作线程探测结果
+    bool m_navExpanded = true;            // 侧栏展开状态(重建时要保持住)
+    PushButton *m_retry = nullptr;        // 扫不动时的「重试」
     QWidget *m_navSlot = nullptr;
     QVBoxLayout *m_navLay = nullptr;
     NavPanel *m_nav = nullptr;

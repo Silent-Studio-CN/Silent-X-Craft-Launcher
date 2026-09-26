@@ -1239,6 +1239,11 @@ sxcl::ui::MainWindow window;
         }
     }
 
+    /* 看门狗的跳表**这时候**才武装:窗口已经建好、事件循环马上就开始 ——
+     * 从这里起"界面线程连续 3 秒不跳"才是真的卡死(以前它在 QApplication 之前装,
+     * 定时器压根起不来,于是每条路由都落一份假 hang 报告)。 */
+    sxcl::ui::armHangWatchdog();
+
     SXCL_LOG_I("startup", "界面就绪:进入事件循环(路由=%s)",
                route.isEmpty() ? "(默认首页)" : route.toUtf8().constData());
     const int rc = app.exec();

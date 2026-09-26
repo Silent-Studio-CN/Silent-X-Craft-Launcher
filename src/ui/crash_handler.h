@@ -32,4 +32,10 @@ void installCrashHandler();
  * 日志也停在半路(卡的是 GUI 线程,它写不出新行),不取证就只能猜。 */
 void installHangWatchdog(int thresholdMs = 3000);
 
+/* 武装跳表:**必须在 QApplication 建好之后、事件循环起来之前**调用(见 .cpp 里的说明)。
+ * 为什么不让 installHangWatchdog 自己顺手启动:它是在 QApplication **之前**调用的,
+ * 那时主线程还没有事件分发器,定时器根本起不来 —— 跳表一次都不跳,看门狗于是把
+ * "启动中"误判成"卡死",每条路由都落一份假报告(2026-09-26 实测并修掉)。 */
+void armHangWatchdog();
+
 } // namespace sxcl::ui

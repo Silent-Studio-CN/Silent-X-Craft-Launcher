@@ -63,6 +63,7 @@
 #include "theme_bridge.h"
 
 // 账户(正版登录)—— Python 版无此功能,新增。实现见 dialogs/account.* 与 dialogs/auth_dialog.*
+#include "workers/bg_task.h"  // 一次性后台任务(阻塞活进工作线程,结果回界面线程)
 #include "workers/ui_error.h"  // 统一错误出口:完整上下文 + 自动复制剪贴板
 #include "workers/ui_paths.h"  // uiSettingsFilePath():设置文件路径的唯一权威(见 settingsFilePath)
 
@@ -815,6 +816,12 @@ public:
         m_combo->setMinimumWidth(320);     // :108
         m_importButton = new PushButton(QStringLiteral("导入"), this);        // :109
         m_downloadButton = new PushButton(QStringLiteral("下载 Java"), this); // :110
+        /* 「重新检测」:只在**没检出可用的 Java** 时出现 —— 用户刚装完 Java 回来点它,
+         * 不用重启启动器(检测本身是后台任务,点一下不会卡界面)。放同一行右端,
+         * 不加新行、不动卡片高度。 */
+        m_retryButton = new PushButton(QStringLiteral("重新检测"), this);
+        m_retryButton->setVisible(false);
+        connect(m_retryButton, &QPushButton::clicked, this, [this] { refresh(); });
         m_statusLabel = new CaptionLabel(QString(), this);                    // :112
         m_statusLabel->setTextColor(QColor(0x52, 0xc4, 0x1a), QColor(0x73, 0xd1, 0x3d)); // :113
 
@@ -827,6 +834,7 @@ public:
         topRow->addWidget(m_combo);                   // :121
         topRow->addWidget(m_downloadButton);          // :122
         topRow->addWidget(m_importButton);            // :123
+        topRow->addWidget(m_retryButton);             // 没检出可用的 Java 时的重试(平时藏着)
         topRow->setAlignment(Qt::AlignRight);         // :124
 
         rightLayout->addLayout(topRow);               // :126
@@ -847,14 +855,45 @@ public:
         connect(m_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
                 [this](int index) { onSelectionChanged(index); });                        // :134
 
+        m_probe = new BgTask(this);
         refresh(); // :136
     }
 
     void setSelectionHandler(SelectionHandler handler) { m_onSelection = std::move(handler); }
 
-    // java_setting_card.py:138-174 refresh
+    /* java_setting_card.py:138-174 refresh —— 分两半:
+     *   refresh()           界面线程:先画"正在检测…",再把这个活交给工作线程
+     *   applyInstallations()界面线程:结果回来之后填下拉/状态行/重试键
+     *
+     * 为什么必须分(2026-09-26 实测):第 :139 行那次探测会给**每个候选真的起一次
+     * <java> -version**(3 个候选 ~300ms,机器慢或候选多时更久)。它以前同步跑在设置页
+     * 构造期 —— 逐页实测"settings 页构造耗时 462ms",那 462ms 里窗口还没画出来,
+     * 用户看到的就是"点了启动器半天不出界面/未响应"。 */
     void refresh(const QString &preferredPath = QString()) {
-        m_installations = discoverJavaInstallations(); // :139
+        m_preferredPath = preferredPath;
+        showProbePending();
+        if (m_probe->running())
+            return; // 上一轮还在跑:结果回来时按**最新一次**的口径填,不排两次队
+        m_probe->start(QStringLiteral("java-detect"),
+                       [this] { m_probed = discoverJavaInstallations(); },
+                       [this] { applyInstallations(); });
+    }
+
+    // 检测期间的骨架:下拉里一行"正在检测…",状态行写清在等什么;重试键先收起来
+    void showProbePending() {
+        const QSignalBlocker blocker(m_combo);
+        m_combo->clear();
+        m_combo->addItem(QStringLiteral("正在检测…"));
+        m_statusLabel->setText(QStringLiteral("正在检测 Java 运行时…"));
+        m_statusLabel->setTextColor(FluentTheme::instance().tokens().textTertiary);
+        m_retryButton->setVisible(false);
+    }
+
+    // 界面线程:把工作线程探到的结果填进界面(java_setting_card.py:139-174 的填法逐条不变)
+    void applyInstallations() {
+        if (m_probe->cancelled())
+            return; // 页面正在收尾:不再回填
+        m_installations = m_probed; // :139(数据来自工作线程,这里只填控件)
         {
             const QSignalBlocker blocker(m_combo);     // :140 blockSignals(True)
             m_combo->clear();                          // :141
@@ -874,6 +913,7 @@ public:
                     m_combo->setToolTip(probe.detail);
                     m_downloadButton->setToolTip(probe.detail);
                 }
+                m_retryButton->setVisible(true); // 一个都没检出:给一个**能点**的重试
                 return;
             }
 
@@ -918,8 +958,8 @@ public:
             }
 
             int selected = 0;                              // :153
-            if (!preferredPath.isEmpty()) {                // :154-160 按归一化路径找
-                const QString wanted = normalizeJavaPath(preferredPath);
+            if (!m_preferredPath.isEmpty()) {              // :154-160 按归一化路径找
+                const QString wanted = normalizeJavaPath(m_preferredPath);
                 for (int index = 0; index < m_combo->count(); ++index) {
                     if (normalizeJavaPath(m_combo->itemData(index).toString()) == wanted) {
                         selected = index;
@@ -938,6 +978,15 @@ public:
             m_combo->setCurrentIndex(selected);            // :171
             updateStatus(m_installations.at(selected));    // :173-174
         }
+        // 一个可用的都没有 -> 把「重新检测」露出来(不是只写一行红字)
+        bool anyUsable = false;
+        for (const JavaEntry &entry : m_installations) {
+            if (entry.usable) {
+                anyUsable = true;
+                break;
+            }
+        }
+        m_retryButton->setVisible(!anyUsable);
     }
 
     // java_setting_card.py:186-190 selected_path
@@ -1165,8 +1214,12 @@ private:
     ComboBox *m_combo = nullptr;
     PushButton *m_importButton = nullptr;
     PushButton *m_downloadButton = nullptr;
+    PushButton *m_retryButton = nullptr;   // 没检出可用 Java 时的「重新检测」
     CaptionLabel *m_statusLabel = nullptr;
     QVector<JavaEntry> m_installations;
+    BgTask *m_probe = nullptr;             // Java 探测的工作线程外壳(界面线程绝不等它)
+    QVector<JavaEntry> m_probed;           // 工作线程写、界面线程读(队列投递保证先后)
+    QString m_preferredPath;               // 最近一次 refresh() 要选中的那条
     SelectionHandler m_onSelection;
 
     // 核心库的进度回调(**工作线程**):只做投递,不碰控件
@@ -2090,6 +2143,10 @@ private:
     PushSettingCard *m_refreshCard = nullptr;
     PushSettingCard *m_logoutCard = nullptr;
     AccountTask *m_accountTask = nullptr;
+
+    // 游戏目录探测(候选扫描 + 每个候选里数版本)只在**工作线程**里跑 ——
+    // 它以前在 buildContent() 里同步跑,是设置页构造耗时的一部分(见 buildContent 的说明)。
+    BgTask *m_dirProbe = nullptr;
 };
 
 SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
@@ -2251,7 +2308,12 @@ void logGameDirDetection() {
 }
 
 void SettingsPage::buildContent() {
-    logGameDirDetection();
+    /* 游戏目录探测(sxcl_paths_detect_ex:候选逐个数 <dir>/versions 里的版本,实测三四个
+     * 候选几十毫秒,大目录/慢盘上更久)以前在这里**同步**跑 —— 设置页构造期占掉的那部分
+     * 就是"窗口还没画出来"的时间。现在放工作线程:候选集/命中的目录一行不少地照打
+     * (验收脚本读的就是 [sxcl-ui] gamedir-probe 那几行),只是不再挡住界面。 */
+    m_dirProbe = new BgTask(this);
+    m_dirProbe->start(QStringLiteral("gamedir-probe"), [] { logGameDirDetection(); }, [] {});
     // ── 通用设置(settings_page.py:215-270)──
     auto *generalGroup = new SettingCardGroup(QString::fromUtf8(kGroupGeneral), m_view);
 
