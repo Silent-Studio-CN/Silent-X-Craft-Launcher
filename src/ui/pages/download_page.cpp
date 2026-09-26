@@ -22,18 +22,27 @@
 //   拼图   = assets/icons/pcl/mod.svg      (index.tsv:15 原名称「Mod」,来源 PageDownloadLeft.xaml)
 //   太阳   = assets/icons/pcl/shader.svg   (index.tsv:19 原名称「光影包」,同一 XAML)
 //
-// 基岩版切换开关:**用户要求预留、位置待他确认**,先放这一页顶部右侧(语义最贴近),
-// 只写状态键 game.edition,点了如实说"还没接入"(不假装有功能)。
+// 侧2 页脚的**版本形态**(Java 版 / 基岩版):**两个图标点选钮**,不是一个滑块。
+//   用户 2026-09-26 原话:「我想要的是咖啡杯代表 Java,然后基岩版再找一个代表,
+//   点这两个所代表的图标,而不是一个按钮,非常诡异啊」。
+//   版面是 [图标 A] | [图标 B]:中间一条**竖直分隔线**,两颗图标各自可点;
+//   咖啡杯   = assets/icons/edition/java_logo.svg(官方 Java 咖啡杯:devicon 的 java-original,
+//              128x128 矢量,fill #0074BD —— 不再用原先那枚自绘的简化咖啡杯图标);
+//   基岩方块 = assets/icons/edition/bedrock_logo.png(官方基岩方块:用户本机基岩版 APK 里
+//              vanilla/textures/blocks/bedrock.png 的 4 倍最近邻放大,原样像素、未重绘)。
+//   两枚素材的下载/解包出处逐条写在 assets/icons/edition/NOTICE.md。
+//   选中态 = 主题令牌 accent(描边 + 淡底);分隔线 = 容器 paintEvent + QPen(令牌 separator, 0)
+//   —— 恒定 1 个**设备**像素,不是控件(docs/27 §12 第 1 条)。
+//   点选只写状态键 game.edition,不弹任何解释性弹窗(docs/27 §11.5 文字纪律);"还没接入"这件事
+//   只留在基岩版那枚图标的 tooltip 里(悬停才出现),折叠区/日志区也没有多余文案。
 
 #include "page_factory.h"
 #include "page_shell.h"
 
 #include "../fluent_theme.h"
 #include "../icon_registry.h"
+#include "../icon_select_button.h" // 页脚的"版本形态"图标点选钮(docs/27 §11 按钮最少化)
 #include "../nav.h"
-#include "../sxcl_icons.h"
-#include "../ui_icons.h"
-#include "libqf.h"          // InfoBar(与其他页同一个入口)
 #include "workers/ui_paths.h"
 
 #include "sxcl/settings.h"  // 基岩版开关的状态键(game.edition)要落盘
@@ -50,7 +59,7 @@
 #endif
 
 #include <QHBoxLayout>
-#include <QLabel>
+#include <QPainter> // 页脚那条竖直分隔线:容器 paintEvent 里画(docs/27 §12)
 #include <QStackedWidget>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -86,6 +95,46 @@ CardWidget *buildPlaceholderCard(const QString &title, const QString &body, QWid
     lay->addWidget(text);
     return card;
 }
+
+/* 页脚那两个图标钮的**容器**:两颗图标之间那条竖直分隔线由它自己画。
+ *
+ * docs/27 §12 第 1 条(线不能是一个控件):拿 1 逻辑像素的控件当线,在 dpr=1.5 的屏幕上会占
+ * 1~2 个物理像素(真机截图扫列实测"一粗一细"),QFrame::VLine 更糟 —— Fusion 的默认调色板是
+ * 浅色的,深色界面里直接画成**白线**。正解就是这里:**栏与栏零间距相邻,线由容器在 paintEvent
+ * 里用 QPen(颜色令牌, 0) 画**(宽度 0 = cosmetic = 恒定 **1 个设备像素**),颜色取主题令牌
+ * (本仓库里这支令牌叫 separator —— 就是方案里写的 line 那一支)。
+ *
+ * 线**在两颗图标之间的中点**、竖直居中:高度取两个钮的并集(不探出、不缩进),
+ * 位置每次绘制时按子控件几何现算,所以折叠/展开/换主题都不用额外接线。 */
+class EditionPickRow : public QWidget {
+public:
+    explicit EditionPickRow(QWidget *parent) : QWidget(parent) {}
+
+    void setButtons(QWidget *left, QWidget *right) {
+        m_left = left;
+        m_right = right;
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        if (m_left == nullptr || m_right == nullptr)
+            return;
+        const QRect a = m_left->geometry();
+        const QRect b = m_right->geometry();
+        if (a.isEmpty() || b.isEmpty())
+            return;
+        const int x = (a.right() + 1 + b.left()) / 2; // 间隙中点
+        const int top = qMin(a.top(), b.top());
+        const int bottom = qMax(a.bottom(), b.bottom());
+        QPainter p(this);
+        p.setPen(QPen(ThemeBridge::instance().token(QStringLiteral("separator")), 0));
+        p.drawLine(x, top, x, bottom);
+    }
+
+private:
+    QWidget *m_left = nullptr;
+    QWidget *m_right = nullptr;
+};
 
 QWidget *buildPlaceholderTab(const QString &title, const QString &body, QWidget *parent) {
     auto *holder = new QWidget(parent);
@@ -133,52 +182,73 @@ QWidget *createDownloadPage(QWidget *parent) {
     inner->setCollapsed(false);
     leftLay->addWidget(inner, 1); // 侧栏吃掉竖直方向的余量
 
-    // ── 侧栏页脚:Java 版 / 基岩版 滑块(用户点名:滑块 + 咖啡杯 + 基岩 LOGO) ──
+    // ── 侧栏页脚:版本形态(Java 版 / 基岩版)**两个图标点选** ──
+    //
+    // 改前:一个 SwitchButton 滑块 + 旁边两个纯文字标签,滑块还把标签文字在"Java 版 / 基岩版"
+    // 之间来回改,点了基岩版再弹一条"基岩版还没接入"的 InfoBar —— 用户 2026-09-26 点名这套
+    // 形态「非常诡异啊」:要的是**咖啡杯 / 基岩方块两个图标本身可点**。
+    // 改后照 docs/27 §11「按钮最少化」+ §11.5「文字纪律」:
+    //   * 动作给图标**(透明底,悬停一档提亮)**,文字只进 tooltip,不占版面、不写废话;
+    //   * 当前态用**主题令牌**表达(选中 = accent 描边 + accent 淡底,见 IconSelectButton);
+    //   * 点选只做一件事:写 game.edition 并立即存盘(重启后记得住),不弹任何解释性弹窗。
     {
         auto *foot = new CardWidget(leftCol);
         auto *fl = new QVBoxLayout(foot);
-        fl->setContentsMargins(16, 12, 16, 12);
+        fl->setContentsMargins(12, 8, 12, 8);
         fl->setSpacing(6);
-        auto *row = new QHBoxLayout();
-        row->setSpacing(8);
-        auto *javaIcon = new QLabel(foot);
-        javaIcon->setPixmap(fluent::icon(QStringLiteral("Cafe"), FluentTheme::instance().isDark())
-                                .pixmap(18, 18));
-        javaIcon->setToolTip(QStringLiteral("Java 版"));
-        row->addWidget(javaIcon, 0, Qt::AlignVCenter);
-        auto *slider = new SwitchButton(QStringLiteral("Java 版"), foot);
-        slider->setToolTip(QStringLiteral("Java 版 / 基岩版：二选一（切换会记住）"));
-        row->addWidget(slider, 0, Qt::AlignVCenter);
-        auto *bedrockIcon = new QLabel(foot);
-        const QPixmap bedrockLogo = uiBedrockLogoPixmap(14);
-        if (!bedrockLogo.isNull())
-            bedrockIcon->setPixmap(bedrockLogo);
-        else
-            bedrockIcon->setText(QStringLiteral("基岩版"));
-        bedrockIcon->setToolTip(QStringLiteral("基岩版"));
-        row->addWidget(bedrockIcon, 0, Qt::AlignVCenter);
-        row->addStretch(1);
-        fl->addLayout(row);
+        auto *rowHost = new EditionPickRow(foot);
+        rowHost->setObjectName(QStringLiteral("sxclEditionPickRow"));
+        auto *row = new QHBoxLayout(rowHost);
+        row->setContentsMargins(0, 0, 0, 0);
+        row->setSpacing(12); // 两颗图标之间留 12:竖直分隔线就画在这段的中点
+
+        auto *javaBtn = new IconSelectButton(rowHost);
+        javaBtn->setObjectName(QStringLiteral("sxclEditionJavaButton")); // dump/验收按它认这个钮
+        javaBtn->setIconFile(QStringLiteral("java_logo.svg")); // 官方咖啡杯 = Java 版
+        javaBtn->setToolTip(QStringLiteral("Java 版"));
+
+        auto *bedrockBtn = new IconSelectButton(rowHost);
+        bedrockBtn->setObjectName(QStringLiteral("sxclEditionBedrockButton"));
+        bedrockBtn->setIconFile(QStringLiteral("bedrock_logo.png")); // 官方基岩方块 = 基岩版
+        // 未接入这件事**只在这里说**(tooltip = 悬停才出现,不占版面);
+        // 以前那条"基岩版还没接入"的 InfoBar 是弹在脸上的废话,已删。
+        bedrockBtn->setToolTip(QStringLiteral("基岩版\n还没接入：下载与启动目前只有 Java 版"));
+
+        // 二选一:同一个父控件上的 autoExclusive —— 点一个,另一个自己弹起来(单选语义)
+        javaBtn->setAutoExclusive(true);
+        bedrockBtn->setAutoExclusive(true);
+        row->addWidget(javaBtn, 0, Qt::AlignVCenter);
+        row->addWidget(bedrockBtn, 0, Qt::AlignVCenter);
+        rowHost->setButtons(javaBtn, bedrockBtn);
+
+        // 页脚里**左对齐**:图标行靠左,剩下的横向空间留给伸缩项
+        auto *outer = new QHBoxLayout();
+        outer->setContentsMargins(0, 0, 0, 0);
+        outer->addWidget(rowHost, 0, Qt::AlignLeft);
+        outer->addStretch(1);
+        fl->addLayout(outer);
 
         const QString edition = currentEdition();
-        slider->setChecked(edition == QLatin1String("bedrock"));
-        slider->setText(slider->isChecked() ? QStringLiteral("基岩版") : QStringLiteral("Java 版"));
-        QObject::connect(slider, &SwitchButton::checkedChanged, foot, [slider, foot](bool on) {
-            // 状态键落盘(界面能点到的开关必须存得住),功能之后再接 —— 基岩版走 Rust+C 那条线。
+        javaBtn->setChecked(edition != QLatin1String("bedrock"));
+        bedrockBtn->setChecked(edition == QLatin1String("bedrock"));
+
+        // 点选 = 落盘 + 立刻刷新两个钮的选中态。状态只有一处真相(设置文件),两个钮都从它派生;
+        // QAbstractButton 的 clicked 不区分"用户点的"与"程序触发的",所以统一走这一个入口。
+        auto selectEdition = [javaBtn, bedrockBtn](const QString &next) {
             const QByteArray path = uiSettingsFilePath().toUtf8();
             if (sxcl_settings *st = sxcl_settings_open(path.constData())) {
-                sxcl_settings_set(st, "game.edition", on ? "bedrock" : "java");
+                sxcl_settings_set(st, "game.edition", next.toUtf8().constData());
                 sxcl_settings_save(st, path.constData()); // 必须存盘,否则"记住"是假的
                 sxcl_settings_free(st);
             }
-            slider->setText(on ? QStringLiteral("基岩版") : QStringLiteral("Java 版"));
-            if (on) {
-                InfoBar::push(InfoBar::Type::Info, QStringLiteral("基岩版还没接入"),
-                              QStringLiteral("开关已经记住（game.edition=bedrock）。基岩版要走 Rust+C "
-                                             "那条线，现在的下载与启动都只有 Java 版。"),
-                              foot, 4500);
-            }
-        });
+            const bool bedrock = next == QLatin1String("bedrock");
+            javaBtn->setChecked(!bedrock);
+            bedrockBtn->setChecked(bedrock);
+        };
+        QObject::connect(javaBtn, &QAbstractButton::clicked, foot,
+                         [selectEdition]() { selectEdition(QStringLiteral("java")); });
+        QObject::connect(bedrockBtn, &QAbstractButton::clicked, foot,
+                         [selectEdition]() { selectEdition(QStringLiteral("bedrock")); });
         leftLay->addWidget(foot, 0);
 
         /* 折叠时**把页脚藏起来**:它比折叠后的轨道(48)宽得多,留着就会把这一列撑到 247 宽,

@@ -1087,6 +1087,40 @@ sxcl::ui::MainWindow window;
         });
     }
 
+    // 验收通路:点下载页侧2 页脚的"版本形态"图标钮(SXCL_UI_EDITION=java|bedrock)。
+    //   用户点名把 Java 版/基岩版从一个滑块改成**两个图标点选**,验收要能复现"点哪个是哪个"
+    //   并且落盘。与 SXCL_UI_JRE_HOSTED 同一个口径:**点界面上真的那个按钮**(QAbstractButton::click),
+    //   不在这里自己写设置文件(那样验的就只是设置读写,验不到按钮有没有接上)。
+    //   按钮就是下载页页脚那两个(IconSelectButton #sxclEditionJavaButton / #sxclEditionBedrockButton),
+    //   所以本钩子要与 SXCL_UI_ROUTE=download 一起用。
+    //   打印的 checked 是点完之后的真状态;落盘那行由验收脚本自己读设置文件(见 tools/ui_edition_icons.ps1)。
+    const QString editionPick = qEnvironmentVariable("SXCL_UI_EDITION");
+    if (!editionPick.isEmpty()) {
+        const int editionDelay = qEnvironmentVariableIntValue("SXCL_UI_EDITION_DELAY");
+        QTimer::singleShot(editionDelay > 0 ? editionDelay : 1800, &app, [&window, editionPick]() {
+            const bool wantBedrock = editionPick.compare(QStringLiteral("bedrock"), Qt::CaseInsensitive) == 0;
+            const QString name = wantBedrock ? QStringLiteral("sxclEditionBedrockButton")
+                                             : QStringLiteral("sxclEditionJavaButton");
+            auto *button = window.findChild<QAbstractButton *>(name);
+            if (button == nullptr) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] 找不到版本形态按钮 %s(SXCL_UI_EDITION 需要 "
+                             "SXCL_UI_ROUTE=download)\n",
+                             name.toUtf8().constData());
+                return;
+            }
+            button->click();
+            const QList<QAbstractButton *> pair{
+                window.findChild<QAbstractButton *>(QStringLiteral("sxclEditionJavaButton")),
+                window.findChild<QAbstractButton *>(QStringLiteral("sxclEditionBedrockButton"))};
+            std::fprintf(stderr,
+                         "[sxcl-ui] 已点 %s(SXCL_UI_EDITION=%s):java=%d bedrock=%d\n",
+                         name.toUtf8().constData(), editionPick.toUtf8().constData(),
+                         pair.at(0) != nullptr && pair.at(0)->isChecked(),
+                         pair.at(1) != nullptr && pair.at(1)->isChecked());
+        });
+    }
+
     // 验收通路:侧栏状态机的真机验收(SXCL_UI_RAILS_TEST=1;套路见本文件上方
     // SxclRailsProbe 的说明)。七步:切回选择页(+确保侧2) -> 展开主栏 -> 切下载页 ->
     // 切回选择页 -> 侧2 再展开 -> 再切下载页 -> 再切回选择页;每步等 600ms

@@ -68,6 +68,9 @@ set(SXCL_UI_SOURCES
   icon_registry.cpp  icon_registry.h
   #   ui_icons.*     界面自绘小图标（警示三角等；用户点名"emoji 换成 svg"）
   ui_icons.cpp       ui_icons.h
+  #   icon_select_button.* 图标点选钮（透明底 + 悬停提亮 + 选中态走主题令牌 accent）：
+  #   下载页侧2 页脚的"Java 版(咖啡杯) / 基岩版(基岩方块)"就是它（docs/27 §11 按钮最少化）
+  icon_select_button.cpp icon_select_button.h
   #   folder_icons.* 文件夹自定义图标（用户点名：悬停文件夹出设置按钮，从应用内挑图标）
   folder_icons.cpp   folder_icons.h
   nav.cpp            nav.h
@@ -82,6 +85,9 @@ target_include_directories(sxcl_ui_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_THEME_DIR="${CMAKE_SOURCE_DIR}/assets/theme")
 # 方块图标资产(assets/icons/blocks/*.png)
 target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_BLOCK_DIR="${CMAKE_SOURCE_DIR}/assets/icons/blocks")
+# 版本形态图标(assets/icons/edition/*):官方 Java 咖啡杯 svg + 官方基岩方块 png
+# (出处见 assets/icons/edition/NOTICE.md;IconSelectButton 按它取图)
+target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_EDITION_DIR="${CMAKE_SOURCE_DIR}/assets/icons/edition")
 # fluent 的 Qt6::Svg 是 PRIVATE(静态库只把它带进链接行),我们直接用 QSvgRenderer,
 # 所以这里显式要一份 Svg 的头文件路径
 # sxcl = 纯 C 核心库。界面层必须能直接调它(设置读写/路径解析/实例列表…),
