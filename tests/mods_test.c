@@ -126,6 +126,16 @@ static void test_search_url(void) {
     check_int(sxcl_mods_modrinth_search_url(&q, url, sizeof(url)), 0, "带特殊字符也拼得出来");
     check(strstr(url, "%20") != NULL && strstr(url, "%26") != NULL, "  空格与 & 都转义了");
 
+    /* 空搜索的"默认榜"：按**下载量**排序（用户 2026-09-27：「没搜索模组的时候，默认填充
+     * 下载量最多的模组，不管它是什么」）。不传 sort 时上游按相关度回，那**不是**下载量榜。 */
+    memset(&q, 0, sizeof(q));
+    q.project_type = "mod";
+    q.sort = "downloads";
+    check_int(sxcl_mods_modrinth_search_url(&q, url, sizeof(url)), 0, "默认榜 URL 拼得出来");
+    check(strstr(url, "index=downloads") != NULL, "  按下载量排序(index=downloads)");
+    check(strstr(url, "query=&") != NULL, "  空关键词照样留空(query=&)");
+    check(strstr(url, "project_type:mod") != NULL, "  类型 facet 还在");
+
     check_int(sxcl_mods_modrinth_versions_url("AANobbMI", "1.20.1", "fabric", url, sizeof(url)), 1,
               "版本列表 URL 拼得出来");
     check(strstr(url, "/v2/project/AANobbMI/version?") == url + strlen("https://api.modrinth.com"),
@@ -134,6 +144,40 @@ static void test_search_url(void) {
     check(strstr(url, "&loaders=[\"fabric\"]") != NULL, "  加载器筛在");
     check_int(sxcl_mods_modrinth_versions_url(NULL, NULL, NULL, url, sizeof(url)), -1,
               "没有工程 id = 参数错");
+}
+
+/* 版本范围必须按**整份**数组算，而且只认正式版号（用户 2026-09-27 要的第二行"1.20 – 1.21.4"）：
+ * 支持版本多起来之后（真机 Fabric API 389 个）前面几个全在 2019 年，拿截断的那几个算范围是错的。 */
+static const char *kSpanJson =
+    "{\"hits\":[{\"project_id\":\"ABCDEFGH\",\"title\":\"Span\",\"downloads\":1,"
+    "\"versions\":[\"1.16.3\",\"1.16.4\",\"1.16.5\",\"1.17\",\"1.17.1\",\"1.18\",\"1.18.1\","
+    "\"1.18.2\",\"22w11a\",\"1.20-pre1\",\"1.7.10\",\"26.3\",\"26.4-snapshot-1\",\"1.21\"]}],"
+    "\"total_hits\":1}";
+
+/* 全是快照/预发布 = 一个正式版号都没有：范围留空（界面那边就是"认不出，一个字都不写"） */
+static const char *kSpanNoReleaseJson =
+    "{\"hits\":[{\"project_id\":\"SNAPONLY\",\"title\":\"Snap\","
+    "\"versions\":[\"24w14a\",\"25w01a\",\"1.20-pre1\"]}],\"total_hits\":1}";
+
+static void test_version_span(void) {
+    sxcl_mod_page page;
+    char err[160];
+    err[0] = '\0';
+    check_int(sxcl_mods_modrinth_search_parse(kSpanJson, strlen(kSpanJson), &page, err, sizeof(err)),
+              0, "范围夹具解析成功");
+    check_int((long)page.count, 1, "  一条");
+    /* 按整份数组算:最早 1.7.10(排在中间),最新 26.3(26.4-snapshot-1 不算正式版) */
+    check_str(page.items[0].versions_min, "1.7.10", "  最早 = 全数组里最小的正式版号");
+    check_str(page.items[0].versions_max, "26.3", "  最新 = 全数组里最大的正式版号(快照不算)");
+    sxcl_mods_page_free(&page);
+
+    err[0] = '\0';
+    check_int(sxcl_mods_modrinth_search_parse(kSpanNoReleaseJson, strlen(kSpanNoReleaseJson), &page,
+                                              err, sizeof(err)),
+              0, "没有正式版号的夹具解析成功");
+    check_str(page.items[0].versions_min, "", "  一个正式版号都没有 -> 范围留空(min)");
+    check_str(page.items[0].versions_max, "", "  一个正式版号都没有 -> 范围留空(max)");
+    sxcl_mods_page_free(&page);
 }
 
 static void test_search_parse(void) {
@@ -153,6 +197,10 @@ static void test_search_parse(void) {
     check_str(page.items[0].license, "LGPL-3.0-only", "  许可证");
     check_str(page.items[0].categories, "optimization", "  分类");
     check_str(page.items[0].versions, "1.21.4 1.21.3 1.20.1", "  支持的游戏版本(空格分隔)");
+    check_str(page.items[0].versions_min, "1.20.1", "  支持版本范围:最早");
+    check_str(page.items[0].versions_max, "1.21.4", "  支持版本范围:最新");
+    check_str(page.items[1].versions_min, "1.21.4", "  只有一个版本时范围就是它自己(min)");
+    check_str(page.items[1].versions_max, "1.21.4", "  只有一个版本时范围就是它自己(max)");
     check_int((long)page.items[0].downloads, 41234567, "  下载量");
     check_str(page.items[0].icon_url, "https://cdn.modrinth.com/data/AANobbMI/icon.png", "  图标");
     check_str(page.items[1].title, "Fabric API", "  第二条标题");
@@ -289,6 +337,17 @@ static void test_curseforge(void) {
     /* 不筛的那两维**不带参数**：镜像把 modLoaderType=0 当"筛一个不存在的加载器"，回 0 条 */
     check(strstr(url, "modLoaderType=0") == NULL, "  不筛加载器时不带 modLoaderType=0");
     check(strstr(url, "key") == NULL, "  **key 绝不进 URL**(走请求头)");
+    check(strstr(url, "sortField=") == NULL, "  关键词搜索不排序(上游默认的相关度)");
+    /* 空搜索的"默认榜"：CF 那边是 sortField=2（Popularity）+ sortOrder=desc。
+     * 实测(2026-09-27 镜像)：不传 -> 645/185/107 次下载的杂项;传了 -> GeckoLib 4.1 亿 / JEI 6.2 亿。 */
+    q.sort = "downloads";
+    check_int(sxcl_mods_curseforge_search_url(&q, url, sizeof(url)), 0, "CF 默认榜 URL 拼得出来");
+    check(strstr(url, "sortField=2") != NULL, "  按热度排序(sortField=2)");
+    check(strstr(url, "sortOrder=desc") != NULL, "  从高到低(sortOrder=desc)");
+    q.sort = "updated";
+    check_int(sxcl_mods_curseforge_search_url(&q, url, sizeof(url)), 0, "CF 按更新时间也拼得出来");
+    check(strstr(url, "sortField=3") != NULL, "  sortField=3 = LastUpdated");
+    q.sort = NULL;
     {
         /* 这一条是给社区镜像的:空的 gameVersion= 会被镜像当成"筛一个空版本",回 0 条 */
         sxcl_mods_query bare;
@@ -317,6 +376,9 @@ static void test_curseforge(void) {
     check_str(page.items[0].source, "curseforge", "  来源标记");
     check_str(page.items[0].categories, "Map and Information API and Library", "  分类(显示名)");
     check_str(page.items[0].versions, "1.20.1 1.20.2 Forge", "  支持版本(latestFiles[0].gameVersions)");
+    /* 范围里**不能有加载器名**：Forge 不是游戏版本 */
+    check_str(page.items[0].versions_min, "1.20.1", "  支持版本范围:最早(加载器名被挡掉)");
+    check_str(page.items[0].versions_max, "1.20.2", "  支持版本范围:最新(加载器名被挡掉)");
     check_int((long)page.items[0].downloads, 123456789, "  下载量");
     sxcl_mods_page_free(&page);
 
@@ -486,6 +548,7 @@ static void test_mirror_url(void) {
 
 int main(void) {
     test_search_url();
+    test_version_span();
     test_search_parse();
     test_versions_and_pick();
     test_many_versions();

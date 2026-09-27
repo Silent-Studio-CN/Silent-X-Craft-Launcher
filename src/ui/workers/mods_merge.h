@@ -14,6 +14,7 @@
 // （tests/mods_sources_test.cpp）。
 #pragma once
 
+#include <QDateTime>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -50,12 +51,29 @@ struct ModsHitRow {
     QString description;
     QString iconUrl;
     QString source;   // "modrinth" / "curseforge" —— 这一行**真实的**来源
-    QString versions; // 空格分隔（支持的 MC 版本）
+    QString versions; // 空格分隔（支持的 MC 版本，前几个）
+    // 支持版本里最早/最新那两个（核心库按**整份**数组算好的；认不出就是空串）。
+    // 界面第二行的 "1.20 – 1.21.4" 用它 —— 拿上面那个被截断的列表算是错的。
+    QString versionsMin;
+    QString versionsMax;
+    QString updated; // ISO 时间（上游原样带出来），界面自己转成"N 小时前"
     qlonglong downloads = 0;
 };
 
 /** 核心库的一条命中 -> 合并列表的一条。 */
 ModsHitRow modsHitRowFromCore(const sxcl_mod_hit &hit);
+
+/** 下载量的**单位**（用户 2026-09-27：「千万以内……上亿了就几点几 + 亿字」）：
+ *   * < 1 万      -> 原数（"856"）
+ *   * 1 万 ~ 1 亿 -> "3.5万"（一位小数，整数就不带小数点："2万"）
+ *   * >= 1 亿     -> "1.2亿"
+ *  取整一律**截断**（不四舍五入）：宁可少报一位，也不把 9999.9 万说成 1 亿。 */
+QString modsDownloadText(qlonglong downloads);
+
+/** 更新时间 -> "3 小时前" 这类**相对时间**（用户 2026-09-27：「更新用「N 小时前」这类相对时间」）。
+ *  now 由调用方给（单测要能固定"现在"）。上游时间认不出来 = 空串：
+ *  界面那边就是"这一格不写"，绝不编一个时间出来。 */
+QString modsUpdatedText(const QString &iso, const QDateTime &now);
 
 /** 把一页搜索结果并进 rows：
  *   * 同一个源里重复的 id 只留第一次出现的那条（上游分页/重复时不该出现两行一样的卡片）；

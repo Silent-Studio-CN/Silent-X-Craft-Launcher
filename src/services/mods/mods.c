@@ -110,6 +110,92 @@ static void join_strings(const sxcl_json_value *array, char *out, size_t cap, si
     }
 }
 
+/* ── 支持版本的"范围"（界面第二行显示 "1.20 – 1.21.4"） ── */
+
+/** 是不是一个**正式版号**：纯数字与点（1.20 / 1.21.4 / 26.3.1）。
+ *  快照（24w14a）、预发布（1.20-pre1 / 26.1-rc-1）、加载器名（Forge）都不是 ——
+ *  混进范围里就等于替上游宣布一个它没说过的事实。 */
+static int version_release_like(const char *text)
+{
+    if (text == NULL || text[0] < '0' || text[0] > '9') {
+        return 0;
+    }
+    for (const char *p = text; *p != '\0'; ++p) {
+        if (*p >= '0' && *p <= '9') {
+            continue;
+        }
+        /* 点后面必须紧跟数字（"1." / "1..2" 不算版号） */
+        if (*p == '.' && p[1] >= '0' && p[1] <= '9') {
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+/** a < b 吗（只对 version_release_like 认过的串用）：按点分段比数值，缺的段当 0
+ *  （1.20 == 1.20.0 < 1.20.1）。不是完整的版本语义实现，只用来在一堆版本里挑最早/最新。 */
+static int version_less(const char *a, const char *b)
+{
+    const char *pa = a;
+    const char *pb = b;
+    for (;;) {
+        char *ea = NULL;
+        char *eb = NULL;
+        const long na = strtol(pa, &ea, 10);
+        const long nb = strtol(pb, &eb, 10);
+        if (na != nb) {
+            return na < nb;
+        }
+        const int more_a = (ea != NULL && *ea == '.');
+        const int more_b = (eb != NULL && *eb == '.');
+        if (!more_a && !more_b) {
+            return 0;   /* 两串都到头了：相等 */
+        }
+        pa = more_a ? ea + 1 : "";
+        pb = more_b ? eb + 1 : "";
+    }
+}
+
+/** 一份"最早 / 最新"的累加器。n == 0 = 还没有一个正式版号。 */
+typedef struct version_span {
+    char min[24];
+    char max[24];
+    size_t n;
+} version_span;
+
+static void span_add(version_span *span, const char *text)
+{
+    if (span == NULL || !version_release_like(text)) {
+        return;
+    }
+    if (span->n == 0) {
+        copy_cap(span->min, sizeof(span->min), text);
+        copy_cap(span->max, sizeof(span->max), text);
+    } else {
+        if (version_less(text, span->min)) {
+            copy_cap(span->min, sizeof(span->min), text);
+        }
+        if (version_less(span->max, text)) {
+            copy_cap(span->max, sizeof(span->max), text);
+        }
+    }
+    ++span->n;
+}
+
+/** **整份**数组里的最早/最新正式版号（不是被截断的前几个 —— 拿截断的那份算会算错）。 */
+static void span_from_array(const sxcl_json_value *array, version_span *span)
+{
+    if (span == NULL) {
+        return;
+    }
+    memset(span, 0, sizeof(*span));
+    const size_t n = sxcl_json_size(array);
+    for (size_t i = 0; i < n; ++i) {
+        span_add(span, sxcl_json_string(sxcl_json_at(array, i)));
+    }
+}
+
 /** CurseForge 的 gameVersions[] 把**游戏版本和加载器名混在一个数组里**（"1.20.1" 与 "Forge"）。
  *  按"第一个字符是不是数字"分成两堆:版本号进 versions（pick_file 拿它比游戏版本),
  *  其余（Forge/Fabric/Quilt/NeoForge…）进 loaders（比加载器）。
@@ -384,6 +470,14 @@ int sxcl_mods_modrinth_search_parse(const char *json, size_t len, sxcl_mod_page 
                          sizeof(dst->categories), 4);
         }
         join_strings(sxcl_json_get(hit, "versions"), dst->versions, sizeof(dst->versions), 6);
+        /* 范围按**整份**数组算（上面那份是截断的前 6 个，拿它算会得出错的范围）。
+         * 一个正式版号都没有 = 两者都留空：界面那边就是"认不出，一个字都不写"。 */
+        {
+            version_span span;
+            span_from_array(sxcl_json_get(hit, "versions"), &span);
+            copy_cap(dst->versions_min, sizeof(dst->versions_min), span.min);
+            copy_cap(dst->versions_max, sizeof(dst->versions_max), span.max);
+        }
         if (dst->id[0] == '\0' && dst->slug[0] == '\0') {
             continue;   /* 既没 id 也没短名：这一条没法用 */
         }
@@ -609,11 +703,27 @@ int sxcl_mods_curseforge_search_url(const sxcl_mods_query *q, char *out, size_t 
     if (loader_type > 0) {
         (void)snprintf(loader_part, sizeof(loader_part), "&modLoaderType=%d", loader_type);
     }
-    /* index 0 = 按相关度（与 Modrinth 的 relevance 对齐）；sortOrder 只对其它 index 有意义 */
+    /* 排序：默认（不传 sortField）= 官方那套"相关度/推荐"排序，**与不筛对齐**；
+     *   q->sort = "downloads" 时传 sortField=2（Popularity，用户 2026-09-27 点名的那个值）——
+     *   空搜索的"默认榜"就要它：不传的话上游回的是乱序的前几条，不是下载量榜
+     *  （实测 2026-09-27 镜像：不传 -> 645/185/107 次下载的杂项；sortField=2&sortOrder=desc ->
+     *   GeckoLib 4.1 亿 / JEI 6.2 亿）。
+     *   "updated" 对应 3 = LastUpdated。其余值不传（不认识就不假装认识）。 */
+    int sort_field = 0;
+    if (q->sort != NULL && str_equal_ci(q->sort, "downloads")) {
+        sort_field = 2;
+    } else if (q->sort != NULL && str_equal_ci(q->sort, "updated")) {
+        sort_field = 3;
+    }
+    char sort_part[40];
+    sort_part[0] = '\0';
+    if (sort_field > 0) {
+        (void)snprintf(sort_part, sizeof(sort_part), "&sortField=%d&sortOrder=desc", sort_field);
+    }
     const int n = snprintf(out, out_len,
                            "https://api.curseforge.com/v1/mods/search?gameId=432&index=%d"
-                           "&pageSize=%d&searchFilter=%s&classId=%d%s%s",
-                           offset, limit, text, class_id, game_part, loader_part);
+                           "&pageSize=%d&searchFilter=%s&classId=%d%s%s%s",
+                           offset, limit, text, class_id, game_part, loader_part, sort_part);
     return (n < 0 || (size_t)n >= out_len) ? -1 : 0;
 }
 
@@ -688,6 +798,11 @@ int sxcl_mods_curseforge_search_parse(const char *json, size_t len, sxcl_mod_pag
             const sxcl_json_value *first = sxcl_json_at(files, 0);
             join_strings(sxcl_json_get(first, "gameVersions"), dst->versions,
                          sizeof(dst->versions), 6);
+            /* 范围同上：按整份数组算，加载器名（Forge/Fabric…）由 version_release_like 挡掉 */
+            version_span span;
+            span_from_array(sxcl_json_get(first, "gameVersions"), &span);
+            copy_cap(dst->versions_min, sizeof(dst->versions_min), span.min);
+            copy_cap(dst->versions_max, sizeof(dst->versions_max), span.max);
         }
         if (dst->id[0] == '0' && dst->id[1] == '\0') {
             continue;   /* id = 0:这一条没法用 */

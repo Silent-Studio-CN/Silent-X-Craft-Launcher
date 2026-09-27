@@ -146,6 +146,9 @@ int main(int argc, char **argv) {
     std::snprintf(one.description, sizeof(one.description), "%s", "desc");
     std::snprintf(one.icon_url, sizeof(one.icon_url), "%s", "https://example.invalid/i.png");
     std::snprintf(one.versions, sizeof(one.versions), "%s", "1.20.1 1.20.2");
+    std::snprintf(one.versions_min, sizeof(one.versions_min), "%s", "1.20.1");
+    std::snprintf(one.versions_max, sizeof(one.versions_max), "%s", "1.21.4");
+    std::snprintf(one.updated, sizeof(one.updated), "%s", "2026-09-27T00:00:00Z");
     std::snprintf(one.slug, sizeof(one.slug), "%s", "iris");
     one.downloads = 424242;
     sxcl_mod_page pageOne = makePage(&one, 1, 1);
@@ -155,8 +158,50 @@ int main(int argc, char **argv) {
               copied.at(0).slug == QLatin1String("iris") &&
               copied.at(0).iconUrl == QLatin1String("https://example.invalid/i.png") &&
               copied.at(0).versions == QLatin1String("1.20.1 1.20.2") &&
+              copied.at(0).versionsMin == QLatin1String("1.20.1") &&
+              copied.at(0).versionsMax == QLatin1String("1.21.4") &&
+              copied.at(0).updated == QLatin1String("2026-09-27T00:00:00Z") &&
               copied.at(0).downloads == 424242 && copied.at(0).description == QLatin1String("desc"),
-          QStringLiteral("id/slug/图标/版本/下载量/简介 整份拷贝"));
+          QStringLiteral("id/slug/图标/版本/版本范围/更新时间/下载量/简介 整份拷贝"));
+
+    // ---- 3b) 下载量单位 + 相对时间（用户 2026-09-27：「上亿了就几点几 + 亿字」）----
+    // 注意：带中文的期望值必须用 QStringLiteral —— QLatin1String 会把 UTF-8 的"万/亿"当
+    // 三个 Latin-1 字节读，比的是另一串东西（这份用例第一版就踩过）。
+    check(modsDownloadText(856) == QStringLiteral("856"), QStringLiteral("一万以内是原数：856"));
+    check(modsDownloadText(9999) == QStringLiteral("9999"), QStringLiteral("9999 还是原数"));
+    check(modsDownloadText(10000) == QStringLiteral("1万"), QStringLiteral("整万不带小数：1万"));
+    check(modsDownloadText(35000) == QStringLiteral("3.5万"), QStringLiteral("3.5万"));
+    check(modsDownloadText(20000) == QStringLiteral("2万"), QStringLiteral("20000 -> 2万"));
+    check(modsDownloadText(99999999LL) == QStringLiteral("9999.9万"),
+          QStringLiteral("差一点到一亿也不说成一亿（截断）：%1").arg(modsDownloadText(99999999LL)));
+    check(modsDownloadText(100000000LL) == QStringLiteral("1亿"), QStringLiteral("一亿整 = 1亿"));
+    check(modsDownloadText(262047778LL) == QStringLiteral("2.6亿"),
+          QStringLiteral("Fabric API 那种量级 -> %1").arg(modsDownloadText(262047778LL)));
+    check(modsDownloadText(412320008LL) == QStringLiteral("4.1亿"), QStringLiteral("4.1亿"));
+
+    const QDateTime now = QDateTime::fromString(QStringLiteral("2026-09-27T12:00:00Z"), Qt::ISODate);
+    check(modsUpdatedText(QStringLiteral("2026-09-27T11:30:00Z"), now) == QStringLiteral("30 分钟前"),
+          QStringLiteral("半小时前"));
+    check(modsUpdatedText(QStringLiteral("2026-09-27T09:00:00Z"), now) == QStringLiteral("3 小时前"),
+          QStringLiteral("3 小时前"));
+    check(modsUpdatedText(QStringLiteral("2026-09-24T12:00:00Z"), now) == QStringLiteral("3 天前"),
+          QStringLiteral("3 天前"));
+    check(modsUpdatedText(QStringLiteral("2026-09-01T12:00:00Z"), now) == QStringLiteral("26 天前"),
+          QStringLiteral("26 天前"));
+    check(modsUpdatedText(QStringLiteral("2026-05-27T12:00:00Z"), now) == QStringLiteral("4 个月前"),
+          QStringLiteral("4 个月前"));
+    check(modsUpdatedText(QStringLiteral("2025-09-27T12:00:00Z"), now) == QStringLiteral("1 年前"),
+          QStringLiteral("1 年前"));
+    /* CF 的时间带毫秒；认不出来的串**不许编**时间出来。
+     * 11:00:00.123 距 12:00:00 差 3599 秒（不足一小时）—— 截断到分钟就是"59 分钟前"，
+     * 不四舍五入成"1 小时前"（宁可少报，不把时间说大）。 */
+    check(modsUpdatedText(QStringLiteral("2026-09-27T11:00:00.123Z"), now) == QStringLiteral("59 分钟前"),
+          QStringLiteral("带毫秒的时间也认"));
+    check(modsUpdatedText(QStringLiteral("2026-09-27T10:59:59.000Z"), now) == QStringLiteral("1 小时前"),
+          QStringLiteral("刚过一小时就是 1 小时前"));
+    check(modsUpdatedText(QStringLiteral(""), now).isEmpty() &&
+              modsUpdatedText(QStringLiteral("不是时间"), now).isEmpty(),
+          QStringLiteral("认不出的时间 = 空串（界面那一格不写）"));
 
     // 没有 id 的条目不许摆上去（摆上去点不了「装」）
     sxcl_mod_hit noId = makeHit("", "modrinth", "no-id");

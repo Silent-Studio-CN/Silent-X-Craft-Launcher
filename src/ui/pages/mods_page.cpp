@@ -32,6 +32,7 @@
 #include "../workers/mods_worker.h"
 #include "../workers/ui_paths.h"
 
+#include "../elided_label.h" // 单行标签：装不下就省略号（结果行的名字/介绍都用它）
 #include "flow_layout.h" // 筛选区：放不下就换行，控件保证完整显示（docs/25 总则）
 #include "fluent_theme.h"
 #include "libqf.h"
@@ -44,15 +45,20 @@
 #include "fluent/fluent_input.h"
 #include "fluent/fluent_labels.h"
 #include "fluent/fluent_scroll.h"
-#include "fluent/fluent_selection.h"   // CheckBox:来源**勾选项**(两个源能同时勾上) + 勾选态自绘
+#include "fluent/fluent_selection.h"     // CheckBox:来源**勾选项**(两个源能同时勾上) + 勾选态自绘
+
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
 
+#include <QCompleter>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFont>
+#include <QFontMetrics>
 #include <QHash>
+#include <QStringListModel>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -61,6 +67,7 @@
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QStringList>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -97,6 +104,10 @@ QByteArray shaderLoaderSlug(const QByteArray &instanceLoader, bool curseforge) {
     }
     return QByteArray();   /* forge/neoforge:光影加载器不统一,不筛(如实让用户自己看) */
 }
+
+/** 结果行里 logo 那个**固定方块**的边长（用户 2026-09-27：「强制放在模组栏里，不能上下延伸」）：
+ *  图标按比例缩进它，行高由文字那 4 行定 —— 图片再大也撑不高一行。 */
+const int kIconSide = 48;
 
 /** 版本隔离开着吗（与启动层同一个键）。 */
 bool versionIsolationOn() {
@@ -145,15 +156,25 @@ private:
         m_context->setTextColor(secondary, secondary);
         lay->addWidget(m_context);
 
-        /* ── 筛选区：**一个流式布局**装下这一整行 ──
-         * 用户 2026-09-27 的规矩（docs/25 的总则）：每个控件都保证**能完整显示自己**，
-         * 放不下就**换行**，绝不压缩/裁切。以前这里是两个 QHBoxLayout，窗口一窄，两个勾选框
-         * 就被压成 41px、文字被切掉（"一直被压缩"就是它）。 */
+        /* ── 筛选区：**正好两行**（用户 2026-09-27：「搜索输入框不动但变长，紧接着右侧是搜索；
+         * 然后切第二行：选版本号和模组来源」）：
+         *   第 1 行 = 搜索框（吃掉这一行剩下的宽，所以它变长了）+「搜索」；
+         *   第 2 行 = 版本（**可手打**）+ 两个来源勾选。
+         * 除这四件**不许加控件**。第二行还是那个流式布局（docs/25 的总则）：每个控件保证
+         * 能**完整显示自己**，放不下就换行，绝不把勾选框压成 41px（用户点名的那个 bug）。 */
         auto *filterRow = new QWidget(this);
         filterRow->setObjectName(QStringLiteral("modsFilterRow"));
-        m_filterFlow = new FlowLayout(filterRow, 0, 10, 8);
+        auto *filterLay = new QVBoxLayout(filterRow);
+        filterLay->setContentsMargins(0, 0, 0, 0);
+        filterLay->setSpacing(8);
 
-        m_search = new SearchLineEdit(filterRow);
+        auto *searchRow = new QWidget(filterRow);
+        searchRow->setObjectName(QStringLiteral("modsSearchRow"));
+        auto *searchLay = new QHBoxLayout(searchRow);
+        searchLay->setContentsMargins(0, 0, 0, 0);
+        searchLay->setSpacing(10);
+
+        m_search = new SearchLineEdit(searchRow);
         m_search->setPlaceholderText(m_shaders ? QStringLiteral("搜光影包")
                                                : QStringLiteral("搜模组"));
         m_search->setFixedHeight(34);
@@ -163,15 +184,51 @@ private:
         /* 自己的自然宽就是下限；它是这一行里唯一带 Expanding 的项(吃掉剩下的宽度)。 */
         m_search->setMinimumWidth(qMax(200, m_search->sizeHint().width()));
         m_search->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        m_filterFlow->addWidget(m_search);
+        searchLay->addWidget(m_search, 1); // 1 = 搜索框吃掉整行剩下的宽度（「不动但变长」）
 
-        m_go = new PrimaryPushButton(QStringLiteral("搜索"), filterRow);
+        m_go = new PrimaryPushButton(QStringLiteral("搜索"), searchRow);
         applyButtonFont(m_go);
         m_go->setObjectName(QStringLiteral("modsSearchButton"));
         m_go->setFixedHeight(34);
         m_go->setMinimumWidth(m_go->sizeHint().width());
         m_go->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-        m_filterFlow->addWidget(m_go);
+        searchLay->addWidget(m_go, 0); // 紧接着搜索框的右侧
+        filterLay->addWidget(searchRow);
+
+        /* ── 第 2 行：版本 + 模组来源 ── */
+        auto *optionRow = new QWidget(filterRow);
+        optionRow->setObjectName(QStringLiteral("modsOptionRow"));
+        m_filterFlow = new FlowLayout(optionRow, 0, 10, 8);
+
+        /* 版本筛选：**可输入的输入框**，不是只能挑的下拉（用户 2026-09-27：
+         * 「那个版本号儿，换成输入框啊，MC 他妈好成千上万个版本儿，你全做成下拉菜单儿」）。
+         *   * 直接手打版本号（1.21.11 这种也能打）；打错了就按"没有这个版本"如实返回，
+         *     不猜、不自动改成别的版本；
+         *   * 带候选提示（常用版本 + 当前实例的版本）——只是提示，**不限制**输入；
+         *   * 留空 = "全部"（这一维不筛）；
+         *   * 进页面时默认**自动填**当前实例的原版版本（他刚装的那个），用户可以改。 */
+        m_versionEdit = new LineEdit(optionRow);
+        m_versionEdit->setObjectName(QStringLiteral("modsVersionFilter"));
+        m_versionEdit->setPlaceholderText(QStringLiteral("版本（留空 = 全部）"));
+        m_versionEdit->setFixedHeight(28);
+        m_versionEdit->setMinimumWidth(qMax(190, m_versionEdit->sizeHint().width()));
+        m_versionEdit->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        {
+            auto *completer = new QCompleter(m_versionEdit);
+            completer->setCaseSensitivity(Qt::CaseInsensitive);
+            completer->setCompletionMode(QCompleter::PopupCompletion);
+            completer->setModel(new QStringListModel(commonVersionChoices(), completer));
+            m_versionEdit->setCompleter(completer); // libqf 的 LineEdit 就是 QLineEdit,直接用 Qt 的补全
+        }
+        /* 打字/回车：条件变了，上一份结果作废（与勾选同一个口径）；回车直接搜。 */
+        QObject::connect(m_versionEdit, &QLineEdit::textEdited, this, [this](const QString &) {
+            m_versionFilterTouched = true;
+            cancelAutoLoad(); // 他在挑版本了:默认榜不许再自动盖上来
+            clearResults();
+            printSearchFilterTrace(m_lastSort);
+        });
+        QObject::connect(m_versionEdit, &QLineEdit::returnPressed, this, [this] { startSearch(); });
+        m_filterFlow->addWidget(m_versionEdit);
 
         // ── 来源**勾选项**（用户 2026-09-26：「模组下载的两个圆要作为勾选的选项」）──
         // 两个源**能同时勾上**：勾上哪个就搜哪个，勾两个就两个都搜，结果合并成一份列表
@@ -184,7 +241,7 @@ private:
                                     {"curseforge", "modsSourceCurseForge"}};
         for (const SourceSpec &spec : specs) {
             const QString key = QString::fromLatin1(spec.key);
-            auto *box = new CheckBox(modsSourceDisplayName(key), filterRow);
+            auto *box = new CheckBox(modsSourceDisplayName(key), optionRow);
             /* 稳定 objectName：验收钩子(SXCL_UI_MODS_SOURCES)与 dump 都按它认这两个勾选框。 */
             box->setObjectName(QString::fromLatin1(spec.objectName));
             box->setTristate(false); // qf 的 CheckBox 默认三态(那份是给演示用的),这里只要勾/不勾
@@ -198,6 +255,7 @@ private:
             m_filterFlow->addWidget(box);
             m_sourceBoxes.insert(key, box);
         }
+        filterLay->addWidget(optionRow);
         lay->addWidget(filterRow);
         /* 注意：这里**没有** key 输入栏 —— 官方 key 是编译期内置的(include/sxcl/mods_key.h)，
          * 用户 2026-09-26 点名「不要让用户自己填写」。没有内置 key 时 CurseForge 那个框点不动
@@ -215,8 +273,16 @@ private:
         m_list->setAlignment(Qt::AlignTop);
         lay->addWidget(scroll, 1);
 
+        /* 默认榜的静默期计时器（见 armAutoLoad / tryAutoLoad）。 */
+        m_autoTimer = new QTimer(this);
+        m_autoTimer->setSingleShot(true);
+        QObject::connect(m_autoTimer, &QTimer::timeout, this, [this] { tryAutoLoad(); });
+
         QObject::connect(m_go, &QAbstractButton::clicked, this, [this] { startSearch(); });
         QObject::connect(m_search, &QLineEdit::returnPressed, this, [this] { startSearch(); });
+        /* 搜索框里一有字就说明他在搜自己的东西了：默认榜取消（程序回填/钩子的 setText 同样算）。 */
+        QObject::connect(m_search, &QLineEdit::textChanged, this,
+                         [this](const QString &) { cancelAutoLoad(); });
     }
 
     // ─────────────────────────── 设置 ───────────────────────────
@@ -262,6 +328,57 @@ private:
         sxcl_settings_free(st);
     }
 
+    /** 版本下拉里的"常用版本"（PCL 那个下拉也是这么给的）：常见的**模组基座**版本。
+     *  它只是快捷选项，**不是**对实例的断言 —— 实例的真实版本由核心库扫描给出（见
+     *  selectVersionFilterFromInstance），认不出就停在"全部"。 */
+    static QStringList commonVersionChoices() {
+        return QStringList{QStringLiteral("1.21.4"), QStringLiteral("1.21.1"),
+                           QStringLiteral("1.20.6"), QStringLiteral("1.20.4"),
+                           QStringLiteral("1.20.1"), QStringLiteral("1.19.4"),
+                           QStringLiteral("1.19.2"), QStringLiteral("1.18.2"),
+                           QStringLiteral("1.16.5"), QStringLiteral("1.12.2"),
+                           QStringLiteral("1.7.10")};
+    }
+
+    /** 当前**筛选**用的版本：输入框里那个（去掉空白）。空 = "全部"（这一维不筛，不带版本 facets）。 */
+    QString versionFilter() const {
+        return m_versionEdit != nullptr ? m_versionEdit->text().trimmed() : QString();
+    }
+
+    /** 输入框的默认值 = 当前实例的**原版版本**（只认版本文件里的那个值；认不出 = 留空 = 全部）。
+     *  用户在页面上动过输入框就**不再覆盖**他打的那个。候选里补上这个版本，方便他改回去。 */
+    void selectVersionFilterFromInstance() {
+        if (m_versionEdit == nullptr || m_versionFilterTouched) {
+            return;
+        }
+        const QString want = m_mc;
+        if (!want.isEmpty() && m_versionEdit->completer() != nullptr &&
+            m_versionEdit->completer()->model() != nullptr) {
+            auto *model = qobject_cast<QStringListModel *>(m_versionEdit->completer()->model());
+            if (model != nullptr && !model->stringList().contains(want)) {
+                QStringList items = model->stringList();
+                items.prepend(want);
+                model->setStringList(items);
+            }
+        }
+        m_versionAuto = true;
+        m_versionEdit->setText(want);
+        m_versionAuto = false;
+        std::fprintf(stderr, "[sxcl-ui] mods-version-default: %s\n",
+                     want.isEmpty() ? "empty" : want.toUtf8().constData());
+    }
+
+    /** 取证行：这一轮搜索用的版本筛选（"全部"就写 all）、关键词、排序。
+     *  排序这一项是"空搜索 = 下载量默认榜"的证据：Modrinth 那边就是 index=downloads
+     *  （见紧随其后的 mods-fetch 行里的 URL），CF 那边是 sortField=2。 */
+    void printSearchFilterTrace(const QByteArray &sort) const {
+        const QString version = versionFilter();
+        std::fprintf(stderr, "[sxcl-ui] mods-search: versionFilter=%s text=\"%s\" index=%s\n",
+                     version.isEmpty() ? "all" : version.toUtf8().constData(),
+                     m_search == nullptr ? "" : m_search->text().trimmed().toUtf8().constData(),
+                     sort.isEmpty() ? "relevance" : sort.constData());
+    }
+
     /** 眼前这几个勾选框里，勾上了哪几个（按固定顺序）。 */
     QStringList pickedSources() const {
         QStringList out;
@@ -297,6 +414,7 @@ private:
 
     /** 用户动了勾选:落盘 + 上一份结果作废(它对应的是**另一组**源,留在屏幕上就是冒充)。 */
     void onSourceToggled(const QString &) {
+        cancelAutoLoad(); // 他在挑源了:默认榜不许再自动盖上来
         m_sources = pickedSources();
         saveSetting(kKeyModsSource, formatModsSources(m_sources));
         clearResults();
@@ -304,10 +422,14 @@ private:
         printSourcesTrace();
     }
 
-    /** 一个源都没勾 = 搜索按钮点不动(不写"请至少选择一个源"那类废话)。 */
+    /** 一个源都没勾 = 搜索按钮点不动(不写"请至少选择一个源"那类废话)。
+     *  **正在搜的时候照样点得动**：再点一次 = 用眼前的条件重搜一遍（见 startSearch 的 beginRun）——
+     *  进门那趟"默认榜"绝不会把用户自己的搜索卡在后面。装的时候（取版本列表/下载）不给点：
+     *  那一趟正在往磁盘上落东西，不该被一次搜索顶掉。 */
     void refreshGo() {
         if (m_go != nullptr) {
-            m_go->setEnabled(!m_busy && !m_sources.isEmpty());
+            const bool installing = (m_phase == LoadingVersions || m_phase == Downloading);
+            m_go->setEnabled(!installing && !m_sources.isEmpty());
         }
     }
 
@@ -385,7 +507,19 @@ private:
                                  m_versionScanned = true;
                                  // **只认版本文件里的**;认不出就是空 —— 什么都不写
                                  m_mc = m_versionRow.base;
+                                 /* "他刚装的那个版本"就是这里的 m_mc（核心库扫出来的实例原版版本）:
+                                  * 版本筛选默认跟着它走；认不出就停在"全部"。 */
+                                 selectVersionFilterFromInstance();
                                  applyContextText();
+                                 /* 默认榜的基准版本有了：条件都满足就让它排上。
+                                  * 换了实例（他刚装的那个变了）且他什么筛选都没动过 -> 按新实例重拉一次。 */
+                                 if (m_autoDone && !m_userTouched &&
+                                     (m_search == nullptr || m_search->text().trimmed().isEmpty()) &&
+                                     id != m_autoInstance) {
+                                     m_autoDone = false;
+                                 }
+                                 m_autoInstance = id;
+                                 armAutoLoad(200);
                              });
     }
 
@@ -455,28 +589,99 @@ private:
         m_context->setText(text.isEmpty() ? m_currentText : text);
     }
 
-    // ─────────────────────────── 搜索 ───────────────────────────
-    /** 点「搜索」：给**勾上的每一个源**各排一个请求（先后固定，与勾选顺序无关），
-     *  回来的结果合并成一份列表。没勾/搜不了的源一个请求都不发。 */
-    void startSearch() {
-        if (m_worker != nullptr || m_busy) {
+    // ─────────────────── 空搜索的默认榜（进门自动拉一次） ───────────────────
+    /** 起一趟新的请求链：**编号 +1**、队列清空。上一趟（可能还在飞）的结果回来时对不上号，
+     *  会被丢掉。用户点了搜索就是"我要新的"，不该被上一趟的慢请求卡住 —— 尤其是进门时
+     *  自动拉的那趟默认榜（CF 官方那一路没有 key 时要等 8 秒才轮到镜像兜底）。 */
+    void beginRun() {
+        ++m_run;
+        m_pending.clear();
+        m_fallback.clear();
+    }
+
+    /** 用户只要动了任何一件筛选（打字 / 改版本 / 点来源 / 点搜索），默认榜就不再自动拉 ——
+     *  他已经在搜自己的东西了，默认榜盖上去就是抢他的屏。 */
+    void cancelAutoLoad() {
+        m_userTouched = true;
+        if (m_autoTimer != nullptr) {
+            m_autoTimer->stop();
+        }
+    }
+
+    /** 默认榜的"静默期"：页面显示之后先等一会儿再拉（见 cancelAutoLoad 的理由）。 */
+    void armAutoLoad(int delayMs) {
+        if (m_autoTimer == nullptr || m_autoDone || m_userTouched) {
             return;
         }
+        m_autoTimer->start(delayMs);
+    }
+
+    /** 拉空搜索的默认榜：**下载量从高到低**（Modrinth index=downloads / CF sortField=2），
+     *  版本按**眼前这个实例的版本**筛（版本框默认就填着它）。条件不满足就**不拉**：
+     *  用户改过东西 / 搜索框里有字 / 一个源都没勾 / 实例还没扫出来（基准版本还没定，等它）。 */
+    void tryAutoLoad() {
+        if (m_autoDone || m_userTouched || m_busy || m_search == nullptr || m_go == nullptr) {
+            return;
+        }
+        if (!m_search->text().trimmed().isEmpty()) {
+            return;
+        }
+        if (!isVisible()) {
+            return; // 隐藏着的那一栏（模组/光影两份）不许背着用户去拉榜
+        }
+        m_sources = pickedSources();
+        if (m_sources.isEmpty() || !m_go->isEnabled()) {
+            return; // 一个源都没勾 = 没有榜可拉
+        }
+        if (!m_instance.isEmpty() && !m_versionScanned) {
+            return; // 实例扫描还没回来：等它（回调里会再 arm 一次）
+        }
+        m_autoDone = true;
+        std::fprintf(stderr, "[sxcl-ui] mods-default-chart: instance=%s version=%s\n",
+                     m_instance.toUtf8().constData(),
+                     versionFilter().isEmpty() ? "all" : versionFilter().toUtf8().constData());
+        startSearch();
+    }
+
+    /** 第一次显示这一页才排默认榜（模组/光影两栏各一次；隐藏着的那一栏不拉）。 */
+    void showEvent(QShowEvent *event) override {
+        QWidget::showEvent(event);
+        if (m_shown) {
+            return;
+        }
+        m_shown = true;
+        armAutoLoad(1000);
+    }
+
+    // ─────────────────────────── 搜索 ───────────────────────────
+    /** 点「搜索」：给**勾上的每一个源**各排一个请求（先后固定，与勾选顺序无关），
+     *  回来的结果合并成一份列表。没勾/搜不了的源一个请求都不发。
+     *
+     *  空搜索 = **下载量默认榜**（用户 2026-09-27：「没搜索模组的时候，默认填充下载量最多的模组，
+     *  不管它是什么；以他最新下载或最新启动的版本为基准来选」）：
+     *    * Modrinth -> index=downloads；CurseForge -> sortField=2（Popularity，从高到低）；
+     *    * 版本这一维照旧按**眼前这个实例的版本**筛（版本框默认就填着它）。 */
+    void startSearch() {
+        cancelAutoLoad(); // 手点/回车/默认榜自己进来:默认榜那一趟不用再等了
+        beginRun();       // 新的一趟开始:上一趟（可能还在飞）的结果作废
         reloadContext();
         m_sources = pickedSources();
         if (m_sources.isEmpty()) {
+            m_phase = Idle;
             return; // 按钮本来就是灰的
         }
-        m_pending.clear();
         m_rows.clear();
         m_requested.clear();
         const QByteArray text = m_search->text().trimmed().toUtf8();
-        const QByteArray mc = m_mc.toUtf8();
+        /* 有关键词 = 按相关度（上游默认）；**空搜索 = 默认榜**，按下载量排序。 */
+        m_lastSort = text.isEmpty() ? QByteArrayLiteral("downloads") : QByteArrayLiteral("relevance");
+        /* 搜索用的版本 = 眼前那个版本框（不再是永远用实例版本）；留空时这一维不筛。 */
+        const QByteArray mc = versionFilter().toUtf8();
+        printSearchFilterTrace(m_lastSort);
         /* 资源类型:模组那一栏必须钉死 "mod"（Modrinth 默认不筛类型，不钉的话光影/资源包会混进来）；
          * 光影那一栏钉 "shader"。CF 那边走 classId（6 / 6552），同一个 project_type 进去。 */
         const QByteArray type = QByteArrayLiteral("mod");
         const QByteArray shaderType = QByteArrayLiteral("shader");
-        m_fallback.clear();
         for (const QString &source : m_sources) {
             if (!sourceUsable(source)) {
                 continue;
@@ -488,6 +693,7 @@ private:
             q.game_version = mc.constData();
             q.loader = loader.constData();
             q.project_type = m_shaders ? shaderType.constData() : type.constData();
+            q.sort = m_lastSort.constData(); // "downloads"（默认榜）/ "relevance"（关键词搜索）
             q.limit = 20;
             char url[1200];
             const bool cf = (source == QLatin1String("curseforge"));
@@ -510,11 +716,9 @@ private:
             m_phase = Idle;
             return;
         }
-        QStringList names;
-        for (const QString &source : m_requested) {
-            names << modsSourceDisplayName(source);
-        }
-        setBusy(true, QStringLiteral("正在搜 %1…").arg(names.join(QStringLiteral(" 与 "))));
+        /* 搜索这件事**不动上下文那一行**（它是"眼前是哪个实例"的信息，被"正在搜…"顶掉就丢了）；
+         * 进行中的状态写在按钮上（"查询中…"），结果就是下面那份列表。 */
+        setBusy(true, QString());
         startNextFetch();
     }
 
@@ -570,14 +774,13 @@ private:
         m_phase = Idle;
         showResults(m_rows);
         const QString counts = modsPerSourceCounts(m_rows, m_requested);
-        std::fprintf(stderr, "[sxcl-ui] mods-merged: sources=%s rows=%d perSource=\"%s\"\n",
+        /* 取证行里的 index= 是"空搜索按下载量拉"的证据（与 mods-search 那条同一个值）；
+         * perSource 每个被请求过的源各多少条（0 也写出来）。 */
+        std::fprintf(stderr, "[sxcl-ui] mods-merged: sources=%s rows=%d perSource=\"%s\" index=%s\n",
                      m_requested.join(QLatin1Char(',')).toUtf8().constData(), int(m_rows.size()),
-                     counts.toUtf8().constData());
-        setBusy(false, QStringLiteral("共 %1 条 · %2 · 点「装」直接进 %3")
-                           .arg(m_rows.size())
-                           .arg(counts)
-                           .arg(versionIsolationOn() ? QStringLiteral("实例自己的目录")
-                                                     : QStringLiteral("根目录")));
+                     counts.toUtf8().constData(),
+                     m_lastSort.isEmpty() ? "relevance" : m_lastSort.constData());
+        setBusy(false, QString()); // 上下文那一行还给"眼前是哪个实例"
     }
 
     void startFetch(const PendingFetch &job) {
@@ -600,8 +803,14 @@ private:
         }
         auto *worker = new ModsWorker(req, this);
         m_worker = worker;
+        /* 这一趟的**编号**兜住它自己:用户又点了一次搜索（或页面打开时那趟默认榜被顶掉）之后，
+         * 旧请求回来时对不上号 -> 直接丢掉，不画、不写 trace、不改状态。 */
+        const int run = m_run;
         QObject::connect(worker, &ModsWorker::finished, this,
-                         [this](bool ok, const QString &error, const QString &text, qint64) {
+                         [this, run](bool ok, const QString &error, const QString &text, qint64) {
+                             if (run != m_run) {
+                                 return; // 这一趟已经被新的一次搜索顶掉了
+                             }
                              m_worker = nullptr;
                              onFetchDone(ok, error, text);
                          });
@@ -687,9 +896,14 @@ private:
             sxcl_mod_file picked;
             std::memset(&picked, 0, sizeof(picked));
             const QByteArray pickLoader = loaderFor(m_fetchSource);
-            if (count == 0 ||
+            if (count > 0 &&
                 sxcl_mods_pick_file(files.data(), count, m_mc.toUtf8().constData(),
                                     pickLoader.constData(), &picked) != 0) {
+                /* 挑不出**唯一**那个（好几个文件都说得过去）:不摆一排按钮，改成"点一项 = 我要它"。 */
+                showFileChoices(files, count);
+                return;
+            }
+            if (count == 0) {
                 InfoBar::push(InfoBar::Type::Warning, QStringLiteral("没有能用的文件"),
                               QStringLiteral("「%1」里没有匹配这个实例（版本 %2 / 加载器 %3）的文件 —— "
                                              "**不自动换加载器**，要么换个包，要么装对应加载器的版本。")
@@ -700,6 +914,37 @@ private:
                 return;
             }
             startDownload(picked);
+        }
+    }
+
+    /** 一个包里"好几个文件都说得过去"时：**点一项 = 我要它**（不是一排按钮）。 */
+    void showFileChoices(const std::vector<sxcl_mod_file> &files, size_t count) {
+        clearResults();
+        auto *hint = new BodyLabel(QStringLiteral("这个包有好几个版本，点一个："), m_list->parentWidget());
+        hint->setWordWrap(true);
+        m_list->addWidget(hint);
+        const QColor secondary = pageTokenColor("textSecondary");
+        for (size_t i = 0; i < count; ++i) {
+            const sxcl_mod_file copy = files[i];
+            auto *card = new CardWidget(m_list->parentWidget());
+            card->setObjectName(QStringLiteral("modsFileChoiceCard")); // 验收钩子按它点
+            card->setCursor(Qt::PointingHandCursor);
+            card->setMinimumHeight(48);
+            auto *lay = new QHBoxLayout(card);
+            lay->setContentsMargins(16, 8, 16, 8);
+            QString meta = QString::fromUtf8(copy.game_versions);
+            if (meta.size() > 72) {
+                meta = meta.left(72) + QStringLiteral("…");
+            }
+            auto *text = new BodyLabel(QStringLiteral("%1 · %2 · %3")
+                                           .arg(QString::fromUtf8(copy.filename), meta,
+                                                QString::fromUtf8(copy.loaders)),
+                                       card);
+            text->setTextColor(secondary, secondary);
+            text->setWordWrap(true);
+            lay->addWidget(text, 1);
+            QObject::connect(card, &CardWidget::clicked, this, [this, copy] { startDownload(copy); });
+            m_list->addWidget(card);
         }
     }
 
@@ -745,12 +990,18 @@ private:
                           .arg(QString::fromUtf8(picked.filename)));
         auto *worker = new ModsWorker(req, this);
         m_worker = worker;
+        /* 也是这一趟的编号：下载途中用户又搜了一次的话，这一趟的状态收尾**不许**动新那一趟的
+         * （m_worker/m_phase 只有一个槽），但"下好了"这件事照样如实报出来。 */
+        const int run = m_run;
         QObject::connect(worker, &ModsWorker::finished, this,
-                         [this, dest](bool ok, const QString &error, const QString &, qint64 bytes) {
-                             m_worker = nullptr;
-                             m_phase = Idle;
-                             if (!ok) {
+                         [this, dest, run](bool ok, const QString &error, const QString &, qint64 bytes) {
+                             const bool current = (run == m_run);
+                             if (current) {
+                                 m_worker = nullptr;
+                                 m_phase = Idle;
                                  setBusy(false, QString());
+                             }
+                             if (!ok) {
                                  InfoBar::push(InfoBar::Type::Warning, QStringLiteral("装失败"), error,
                                                this, 9000);
                                  return;
@@ -762,8 +1013,10 @@ private:
                                  extra = QStringLiteral("；依赖（只展示不装）：%1")
                                              .arg(deps.join(QStringLiteral(", ")));
                              }
-                             setBusy(false, QStringLiteral("已装好：%1")
-                                                .arg(QDir::toNativeSeparators(dest)));
+                             if (current) {
+                                 setBusy(false, QStringLiteral("已装好：%1")
+                                                    .arg(QDir::toNativeSeparators(dest)));
+                             }
                              InfoBar::push(InfoBar::Type::Success, QStringLiteral("已就位"),
                                            QStringLiteral("%1（%2 字节）%3")
                                                .arg(QDir::toNativeSeparators(dest))
@@ -803,15 +1056,17 @@ private:
         }
         m_installSource = src;
         m_phase = LoadingVersions;
-        m_pending.clear();
-        m_fallback.clear();
+        beginRun(); // 装这一条:上一趟（可能还在飞）的搜索/取版本作废
         enqueueCandidates(src, QString::fromUtf8(url)); // 文件列表也走同一条兜底
         setBusy(true, QStringLiteral("正在取「%1」的版本列表…").arg(m_projectTitle));
         startNextFetch();
     }
 
-    /** 把**合并后**的结果摆出来:两个源的条目在同一份列表里,按源分段(段序固定),
-     *  每条自带来源标记 —— 一眼能看出这条来自哪个源,绝不含糊。 */
+    /** 结果行 = **固定 4 行**（用户 2026-09-27）：
+     *    ① 名字 + 右侧来源   ② 开发商 + 版本范围（"1.20 – 1.21.4"）
+     *    ③ 只占一行的介绍（超出就省略号）④ 留空
+     *  行高**固定**（同一套字号量出来的数，每张卡一样高）；logo 是固定方块，不许撑高行；
+     *  行上**一个按钮都没有**：点整行 = 我要它（这条口径不变）。 */
     void showResults(const QVector<ModsHitRow> &rows) {
         if (rows.isEmpty()) {
             auto *empty = new BodyLabel(QStringLiteral("没找到。换个关键词再试。"),
@@ -821,20 +1076,28 @@ private:
             return;
         }
         const QColor secondary = pageTokenColor("textSecondary");
+        QFont titleFont = font();
+        titleFont.setPixelSize(15);
+        titleFont.setWeight(QFont::DemiBold);
+        QFont metaFont = font();
+        metaFont.setPixelSize(12);
+        const QFontMetrics fmTitle(titleFont);
+        const QFontMetrics fmMeta(metaFont);
         for (const ModsHitRow &row : rows) {
             auto *card = new CardWidget(m_list->parentWidget());
-            card->setMinimumHeight(66);
             auto *rowLay = new QHBoxLayout(card);
             rowLay->setContentsMargins(16, 10, 16, 10);
             rowLay->setSpacing(12);
 
-            /* 图标位：先摆一个空框，图标在工作线程下回来再填 ——
-             * 界面绝不为了一个图标卡住（用户点名过"未响应"）。取不到就留空框，不造假图。 */
+            /* logo：**固定方块**（用户 2026-09-27：「模组 logo 强制以我们的布局为主，获取到图片后
+             * 强制放在模组栏里，不能上下延伸」）—— 图标按比例缩进这个方块，行高由文字那 4 行定。
+             * 拉不到图标就**什么都不画**（连底框都不画），位置照样占着，行与行才对得齐。 */
             auto *icon = new QLabel(card);
-            icon->setFixedSize(40, 40);
-            icon->setStyleSheet(QStringLiteral("QLabel { background: rgba(255,255,255,0.06);"
-                                               " border-radius: 8px; }"));
-            rowLay->addWidget(icon, 0, Qt::AlignTop);
+            icon->setObjectName(QStringLiteral("modsRowIcon"));
+            icon->setFixedSize(kIconSide, kIconSide);
+            icon->setAlignment(Qt::AlignCenter);
+            icon->setStyleSheet(QStringLiteral("QLabel { background: transparent; }"));
+            rowLay->addWidget(icon, 0, Qt::AlignVCenter);
             if (!row.iconUrl.isEmpty()) {
                 /* 缓存文件名带上源:两个源的 id 可能撞(CF 是数字、Modrinth 是短 id),
                  * 只按 id 存会把一个源的图标当成另一个源的。 */
@@ -842,53 +1105,101 @@ private:
             }
 
             auto *textCol = new QVBoxLayout();
+            textCol->setContentsMargins(0, 0, 0, 0);
             textCol->setSpacing(2);
-            auto *titleRow = new QHBoxLayout();
-            titleRow->setSpacing(8);
+
+            /* ① 名字（占满左边，装不下省略号）+ 右侧来源标记。 */
+            auto *line1 = new QHBoxLayout();
+            line1->setSpacing(8);
             auto *title = new BodyLabel(row.title, card);
-            {
-                QFont font = title->font();
-                font.setPixelSize(15);
-                font.setWeight(QFont::DemiBold);
-                title->setFont(font);
-            }
-            titleRow->addWidget(title, 0);
+            title->setObjectName(QStringLiteral("modsRowTitle"));
+            title->setFont(titleFont);
+            title->setToolTip(row.title);
+            makeLabelElide(title, 60);
+            line1->addWidget(title, 1);
             /* 来源标记:合并列表里"这条是谁家的"必须一眼看出来(不写句子,一个小标签)。
              * 稳定 objectName:验收脚本按它逐行断言"没有一行冒充别的源"。 */
             auto *tag = new BodyLabel(modsSourceDisplayName(row.source), card);
             tag->setObjectName(QStringLiteral("modsSourceTag"));
+            tag->setWordWrap(false); // 行高是钉死的：这一行绝不许折成两行
             tag->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;")
                                    .arg(pageTokenText("textTertiary")));
-            titleRow->addWidget(tag, 0);
-            titleRow->addStretch(1);
-            textCol->addLayout(titleRow);
-            /* CF 的搜索响应里没有作者时如实少一段,不编一个名字出来。 */
-            auto *sub = new BodyLabel(QStringLiteral("%1%2下载 %3")
-                                          .arg(row.author.isEmpty()
-                                                   ? QString()
-                                                   : row.author + QStringLiteral(" · "))
-                                          .arg(row.versions.isEmpty()
-                                                   ? QString()
-                                                   : QStringLiteral("支持 %1 · ").arg(row.versions))
-                                          .arg(row.downloads),
-                                      card);
-            sub->setTextColor(secondary, secondary);
-            sub->setWordWrap(true);
-            textCol->addWidget(sub);
+            line1->addWidget(tag, 0, Qt::AlignRight | Qt::AlignVCenter);
+            textCol->addLayout(line1);
+
+            /* ② 开发商 + 版本范围（左）；下载量 + 更新时间（右，都是**单位化/相对时间**）。
+             *  CF 的搜索响应里没有作者时如实少一段,不编一个名字出来；范围认不出就只写作者。 */
+            auto *line2 = new QHBoxLayout();
+            line2->setSpacing(8);
+            QStringList meta;
+            if (!row.author.isEmpty()) {
+                meta << row.author;
+            }
+            if (!row.versionsMin.isEmpty()) {
+                meta << (row.versionsMin == row.versionsMax
+                             ? row.versionsMin
+                             : QStringLiteral("%1 – %2").arg(row.versionsMin, row.versionsMax));
+            }
+            auto *dev = new BodyLabel(meta.join(QStringLiteral(" · ")), card);
+            dev->setObjectName(QStringLiteral("modsRowDev"));
+            dev->setFont(metaFont);
+            dev->setTextColor(secondary, secondary);
+            makeLabelElide(dev, 40);
+            line2->addWidget(dev, 1);
+            QStringList stats;
+            stats << QStringLiteral("%1次下载").arg(modsDownloadText(row.downloads));
+            const QString when = modsUpdatedText(row.updated, QDateTime::currentDateTimeUtc());
+            if (!when.isEmpty()) {
+                stats << when;
+            }
+            auto *numbers = new BodyLabel(stats.join(QStringLiteral(" · ")), card);
+            numbers->setObjectName(QStringLiteral("modsRowStats"));
+            numbers->setWordWrap(false); // 同上：下载量与更新时间就占一行
+            numbers->setFont(metaFont);
+            numbers->setTextColor(secondary, secondary);
+            line2->addWidget(numbers, 0, Qt::AlignRight | Qt::AlignVCenter);
+            textCol->addLayout(line2);
+
+            /* ③ 介绍**只占一行**：超出省略号（单击整行这件事见下面那段，口径不变）。
+             *  整份介绍挂在悬停提示里 —— 不占行、也不多一个控件。 */
             auto *desc = new BodyLabel(row.description, card);
+            desc->setObjectName(QStringLiteral("modsRowDesc"));
+            desc->setFont(metaFont);
             desc->setTextColor(secondary, secondary);
-            desc->setWordWrap(true);
+            makeLabelElide(desc, 40);
+            if (!row.description.isEmpty()) {
+                desc->setToolTip(row.description);
+            }
             textCol->addWidget(desc);
+
+            /* ④ 第 4 行先留空（占住行高，四行的行距与基线才固定）。 */
+            auto *blank = new BodyLabel(QString(), card);
+            blank->setObjectName(QStringLiteral("modsRowBlank"));
+            blank->setWordWrap(false);
+            blank->setFont(metaFont);
+            textCol->addWidget(blank);
+
+            /* 4 行的高度：按这套字号量（含标签自己的内边距），行高**钉死**，每张卡一样高。 */
+            const int hTitle = qMax(fmTitle.height(), title->sizeHint().height());
+            const int hMeta = qMax(qMax(fmMeta.height(), desc->sizeHint().height()),
+                                   numbers->sizeHint().height());
+            title->setFixedHeight(hTitle);
+            dev->setFixedHeight(hMeta);
+            desc->setFixedHeight(hMeta);
+            blank->setFixedHeight(hMeta);
+            numbers->setFixedHeight(hMeta);
+            card->setFixedHeight(qMax(kIconSide + 2 * 10, 2 * 10 + hTitle + 3 * hMeta + 3 * 2));
+
             rowLay->addLayout(textCol, 1);
 
-            auto *btn = new PushButton(QStringLiteral("装"), card);
-            applyButtonFont(btn);
-            /* 稳定 objectName:验收钩子(SXCL_UI_MODS_INSTALL)点**真的那一个「装」** ——
-             * 走产品路径(取版本 -> 挑文件 -> 工作线程下载 + sha1 强校验 -> 进隔离目录)。 */
-            btn->setObjectName(QStringLiteral("modsInstallButton"));
-            const ModsHitRow copy = row; /* 值拷贝:卡片被清掉后按钮回调还要用 */
-            QObject::connect(btn, &QAbstractButton::clicked, this, [this, copy] { install(copy); });
-            rowLay->addWidget(btn, 0, Qt::AlignVCenter);
+            /* 整行可点 = "我要它"（用户 2026-09-27：「都做成他妈选项卡没有按钮，点击就是代表我要点它。
+             * 那鼠标左键是给你干啥的？没有按钮不能干活儿了，是不是？」）。
+             * 用 CardWidget 自带的 clicked + hover/pressed 背景过渡(120ms) + 手型光标 ——
+             * 小白一眼就知道整块能点。行上**一个按钮都没有**。 */
+            card->setObjectName(QStringLiteral("modsResultCard"));
+            card->setCursor(Qt::PointingHandCursor);
+            const ModsHitRow copy = row; /* 值拷贝:卡片被清掉后回调还要用 */
+            QObject::connect(card, &CardWidget::clicked, this, [this, copy] { install(copy); });
             m_list->addWidget(card);
         }
     }
@@ -929,10 +1240,11 @@ private:
     static void setIconFromFile(const QString &path, QLabel *target) {
         QPixmap pm(path);
         if (pm.isNull() || target == nullptr) {
-            return;
+            return; // 解不开的图 = 什么都不画（不拿占位图冒充）
         }
-        target->setPixmap(pm.scaled(40, 40, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-        target->setStyleSheet(QStringLiteral("QLabel { background: transparent; }"));
+        /* **按比例缩进固定方块**：不拉伸、不裁切，也绝不让图片决定行高。 */
+        target->setPixmap(pm.scaled(kIconSide, kIconSide, Qt::KeepAspectRatio,
+                                    Qt::SmoothTransformation));
     }
 
     bool m_shaders = false;
@@ -962,7 +1274,17 @@ private:
     SearchLineEdit *m_search = nullptr;
     PrimaryPushButton *m_go = nullptr;
     BodyLabel *m_context = nullptr;
-    FlowLayout *m_filterFlow = nullptr;        // 筛选区那一行（流式：放不下换行，不压控件）
+    FlowLayout *m_filterFlow = nullptr;        // 筛选区**第 2 行**（流式：放不下换行，不压控件）
+    LineEdit *m_versionEdit = nullptr;         // 版本筛选：**可输入**（留空 = 全部）
+    bool m_versionAuto = false;                // 程序回填默认值时不要当成"用户改了"
+    bool m_versionFilterTouched = false;       // 用户动过输入框就不再自动改它
+    QTimer *m_autoTimer = nullptr;             // 默认榜的"静默期"计时器
+    bool m_shown = false;                      // 这一页显示过没有（默认榜只在第一次显示时排）
+    bool m_autoDone = false;                   // 默认榜排过了（或条件不满足已经放弃）
+    bool m_userTouched = false;                // 用户动过任何一件筛选 -> 默认榜不再自动拉
+    QString m_autoInstance;                    // 上一次默认榜用的实例（换实例要重拉）
+    int m_run = 0;                             // 这一趟请求链的编号（旧的回来就丢掉）
+    QByteArray m_lastSort;                     // 这一趟的排序（"downloads" / "relevance"），取证行用
     QHash<QString, QCheckBox *> m_sourceBoxes; // "modrinth" / "curseforge" -> 那个勾选框
     QVBoxLayout *m_list = nullptr;
     ModsWorker *m_worker = nullptr;

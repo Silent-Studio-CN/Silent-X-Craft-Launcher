@@ -63,6 +63,14 @@ typedef struct sxcl_mod_hit {
     char updated[40];                 /**< ISO 时间，原样带出来（界面自己格式化） */
     char categories[192];             /**< 空格分隔（分类 slug） */
     char versions[192];               /**< 空格分隔（支持的游戏版本，前若干个） */
+    /** 支持版本里**最早 / 最新**的那两个（界面第二行显示 "1.20 – 1.21.4" 用它）。
+     *  只认**正式版号**（1.20 / 1.21.4 / 26.3.1）：快照（24w14a）、预发布（1.20-pre1）、
+     *  加载器名（Forge）都不是"用户能装的正式版本"，混进范围里就是假事实；一个正式版号
+     *  都没有（比如只支持快照）时两者都是空串 —— 界面那边就是"认不出，一个字都不写"。
+     *  **必须按整份数组算**：versions 是被截断的前几个，拿它算范围会得出错的范围
+     *  （Fabric API 支持 389 个版本，前 6 个全在 2019 年）。 */
+    char versions_min[24];
+    char versions_max[24];
 } sxcl_mod_hit;
 
 typedef struct sxcl_mod_page {

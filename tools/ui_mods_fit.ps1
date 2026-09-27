@@ -50,7 +50,7 @@ $ini = Join-Path $work 'fit.ini'
 Set-Content -Path $ini -Value ('game.default_dir=' + (Join-Path $work 'mc')) -Encoding utf8
 
 # the controls that make up the filter row (name box, search button, two source boxes)
-$names = @('modsSearchBox','modsSearchButton','modsSourceModrinth','modsSourceCurseForge')
+$names = @('modsSearchBox','modsSearchButton','modsVersionFilter','modsSourceModrinth','modsSourceCurseForge')
 
 function Invoke-Fit([string]$tag, [string]$size) {
   $env:SXCL_UI_SETTINGS = $ini
@@ -133,14 +133,22 @@ foreach ($case in @(@('900x600',$true), @('1100x750',$true), @('1280x800',$true)
   Ok ($cut -eq 0) ('no CUT-W / CUT-H on any filter control (' + $cut + ' markers)')
   Ok ($tooSmall -eq 0) ('every control shows itself completely (' + $tooSmall + ' offenders)')
 
-  # the row really wraps when the window cannot hold it
+  # The area is EXACTLY TWO ROWS (user 2026-09-27: name+search on top, version+sources below), so
+  # its height is "one 34px row + gap + one 28px row" at every size. Three rows (a wrap inside either
+  # row) would show up as a taller container; a squeezed control would show up as CUT-W above.
   $rowGeo = [regex]::Match(($rowVisible), '\((\d+),(\d+) (\d+)x(\d+)\)')
   $rowW = [int]$rowGeo.Groups[3].Value
   $rowH = [int]$rowGeo.Groups[4].Value
-  if ($isWide) {
-    Ok ($rowH -le 44) ('at ' + $size + ' the row fits on one line (row ' + $rowW + 'x' + $rowH + ')')
-  } else {
-    Ok ($rowH -ge 60) ('at ' + $size + ' the row wrapped instead of squeezing (row ' + $rowW + 'x' + $rowH + ')')
+  Ok ($rowH -ge 60 -and $rowH -le 92) ('at ' + $size + ' the filter area is exactly two complete rows (row ' + $rowW + 'x' + $rowH + ')')
+  $row1Line = $null
+  foreach ($l in $lines) { if ($l -notmatch ' hidden' -and $l -match '#modsSearchRow \(') { $row1Line = $l; break } }
+  $row2Line = $null
+  foreach ($l in $lines) { if ($l -notmatch ' hidden' -and $l -match '#modsOptionRow \(') { $row2Line = $l; break } }
+  Ok ($row1Line -ne $null -and $row2Line -ne $null) 'both rows of the area are in the dump'
+  if ($row1Line -ne $null -and $row2Line -ne $null) {
+    $g1 = [regex]::Match($row1Line, '\((\d+),(\d+) (\d+)x(\d+)\)')
+    $g2 = [regex]::Match($row2Line, '\((\d+),(\d+) (\d+)x(\d+)\)')
+    Ok ([int]$g2.Groups[2].Value -ge ([int]$g1.Groups[2].Value + [int]$g1.Groups[4].Value)) 'row 2 starts below row 1'
   }
   Write-Output ('  filter row: ' + $rowW + 'x' + $rowH)
 }
