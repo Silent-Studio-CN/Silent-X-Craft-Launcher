@@ -40,6 +40,28 @@ set(SXCL_UI_SOURCES
   crash_handler.cpp        crash_handler.h
   # 新界面(docs/27):M1 外壳 + 令牌/QSS + 折叠动画。老界面一行不删,SXCL_UI2=1 切换。
   ui2/ui2.cpp              ui2/ui2.h
+  #   tokens.*  令牌表(颜色唯一来源;外壳与每个控件都从这里**现取**)
+  #   icons.*   assets/icons/ui/* 的取图(单色线稿按令牌现染;官方四色原样保留)
+  #   task.*    任务原语:阻塞活进工作线程,结果由框架回到界面线程;析构先取消再回收
+  #   sources.* 主页的阻塞数据源(扫版本 / 读账户 / 写设置)—— **只许 Task 的工作线程调**
+  ui2/tokens.cpp           ui2/tokens.h
+  ui2/icons.cpp            ui2/icons.h
+  ui2/task.cpp             ui2/task.h
+  ui2/sources.cpp          ui2/sources.h
+  #   pages/home.*       主页:页面里只有数据与槽(不碰样式、不碰磁盘)
+  ui2/pages/home.cpp       ui2/pages/home.h
+  #   widgets/*          当前版本大卡 / 玩家卡(悬停图标 + 版本形态点选) / 手风琴 / 公告卡
+  ui2/widgets/hero_card.cpp    ui2/widgets/hero_card.h
+  ui2/widgets/player_card.cpp  ui2/widgets/player_card.h
+  ui2/widgets/accordion.cpp    ui2/widgets/accordion.h
+  ui2/widgets/notice_card.cpp  ui2/widgets/notice_card.h
+  ui2/widgets/icon_button.cpp  ui2/widgets/icon_button.h
+  ui2/widgets/avatar.cpp       ui2/widgets/avatar.h
+  # 动画基座(docs/27 §10.2 / §10.2.1 / §13.1):时间线编排 + 自家曲线表 + 错峰模板 + 动效开关。
+  # 纯 Qt,不依赖 libqf;全局只有一个心跳 QTimer(见 anim.cpp)。
+  ui2/anim.cpp             ui2/anim.h
+  # 会"冒出来"的自绘行:只暴露一个 reveal 属性,动画写它、paintEvent 读它(不碰布局)。
+  ui2/motion_row.cpp       ui2/motion_row.h
   # 工作线程层(阶段 7:下载->安装->启动 的界面接线)
   #   ui_paths.*       界面层共用的运行期取值(游戏目录/设置文件/内存/进度追踪)
   #   install_worker.* 把阻塞的 sxcl_install_run 放工作线程,阶段/进度/速度/取消回填 UI
@@ -81,6 +103,8 @@ set(SXCL_UI_SOURCES
 )
 qt_add_library(sxcl_ui_core STATIC ${SXCL_UI_SOURCES})
 target_include_directories(sxcl_ui_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# 新界面自己的目录:ui2/** 里可以直接 #include "icons.h",从 widgets/ 与 pages/ 也找得到
+target_include_directories(sxcl_ui_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ui2)
 # 主题资产（qf 原版 QSS）在源码树里，编译期把目录写死，运行时按需回退到 exe 旁
 target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_THEME_DIR="${CMAKE_SOURCE_DIR}/assets/theme")
 # 方块图标资产(assets/icons/blocks/*.png)
@@ -88,6 +112,9 @@ target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_BLOCK_DIR="${CMAKE_SOURCE
 # 版本形态图标(assets/icons/edition/*):官方 Java 咖啡杯 svg + 官方基岩方块 png
 # (出处见 assets/icons/edition/NOTICE.md;IconSelectButton 按它取图)
 target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI_EDITION_DIR="${CMAKE_SOURCE_DIR}/assets/icons/edition")
+# 新界面自己的图标(assets/icons/ui/*):微软 LOGO + 断线图标 + 换皮肤/切换账号/更改名字/齿轮/箭头
+# (全部自绘,出处见 assets/icons/ui/NOTICE.md;单色线稿由 IconButton 按主题令牌现染)
+target_compile_definitions(sxcl_ui_core PUBLIC SXCL_UI2_ICON_DIR="${CMAKE_SOURCE_DIR}/assets/icons/ui")
 # fluent 的 Qt6::Svg 是 PRIVATE(静态库只把它带进链接行),我们直接用 QSvgRenderer,
 # 所以这里显式要一份 Svg 的头文件路径
 # sxcl = 纯 C 核心库。界面层必须能直接调它(设置读写/路径解析/实例列表…),
@@ -105,6 +132,9 @@ target_include_directories(sxcl_ui_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 # ---- 可执行 ----
 qt_add_executable(sxcl-ui main.cpp)
+# 动画基座的真机验收探针(SXCL_UI2_ANIM_DEMO=1 才动,平时一行不执行;见 ui2/anim_probe.cpp)。
+# 编进可执行文件而不是静态库:静态库里没有被引用的目标文件会被链接器丢掉,启动钩子就永远不跑。
+target_sources(sxcl-ui PRIVATE ui2/anim_probe.cpp)
 # 成品观感:控制台子系统会在启动器旁边弹一个黑窗口(实测 PE 子系统 = 3)。
 # 开发/验收阶段保留控制台 —— 工具链与各页自检都靠 stderr 看诊断;
 # **打包时**用 -DSXCL_UI_WINDOWS_GUI=ON 变成 GUI 子系统(PE 子系统 = 2)。
@@ -167,6 +197,18 @@ if(SXCL_BUILD_TESTS)
   sxcl_deploy_qt(sxcl_ui_folder_icons_test)
   add_test(NAME sxcl_ui_folder_icons_test COMMAND sxcl_ui_folder_icons_test -platform offscreen)
   set_tests_properties(sxcl_ui_folder_icons_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sxcl_qt_bin}")
+
+  # 动画基座验收(docs/27 §13.1 第 6 条:每个动效都要能在 CI 里断言)——
+  # 时序采样 / then+after 串行时间戳 / stagger 延迟表 25ms±5ms / ui.motion=off 立即就位且 0 帧 /
+  # 全局心跳恒为 1 个 / 自绘属性驱动像素且几何不动。全部无头,不看截图。
+  add_executable(sxcl_ui2_anim_test "${CMAKE_SOURCE_DIR}/src/ui/tests/ui2_anim_test.cpp")
+  target_link_libraries(sxcl_ui2_anim_test PRIVATE sxcl_ui_core)
+  sxcl_warnings(sxcl_ui2_anim_test)
+  sxcl_deploy_qt(sxcl_ui2_anim_test)
+  add_test(NAME sxcl_ui2_anim_test COMMAND sxcl_ui2_anim_test -platform offscreen)
+  set_tests_properties(sxcl_ui2_anim_test PROPERTIES
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sxcl_qt_bin}")
 
