@@ -154,11 +154,18 @@ static void dumpWidgetTree(QWidget *root, int maxDepth) {
                 return;
             const QPoint topLeft = widget->mapTo(widget->window(), QPoint(0, 0));
             QString text;
+            /* 勾选态也是"这一行在说什么"的一部分:模组页的两个来源是**复选框**
+             * (用户 2026-09-26),验收脚本要能按 dump 直接断言"勾了哪几个源",
+             * 而不是只信我们自己打的 trace。非 checkable 的按钮不打印,免得噪音。 */
+            QString checkedSuffix;
             if (auto *label = qobject_cast<QLabel *>(widget))
                 text = label->text();
-            else if (auto *button = qobject_cast<QAbstractButton *>(widget))
+            else if (auto *button = qobject_cast<QAbstractButton *>(widget)) {
                 text = button->text();
-            else if (auto *combo = qobject_cast<QComboBox *>(widget))
+                if (button->isCheckable())
+                    checkedSuffix = button->isChecked() ? QStringLiteral(" checked")
+                                                        : QStringLiteral(" unchecked");
+            } else if (auto *combo = qobject_cast<QComboBox *>(widget))
                 text = combo->currentText();
             // 度量必须在**原样文本**上做(截断只影响打印,不影响需要多宽)
             const QString metrics = textMetrics(widget, text);
@@ -169,9 +176,10 @@ static void dumpWidgetTree(QWidget *root, int maxDepth) {
                          widget->metaObject()->className());
             if (!widget->objectName().isEmpty())
                 std::fprintf(stderr, " #%s", widget->objectName().toUtf8().constData());
-            std::fprintf(stderr, " (%d,%d %dx%d)%s%s", topLeft.x(), topLeft.y(), widget->width(),
+            std::fprintf(stderr, " (%d,%d %dx%d)%s%s%s", topLeft.x(), topLeft.y(), widget->width(),
                          widget->height(), widget->isVisible() ? "" : " hidden",
-                         widget->isEnabled() ? "" : " disabled");
+                         widget->isEnabled() ? "" : " disabled",
+                         checkedSuffix.toUtf8().constData());
             if (!text.isEmpty())
                 std::fprintf(stderr, " \"%s\"", text.toUtf8().constData());
             if (!metrics.isEmpty())
@@ -941,12 +949,93 @@ sxcl::ui::MainWindow window;
         });
     }
 
+    // 验收通路:勾模组页的**来源勾选项**(SXCL_UI_MODS_SOURCES=modrinth,curseforge)。
+    //   用户 2026-09-26:「模组下载的两个圆要作为勾选的选项,而不是搜一个模组从两个下面儿选,
+    //   这点你要模仿 PCL 的理念」—— 两个源是**可同时勾上**的筛选项,不是一个单选滑块。
+    //   点的是界面上真的那两个复选框(#modsSourceModrinth / #modsSourceCurseForge),
+    //   不在这里写设置文件:验的是接线,不是设置读写。
+    //   这个钩子的**终态** = 参数里列出的那几个源(没列的会被取消掉,免得上一次落盘的勾选
+    //   把结论搅浑);每个框打完之后的真状态都打出来 —— 勾不动的(比如这个构建没有内置 key 的
+    //   CurseForge)如实写勾不动,不假装点上了。
+    const QString modsSources = qEnvironmentVariable("SXCL_UI_MODS_SOURCES");
+    if (!modsSources.isEmpty()) {
+        std::fprintf(stderr, "[sxcl-ui] mods-source-hook: armed want=%s\n",
+                     modsSources.toUtf8().constData());
+        const int sourcesDelay = qEnvironmentVariableIntValue("SXCL_UI_MODS_SOURCES_DELAY");
+        /* 页面是**异步**建起来的(模组/光影两栏在下载路由下才建),所以这里要**等它出现**:
+         * 只试一次的话 450ms 时那两个勾选框还没出生,钩子就白跑了(实测踩到:
+         * 打印 want=modrinth modrinth=missing curseforge=missing,而那一刻 dump 里两个框都在)。
+         * 每 250ms 试一次,最多 6 秒;真等不到才如实报 missing。 */
+        struct SourcePick {
+            const char *key;
+            const char *objectName;
+        };
+        const SourcePick picks[] = {{"modrinth", "modsSourceModrinth"},
+                                    {"curseforge", "modsSourceCurseForge"}};
+        auto tries = std::make_shared<int>(0);
+        auto *timer = new QTimer(&app);
+        timer->setInterval(250);
+        QObject::connect(timer, &QTimer::timeout, &app,
+                         [&window, modsSources, tries, timer, &picks]() {
+            ++(*tries);
+            QList<QAbstractButton *> boxes;
+            bool allFound = true;
+            for (const SourcePick &pick : picks) {
+                QAbstractButton *box = nullptr;
+                const QList<QAbstractButton *> all = window.findChildren<QAbstractButton *>(
+                    QString::fromLatin1(pick.objectName));
+                for (QAbstractButton *candidate : all) {
+                    if (candidate->isVisible()) { // 两个模组页(模组/光影)同名,只认眼前那个
+                        box = candidate;
+                        break;
+                    }
+                }
+                if (box == nullptr) {
+                    allFound = false;
+                }
+                boxes.append(box);
+            }
+            if (!allFound && *tries <= 24) {
+                return; // 还没出生:接着等
+            }
+            const QStringList wanted = modsSources.split(QLatin1Char(','), Qt::SkipEmptyParts);
+            QStringList state;
+            for (int i = 0; i < int(sizeof(picks) / sizeof(picks[0])); ++i) {
+                const QString key = QString::fromLatin1(picks[i].key);
+                QAbstractButton *box = boxes.at(i);
+                if (box == nullptr) {
+                    state << QStringLiteral("%1=missing").arg(key);
+                    continue;
+                }
+                const bool want = wanted.contains(key, Qt::CaseInsensitive);
+                if (box->isEnabled() && box->isChecked() != want) {
+                    box->click(); // 真点一下:走它自己的信号(与用户手点同一条路)
+                }
+                state << QStringLiteral("%1=%2")
+                             .arg(key, !box->isEnabled()
+                                            ? QStringLiteral("disabled")
+                                            : (box->isChecked() ? QStringLiteral("checked")
+                                                                : QStringLiteral("unchecked")));
+            }
+            std::fprintf(stderr, "[sxcl-ui] mods-source-pick: want=%s %s\n",
+                         modsSources.toUtf8().constData(),
+                         state.join(QLatin1Char(' ')).toUtf8().constData());
+            timer->stop();
+            timer->deleteLater();
+        });
+        QTimer::singleShot(sourcesDelay > 0 ? sourcesDelay : 450, &app, [timer]() { timer->start(); });
+    }
+
     // 验收通路:模组页真的搜一次(SXCL_UI_MODS_QUERY=<关键词>)。
     //   往**真控件**里写字、点**真的搜索按钮** —— 走产品路径(工作线程取 JSON -> 解析 -> 出卡片),
     //   与 SXCL_UI_JRE_HOSTED 同一个口径:验的是接线,不是"main.cpp 里自己调核心库"。
     const QString modsQuery = qEnvironmentVariable("SXCL_UI_MODS_QUERY");
     if (!modsQuery.isEmpty()) {
-        QTimer::singleShot(600, &app, [&window, modsQuery]() {
+        /* SXCL_UI_MODS_QUERY_DELAY=<ms>：默认 600ms。要先用 SXCL_UI_MODS_SOURCES 勾来源再搜时，
+         * 把这一条推后（勾选钩子要等控件出生，最快也要 450+250ms），否则搜索会在"一个源都没勾"
+         * 的状态下空转一次（实测踩到过）。 */
+        const int queryDelay = qEnvironmentVariableIntValue("SXCL_UI_MODS_QUERY_DELAY");
+        QTimer::singleShot(queryDelay > 0 ? queryDelay : 600, &app, [&window, modsQuery]() {
             /* 模组页在下载页的 stack 里有**两份**(MOD 那一栏与光影那一栏),
              * 两份的搜索框同名 —— 必须挑**看得见的那一份**(用户眼前那个),
              * 否则会往隐藏的那一页里打字(实测踩到:dump 里中招的是隐藏页,可见页毫无反应)。 */

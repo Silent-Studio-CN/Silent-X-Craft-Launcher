@@ -4,14 +4,18 @@
  * All rights reserved.
  */
 
-// 下载页的「拼图（MOD）」与「太阳（光影）」两栏（docs/22 的 A1，走 PCL 线路）。
+// 下载页的「拼图（MOD）」与「太阳（光影）」两栏（docs/22 的 A1）。
 //
-// 顶部三行：当前实例上下文 / 搜索框 / **来源滑块**（Modrinth 免 key，CurseForge 要官方 key）；
+// 顶部三行：当前实例上下文 / 搜索框 / **来源勾选项**（两个源可同时勾上）；
 // 下面    ：结果卡片（图标 / 标题 / 作者 / 下载量 / 简介 + 一键「装」）。
 //
 // 口径（与 sxcl/mods.h 完全一致）：
-//   * **两个源**：Modrinth（免 key）+ CurseForge（官方 API 必须带 x-api-key）。
-//     **没配 key 就不发请求**，如实告诉用户缺什么 —— 绝不改用另一个源假装是 CF 的结果；
+//   * **两个源是勾选项**（用户 2026-09-26：「模组下载的两个圆要作为勾选的选项，而不是搜一个模组
+//     从两个下面儿选，这点你要模仿 PCL 的理念」）：勾上哪个就搜哪个，勾两个就两个都搜，
+//     结果**合并成一份列表**，每一条自带真实来源；一个源都没勾时搜索按钮点不动。
+//   * **CurseForge 的 key 是编译期内置的**（include/sxcl/mods_key.h；用户点名「不要让用户自己填写」）：
+//     界面上没有任何填 key 的入口；这个构建没有内置 key 时，CF 那个勾选框**可见但点不动**
+//     （tooltip 一句话），**不发注定失败的请求** —— 绝不改用另一个源假装是 CF 的结果；
 //   * 筛选交给**服务端**（Modrinth 的 facets / CF 的 classId + modLoaderType），本地不过滤；
 //   * **不自动换加载器**：实例是 Fabric 就只列/只挑 Fabric 的文件，挑不出来就如实说；
 //   * 依赖**只展示不装**（装完把 required 的 id 打在提示里）；
@@ -24,6 +28,7 @@
 
 #include "../workers/bg_task.h"        // 一次性后台任务(实例扫描是磁盘活,只许工作线程)
 #include "../workers/instance_scan.h"  // 单个实例扫描 + **版本行那份展示口径**(versionRowInfo)
+#include "../workers/mods_merge.h"     // 来源勾选列表的落盘/读回 + 两源结果合并(纯逻辑,单测在 tests/)
 #include "../workers/mods_worker.h"
 #include "../workers/ui_paths.h"
 
@@ -38,7 +43,7 @@
 #include "fluent/fluent_input.h"
 #include "fluent/fluent_labels.h"
 #include "fluent/fluent_scroll.h"
-#include "fluent/fluent_segmented.h"   // Pivot:来源滑块(与主页离线/正版同一个形态)
+#include "fluent/fluent_selection.h"   // CheckBox:来源**勾选项**(两个源能同时勾上) + 勾选态自绘
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
@@ -46,6 +51,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFont>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -63,14 +69,16 @@
 
 #include "sxcl/fs.h"
 #include "sxcl/mods.h"
+#include "sxcl/mods_key.h"     // 编译期内置的 CurseForge key(SXCL_CURSEFORGE_API_KEY)
 #include "sxcl/settings.h"
 
 namespace sxcl::ui {
 namespace {
 
-// 设置键（模组页自己也写这两个：key 就在这一页上填，没必要逼用户翻到设置页）。
-const char *const kKeyModsSource = "mods.source";             // "modrinth" / "curseforge"
-const char *const kKeyCfApiKey = "mods.curseforge_api_key";   // CurseForge 官方 API key
+/* 设置键：**勾选项的列表**（"modrinth,curseforge" / "modrinth" / 空 = 一个都不勾）。
+ * 老设置文件里存过单值（"modrinth" / "curseforge"），读的时候自动升级成列表
+ * —— 见 workers/mods_merge.h 的 parseModsSources()。*/
+const char *const kKeyModsSource = "mods.source";
 
 /** 光影那一栏要的加载器 slug：Modrinth 认的是 iris / optifine / canvas，
  *  拿实例的 fabric/forge 去筛会一条都搜不到（这是"不自动换加载器"在光影上的等价物：
@@ -145,58 +153,37 @@ private:
         row->addWidget(m_go, 0);
         lay->addLayout(row);
 
-        // ── 来源滑块（PCL 那样的滑动选项；与主页离线/正版同一个控件） ──
+        // ── 来源**勾选项**（用户 2026-09-26：「模组下载的两个圆要作为勾选的选项」）──
+        // 两个源**能同时勾上**：勾上哪个就搜哪个，勾两个就两个都搜，结果合并成一份列表
+        // （每一条自带真实来源标记）。这不是"先选一个源、再在它下面搜"。
         auto *sourceRow = new QWidget(this);
         auto *sourceLay = new QHBoxLayout(sourceRow);
         sourceLay->setContentsMargins(0, 0, 0, 0);
-        sourceLay->setSpacing(8);
-        m_sourcePivot = new Pivot(sourceRow);
-        m_sourcePivot->addItem(QStringLiteral("modrinth"), QStringLiteral("Modrinth"));
-        m_sourcePivot->addItem(QStringLiteral("curseforge"), QStringLiteral("CurseForge"));
-        m_sourcePivot->setIndicatorColor(FluentTheme::instance().tokens().accent,
-                                        FluentTheme::instance().tokens().accent);
-        for (const QString &key : {QStringLiteral("modrinth"), QStringLiteral("curseforge")}) {
-            if (PivotItem *it = m_sourcePivot->item(key)) {
-                QFont f = it->font();
-                f.setPixelSize(14);
-                f.setWeight(QFont::DemiBold);
-                it->setFont(f);
-                it->setProperty("hasIcon", false);
-                it->setFixedHeight(34);
-                it->setCursor(Qt::PointingHandCursor);
-            }
+        sourceLay->setSpacing(18);
+        struct SourceSpec {
+            const char *key;
+            const char *objectName;
+        };
+        const SourceSpec specs[] = {{"modrinth", "modsSourceModrinth"},
+                                    {"curseforge", "modsSourceCurseForge"}};
+        for (const SourceSpec &spec : specs) {
+            const QString key = QString::fromLatin1(spec.key);
+            auto *box = new CheckBox(modsSourceDisplayName(key), sourceRow);
+            /* 稳定 objectName：验收钩子(SXCL_UI_MODS_SOURCES)与 dump 都按它认这两个勾选框。 */
+            box->setObjectName(QString::fromLatin1(spec.objectName));
+            box->setTristate(false); // qf 的 CheckBox 默认三态(那份是给演示用的),这里只要勾/不勾
+            box->setFixedHeight(28);
+            box->setCursor(Qt::PointingHandCursor);
+            QObject::connect(box, &QAbstractButton::toggled, this,
+                             [this, key] { onSourceToggled(key); });
+            sourceLay->addWidget(box, 0, Qt::AlignLeft);
+            m_sourceBoxes.insert(key, box);
         }
-        m_sourcePivot->setFixedHeight(38);
-        m_sourcePivot->setStyleSheet(
-            QStringLiteral("Pivot { background: transparent; border: none; }"
-                           "PivotItem { background: transparent; border: none; padding: 4px 10px; }"
-                           "PivotItem[isSelected='true'] { color: %1; }"
-                           "PivotItem[isSelected='false'] { color: %2; }")
-                .arg(pageTokenText("accent"), pageTokenText("textSecondary")));
-        sourceLay->addWidget(m_sourcePivot, 0, Qt::AlignLeft);
-
-        m_sourceNote = new BodyLabel(QString(), sourceRow);
-        m_sourceNote->setTextColor(secondary, secondary);
-        m_sourceNote->setWordWrap(true);
-        sourceLay->addWidget(m_sourceNote, 1);
+        sourceLay->addStretch(1);
         lay->addWidget(sourceRow);
-
-        // ── CurseForge 的 key 那一栏（只在这一源被选中时才出现） ──
-        m_keyRow = new QWidget(this);
-        auto *keyLay = new QHBoxLayout(m_keyRow);
-        keyLay->setContentsMargins(0, 0, 0, 0);
-        keyLay->setSpacing(8);
-        m_keyEdit = new QLineEdit(m_keyRow);
-        m_keyEdit->setFixedHeight(34);
-        m_keyEdit->setPlaceholderText(QStringLiteral(
-            "CurseForge API Key（在 curseforge.com 申请；只存在本地设置里）"));
-        m_keyEdit->setObjectName(QStringLiteral("modsCfKeyEdit"));
-        keyLay->addWidget(m_keyEdit, 1);
-        auto *keySave = new PushButton(QStringLiteral("保存"), m_keyRow);
-        applyButtonFont(keySave);
-        keySave->setFixedHeight(34);
-        keyLay->addWidget(keySave, 0);
-        lay->addWidget(m_keyRow);
+        /* 注意：这里**没有** key 输入栏 —— 官方 key 是编译期内置的(include/sxcl/mods_key.h)，
+         * 用户 2026-09-26 点名「不要让用户自己填写」。没有内置 key 时 CurseForge 那个框点不动
+         * （见 refreshSourceBoxes 的 tooltip），而不是摆个框让用户去申请。 */
 
         auto *scroll = new ScrollArea(this);
         scroll->setWidgetResizable(true);
@@ -212,31 +199,38 @@ private:
 
         QObject::connect(m_go, &QAbstractButton::clicked, this, [this] { startSearch(); });
         QObject::connect(m_search, &QLineEdit::returnPressed, this, [this] { startSearch(); });
-        QObject::connect(m_sourcePivot, &Pivot::currentItemChanged, this,
-                         [this](const QString &key) { setSource(key); });
-        QObject::connect(keySave, &QAbstractButton::clicked, this, [this] { saveKeyFromEdit(); });
-        QObject::connect(m_keyEdit, &QLineEdit::returnPressed, this, [this] { saveKeyFromEdit(); });
     }
 
     // ─────────────────────────── 设置 ───────────────────────────
+    /** 这个构建**内置**的 CurseForge key（include/sxcl/mods_key.h；空 = 这个构建没有这一源）。
+     *  用户 2026-09-26 点名「不要让用户自己填写」，所以界面上没有任何填 key 的入口。 */
+    static QString compiledCfKey() { return QString::fromUtf8(SXCL_CURSEFORGE_API_KEY).trimmed(); }
+
+    /** 这一源在这个构建里能不能搜：CurseForge 要内置 key（Modrinth 免 key）。 */
+    static bool sourceUsable(const QString &source) {
+        return source != QLatin1String("curseforge") || !compiledCfKey().isEmpty();
+    }
+
     void reloadSettings() {
+        QStringList picked;
         const QByteArray path = uiSettingsFilePath().toUtf8();
         sxcl_settings *st = sxcl_settings_open(path.constData());
-        if (st == nullptr) {
-            m_source = QStringLiteral("modrinth");
-            m_cfKey.clear();
-            return;
+        if (st != nullptr) {
+            /* **从来没写过这个键**(nullptr) = 默认勾 Modrinth；
+             * 写过就按写过的样子（空 = 用户把两个都取消了，不许偷偷改回默认）。 */
+            picked = modsSourcesFromStored(sxcl_settings_get(st, kKeyModsSource, nullptr));
+            sxcl_settings_free(st);
+        } else {
+            picked = modsSourcesFromStored(nullptr);
         }
-        m_source = QString::fromUtf8(sxcl_settings_get(st, kKeyModsSource, "modrinth")).toLower();
-        if (m_source != QLatin1String("curseforge")) {
-            m_source = QStringLiteral("modrinth");
+        for (const QString &source : modsAllSources()) {
+            QCheckBox *box = m_sourceBoxes.value(source);
+            if (box != nullptr) {
+                QSignalBlocker blocker(box); // 回填不算"用户改了勾选",不重复落盘
+                box->setChecked(picked.contains(source));
+            }
         }
-        m_cfKey = QString::fromUtf8(sxcl_settings_get(st, kKeyCfApiKey, "")).trimmed();
-        sxcl_settings_free(st);
-        if (m_sourcePivot != nullptr) {
-            m_sourcePivot->setCurrentItem(m_source);   // 触发 setSource -> 刷新说明与 key 那一栏
-            refreshSourceUi();
-        }
+        refreshSourceBoxes();
     }
 
     void saveSetting(const char *key, const QString &value) {
@@ -250,70 +244,75 @@ private:
         sxcl_settings_free(st);
     }
 
-    bool curseforge() const { return m_source == QLatin1String("curseforge"); }
-
-    void setSource(const QString &key) {
-        const QString next = (key == QLatin1String("curseforge")) ? QStringLiteral("curseforge")
-                                                                  : QStringLiteral("modrinth");
-        if (next == m_source) {
-            refreshSourceUi();
-            return;
+    /** 眼前这几个勾选框里，勾上了哪几个（按固定顺序）。 */
+    QStringList pickedSources() const {
+        QStringList out;
+        for (const QString &source : modsAllSources()) {
+            QCheckBox *box = m_sourceBoxes.value(source);
+            if (box != nullptr && box->isChecked()) {
+                out << source;
+            }
         }
-        m_source = next;
-        saveSetting(kKeyModsSource, m_source);
-        clearResults();   // 上一个源的结果不能留在屏幕上冒充这一个源的
-        reloadContext();
-        refreshSourceUi();
+        return out;
     }
 
-    /** 来源说明 + key 那一栏的显隐（"没配 key" 这件事必须写在脸上）。 */
-    void refreshSourceUi() {
-        if (m_sourceNote == nullptr) {
-            return;
+    /** 勾选框的可用性：这个构建没有内置 key 的源**可见但点不动**（tooltip 一句话），
+     *  而不是摆一个输入框让用户去申请 key。 */
+    void refreshSourceBoxes() {
+        for (const QString &source : modsAllSources()) {
+            QCheckBox *box = m_sourceBoxes.value(source);
+            if (box == nullptr) {
+                continue;
+            }
+            const bool usable = sourceUsable(source);
+            box->setEnabled(usable);
+            box->setToolTip(usable ? QString()
+                                   : QStringLiteral("这个构建没有内置这一源的密钥，暂时搜不了"));
+            if (!usable && box->isChecked()) {
+                QSignalBlocker blocker(box); // 我们替它取消,不算用户改勾选(不重复落盘)
+                box->setChecked(false);
+            }
         }
-        if (!curseforge()) {
-            /* 用户 2026-09-26(文字纪律):Modrinth 这一源"免 key、直接能搜"是**解释我们怎么实现**,
-             * 删掉 —— 没有这句话照样能搜(搜索框与结果就是答案)。 */
-            m_sourceNote->clear();
-            if (m_keyRow != nullptr) {
-                m_keyRow->setVisible(false);
-            }
-            return;
-        }
-        if (m_cfKey.isEmpty()) {
-            // 这一句是"让他动手"的:保留动作与后果,去掉"官方 API 要求带 x-api-key"这半句实现解释。
-            m_sourceNote->setText(QStringLiteral(
-                "还没配 key —— 这一源不会发请求，请把上面那栏填上。"));
-            if (m_keyRow != nullptr) {
-                m_keyRow->setVisible(true);
-            }
-        } else {
-            // 状态就写状态:"放在哪个请求头里"是实现细节,删。
-            m_sourceNote->setText(QStringLiteral("已配置 key（%1…）").arg(m_cfKey.left(4)));
-            if (m_keyRow != nullptr) {
-                m_keyRow->setVisible(false);
-            }
+        m_sources = pickedSources();
+        refreshGo();
+        printSourcesTrace();
+    }
+
+    /** 用户动了勾选:落盘 + 上一份结果作废(它对应的是**另一组**源,留在屏幕上就是冒充)。 */
+    void onSourceToggled(const QString &) {
+        m_sources = pickedSources();
+        saveSetting(kKeyModsSource, formatModsSources(m_sources));
+        clearResults();
+        refreshGo();
+        printSourcesTrace();
+    }
+
+    /** 一个源都没勾 = 搜索按钮点不动(不写"请至少选择一个源"那类废话)。 */
+    void refreshGo() {
+        if (m_go != nullptr) {
+            m_go->setEnabled(!m_busy && !m_sources.isEmpty());
         }
     }
 
-    void saveKeyFromEdit() {
-        if (m_keyEdit == nullptr) {
-            return;
+    /** 取证行:勾了哪几个源 / 这一轮真去搜哪几个 / 哪个源搜不了(为什么)。
+     *  验收脚本按它断言"两个源是否**同时**被请求""没有 key 的那一源是不是如实被跳过"。 */
+    void printSourcesTrace(const char *tag = "mods-sources-state") const {
+        QStringList skipped;
+        for (const QString &source : modsAllSources()) {
+            if (!sourceUsable(source)) {
+                skipped << (source + QStringLiteral(":no-key"));
+            }
         }
-        const QString typed = m_keyEdit->text().trimmed();
-        m_cfKey = typed;
-        saveSetting(kKeyCfApiKey, typed);
-        m_keyEdit->clear();
-        refreshSourceUi();
-        if (typed.isEmpty()) {
-            InfoBar::push(InfoBar::Type::Warning, QStringLiteral("key 清空了"),
-                          QStringLiteral("CurseForge 这一源现在不会发请求（不会拿别的源的结果冒充它）"),
-                          this, 5000);
-        } else {
-            InfoBar::push(InfoBar::Type::Success, QStringLiteral("key 已保存"),
-                          QStringLiteral("存在本地设置文件里；请求时放在 x-api-key 头里，绝不写进 URL。"),
-                          this, 5000);
+        QStringList searchable;
+        for (const QString &source : m_sources) {
+            if (sourceUsable(source)) {
+                searchable << source;
+            }
         }
+        std::fprintf(stderr, "[sxcl-ui] %s: picked=%s searchable=%s skipped=%s\n", tag,
+                     m_sources.join(QLatin1Char(',')).toUtf8().constData(),
+                     searchable.join(QLatin1Char(',')).toUtf8().constData(),
+                     skipped.isEmpty() ? "none" : skipped.join(QLatin1Char(',')).toUtf8().constData());
     }
 
     // ─────────────────────────── 上下文 ───────────────────────────
@@ -413,13 +412,14 @@ private:
                      m_currentText.toUtf8().constData(), m_versionError.toUtf8().constData());
     }
 
-    /** 这一栏实际拿去做筛选、挑文件的加载器：光影那一栏换加载器自己的 slug（见上）。 */
-    QByteArray effectiveLoader() const {
+    /** 这一栏、**这一个源**实际拿去做筛选/挑文件的加载器：光影那一栏要换加载器自己的 slug
+     *  （Modrinth 认 iris/optifine；CurseForge 那边光影不分加载器，见 shaderLoaderSlug）。 */
+    QByteArray loaderFor(const QString &source) const {
         const QByteArray loader = m_loader.toUtf8();
         if (!m_shaders) {
             return loader;
         }
-        return shaderLoaderSlug(loader, curseforge());
+        return shaderLoaderSlug(loader, source == QLatin1String("curseforge"));
     }
 
     void clearResults() {
@@ -432,75 +432,113 @@ private:
     }
 
     void setBusy(bool busy, const QString &text) {
-        m_go->setEnabled(!busy);
+        m_busy = busy;
         m_go->setText(busy ? QStringLiteral("查询中…") : QStringLiteral("搜索"));
+        refreshGo();
         m_context->setText(text.isEmpty() ? m_currentText : text);
     }
 
     // ─────────────────────────── 搜索 ───────────────────────────
+    /** 点「搜索」：给**勾上的每一个源**各排一个请求（先后固定，与勾选顺序无关），
+     *  回来的结果合并成一份列表。没勾/搜不了的源一个请求都不发。 */
     void startSearch() {
-        if (m_worker != nullptr) {
+        if (m_worker != nullptr || m_busy) {
             return;
         }
         reloadContext();
-        const bool cf = curseforge();
-        if (cf && m_cfKey.isEmpty()) {
-            InfoBar::push(InfoBar::Type::Warning, QStringLiteral("CurseForge 还没配 API Key"),
-                          QStringLiteral("官方 API 必须带 x-api-key 才回数据。key 请填在上面那一栏"
-                                         "（设置页里也有）。没填我们就不发这个请求 —— "
-                                         "也不会改用 Modrinth 假装是 CurseForge 的结果。"),
-                          this, 10000);
-            if (m_keyRow != nullptr) {
-                m_keyRow->setVisible(true);
-            }
-            if (m_keyEdit != nullptr) {
-                m_keyEdit->setFocus();
-            }
-            return;
+        m_sources = pickedSources();
+        if (m_sources.isEmpty()) {
+            return; // 按钮本来就是灰的
         }
-        sxcl_mods_query q;
-        std::memset(&q, 0, sizeof(q));
+        m_pending.clear();
+        m_rows.clear();
+        m_requested.clear();
         const QByteArray text = m_search->text().trimmed().toUtf8();
         const QByteArray mc = m_mc.toUtf8();
-        const QByteArray loader = effectiveLoader();
         /* 资源类型:模组那一栏必须钉死 "mod"（Modrinth 默认不筛类型，不钉的话光影/资源包会混进来）；
          * 光影那一栏钉 "shader"。CF 那边走 classId（6 / 6552），同一个 project_type 进去。 */
         const QByteArray type = QByteArrayLiteral("mod");
         const QByteArray shaderType = QByteArrayLiteral("shader");
-        q.text = text.constData();
-        q.game_version = mc.constData();
-        q.loader = loader.constData();
-        q.project_type = m_shaders ? shaderType.constData() : type.constData();
-        q.limit = 20;
-        char url[1200];
-        const int rc = cf ? sxcl_mods_curseforge_search_url(&q, url, sizeof(url))
-                          : sxcl_mods_modrinth_search_url(&q, url, sizeof(url));
-        if (rc != 0) {
-            InfoBar::push(InfoBar::Type::Warning, QStringLiteral("条件太长"),
-                          QStringLiteral("搜索条件拼不成 URL，换个短点的关键词"), this, 4000);
-            return;
+        for (const QString &source : m_sources) {
+            if (!sourceUsable(source)) {
+                continue; // 没有内置 key 的源:不发注定失败的请求(那个勾选框也点不动)
+            }
+            const QByteArray loader = loaderFor(source);
+            sxcl_mods_query q;
+            std::memset(&q, 0, sizeof(q));
+            q.text = text.constData();
+            q.game_version = mc.constData();
+            q.loader = loader.constData();
+            q.project_type = m_shaders ? shaderType.constData() : type.constData();
+            q.limit = 20;
+            char url[1200];
+            const bool cf = (source == QLatin1String("curseforge"));
+            const int rc = cf ? sxcl_mods_curseforge_search_url(&q, url, sizeof(url))
+                              : sxcl_mods_modrinth_search_url(&q, url, sizeof(url));
+            if (rc != 0) {
+                InfoBar::push(InfoBar::Type::Warning, QStringLiteral("条件太长"),
+                              QStringLiteral("搜索条件拼不成 URL，换个短点的关键词"), this, 4000);
+                return;
+            }
+            m_pending.append(PendingFetch{QString::fromUtf8(url), source});
+            m_requested << source;
         }
         clearResults();
         m_phase = Searching;
-        setBusy(true, cf ? QStringLiteral("正在搜 CurseForge…（classId %1 + 加载器 %2；key 走 x-api-key 头）")
-                               .arg(m_shaders ? 6552 : 6)
-                               .arg(loader.isEmpty() ? QStringLiteral("不筛") : QString::fromUtf8(loader))
-                       : QStringLiteral("正在搜 Modrinth…（筛选走服务端 facets：版本 %1 / 加载器 %2）")
-                             .arg(m_mc.isEmpty() ? QStringLiteral("全部") : m_mc,
-                                  loader.isEmpty() ? QStringLiteral("全部") : QString::fromUtf8(loader)));
-        startFetch(QString::fromUtf8(url), cf ? QStringLiteral("curseforge") : QStringLiteral("modrinth"));
+        /* 搜索这一刻单独一个 tag：勾选/重载也会打同样的内容(state)，验收脚本要能分清
+         * "这一刻真去搜了哪几个源"。 */
+        printSourcesTrace("mods-sources");
+        if (m_pending.isEmpty()) {
+            m_phase = Idle;
+            return;
+        }
+        QStringList names;
+        for (const QString &source : m_requested) {
+            names << modsSourceDisplayName(source);
+        }
+        setBusy(true, QStringLiteral("正在搜 %1…").arg(names.join(QStringLiteral(" 与 "))));
+        startNextFetch();
+    }
+
+    /** 队列里下一个源（一次只飞一个请求：界面层的 worker 槽只有一个，串行也最省事）。 */
+    void startNextFetch() {
+        if (m_pending.isEmpty()) {
+            finishSearch();
+            return;
+        }
+        const PendingFetch job = m_pending.takeFirst();
+        startFetch(job.url, job.source);
+    }
+
+    /** 队列清空：把**合并后**的列表摆出来，并打一行取证（每个被请求过的源各多少条，0 也写出来）。 */
+    void finishSearch() {
+        m_phase = Idle;
+        showResults(m_rows);
+        const QString counts = modsPerSourceCounts(m_rows, m_requested);
+        std::fprintf(stderr, "[sxcl-ui] mods-merged: sources=%s rows=%d perSource=\"%s\"\n",
+                     m_requested.join(QLatin1Char(',')).toUtf8().constData(), int(m_rows.size()),
+                     counts.toUtf8().constData());
+        setBusy(false, QStringLiteral("共 %1 条 · %2 · 点「装」直接进 %3")
+                           .arg(m_rows.size())
+                           .arg(counts)
+                           .arg(versionIsolationOn() ? QStringLiteral("实例自己的目录")
+                                                     : QStringLiteral("根目录")));
     }
 
     void startFetch(const QString &url, const QString &source) {
         m_fetchSource = source;
+        /* 取证行:这一轮真的往哪个源发了请求(验收脚本按它断言"勾了两个源就发两个请求")。 */
+        std::fprintf(stderr, "[sxcl-ui] mods-fetch: source=%s url=%s\n",
+                     source.toUtf8().constData(), url.toUtf8().constData());
         ModsWorker::Request req;
         req.op = ModsWorker::FetchText;
         req.url = url;
         req.settingsFile = uiSettingsFilePath();
         if (source == QLatin1String("curseforge")) {
-            /* key 放在**请求头**里:x-api-key。绝不进 URL(URL 会进日志/错误消息)。 */
+            /* key 放在**请求头**里:x-api-key(编译期内置,见 sxcl/mods_key.h)。绝不进 URL ——
+             * URL 会进日志/错误消息/历史。 */
             req.headers << QStringLiteral("Accept: application/json");
-            req.headers << QStringLiteral("x-api-key: %1").arg(m_cfKey);
+            req.headers << QStringLiteral("x-api-key: %1").arg(compiledCfKey());
         }
         auto *worker = new ModsWorker(req, this);
         m_worker = worker;
@@ -515,6 +553,36 @@ private:
     void onFetchDone(bool ok, const QString &error, const QString &text) {
         const Phase phase = m_phase;
         const bool cf = (m_fetchSource == QLatin1String("curseforge"));
+        if (phase == Searching) {
+            /* 搜索是**队列**驱动的:一个源失败/为空不影响另一个源 —— 这一源这一轮就是 0 条,
+             * 如实写 0,绝不拿另一个源的结果顶上来冒充它。 */
+            if (!ok) {
+                InfoBar::push(InfoBar::Type::Warning,
+                              QStringLiteral("%1 取不到").arg(modsSourceDisplayName(m_fetchSource)),
+                              error, this, 8000);
+            } else {
+                const QByteArray body = text.toUtf8();
+                char err[192];
+                err[0] = '\0';
+                sxcl_mod_page page;
+                std::memset(&page, 0, sizeof(page));
+                const int prc =
+                    cf ? sxcl_mods_curseforge_search_parse(body.constData(), (size_t)body.size(),
+                                                           &page, err, sizeof(err))
+                       : sxcl_mods_modrinth_search_parse(body.constData(), (size_t)body.size(), &page,
+                                                         err, sizeof(err));
+                if (prc != 0) {
+                    InfoBar::push(InfoBar::Type::Warning,
+                                  QStringLiteral("%1 解析失败").arg(modsSourceDisplayName(m_fetchSource)),
+                                  QString::fromUtf8(err), this, 8000);
+                } else {
+                    appendModsHits(m_rows, page);
+                    sxcl_mods_page_free(&page);
+                }
+            }
+            startNextFetch();
+            return;
+        }
         m_phase = Idle;
         if (!ok) {
             setBusy(false, QStringLiteral("查不到：%1").arg(error));
@@ -523,27 +591,6 @@ private:
         const QByteArray body = text.toUtf8();
         char err[192];
         err[0] = '\0';
-        if (phase == Searching) {
-            sxcl_mod_page page;
-            const int prc = cf ? sxcl_mods_curseforge_search_parse(body.constData(), (size_t)body.size(),
-                                                                  &page, err, sizeof(err))
-                               : sxcl_mods_modrinth_search_parse(body.constData(), (size_t)body.size(),
-                                                                 &page, err, sizeof(err));
-            if (prc != 0) {
-                setBusy(false, QStringLiteral("解析失败：%1").arg(QString::fromUtf8(err)));
-                return;
-            }
-            const size_t total = page.total;
-            const size_t count = page.count;
-            showResults(page);
-            sxcl_mods_page_free(&page);
-            setBusy(false, QStringLiteral("共命中 %1 条（这一页 %2 条）· 点「装」直接进 %3")
-                              .arg(total)
-                              .arg(count)
-                              .arg(versionIsolationOn() ? QStringLiteral("实例自己的目录")
-                                                        : QStringLiteral("根目录")));
-            return;
-        }
         if (phase == LoadingVersions) {
             std::vector<sxcl_mod_file> files(64);
             size_t count = 0;
@@ -560,13 +607,13 @@ private:
             }
             sxcl_mod_file picked;
             std::memset(&picked, 0, sizeof(picked));
-            const QByteArray pickLoader = effectiveLoader();
+            const QByteArray pickLoader = loaderFor(m_fetchSource);
             if (count == 0 ||
                 sxcl_mods_pick_file(files.data(), count, m_mc.toUtf8().constData(),
                                     pickLoader.constData(), &picked) != 0) {
                 InfoBar::push(InfoBar::Type::Warning, QStringLiteral("没有能用的文件"),
                               QStringLiteral("「%1」里没有匹配这个实例（版本 %2 / 加载器 %3）的文件 —— "
-                                             "PCL 口径**不自动换加载器**，要么换个包，要么装对应加载器的版本。")
+                                             "**不自动换加载器**，要么换个包，要么装对应加载器的版本。")
                                   .arg(m_projectTitle, m_mc.isEmpty() ? QStringLiteral("任何") : m_mc,
                                        pickLoader.isEmpty() ? QStringLiteral("任何")
                                                             : QString::fromUtf8(pickLoader)),
@@ -635,34 +682,29 @@ private:
         worker->start();
     }
 
-    void install(const sxcl_mod_hit &hit) {
-        m_projectTitle = hit.title[0] != '\0' ? QString::fromUtf8(hit.title)
-                                              : QString::fromUtf8(hit.slug);
-        /* 用**这一条自己的** source:结果可能还是上一个源留下的,不能按当前滑块去解析。 */
-        const QString src = QString::fromUtf8(hit.source) == QLatin1String("curseforge")
-                                ? QStringLiteral("curseforge")
-                                : QStringLiteral("modrinth");
+    void install(const ModsHitRow &row) {
+        m_projectTitle = row.title.isEmpty() ? row.slug : row.title;
+        /* 用**这一条自己的** source:合并列表里两个源的条目混在一起,不能按"当前勾选/上一个源"去解析。 */
+        const QString src = modsSourceValid(row.source) ? row.source : QStringLiteral("modrinth");
+        const QByteArray loader = loaderFor(src);
         char url[1200];
         if (src == QLatin1String("curseforge")) {
             bool numeric = false;
-            const qlonglong id = QString::fromUtf8(hit.id).toLongLong(&numeric);
+            const qlonglong id = row.id.toLongLong(&numeric);
             if (!numeric || id <= 0) {
                 InfoBar::push(InfoBar::Type::Warning, QStringLiteral("工程 id 拿不到"),
-                              QStringLiteral("这一条没有可用的数字 id（%1）")
-                                  .arg(QString::fromUtf8(hit.id)),
-                              this, 5000);
+                              QStringLiteral("这一条没有可用的数字 id（%1）").arg(row.id), this, 5000);
                 return;
             }
-            if (sxcl_mods_curseforge_versions_url(id, m_mc.toUtf8().constData(),
-                                                  effectiveLoader().constData(), url,
-                                                  sizeof(url)) != 0) {
+            if (sxcl_mods_curseforge_versions_url(id, m_mc.toUtf8().constData(), loader.constData(),
+                                                  url, sizeof(url)) != 0) {
                 InfoBar::push(InfoBar::Type::Warning, QStringLiteral("条件太长"),
                               QStringLiteral("文件列表 URL 拼不出来"), this, 5000);
                 return;
             }
-        } else if (sxcl_mods_modrinth_versions_url(hit.id, m_mc.toUtf8().constData(),
-                                                  effectiveLoader().constData(), url,
-                                                  sizeof(url)) != 1) {
+        } else if (sxcl_mods_modrinth_versions_url(row.id.toUtf8().constData(),
+                                                   m_mc.toUtf8().constData(), loader.constData(), url,
+                                                   sizeof(url)) != 1) {
             InfoBar::push(InfoBar::Type::Warning, QStringLiteral("工程 id 拿不到"),
                           QStringLiteral("这一条没有可用的 id"), this, 5000);
             return;
@@ -672,20 +714,18 @@ private:
         startFetch(QString::fromUtf8(url), src);
     }
 
-    void showResults(const sxcl_mod_page &page) {
-        if (page.count == 0) {
-            auto *empty = new BodyLabel(
-                QStringLiteral("没找到。换个关键词或关掉筛选条件（版本 %1 / 加载器 %2）再试。")
-                    .arg(m_mc.isEmpty() ? QStringLiteral("全部") : m_mc,
-                         effectiveLoader().isEmpty() ? QStringLiteral("全部")
-                                                     : QString::fromUtf8(effectiveLoader())),
-                m_list->parentWidget());
+    /** 把**合并后**的结果摆出来:两个源的条目在同一份列表里,按源分段(段序固定),
+     *  每条自带来源标记 —— 一眼能看出这条来自哪个源,绝不含糊。 */
+    void showResults(const QVector<ModsHitRow> &rows) {
+        if (rows.isEmpty()) {
+            auto *empty = new BodyLabel(QStringLiteral("没找到。换个关键词再试。"),
+                                       m_list->parentWidget());
             empty->setWordWrap(true);
             m_list->addWidget(empty);
             return;
         }
-        for (size_t i = 0; i < page.count; ++i) {
-            const sxcl_mod_hit &hit = page.items[i];
+        const QColor secondary = pageTokenColor("textSecondary");
+        for (const ModsHitRow &row : rows) {
             auto *card = new CardWidget(m_list->parentWidget());
             card->setMinimumHeight(66);
             auto *rowLay = new QHBoxLayout(card);
@@ -699,36 +739,47 @@ private:
             icon->setStyleSheet(QStringLiteral("QLabel { background: rgba(255,255,255,0.06);"
                                                " border-radius: 8px; }"));
             rowLay->addWidget(icon, 0, Qt::AlignTop);
-            if (hit.icon_url[0] != '\0') {
-                startIcon(QString::fromUtf8(hit.icon_url), QString::fromUtf8(hit.id), icon);
+            if (!row.iconUrl.isEmpty()) {
+                /* 缓存文件名带上源:两个源的 id 可能撞(CF 是数字、Modrinth 是短 id),
+                 * 只按 id 存会把一个源的图标当成另一个源的。 */
+                startIcon(row.iconUrl, row.source + QLatin1Char('-') + row.id, icon);
             }
 
             auto *textCol = new QVBoxLayout();
             textCol->setSpacing(2);
-            auto *title = new BodyLabel(QString::fromUtf8(hit.title), card);
+            auto *titleRow = new QHBoxLayout();
+            titleRow->setSpacing(8);
+            auto *title = new BodyLabel(row.title, card);
             {
                 QFont font = title->font();
                 font.setPixelSize(15);
                 font.setWeight(QFont::DemiBold);
                 title->setFont(font);
             }
-            textCol->addWidget(title);
+            titleRow->addWidget(title, 0);
+            /* 来源标记:合并列表里"这条是谁家的"必须一眼看出来(不写句子,一个小标签)。
+             * 稳定 objectName:验收脚本按它逐行断言"没有一行冒充别的源"。 */
+            auto *tag = new BodyLabel(modsSourceDisplayName(row.source), card);
+            tag->setObjectName(QStringLiteral("modsSourceTag"));
+            tag->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;")
+                                   .arg(pageTokenText("textTertiary")));
+            titleRow->addWidget(tag, 0);
+            titleRow->addStretch(1);
+            textCol->addLayout(titleRow);
             /* CF 的搜索响应里没有作者时如实少一段,不编一个名字出来。 */
-            const QString author = QString::fromUtf8(hit.author);
-            auto *sub = new BodyLabel(QStringLiteral("%1%2 · 下载 %3%4")
-                                          .arg(author.isEmpty() ? QString() : author + QStringLiteral(" · "))
-                                          .arg(QString::fromUtf8(hit.source))
-                                          .arg(hit.downloads)
-                                          .arg(hit.versions[0] != '\0'
-                                                   ? QStringLiteral(" · 支持 %1")
-                                                         .arg(QString::fromUtf8(hit.versions))
-                                                   : QString()),
+            auto *sub = new BodyLabel(QStringLiteral("%1%2下载 %3")
+                                          .arg(row.author.isEmpty()
+                                                   ? QString()
+                                                   : row.author + QStringLiteral(" · "))
+                                          .arg(row.versions.isEmpty()
+                                                   ? QString()
+                                                   : QStringLiteral("支持 %1 · ").arg(row.versions))
+                                          .arg(row.downloads),
                                       card);
-            const QColor secondary = pageTokenColor("textSecondary");
             sub->setTextColor(secondary, secondary);
             sub->setWordWrap(true);
             textCol->addWidget(sub);
-            auto *desc = new BodyLabel(QString::fromUtf8(hit.description), card);
+            auto *desc = new BodyLabel(row.description, card);
             desc->setTextColor(secondary, secondary);
             desc->setWordWrap(true);
             textCol->addWidget(desc);
@@ -739,7 +790,7 @@ private:
             /* 稳定 objectName:验收钩子(SXCL_UI_MODS_INSTALL)点**真的那一个「装」** ——
              * 走产品路径(取版本 -> 挑文件 -> 工作线程下载 + sha1 强校验 -> 进隔离目录)。 */
             btn->setObjectName(QStringLiteral("modsInstallButton"));
-            const sxcl_mod_hit copy = hit; /* 值拷贝:page 释放后按钮回调还要用 */
+            const ModsHitRow copy = row; /* 值拷贝:卡片被清掉后按钮回调还要用 */
             QObject::connect(btn, &QAbstractButton::clicked, this, [this, copy] { install(copy); });
             rowLay->addWidget(btn, 0, Qt::AlignVCenter);
             m_list->addWidget(card);
@@ -790,9 +841,17 @@ private:
 
     bool m_shaders = false;
     Phase m_phase = Idle;
-    QString m_source = QStringLiteral("modrinth");
+    /** 一次搜索要跑的几个请求(勾了几个源就有几个),**串行**发:worker 槽只有一个。 */
+    struct PendingFetch {
+        QString url;
+        QString source;
+    };
+    QStringList m_sources;            // 勾上的源(固定顺序,与勾选先后无关)
+    QStringList m_requested;          // 这一轮真发过请求的源(计数与取证都用它)
+    QVector<PendingFetch> m_pending;  // 还没发的请求
+    QVector<ModsHitRow> m_rows;       // 合并后的结果(界面只认这一份)
+    bool m_busy = false;              // 有没有活正在跑(搜索/取版本/下载)
     QString m_fetchSource;
-    QString m_cfKey;
     QString m_gameDir;
     QString m_instance;
     QString m_mc;      // 拿去筛版本的**原版版本号**:只认版本文件里的,认不出就是空(=不筛)
@@ -808,10 +867,7 @@ private:
     SearchLineEdit *m_search = nullptr;
     PrimaryPushButton *m_go = nullptr;
     BodyLabel *m_context = nullptr;
-    BodyLabel *m_sourceNote = nullptr;
-    Pivot *m_sourcePivot = nullptr;
-    QWidget *m_keyRow = nullptr;
-    QLineEdit *m_keyEdit = nullptr;
+    QHash<QString, QCheckBox *> m_sourceBoxes; // "modrinth" / "curseforge" -> 那个勾选框
     QVBoxLayout *m_list = nullptr;
     ModsWorker *m_worker = nullptr;
 };

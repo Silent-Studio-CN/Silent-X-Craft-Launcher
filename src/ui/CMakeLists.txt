@@ -58,6 +58,10 @@ set(SXCL_UI_SOURCES
   workers/ui_error.cpp        workers/ui_error.h
   #   mods_worker.* 模组页的取文本/下文件(工作线程;模组下载不碰安装编排)
   workers/mods_worker.cpp     workers/mods_worker.h
+  #   mods_merge.*  模组页"来源"那一层的纯逻辑(勾选列表的落盘/读回 + 两源结果合并/去重;
+  #                 结果不跨源合并,每条自带真实来源)。纯字符串与纯数据,单测直接调它:
+  #                 tests/mods_sources_test.cpp —— 不需要窗口、不需要网络
+  workers/mods_merge.cpp      workers/mods_merge.h
   #   bg_task.*     通用"一次性后台任务"(阻塞代码进工作线程,结果回界面线程;界面线程零等待)
   workers/bg_task.cpp         workers/bg_task.h
   #   instance_scan.* 已安装版本扫描(sxcl_instance_scan)的界面层唯一实现;**只许工作线程调**
@@ -111,6 +115,20 @@ if(TARGET sxcl_net_qt)
 endif()
 # 核心库头文件目录:显式挂上,免得"链了库却看不到 include/sxcl/*.h"(页面代理踩过)
 target_include_directories(sxcl_ui_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
+
+# CurseForge 的官方 API key 是**编译期内置**的(用户 2026-09-26:「不要让用户自己填写」)。
+#   * 默认 = include/sxcl/mods_key.h 里的空串,空串就是"这个构建里没有这一源";
+#   * 拿到 key 后配置时给一个缓存变量即可,不用改源码:
+#         cmake -S . -B build-ui -DSXCL_CURSEFORGE_API_KEY=<key>
+#   * 这里**只挂到读这个头的那一个源文件**上:换 key 只重编 pages/mods_page.cpp 一份
+#     (验收脚本 tools/ui_mods_sources.ps1 的第二档就是靠这一点:临时编一个假 key 进去,
+#      验完再编回空串 —— 整个目标重编的话这一档就没法在脚本里跑)。
+if(DEFINED SXCL_CURSEFORGE_API_KEY AND NOT SXCL_CURSEFORGE_API_KEY STREQUAL "")
+  set_source_files_properties(pages/mods_page.cpp PROPERTIES
+    COMPILE_DEFINITIONS "SXCL_CURSEFORGE_API_KEY=\"${SXCL_CURSEFORGE_API_KEY}\"")
+  string(LENGTH "${SXCL_CURSEFORGE_API_KEY}" _sxcl_cf_len)
+  message(STATUS "CurseForge: 内置了官方 API key(长度 ${_sxcl_cf_len},只编进 pages/mods_page.cpp)")
+endif()
 
 # ---- 可执行 ----
 qt_add_executable(sxcl-ui main.cpp)
@@ -177,6 +195,17 @@ if(SXCL_BUILD_TESTS)
   sxcl_deploy_qt(sxcl_ui_folder_icons_test)
   add_test(NAME sxcl_ui_folder_icons_test COMMAND sxcl_ui_folder_icons_test -platform offscreen)
   set_tests_properties(sxcl_ui_folder_icons_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sxcl_qt_bin}")
+
+  # 模组页"来源"那一层(用户点名:两个源是**可同时勾选**的选项,结果合并成一份;
+  # CF 的 key 编译期内置,不让用户填)。纯逻辑 + 纯数据,不用截图、不联网。
+  add_executable(sxcl_mods_sources_test "${CMAKE_SOURCE_DIR}/tests/mods_sources_test.cpp")
+  target_link_libraries(sxcl_mods_sources_test PRIVATE sxcl_ui_core)
+  sxcl_warnings(sxcl_mods_sources_test)
+  sxcl_deploy_qt(sxcl_mods_sources_test)
+  add_test(NAME sxcl_mods_sources_test COMMAND sxcl_mods_sources_test -platform offscreen)
+  set_tests_properties(sxcl_mods_sources_test PROPERTIES
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sxcl_qt_bin}")
 
