@@ -152,9 +152,11 @@ const char *const kKeyRate = "download.rate";             // 核(字节/秒,默�
 const char *const kKeyVerifySha1 = "download.verify_sha1"; // 新增,默认开
 const char *const kKeyDebugMode = "advanced.debug_mode";  // 新增,默认关
 const char *const kKeyDownloadEngine = "advanced.use_download_engine"; // 新增,默认开
-// docs/22 §14:CurseForge 官方 API 的 key(用户自己在 curseforge.com 申请)。
-// **三处必须用同一个字面量**:本页 / 模组页(mods_page.cpp)/ CLI(sxcl-dl mods --key 的兜底来源)。
-const char *const kKeyCfApiKey = "mods.curseforge_api_key";
+/* 注意:设置页**没有** CurseForge API key 这一项 —— 用户 2026-09-26 点名
+ * 「关于 CF 源的密钥配置，我后续给你，不要让用户自己填写」,key 已改成**编译期内置**
+ * (include/sxcl/mods_key.h,构建时 -DSXCL_CURSEFORGE_API_KEY=...)。以前那张卡片连同
+ * mods.curseforge_api_key 这个设置键一起删了:入口改成编译期常量之后,设置里的值已经没人读
+ * (模组页不读、界面也不读),留着就是一张骗人的死卡片。 */
 // 「关闭文件校验」(docs/24 的 P0a「还没做」那条;等价 PCL 的 ShouldIgnoreFileCheck)。
 // 开了以后启动前补全**存在就算过**:坏文件不会被发现 —— 代价必须写在卡片上,不能只写好处。
 const char *const kKeySkipFileCheck = "launch.skip_file_check";
@@ -1901,92 +1903,10 @@ private:
     BodyLabel *m_chip = nullptr;
 };
 
-// ──────────────────── 卡片:CurseForge API Key(新增;docs/22 §14)────────────────────
-//
-// 这一栏**不是装饰**:CurseForge 的官方 API 不带 x-api-key 就不回数据。没填的含义是
-// "CurseForge 这一源不发请求"(模组页会如实说缺什么,绝不会改用 Modrinth 假装是 CF 的结果)。
-// key 只存在本地设置文件里,请求时放进 **请求头**,绝不进 URL(URL 会进日志/错误消息)。
-class CurseForgeKeyCard : public SettingCard {
-public:
-    explicit CurseForgeKeyCard(QWidget *parent = nullptr)
-        : SettingCard(FluentIcon::qicon(FluentIcon::CERTIFICATE),
-                      QStringLiteral("CurseForge API Key"),
-                      QStringLiteral("官方 API 必须带 x-api-key；只存本地设置，"
-                                     "请求时放进请求头，绝不写进 URL"), parent) {
-        setFixedHeight(100);
-
-        m_edit = new QLineEdit(this);
-        m_edit->setMinimumWidth(300);
-        m_edit->setFixedHeight(34);
-        m_edit->setEchoMode(QLineEdit::Password);   // 密钥不回显
-        m_edit->setPlaceholderText(QStringLiteral("粘贴 key（留空/清除 = 不配）"));
-        m_edit->setObjectName(QStringLiteral("curseForgeKeyEdit"));
-        m_save = new PushButton(QStringLiteral("保存"), this);
-        m_save->setFixedHeight(34);
-        m_save->setObjectName(QStringLiteral("curseForgeKeySave"));
-        m_clear = new PushButton(QStringLiteral("清除"), this);
-        m_clear->setFixedHeight(34);
-        m_state = new CaptionLabel(QString(), this);
-
-        auto *right = new QVBoxLayout();
-        right->setSpacing(4);
-        right->setContentsMargins(0, 0, 0, 0);
-        auto *top = new QHBoxLayout();
-        top->setSpacing(8);
-        top->addWidget(m_edit);
-        top->addWidget(m_save);
-        top->addWidget(m_clear);
-        right->addLayout(top);
-        right->addWidget(m_state, 0, Qt::AlignRight);
-        hBox()->addLayout(right, 0);
-        hBox()->addSpacing(16);
-
-        connect(m_save, &QAbstractButton::clicked, this, [this] { commit(m_edit->text()); });
-        connect(m_clear, &QAbstractButton::clicked, this, [this] {
-            m_edit->clear();
-            commit(QString());
-        });
-        connect(m_edit, &QLineEdit::returnPressed, this, [this] { commit(m_edit->text()); });
-        refresh();
-    }
-
-    /** 初始值由页面从设置里读好传进来(卡片不自己开第二份设置句柄去读)。 */
-    void setStored(const QString &value) {
-        m_value = value.trimmed();
-        refresh();
-    }
-    /** 落盘出口由页面给(设置页的 ConfigStore 才是设置的唯一写入口)。 */
-    void setSaveHandler(std::function<void(const QString &)> handler) {
-        m_onSave = std::move(handler);
-    }
-    /** 供验收钩子直接读的界面读数。 */
-    QString stateText() const { return m_state->text(); }
-
-private:
-    void commit(const QString &value) {
-        m_value = value.trimmed();
-        if (m_onSave) {
-            m_onSave(m_value);
-        }
-        m_edit->clear();
-        refresh();
-    }
-    void refresh() {
-        const bool has = !m_value.isEmpty();
-        m_clear->setEnabled(has);
-        m_state->setText(has ? QStringLiteral("已配置（%1…，共 %2 个字符）")
-                                   .arg(m_value.left(4))
-                                   .arg(m_value.size())
-                             : QStringLiteral("未配置 —— 模组页的 CurseForge 源不会发请求"));
-    }
-
-    QLineEdit *m_edit = nullptr;
-    PushButton *m_save = nullptr;
-    PushButton *m_clear = nullptr;
-    CaptionLabel *m_state = nullptr;
-    QString m_value;
-    std::function<void(const QString &)> m_onSave;
-};
+/* 这里原来有一张「CurseForge API Key」卡(密码框 + 保存 + 清除)。**已整张删除**:
+ * 用户 2026-09-26 点名「不要让用户自己填写」—— key 现在是编译期内置的
+ * (include/sxcl/mods_key.h + 构建参数 -DSXCL_CURSEFORGE_API_KEY=...)，
+ * 模组页那边也早就把 key 输入栏删了。设置里那个键已经没有任何读者,卡片留着就是死控件。 */
 
 // ──────────────── 卡片:微软应用 ID(2026-09-22 晚新增;正版登录第 6 跳 403 的出口)────────────────
 //
@@ -2240,7 +2160,6 @@ private:
     SpinSettingCard *m_connCard = nullptr;
     SpinSettingCard *m_limitCard = nullptr;
     SwitchSettingCard *m_verifyCard = nullptr;
-    CurseForgeKeyCard *m_cfKeyCard = nullptr; // 新增:CurseForge 的 key(没它 CF 那一源不查)
     SwitchSettingCard *m_skipFileCheckCard = nullptr; // 新增:「关闭文件校验」(PCL 同名开关)
     ComboBoxSettingCard *m_assetsLevelCard = nullptr; // 新增:启动前补全资源补到哪一档
 
@@ -2639,13 +2558,9 @@ void SettingsPage::buildContent() {
         FluentIcon::qicon(FluentIcon::CERTIFICATE), QStringLiteral("校验文件完整性（SHA1）"),
         QStringLiteral("强制校验 Mojang 提供哈希的全部资源；校验失败会自动换源重下"),
         m_store.flag(kKeyVerifySha1, true), downloadGroup);
-    m_cfKeyCard = new CurseForgeKeyCard(downloadGroup); // 新增(模组页的 CurseForge 源靠它)
-    m_cfKeyCard->setStored(m_store.text(kKeyCfApiKey));
-    m_cfKeyCard->setSaveHandler([this](const QString &key) { m_store.set(kKeyCfApiKey, key); });
     downloadGroup->addSettingCard(m_connCard);   // :393
     downloadGroup->addSettingCard(m_limitCard);  // :394
     downloadGroup->addSettingCard(m_verifyCard); // :395
-    downloadGroup->addSettingCard(m_cfKeyCard);  // 新增项,排在照抄项之后
 
     // ── 账户(**新增**;Python 版没有这一组)──
     //

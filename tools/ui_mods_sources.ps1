@@ -44,6 +44,9 @@ $exe  = Join-Path $root 'build-ui\src\ui\Release\sxcl-ui.exe'
 $work = 'D:\SilentStudio\_test\sxcl_mods_sources'
 $fail = 0
 $total = 0
+# Chinese fragments are built from code points: this file is ASCII-only on purpose
+# (Windows PowerShell 5.1 parses .ps1 as ANSI unless it has a BOM).
+function C([int[]]$cp) { -join ($cp | ForEach-Object { [char]$_ }) }
 function Ok([bool]$cond, [string]$what) {
   $script:total++
   if ($cond) { Write-Output ('  [ok]   ' + $what) }
@@ -227,6 +230,44 @@ $r3 = Invoke-Mods 't1c' '' '' 4000
 $mLine3 = Find-Visible $r3.lines '#modsSourceModrinth \('
 Write-Output ('  dump modrinth  : ' + $mLine3.Trim())
 Ok ($mLine3 -notmatch ' checked') 'a written empty set reads back as "nothing ticked" (the default only applies when the key was never written)'
+
+# =====================================================================================
+# TIER 1, run 4: the SETTINGS page must not ask for a CurseForge key either
+#               (the card went away together with the settings key it used to write)
+# =====================================================================================
+Write-Output ''
+Write-Output '== tier 1 / run 4: settings page carries no CurseForge key card =='
+$srcFile = Join-Path $root 'src\ui\pages\settings_page.cpp'
+# NOTE: the settings key is matched **with its quotes** (a live reference is always a C string
+# literal). The source file keeps a comment that explains WHY the card was deleted, and that
+# comment names the old setting key on purpose -- matching the bare token would flag that comment.
+$srcHits = @(Select-String -Path $srcFile -Pattern 'curseForgeKeyEdit|curseForgeKeySave|CurseForgeKeyCard|kKeyCfApiKey|"mods\.curseforge_api_key"' -ErrorAction SilentlyContinue)
+Ok ($srcHits.Count -eq 0) ('settings_page.cpp has no CF key card / key constant left (' + $srcHits.Count + ' hits)')
+
+$env:SXCL_UI_SETTINGS = $ini
+$env:SXCL_UI_GAME_DIR = (Join-Path $work 'mc')
+$env:SXCL_UI_ROUTE = 'settings'
+$env:SXCL_UI_THEME = 'dark'
+$env:SXCL_UI_WINDOW = '1100x750'
+$env:SXCL_UI_DUMP = '1'
+$env:SXCL_UI_DUMP_DEPTH = '18'
+$env:SXCL_UI_SHOT = (Join-Path $work 'shot_settings.png')
+$env:SXCL_UI_SHOT_DELAY = '4000'
+Remove-Item Env:SXCL_UI_NAV -ErrorAction SilentlyContinue
+Remove-Item Env:SXCL_UI_MODS_QUERY -ErrorAction SilentlyContinue
+Remove-Item Env:SXCL_UI_MODS_SOURCES -ErrorAction SilentlyContinue
+$outS = Join-Path $work 'run_settings.txt'
+$errS = $outS + '.err'
+Remove-Item $outS,$errS -ErrorAction SilentlyContinue
+Start-Process -FilePath $exe -RedirectStandardOutput $outS -RedirectStandardError $errS -Wait | Out-Null
+$linesS = @(Get-Content $outS -Encoding utf8 -ErrorAction SilentlyContinue) + @(Get-Content $errS -Encoding utf8 -ErrorAction SilentlyContinue)
+Ok ((@($linesS | Where-Object { $_ -match 'ScrollArea #SettingsPage \(' }).Count) -ge 1) 'the settings page really rendered (the dump has #SettingsPage)'
+$keyWidgetsS = @($linesS | Where-Object { $_ -match 'curseForgeKeyEdit|curseForgeKeySave' })
+Ok ($keyWidgetsS.Count -eq 0) ('no key input / save widget anywhere on the settings page (' + $keyWidgetsS.Count + ' found)')
+$keyWordsS = @($linesS | Where-Object { $_ -match 'API [Kk]ey|console\.curseforge\.com|' + (C @(0x7C98,0x8D34)) + ' key' })
+Ok ($keyWordsS.Count -eq 0) ('nothing on the settings page asks the user for a key (' + $keyWordsS.Count + ' lines)')
+$dlGroupS = @($linesS | Where-Object { $_ -match (C @(0x4E0B,0x8F7D,0x8BBE,0x7F6E)) })
+Ok ($dlGroupS.Count -ge 1) 'the download settings group is still there (only the key card was removed)'
 
 # =====================================================================================
 # TIER 2: temporary build with a dummy key -> both sources at once

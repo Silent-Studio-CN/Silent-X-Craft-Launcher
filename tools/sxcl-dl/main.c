@@ -29,6 +29,7 @@
 #include "sxcl/loader_catalog.h" /* Quilt:从 meta 直接拼加载器 JSON(不用安装器 jar) */
 #include "sxcl/http.h"   /* CF 的 x-api-key 头要走带 header 的那条 HTTP */
 #include "sxcl/mods.h"   /* mods 子命令:模组资源来源层(Modrinth/CurseForge)的端到端验收入口 */
+#include "sxcl/mods_key.h" /* 编译期内置的 CurseForge key(界面不填,这里优先用它) */
 #include "sxcl/manifest.h"
 #include "sxcl/net.h"
 #include "sxcl/options.h"
@@ -2572,8 +2573,16 @@ static int mods_fetch_with_key(const char *url, const char *key, char **out, cha
 }
 
 /** 从设置文件里读 CF 的 key（设置页里那一栏写的就是这个键）。 */
-static int mods_key_from_settings(char *out, size_t cap) {
+/* CurseForge 的 key:先看**编译期内置**的那一份(include/sxcl/mods_key.h,与界面同一个来源),
+ * 没有再退回设置文件里的老键 mods.curseforge_api_key。
+ * **界面已经不写这个键了**(用户 2026-09-26:「不要让用户自己填写」;设置页那张卡已删),
+ * 设置文件这条只服务命令行工具(sxcl-dl),与界面无关 —— 别把它当成"用户配置入口"再搬回界面。 */
+static int mods_key_fallback(char *out, size_t cap) {
     out[0] = '\0';
+    snprintf(out, cap, "%s", SXCL_CURSEFORGE_API_KEY);
+    if (out[0] != '\0') {
+        return 0;
+    }
     char path[1024];
     char err[160];
     err[0] = '\0';
@@ -2656,14 +2665,15 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
         char key_buf[256];
         const char *key = api_key;
         if (key == NULL || key[0] == '\0') {
-            if (mods_key_from_settings(key_buf, sizeof(key_buf)) == 0) {
+            if (mods_key_fallback(key_buf, sizeof(key_buf)) == 0) {
                 key = key_buf;
             }
         }
         if (key == NULL || key[0] == '\0') {
             fprintf(stderr,
-                    "CurseForge 需要 API key：去 https://console.curseforge.com 申请一个，"
-                    "然后 --key <KEY>（或填进设置 mods.curseforge_api_key）。\n"
+                    "CurseForge 需要 API key：这个构建没有内置 key"
+                    "（见 include/sxcl/mods_key.h，构建时 -DSXCL_CURSEFORGE_API_KEY=...），"
+                    "也可以用 --key <KEY> 临时给一份。\n"
                     "没配 key 就不查这一源 —— 我们不会假装有结果。\n");
             return 2;
         }
