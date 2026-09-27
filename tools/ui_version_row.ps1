@@ -1,4 +1,4 @@
-# (C) Silent X Craft Launcher -- "version row" acceptance (user 2026-09-26, three points).
+﻿# (C) Silent X Craft Launcher -- "version row" acceptance (user 2026-09-26, three points).
 #
 # What this proves, per run (every number is measured on this machine, nothing is guessed):
 #
@@ -88,7 +88,7 @@ $beforePage['271828'] = $T_REASON_PARENT
 # ---- what the code under test declares (checked against the evidence line of each run) ----
 # A fixture is "launchable" or not strictly by the core library (sxcl_instance_scan);
 # the icon must follow that verdict, whatever it is. 233333 (libraries declared but their
-# files absent) is EXPECTED to come out launchable: the core判据 only looks at
+# files absent) is EXPECTED to come out launchable: the core verdict only looks at
 # mainClass / inheritsFrom / jar / JSON id (instance.c:1413-1427), and the pre-launch
 # "complete the files" step downloads missing libraries (docs/24).  Missing libraries are
 # therefore NOT a PCL-style "broken version" and must NOT get the red badge.
