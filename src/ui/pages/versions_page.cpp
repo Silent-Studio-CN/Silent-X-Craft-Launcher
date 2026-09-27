@@ -39,7 +39,10 @@
 #pragma warning(push, 0) // libqf 的头在 /W4 下不是零警告,整体静音(见 libqf.h 的说明)
 #endif
 #include "../ui_icons.h"              // 自绘 svg 小图标(警告符/叉号)+ 版本行的状态图标
-#include <QShowEvent>                     // 逐行取证:这一份实例真的上屏时再打坐标
+#include <QApplication>                  // 取证通路:把滚轮事件发给视口(SXCL_UI_LIST)
+#include <QScrollBar>                    // 列表状态读数(范围/步长/当前位置)
+#include <QShowEvent>                    // 逐行取证:这一份实例真的上屏时再打坐标
+#include <QWheelEvent>                   // 取证通路:证明"滚轮真的能滚到旧版本"
 #include "fluent/fluent_controls.h"      // PushButton / InfoBar
 #include "fluent/fluent_input.h"         // SearchLineEdit
 #include "fluent/fluent_labels.h"        // TitleLabel / SubtitleLabel / BodyLabel
@@ -797,7 +800,10 @@ public:
         setObjectName(QStringLiteral("VersionsPage"));
         m_box = new QVBoxLayout(this); // 页边距 = 0:外层(下载页右列 / VersionsRoutePage)负责留白
         m_box->setContentsMargins(0, 0, 0, 0);
-        m_box->setSpacing(16);
+        /* 行距 16 -> 8:用户 2026-09-26 一直在说"别套两层、给足空间",而不说废话的页面
+         * (工具栏/状态行/加载态三样平时两样是藏着的)本来就不需要 16px 的行距 —— 实测
+         * 列表净高因此多出 16px(见 tools/ui_versions_list.ps1 的读数)。 */
+        m_box->setSpacing(8);
         m_box->setAlignment(Qt::AlignTop);
         m_fetch = new BgTask(this);
         buildContent();
@@ -806,10 +812,15 @@ public:
 
     QVBoxLayout *box() const { return m_box; }
 
+    /** 工具栏那一行(搜索 + 分类 + 刷新)。独立路由页要把它和**页名摆成同一行** ——
+     *  用户:"把上面那 94 像素的页内元素(页名/说明/搜索框)压到最小(搜索框可以挪到与页名同一行)"。 */
+    QWidget *toolbar() const { return m_toolbar; }
+
 private:
     void buildContent() {
         // ---- 工具栏(versions_page.py:321-348)----
         auto *toolbar = new QWidget(this);
+        m_toolbar = toolbar;
         auto *toolbarLayout = new QHBoxLayout(toolbar);
         toolbarLayout->setContentsMargins(0, 0, 0, 0);
         toolbarLayout->setSpacing(12);
@@ -863,13 +874,17 @@ private:
         m_retry = new PushButton(QStringLiteral("重试"), this);
         m_retry->setVisible(false);
         connect(m_retry, &QPushButton::clicked, this, [this] { loadVersions(); });
-        auto *statusRow = new QWidget(this);
-        auto *statusLay = new QHBoxLayout(statusRow);
+        /* 状态行那一**整行**平时是藏着的:两个子控件都藏了,行本身留着的话,布局里
+         * 那一格 + 上下两条行距白吃 ~20 像素(实测列表因此矮一截)。用户要的是"给足空间",
+         * 而这一行平时本来就一句话都没有(见 setStatusText 的说明)。 */
+        m_statusRow = new QWidget(this);
+        auto *statusLay = new QHBoxLayout(m_statusRow);
         statusLay->setContentsMargins(0, 0, 0, 0);
         statusLay->setSpacing(12);
         statusLay->addWidget(m_status, 1);
         statusLay->addWidget(m_retry, 0, Qt::AlignVCenter);
-        box()->addWidget(statusRow);
+        m_statusRow->setVisible(false);
+        box()->addWidget(m_statusRow);
 
         // ---- 虚拟化列表(versions_page.py:370-392)----
         m_list = new VersionListView(this);
@@ -929,6 +944,7 @@ private:
         m_loadingLabel->setText(QStringLiteral("正在加载版本清单…"));
         m_status->setVisible(false);
         m_retry->setVisible(false);
+        syncStatusRow();
         m_model->setVersions({}, m_installed);
         m_refresh->setEnabled(false);
 
@@ -1012,6 +1028,7 @@ private:
         m_status->setText(m_manifestNote);
         m_status->setVisible(true); // 错误必须有话说(这一行 + 重试键都要露出来)
         m_retry->setVisible(true); // 失败也要能用:给一个能点的重试(不是只写一行红字)
+        syncStatusRow();
         // 统一错误出口:InfoBar 里只放短句,**完整上下文(页面/操作/原始原因/路径/版本)
         // 一并进剪贴板** —— 用户报障时直接粘,不用再问"什么错"。
         UiErrorContext ctx;
@@ -1103,6 +1120,91 @@ private:
         m_model->setDetails(m_details);
     }
 
+    /* 列表**自己**的状态读数(一行,stderr):模型多少行、视口放得下几行、滚动条的范围与步长。
+     * 为什么必须有它:截图与控件树都分不出"模型只有 5 行"和"模型 916 行、屏幕只放得下 10 行"
+     * —— 用户报"就 5 个版本"时,这一行就是判据。fitsRows = 视口高 / 行高(含最后一行露出一部分)。 */
+    void printListTrace() const {
+        if (m_model == nullptr || m_list == nullptr)
+            return;
+        /* **只报在屏幕上那一份**:同一刻可能有两份实例(下载页右列那一份 + 独立路由页那一份),
+         * 藏着的那一份的几何是布局过程中的中间值,拿它当"用户看到几行"是假读数。 */
+        if (!m_list->isVisible())
+            return;
+        // 这一份到底是谁(祖先里最近几个有名字的控件)—— 两份实例的读数靠它区分
+        QString host;
+        for (QWidget *w = parentWidget(); w != nullptr && host.count(QLatin1Char(0x2F)) < 3;
+             w = w->parentWidget()) {
+            if (!w->objectName().isEmpty())
+                host += w->objectName() + QLatin1Char(0x2F);
+        }
+        const QScrollBar *bar = m_list->verticalScrollBar();
+        const int rowH = VersionRowDelegate::ROW_HEIGHT;
+        const int vw = m_list->viewport()->width();
+        const int vh = m_list->viewport()->height();
+        const int rows = m_model->rowCount();
+        const int fits = (vh + rowH - 1) / rowH;
+        const QPoint origin = m_list->viewport()->mapTo(m_list->window(), QPoint(0, 0));
+        const QModelIndex first = m_list->indexAt(QPoint(vw / 2, 1));
+        const QModelIndex last = m_list->indexAt(QPoint(vw / 2, vh - 2));
+        const QString firstId = first.isValid() ? m_model->versionAt(first.row()).id : QStringLiteral("-");
+        const QString lastId = last.isValid() ? m_model->versionAt(last.row()).id : QStringLiteral("-");
+        std::fprintf(stderr,
+                     "[sxcl-ui] versions-list: host=%s rows=%d all=%d rowH=%d viewport=%dx%d fitsRows=%d "
+                     "scrollMin=%d scrollMax=%d pageStep=%d value=%d top=%d,%d "
+                     "firstVisible=%s lastVisible=%s\n",
+                     host.toUtf8().constData(), rows, int(m_all.size()), rowH, vw, vh, fits,
+                     bar != nullptr ? bar->minimum() : -1, bar != nullptr ? bar->maximum() : -1,
+                     bar != nullptr ? bar->pageStep() : -1, bar != nullptr ? bar->value() : -1,
+                     origin.x(), origin.y(), firstId.toUtf8().constData(),
+                     lastId.toUtf8().constData());
+        /* 排序口径的取证:模型前 5 条 / 后 5 条的真实版本号。模型顺序 = 清单顺序
+         * (sxcl_version_list_build 给的,manifest 本身就是新版在前;界面不再二次排序)。 */
+        QString head;
+        QString tail;
+        for (int i = 0; i < rows; ++i) {
+            const QString id = m_model->versionAt(i).id;
+            if (i < 5)
+                head += (head.isEmpty() ? QString() : QStringLiteral(",")) + id;
+            if (i >= rows - 5)
+                tail += (tail.isEmpty() ? QString() : QStringLiteral(",")) + id;
+        }
+        std::fprintf(stderr, "[sxcl-ui] versions-list-order: host=%s head=%s tail=%s\n",
+                     host.toUtf8().constData(), head.toUtf8().constData(),
+                     tail.toUtf8().constData());
+    }
+
+    /* 取证通路 SXCL_UI_LIST:把列表**真的**滚一下,证明"老版本在后面"不是猜的。
+     *   SXCL_UI_LIST=bottom -> 滚动条拖到底(与用户拖手柄等价),再打一次读数;
+     *   SXCL_UI_LIST=wheel  -> 先往视口发 5 次滚轮事件(与用户滚轮等价),打滚了多远,再拖到底。
+     * 只驱动产品控件(滚动条 / 视口事件),不改任何页面状态、不动模型。 */
+    void applyListProbe() {
+        const QString spec = qEnvironmentVariable("SXCL_UI_LIST").trimmed().toLower();
+        if (spec.isEmpty() || m_list == nullptr)
+            return;
+        if (m_model == nullptr || m_model->rowCount() == 0)
+            return; // 清单还没回来:没有东西可滚(这一趟不报,免得留下 value=0/0 的假读数)
+        QScrollBar *bar = m_list->verticalScrollBar();
+        if (bar == nullptr)
+            return;
+        if (spec == QLatin1String("wheel")) {
+            QWidget *vp = m_list->viewport();
+            const int before = bar->value();
+            for (int i = 0; i < 5; ++i) {
+                const QPoint pos(vp->width() / 2, vp->height() / 2);
+                QWheelEvent wheel(QPointF(pos), QPointF(vp->mapToGlobal(pos)), QPoint(),
+                                  QPoint(0, -360), Qt::NoButton, Qt::NoModifier,
+                                  Qt::NoScrollPhase, false);
+                QApplication::sendEvent(vp, &wheel);
+            }
+            std::fprintf(stderr, "[sxcl-ui] versions-list-scroll: spec=wheel events=5 from=%d to=%d\n",
+                         before, bar->value());
+        }
+        bar->setValue(bar->maximum());
+        std::fprintf(stderr, "[sxcl-ui] versions-list-scroll: spec=%s bottom value=%d/%d\n",
+                     spec.toUtf8().constData(), bar->value(), bar->maximum());
+        printListTrace();
+    }
+
     /* 逐行取证(stderr):这一列的行首图标是**自绘**的(控件树里没有它),所以坐标由这一页
      * 自己报 —— 报的是**窗口坐标**下的图标槽矩形,验收脚本拿它去截图上数像素。
      * 只在"这一份实例真的在屏幕上"时打(下载页里还嵌着同一份,藏着的那份不该混进来)。
@@ -1163,7 +1265,9 @@ private:
         m_evidencePending = true;
         QTimer::singleShot(150, this, [this] {
             m_evidencePending = false;
+            printListTrace();
             printRowEvidence();
+            applyListProbe();
         });
     }
 
@@ -1213,6 +1317,14 @@ private:
             m_status->clear();
         }
         m_status->setVisible(!m_status->text().isEmpty()); // 没话说就别占那一行(会挤列表)
+        syncStatusRow();
+    }
+
+    /** 状态行那一整行的可见性 = 两个子控件里有没有一个要露脸。 */
+    void syncStatusRow() {
+        if (m_statusRow == nullptr)
+            return;
+        m_statusRow->setVisible(m_status->isVisible() || m_retry->isVisible());
     }
 
     // ---- 交互 ----
@@ -1248,6 +1360,8 @@ private:
     QString m_fetchNotice;
     bool m_fetchFromCache = false;
 
+    QWidget *m_toolbar = nullptr;    // 工具栏那一行(独立路由页会把它挪到页名旁边)
+    QWidget *m_statusRow = nullptr;  // 状态行 + 「重试」那一行(没话说时整行藏掉)
     SearchLineEdit *m_search = nullptr;
     ComboBox *m_category = nullptr;
     PushButton *m_refresh = nullptr;
@@ -1285,8 +1399,28 @@ public:
         setObjectName(QStringLiteral("sxclPage_versions"));
         if (QWidget *subtitle = subtitleLabel())
             subtitle->setVisible(false); // 副标题是空串(那句"要装哪个版本…"是废话,已删)
-        box()->addWidget(new VersionsPage(this), 1);
+        m_inner = new VersionsPage(this);
+        /* 页名与**工具栏摆成同一行**(用户 2026-09-26:「把上面那 94 像素的页内元素
+         * (页名/说明/搜索框)压到最小(搜索框可以挪到与页名同一行)」):
+         * 以前是"页名 38px 一行 + 行距 + 搜索框 33px 一行",列表上面白吃 ~90 像素;
+         * 现在左边页名、右边搜索框/分类/刷新,一行 38px 装下,列表净多出 ~50 像素。
+         * PageScaffold 没有"标题右边还有东西"的版式,所以这里把标题从它的竖布局里摘出来,
+         * 和自己那一行工具栏并进一个横向行(两个控件都还是原来的实例,样式一个字没改)。 */
+        QWidget *title = titleLabel();
+        box()->removeWidget(title);
+        auto *titleRow = new QWidget(view());
+        titleRow->setObjectName(QStringLiteral("sxclVersionsTitleRow")); // 验收 dump 按它认这一行
+        auto *titleLay = new QHBoxLayout(titleRow);
+        titleLay->setContentsMargins(0, 0, 0, 0);
+        titleLay->setSpacing(16);
+        titleLay->addWidget(title, 0, Qt::AlignVCenter);
+        titleLay->addWidget(m_inner->toolbar(), 1, Qt::AlignVCenter);
+        box()->addWidget(titleRow);
+        box()->addWidget(m_inner, 1);
     }
+
+private:
+    VersionsPage *m_inner = nullptr;
 };
 
 } // namespace
