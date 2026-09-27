@@ -122,6 +122,20 @@ QString typeText(const QString &type) { // versions_page.py:184
     return type;
 }
 
+/* 版本类型 -> 方块图 kind(用户 2026-09-26:「版本下载版本儿左面儿的那个草方块儿,你忘了」)。
+ *   release -> Grass.png(vanilla) / snapshot -> CommandBlock.png / old_beta|old_alpha -> CobbleStone.png。
+ * 映射**只有一份**:统一走 sxcl_icons.cpp 的 stateIconKind + kFiles,这里不另造表。
+ * 清单里出现认不出的类型时返回**空串** —— 宁可这一格空着,也不拿别的方块冒充它。 */
+QString typeBlockKind(const QString &type) {
+    const QString t = type.toLower();
+    static const char *const kKnown[] = {"release", "snapshot", "old", "old_beta", "old_alpha"};
+    for (const char *k : kKnown) {
+        if (t == QLatin1String(k))
+            return SxclIcons::stateIconKind(t, QStringList(), false);
+    }
+    return QString();
+}
+
 // icons.py:67-75 LOADER_COLORS(硬编码十六进制,Python 里就不是令牌)
 QString loaderColor(const QString &kind) {
     static const QHash<QString, QString> kColors = {
@@ -264,8 +278,6 @@ public:
         ROW_HEIGHT = 52,
         BTN_H = 28,
         LOG_W = 84,
-        SRV_W = 96,
-        GAP = 8,
         MARGIN = 16,
         // 行首那个状态图标位(用户 2026-09-26):ICON = 边长,ICON_LEFT = 原来文字的左距
         // (图标就长在文字该在的位置上),ICON_GAP = 图标与版本名之间的呼吸。
@@ -280,11 +292,12 @@ public:
         return QSize(0, ROW_HEIGHT);
     }
 
-    // versions_page.py:160-164
-    static void buttonRects(const QRect &rect, QRect *logRect, QRect *srvRect) {
+    /* 行右侧只剩「版本日志」一枚(用户 2026-09-26:「获取服务端先不做后续再说」——
+     * 一枚点了只会说"开发中"的死入口删掉;功能以后真做出来再加回来)。
+     * 按钮**仍然贴右边距**:右边缘 = 行右 - MARGIN,不因为少了一枚就飘到中间。 */
+    static void buttonRects(const QRect &rect, QRect *logRect) {
         const int y = rect.top() + (rect.height() - BTN_H) / 2;
-        *srvRect = QRect(rect.right() - MARGIN - SRV_W, y, SRV_W, BTN_H);
-        *logRect = QRect(srvRect->left() - GAP - LOG_W, y, LOG_W, BTN_H);
+        *logRect = QRect(rect.right() - MARGIN - LOG_W, y, LOG_W, BTN_H);
     }
 
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
@@ -305,20 +318,26 @@ public:
             tokenColor(hovered ? QStringLiteral("hoverStrong") : QStringLiteral("hover")));
         painter->drawRoundedRect(rect, 6, 6);
 
-        /* 行首**状态图标位**(用户 2026-09-26:「PCL…用左侧放一个红石块来展示,但咱们也这样
-         * 显得有点太雷同了…你自己画图标…正常版本能启动的用草方块」):
-         *   装过且能启动 -> 草方块;装过但起不来 -> 我们自绘的红色警告符;
-         *   **没装过的行不画** —— 它还没有"能不能启动"可言。但这一列**宽度恒定**,
-         *   免得同一列里文字起点忽左忽右。 */
+        /* 行首图标位 —— **每一行都画**(用户 2026-09-26:「版本下载版本儿左面儿的那个草方块儿,
+         * 你忘了」)。原来的口径是"装过才画、没装过留白",用户要的是**每一行的左边都有图标**:
+         *   按**版本类型**取方块图(正式版 = 草方块 Grass.png / 快照 = 命令方块 / 旧版 = 圆石);
+         *   装过但起不来 -> 仍然由我们自绘的红色警告符**盖过**方块图(优先级最高);
+         *   认不出的类型或素材缺失 -> 这一格空着,不拿别的方块冒充。
+         * "装没装过"早就不该在下载清单上评判(用户 2026-09-22 点名),所以这回也不再用
+         * "有没有图标"来表达它。这一列宽度恒定,免得同一列里文字起点忽左忽右。 */
         const int iconLeft = rect.left() + ICON_LEFT;
         const QString state = model->stateAt(index.row());
-        if (!state.isEmpty()) {
-            const QPixmap statePixmap = uiVersionStatePixmap(state.toLatin1().constData(), ICON);
-            if (!statePixmap.isNull()) {
-                painter->drawPixmap(
-                    QRect(iconLeft, rect.top() + (rect.height() - ICON) / 2, ICON, ICON),
-                    statePixmap);
-            }
+        QPixmap rowIcon;
+        if (state == QLatin1String(version_state::kWarn)) {
+            rowIcon = uiVersionStatePixmap(version_state::kWarn, ICON);
+        } else {
+            const QString kind = typeBlockKind(version.type);
+            if (!kind.isEmpty())
+                rowIcon = SxclIcons::instance().blockPixmap(kind, ICON);
+        }
+        if (!rowIcon.isNull()) {
+            painter->drawPixmap(QRect(iconLeft, rect.top() + (rect.height() - ICON) / 2, ICON, ICON),
+                                rowIcon);
         }
         const int left = iconLeft + ICON + ICON_GAP;
         QFont font = painter->font();
@@ -392,16 +411,11 @@ public:
 
         if (hovered) {
             QRect logRect;
-            QRect srvRect;
-            buttonRects(rect, &logRect, &srvRect);
+            buttonRects(rect, &logRect);
             painter->setPen(QPen(t.accent));
             painter->setBrush(Qt::NoBrush);
-            const QRect rects[2] = {logRect, srvRect};
-            const QString labels[2] = {QStringLiteral("版本日志"), QStringLiteral("获取服务端")};
-            for (int i = 0; i < 2; ++i) {
-                painter->drawRoundedRect(rects[i], 4, 4);
-                painter->drawText(rects[i], Qt::AlignCenter, labels[i]);
-            }
+            painter->drawRoundedRect(logRect, 4, 4);
+            painter->drawText(logRect, Qt::AlignCenter, QStringLiteral("版本日志"));
         }
         painter->restore();
     }
@@ -413,7 +427,7 @@ public:
 // 松手时 Qt 不给 MouseOver,所以不能在 delegate 里判 —— 由视图自己算矩形。
 class VersionListView : public QListView {
 public:
-    // action: 0 = 无, 1 = wiki(版本日志), 2 = server(获取服务端)
+    // action: 0 = 无, 1 = wiki(版本日志)。(2 = server 已按用户 2026-09-26 删除)
     std::function<void(int row, int action)> onAction;
 
     explicit VersionListView(QWidget *parent = nullptr) : QListView(parent) {}
@@ -427,17 +441,10 @@ protected:
             auto *delegate = static_cast<VersionRowDelegate *>(itemDelegate());
             if (index.isValid() && delegate) {
                 QRect logRect;
-                QRect srvRect;
-                VersionRowDelegate::buttonRects(visualRect(index).adjusted(0, 2, 0, -2), &logRect,
-                                                &srvRect);
+                VersionRowDelegate::buttonRects(visualRect(index).adjusted(0, 2, 0, -2), &logRect);
                 const QPoint pos = event->position().toPoint();
                 if (logRect.contains(pos)) {
                     emitRowAction(index.row(), 1);
-                    event->accept();
-                    return;
-                }
-                if (srvRect.contains(pos)) {
-                    emitRowAction(index.row(), 2);
                     event->accept();
                     return;
                 }
@@ -922,11 +929,8 @@ private:
         m_list->onAction = [this](int row, int action) {
             if (row < 0 || row >= m_model->items().size())
                 return;
-            const GameVersion v = m_model->versionAt(row);
             if (action == 1)
-                openVersionWiki(v);
-            else if (action == 2)
-                showServerPlaceholder(v);
+                openVersionWiki(m_model->versionAt(row));
         };
 
         // 主题一变就重画(对应 Python on_theme_changed(lambda: viewport.update()))
@@ -1205,6 +1209,29 @@ private:
         printListTrace();
     }
 
+    /* 取证通路 SXCL_UI_CATEGORY=all|release|snapshot|old:在**真的**分类下拉框里换一档
+     * (等价于用户点下拉框;不绕过去自己改模型)。为什么要它:清单里不同**版本类型**的行
+     * 要同屏才验得到"每行左侧的方块图按类型取",而默认那一档是"正式版"。
+     * 换档走 m_category->setCurrentIndex —— 与用户操作同一条信号链(currentIndexChanged
+     * -> reloadList)。已经是这一档就什么都不做,免得白重建一次列表。 */
+    void applyCategoryProbe() {
+        const QString spec = qEnvironmentVariable("SXCL_UI_CATEGORY").trimmed().toLower();
+        if (spec.isEmpty() || m_category == nullptr)
+            return;
+        static const QHash<QString, int> kMap = {{QStringLiteral("all"), 0},
+                                                 {QStringLiteral("release"), 1},
+                                                 {QStringLiteral("snapshot"), 2},
+                                                 {QStringLiteral("old"), 3}};
+        if (!kMap.contains(spec))
+            return;
+        const int idx = kMap.value(spec);
+        if (m_category->currentIndex() == idx)
+            return;
+        m_category->setCurrentIndex(idx);
+        std::fprintf(stderr, "[sxcl-ui] versions-category: spec=%s idx=%d rows=%d\n",
+                     spec.toUtf8().constData(), idx, m_model != nullptr ? m_model->rowCount() : -1);
+    }
+
     /* 逐行取证(stderr):这一列的行首图标是**自绘**的(控件树里没有它),所以坐标由这一页
      * 自己报 —— 报的是**窗口坐标**下的图标槽矩形,验收脚本拿它去截图上数像素。
      * 只在"这一份实例真的在屏幕上"时打(下载页里还嵌着同一份,藏着的那份不该混进来)。
@@ -1221,9 +1248,12 @@ private:
         const int scroll = (bar != nullptr) ? bar->value() : 0;
         const QRect viewportRect = m_list->viewport()->rect();
         for (int i = 0; i < items.size(); ++i) {
+            /* **每一行都报**(2026-09-26 之后):行首图标改成按**版本类型**画,每一行都有图标,
+             * 所以"没装过的行留白、没有状态可报"这个前提没了 —— 报的是行上**真的画了什么**:
+             *   state = 实例状态(grass/warn/空,来自核心库判据)
+             *   block = 版本类型对应的方块图 kind(vanilla/snapshot/old/none)
+             *   icon  = 这一格**实际**画出来的东西(warn 盖过方块图;认不出类型 = none) */
             const QString state = m_model->stateAt(i);
-            if (state.isEmpty())
-                continue; // 没装过的行:这一列留白,没有状态可报
             /* 行矩形**自己算**,不问 visualRect:这一页的模型刚 setVersions 完、视图的布局
              * 还没跑,visualRect 会给出上一版布局的坐标(实测整体偏了一行的距离,取证脚本
              * 照它去截图上数像素会数到别的行)。判据只有一条 —— 委托就是按
@@ -1238,9 +1268,21 @@ private:
             QString tip = m_model->detailAt(i);
             chip.replace(QLatin1Char('\n'), QStringLiteral(" | "));
             tip.replace(QLatin1Char('\n'), QStringLiteral(" | "));
+            /* 这一行**实际**画出来的方块图:类型映射(typeBlockKind)+ 警告符盖过方块图的规则,
+             * 与委托 paint 里那份是同一套判据;block=none/icon=none 表示这一格真的没画东西。 */
+            const QString blockKind = typeBlockKind(items.at(i).type);
+            const QString block = blockKind.isEmpty() ? QStringLiteral("none") : blockKind;
+            const QString iconKind = (state == QLatin1String(version_state::kWarn))
+                                         ? QString::fromLatin1(version_state::kWarn)
+                                         : block;
+            /* 行右侧那枚「版本日志」的矩形:由**委托自己的** buttonRects 算,取证脚本不另写一份
+             * 几何(用户 2026-09-26 删掉「获取服务端」之后,它必须仍然贴右边距)。 */
+            QRect logRect;
+            VersionRowDelegate::buttonRects(rowDraw, &logRect);
             std::fprintf(stderr,
                          "[sxcl-ui] version-row page: id=%s state=%s iconRect=%d,%d,%dx%d "
-                         "chip=\"%s\" tip=\"%s\" vis=%d inView=%d list=%d,%d,%dx%d win=%dx%d\n",
+                         "chip=\"%s\" tip=\"%s\" vis=%d inView=%d list=%d,%d,%dx%d win=%dx%d "
+                         "block=%s icon=%s logRect=%d,%d,%dx%d\n",
                          items.at(i).id.toUtf8().constData(), state.toUtf8().constData(),
                          slot.x(), slot.y(), slot.width(), slot.height(),
                          chip.toUtf8().constData(), tip.toUtf8().constData(),
@@ -1250,7 +1292,9 @@ private:
                          // 对齐 —— 对不上就说明这组坐标是布局跑之前的旧值(那是假读数)
                          m_list->mapTo(win, QPoint(0, 0)).x(),
                          m_list->mapTo(win, QPoint(0, 0)).y(), m_list->width(), m_list->height(),
-                         win->width(), win->height());
+                         win->width(), win->height(), block.toUtf8().constData(),
+                         iconKind.toUtf8().constData(), logRect.x(), logRect.y(),
+                         logRect.width(), logRect.height());
         }
     }
 
@@ -1265,6 +1309,7 @@ private:
         m_evidencePending = true;
         QTimer::singleShot(150, this, [this] {
             m_evidencePending = false;
+            applyCategoryProbe(); // 先把分类换到验收要求的那一档(真的下拉框),再报这一屏的行
             printListTrace();
             printRowEvidence();
             applyListProbe();
@@ -1347,11 +1392,6 @@ private:
                       .arg(QString::fromUtf8(QUrl::toPercentEncoding(v.id)))
                 : QStringLiteral("https://minecraft.wiki/w/Java_Edition_%1").arg(v.id);
         QDesktopServices::openUrl(QUrl(url));
-    }
-
-    void showServerPlaceholder(const GameVersion &v) { // versions_page.py:543-552
-        InfoBar::push(InfoBar::Type::Info, QStringLiteral("获取服务端"),
-                      QStringLiteral("即将进入 %1 服务端下载页 (功能开发中)").arg(v.id), this, 3000);
     }
 
     BgTask *m_fetch = nullptr;     // 清单 + 本地扫描的工作线程外壳(loadVersions 里起)
