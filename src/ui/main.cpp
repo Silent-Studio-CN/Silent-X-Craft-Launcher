@@ -21,9 +21,15 @@
 #include <QMouseEvent>   // 验收钩子:取色块靠 mouseReleaseEvent 开对话框,得真发一对鼠标事件
 #include <QLineEdit>       // 验收钩子:SXCL_UI_MODS_QUERY 往搜索框里写字
 #include <QPushButton> // 验收钩子:SXCL_UI_JRE_HOSTED 要找并点设置页上的「开始下载」按钮
+#include <QAbstractItemView> // 验收钩子:下拉/补全弹层的宽度读数(条目文字区按样式算)
+#include <QCompleter>        // 验收钩子:SXCL_UI_POPUP_KIND=completer
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QStyleHints>
+#include <QStyleOptionViewItem>
+#include <QTextLayout>
+#include <QTextLine>
+#include <QTextOption>
 #include <QTimer>
 
 #include <climits>
@@ -57,7 +63,8 @@
 #include "sxcl/lang.h"     // 语言表(键 -> 文案;.lang 与 Python 版逐字段兼容)
 #include "sxcl/settings.h" // 启动恢复:ui.theme / ui.accent / ui.language(环境变量优先)
 
-// ComboBox:弹出层取证要用它的 showPopup()
+// ComboBox:弹出层取证要用它的 showPopup();LineEdit:补全弹层走同一套宽度读数
+#include "fluent/fluent_input.h"
 #include "fluent/fluent_setting_cards.h"
 
 // ── 运行日志(核心库 include/sxcl/log.h)──────────────────────────────────
@@ -91,6 +98,84 @@ void logStartupJavaList() {
     }
     if (count == 0)
         SXCL_LOG_W("startup", "Java 检测:一个都没扫到 —— 下次启动游戏时会要求先装/指定 Java");
+}
+
+// ── 下拉/补全弹层的宽度读数(用户 2026-09-27:「下拉菜单给我显示完整个窗口的宽度」)──
+//
+// 「宽度够不够、字有没有被切」在弹层里是几个可量的数,读数由 tools/ui_combo_width.ps1 断言:
+//   popup-trace | win=宿主窗口(内容区)  panel=弹层里**可见面板**(下拉 = MenuActionListWidget,
+//                 补全 = 弹层本身)  container=弹层窗口(下拉的容器左右各多 12px 透明边距)
+//   popup-item  | 逐条:文字自然宽 textw / 样式**真正留给文字**的区域 area(按 SE_ItemViewItemText
+//                 算,与委托绘制同一口径)/ 需要几行 lines / 行高 rowH / fit=1 才算完整显示
+//   fit = (一行装得下) 或 (换行后每一行都画得进 rowH) —— 不靠"看着像"。
+static int popupWrappedLines(const QString &text, const QFont &font, int width) {
+    if (width <= 0)
+        return 1;
+    QTextLayout layout(text, font);
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    layout.setTextOption(option);
+    layout.beginLayout();
+    int lines = 0;
+    for (;;) {
+        QTextLine line = layout.createLine();
+        if (!line.isValid())
+            break;
+        line.setLineWidth(width);
+        ++lines;
+    }
+    layout.endLayout();
+    return qMax(lines, 1);
+}
+
+static void tracePopupWidth(QWidget *popup, QWidget *window, const QString &kind, int index) {
+    if (popup == nullptr)
+        return;
+    // 下拉弹层:容器(带阴影边距)里装着真正的面板;补全弹层:弹层本身就是那个 QListView。
+    QAbstractItemView *view = qobject_cast<QAbstractItemView *>(popup);
+    if (view == nullptr)
+        view = popup->findChild<QAbstractItemView *>();
+    QWidget *panel = view != nullptr ? static_cast<QWidget *>(view) : popup;
+    const QWidget *top = window != nullptr ? window : popup->window();
+    const int winW = top != nullptr ? top->width() : 0;
+    const int winH = top != nullptr ? top->height() : 0;
+    const double ratio = winW > 0 ? double(panel->width()) / double(winW) : 0.0;
+    std::fprintf(stderr,
+                 "[sxcl-ui] popup-trace | kind=%s index=%d win=%dx%d panel=%dx%d "
+                 "container=%dx%d ratio=%.4f\n",
+                 kind.toUtf8().constData(), index, winW, winH, panel->width(),
+                 panel->height(), popup->width(), popup->height(), ratio);
+    if (view == nullptr || view->model() == nullptr)
+        return;
+    const QAbstractItemModel *model = view->model();
+    const QFont viewFont = view->font();
+    const QFontMetrics fm(viewFont);
+    for (int row = 0; row < model->rowCount(); ++row) {
+        const QModelIndex idx = model->index(row, 0);
+        const QString text = idx.data(Qt::DisplayRole).toString();
+        const QRect itemRect = view->visualRect(idx);
+        // 文字区 = 样式自己报的 SE_ItemViewItemText(menu.qss 的 item 内边距/外边距都算进去)
+        QStyleOptionViewItem option;
+        option.initFrom(view);
+        option.rect = itemRect;
+        option.font = viewFont;
+        option.fontMetrics = fm;
+        option.decorationSize = view->iconSize();
+        option.features |= QStyleOptionViewItem::WrapText;
+        option.text = text;
+        option.widget = view;
+        const QRect textRect = view->style()->subElementRect(
+            QStyle::SE_ItemViewItemText, &option, view);
+        const int textw = fm.horizontalAdvance(text);
+        const int area = textRect.width();
+        const int lines = popupWrappedLines(text, viewFont, area);
+        const bool fit = (textw <= area) || (lines * fm.height() <= itemRect.height());
+        std::fprintf(stderr,
+                     "[sxcl-ui] popup-item | i=%d textw=%d area=%d lines=%d rowH=%d fit=%d "
+                     "text=%s\n",
+                     row, textw, area, lines, itemRect.height(), fit ? 1 : 0,
+                     text.toUtf8().constData());
+    }
 }
 
 } // namespace
@@ -649,50 +734,126 @@ sxcl::ui::MainWindow window;
     const QString shot = qEnvironmentVariable("SXCL_UI_SHOT");
 
     // 取证通路:下拉弹出层截图(对应 Python tools/popup_capture_py.py)
-    //   SXCL_UI_POPUP=<序号> + SXCL_UI_SHOT=<png 路径>:
-    //   打开当前路由页里第 N 个 ComboBox 的弹出层(序号 = 可见 ComboBox 的 findChildren
-    //   顺序,与 Python 端 page.findChildren(ComboBox) 同序),等 qf 动画跑完
-    //   (250ms OutQuad)再 grab QApplication::activePopupWidget() 存图退出。
+    //   SXCL_UI_POPUP=<序号|text:子串> + SXCL_UI_SHOT=<png 路径>:
+    //   打开当前路由页里的下拉弹层,等 qf 动画跑完(250ms OutQuad)再
+    //   grab QApplication::activePopupWidget() 存图退出,同时打出宽度读数(见 tracePopupWidth)。
+    //   * SXCL_UI_POPUP_KIND=combo(默认)| completer:
+    //       combo     = 第 N 个**可见** ComboBox(序号 = findChildren 顺序,
+    //                   与 Python 端 page.findChildren(ComboBox) 同序);
+    //       completer = 第 N 个**可见且带补全器**的 libqf LineEdit ——
+    //                   模组页那个"版本(留空 = 全部)"输入框就是它,补全弹层也是下拉弹层。
+    //   * 选择器还能写 text:<子串>:挑"条目里含这个子串"的第一个下来 —— 页面一改、序号就漂,
+    //     验收脚本用文字挑更稳(用户 2026-09-27 的规矩只针对弹层宽度,不该被序号搞脆)。
     //   这是成品的取证功能(见 docs/05-UI-1to1规格.md §11),不是临时诊断。
     const QString popup = qEnvironmentVariable("SXCL_UI_POPUP");
     if (!popup.isEmpty() && !shot.isEmpty()) {
-        bool numeric = false;
-        const int index = popup.toInt(&numeric);
+        const QString popupKind =
+            qEnvironmentVariable("SXCL_UI_POPUP_KIND", QStringLiteral("combo")).trimmed();
         // (&app 要捕获:内层 singleShot 用它当 context 对象)
-        QTimer::singleShot(1500, &app, [&app, &window, index, numeric, shot]() {
-            if (!numeric || index < 0) {
-                std::fprintf(stderr, "[sxcl-ui] SXCL_UI_POPUP 需要非负序号,收到 %d\n", index);
-                QCoreApplication::quit();
-                return;
-            }
+        QTimer::singleShot(1500, &app, [&app, &window, popup, popupKind, shot]() {
             // 光标停到固定点:qf 的 getCurrentScreenGeometry() 取【光标所在屏】的可用区域,
             // 弹层的 hover 高亮也取决于光标位置 —— 参考图脚本(popup_capture_py.py)同口径,
             // 否则同一份代码两次抓图的悬停行会不一样。
             QCursor::setPos(5, 5);
 
-            QList<ComboBox *> combos;
-            const QList<ComboBox *> all = window.findChildren<ComboBox *>();
-            for (ComboBox *c : all) {
-                if (c->isVisible())
-                    combos.append(c);
-            }
-            if (index >= combos.size()) {
-                std::fprintf(stderr, "[sxcl-ui] 弹出层 #%d 不存在(当前页可见下拉 %d 个)\n",
-                             index, static_cast<int>(combos.size()));
+            bool numeric = false;
+            const int index = popup.toInt(&numeric);
+            const QString needle =
+                popup.startsWith(QStringLiteral("text:")) ? popup.mid(5) : QString();
+            if ((!numeric || index < 0) && needle.isEmpty()) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] SXCL_UI_POPUP 需要非负序号或 text:<子串>,收到 \"%s\"\n",
+                             popup.toUtf8().constData());
                 QCoreApplication::quit();
                 return;
             }
-            ComboBox *combo = combos.at(index);
-            std::fprintf(stderr, "[sxcl-ui] 弹出层 #%d:下拉框 %dx%d 当前项 %d\n", index,
-                         combo->width(), combo->height(), combo->currentIndex());
-            combo->showPopup();
-            QTimer::singleShot(700, &app, [shot]() {
+
+            // 候选 = 当前页上真能打开弹层的宿主控件(附上它的条目文字,供 text: 选择器挑)
+            QList<QWidget *> hosts;
+            QList<QStringList> hostItems;
+            if (popupKind == QLatin1String("completer")) {
+                const QList<LineEdit *> all = window.findChildren<LineEdit *>();
+                for (LineEdit *edit : all) {
+                    if (edit == nullptr || !edit->isVisible() || edit->completer() == nullptr)
+                        continue;
+                    QStringList items;
+                    if (const QAbstractItemModel *model = edit->completer()->model()) {
+                        for (int r = 0; r < model->rowCount(); ++r)
+                            items.append(model->index(r, 0).data(Qt::DisplayRole).toString());
+                    }
+                    if (items.isEmpty())   // 没候选的补全器打不开弹层
+                        continue;
+                    hosts.append(edit);
+                    hostItems.append(items);
+                }
+            } else {
+                const QList<ComboBox *> all = window.findChildren<ComboBox *>();
+                for (ComboBox *combo : all) {
+                    if (combo == nullptr || !combo->isVisible())
+                        continue;
+                    QStringList items;
+                    for (int i = 0; i < combo->count(); ++i)
+                        items.append(combo->itemText(i));
+                    if (items.isEmpty())
+                        continue;
+                    hosts.append(combo);
+                    hostItems.append(items);
+                }
+            }
+            int picked = -1;
+            for (int c = 0; c < hosts.size(); ++c) {
+                if (needle.isEmpty()) {
+                    if (c == index) {
+                        picked = c;
+                        break;
+                    }
+                    continue;
+                }
+                bool hit = false;
+                for (const QString &item : hostItems.at(c)) {
+                    if (item.contains(needle)) {
+                        hit = true;
+                        break;
+                    }
+                }
+                if (hit) {
+                    picked = c;
+                    break;
+                }
+            }
+            if (picked < 0) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] 弹层目标不存在(kind=%s 候选 %d 个,选择器 \"%s\")\n",
+                             popupKind.toUtf8().constData(),
+                             static_cast<int>(hosts.size()), popup.toUtf8().constData());
+                QCoreApplication::quit();
+                return;
+            }
+
+            QWidget *host = hosts.at(picked);
+            if (auto *combo = qobject_cast<ComboBox *>(host)) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] 弹出层 kind=combo pick=%d:下拉框 %dx%d 当前项 %d 条目 %d\n",
+                             picked, combo->width(), combo->height(),
+                             combo->currentIndex(), combo->count());
+                combo->showPopup();
+            } else if (auto *edit = qobject_cast<LineEdit *>(host)) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] 弹出层 kind=completer pick=%d:输入框 %dx%d 候选 %d\n",
+                             picked, edit->width(), edit->height(),
+                             static_cast<int>(hostItems.at(picked).size()));
+                edit->completer()->setCompletionPrefix(QString());   // 全部候选都列出来
+                edit->completer()->complete();
+            }
+
+            QTimer::singleShot(700, &app, [&window, shot, popupKind, picked]() {
                 QWidget *pop = QApplication::activePopupWidget();
                 if (!pop) {
                     std::fprintf(stderr, "[sxcl-ui] 弹出层截图失败:没有活动弹层\n");
                     QCoreApplication::quit();
                     return;
                 }
+                tracePopupWidth(pop, &window, popupKind, picked);
                 const QPixmap pm = pop->grab();
                 const bool ok = pm.save(shot);
                 std::fprintf(stderr, "[sxcl-ui] 弹层截图 %s %dx%d dpr=%.2f %s\n",

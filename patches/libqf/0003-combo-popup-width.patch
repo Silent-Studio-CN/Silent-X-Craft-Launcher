@@ -1,0 +1,562 @@
+# libqf patch 3: dropdown popup width = host window width (one global rule; user 2026-09-27)
+#
+# Why it lives in our repo: that tree is not a git repository (see README.md next to this
+# file) -- a fresh checkout of libqf would silently drop these edits.
+# How to use it (run inside the libqf source tree; git apply does not need a repo):
+#     cd "D:\SilentStudio\PyQf to C"
+#     git apply -p1 --check  "<this patch>"      # dry run first
+#     git apply -p1          "<this patch>"      # then apply
+# Reverse check (proves the patch matches the live sources):
+#     git apply -p1 --reverse --check "<this patch>"
+#
+# What it changes (5 files, 13 hunks):
+#   src/fluent/fluent_menu.h/.cpp          ComboBoxMenu width policy: applyHostWidthPolicy()
+#   src/fluent/fluent_setting_cards.cpp    qf::ComboBox: popup uses the same policy + view() flags
+#   src/fluent/fluent_input.h/.cpp         libqf::LineEdit::setCompleter: completer popup, same rule
+#
+# Acceptance: tools/ui_combo_width.ps1 (private build D:/SilentStudio/_build/combow; build-ui untouched)
+
+diff --git a/src/fluent/fluent_menu.h b/src/fluent/fluent_menu.h
+index d5da279..d6e884f 100644
+--- a/src/fluent/fluent_menu.h
++++ b/src/fluent/fluent_menu.h
+@@ -153,15 +153,38 @@ public:
+     // python RoundMenu.adjustSize (menu.py:349-353)
+     void adjustSize();
+ 
+     // python ComboBoxMenu.exec(pos, ani, aniType) (combo_box.py:553)
+     void exec(const QPoint &pos, MenuAnimationType aniType = MenuAnimationType::DropDown);
+     // 兼容既有调用(EditableComboBox / ModelComboBox):父控件下方居中,
+-    // 内部走 ComboBoxBase._showComboMenu 的 hd/hu 判定(combo_box.py:338-351)
++    // 内部走 ComboBoxBase._showComboMenu 的 hd/hu 判定(combo_box.py:338-351);
++    // 宽度规矩(applyHostWidthPolicy)在内部自动套用,调用方不必各写一遍。
+     void popup();
+ 
++    // ── 弹层宽度(用户 2026-09-27 的全局一条规矩,全仓所有下拉都走这里)──────────
++    //
++    // 用户原话:「还有那个下拉菜单儿,以后你就给我他妈显示完整个窗口的宽度,
++    //            放不下再换行,能听懂吗?天天整那个长方形,谁看呀?」
++    //
++    // 所以 qf 原来的"宽度 = 下拉框自身宽度"(combo_box.py:325-327)和后来补的
++    // "宽度 = 最宽那条文字"(见 fluent_setting_cards.cpp)都不再是规矩本身,只是下限。
++    // 现在的算法(一处实现,所有 ComboBox 弹层共用):
++    //   ① 铺满**宿主窗口**的可用宽度(两侧各留 sideMargin,默认 12);
++    //   ② 条目文字在这一行里放不下就**换行**:按 Qt 自己的文本引擎量出需要的行数与
++    //      高度,条目 sizeHint 跟着长 —— 不再有"省略号/硬裁"当默认行为;
++    //   ③ 只有"一个不可断开的片段"(比如一整条 Java 路径里没有空格的那一段)比窗口还宽
++    //      时,才允许弹层比窗口略宽、把这一整段装下 —— 上限仍是光标所在屏的可用宽度;
++    //   ④ 上面三步之后还装不下(比屏幕还宽)才允许省略 —— 这种情况会出现在验收 trace 的
++    //      fit 读数里,不会静默发生。
++    //
++    // 返回最终给到视图(可见面板)的宽度。
++    int applyHostWidthPolicy(QWidget *host, int sideMargin = 12);
++    int policyViewWidth() const { return m_policyViewWidth; }
++    // 条目文字区的宽度(面板宽 - 这条 item 的左右外边距/内边距/图标位),验收 trace 用
++    int itemTextWidth(int row) const;
++
+ signals:
+     void actionTriggered(int index);
+     void closed();
+ 
+ protected:
+     void showEvent(QShowEvent *) override;
+@@ -172,18 +195,25 @@ protected:
+ 
+ private:
+     void activateItem(int index);
+     void animateAndShow(const QPoint &pos, MenuAnimationType aniType);
+     bool hasIcon() const;
+ 
++    // 宽度规矩(applyHostWidthPolicy)的内部实现
++    void reflowItemsForPolicy();
++    void reflowItemForPolicy(int row);
++    int longestUnbreakableRun() const;
++
+     MenuActionListWidget *m_view = nullptr;
+     QVector<QIcon> m_icons;
+     QVector<bool> m_enabled;
+     int m_itemHeight = 33;
+     int m_maxVisibleItems = -1;
+     int m_defaultIndex = -1;
++    int m_policyViewWidth = -1;   // <0 = 还没套用宽度规矩(见 applyHostWidthPolicy)
++    int m_policySideMargin = 12;
+     bool m_closedEmitted = false;
+     QPropertyAnimation *m_posAni = nullptr;
+     QPropertyAnimation *m_opacityAni = nullptr;
+     QParallelAnimationGroup *m_aniGroup = nullptr;
+ };
+ 
+diff --git a/src/fluent/fluent_menu.cpp b/src/fluent/fluent_menu.cpp
+index a17e2b9..c7397b9 100644
+--- a/src/fluent/fluent_menu.cpp
++++ b/src/fluent/fluent_menu.cpp
+@@ -10,12 +10,15 @@
+ #include <QMouseEvent>
+ #include <QPainter>
+ #include <QParallelAnimationGroup>
+ #include <QPixmap>
+ #include <QRegion>
+ #include <QScreen>
++#include <QTextLayout>
++#include <QTextLine>
++#include <QTextOption>
+ 
+ #include "fluent_font.h"
+ #include "fluent_acrylic.h"
+ #include <QAbstractAnimation>
+ #include <QEasingCurve>
+ #include <QApplication>
+@@ -26,12 +29,19 @@
+ #include "fluent_icon.h"
+ #include "fluent_style.h"
+ 
+ namespace {
+ constexpr int kPadV = 6;   // 容器上下内边距
+ constexpr int kMargin = 6; // 行左右外边距(与 menu.qss margin 一致)
++
++// 下拉条目文字区的两边占用(见 applyHostWidthPolicy 的宽度推算)
++//   menu.qss:MenuActionListWidget::item { margin-left/right: 6; padding-left/right: 10 }
++//   -> 左右一共 32px 不归文字用;条目带图标时再扣图标位(iconSize 14 + 间距)。
++// 比真实值略保守:宁可早一行换行,也不让字数卡边界被裁。
++constexpr int kItemTextInset = 32;
++constexpr int kItemIconInset = 20;
+ }
+ 
+ RoundMenu::RoundMenu(QWidget *parent) : QWidget(parent) {
+     setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
+     setAttribute(Qt::WA_TranslucentBackground);
+     setMouseTracking(true);
+@@ -411,12 +421,14 @@ int ComboBoxMenu::addItem(const QIcon &icon, const QString &text, bool isEnabled
+ 
+     auto *item = new QListWidgetItem(itemIcon, itemText);
+     item->setSizeHint(QSize(w, m_itemHeight));
+     if (!isEnabled)
+         item->setFlags(Qt::NoItemFlags);   // python:item.setFlags(Qt.NoItemFlags)
+     m_view->QListWidget::addItem(item);   // MenuActionListWidget::addItem 被同名重载遮住了
++    if (m_policyViewWidth > 0)            // 规矩已套用:后加的条目也按同一套宽/高
++        reflowItemForPolicy(m_view->row(item));
+     adjustViewSize(QPoint(), MenuAnimationType::None); // python addItem 后 view.adjustSize()
+     adjustSize();                                     // python RoundMenu.addAction 后 adjustSize()
+     return m_view->row(item);
+ }
+ 
+ void ComboBoxMenu::clearActions() {
+@@ -499,12 +511,128 @@ void ComboBoxMenu::adjustSize() {
+     // python menu.py:349-353 RoundMenu.adjustSize
+     const QMargins m = layout()->contentsMargins();
+     setFixedSize(m_view->width() + m.left() + m.right(),
+                  m_view->height() + m.top() + m.bottom());
+ }
+ 
++// ================================================================
++// 弹层宽度规矩(用户 2026-09-27:铺满窗口,放不下换行)
++// ================================================================
++int ComboBoxMenu::itemTextWidth(int row) const {
++    if (m_view == nullptr || row < 0 || row >= m_view->count())
++        return 0;
++    const QListWidgetItem *item = m_view->item(row);
++    if (item == nullptr)
++        return 0;
++    const int viewW = m_view->width() > 0 ? m_view->width() : qMax(m_policyViewWidth, 0);
++    return qMax(0, viewW - kItemTextInset - (item->icon().isNull() ? 0 : kItemIconInset));
++}
++
++int ComboBoxMenu::longestUnbreakableRun() const {
++    // "不可断开的片段" = 一条文字里不含空白的连续一段。换行只能断在空白处,所以最长的那一段
++    // 决定了"不硬折、不裁字"至少要多宽 —— 路径(\ 和 : 都不是断点)就是典型例子。
++    if (m_view == nullptr)
++        return 0;
++    const QFontMetrics fm(m_view->font());
++    int longest = 0;
++    for (int i = 0; i < m_view->count(); ++i) {
++        const QListWidgetItem *item = m_view->item(i);
++        if (item == nullptr)
++            continue;
++        const QString text = item->text();
++        int start = 0;
++        for (int p = 0; p <= text.size(); ++p) {
++            if (p != text.size() && !text.at(p).isSpace())
++                continue;
++            if (p > start)
++                longest = qMax(longest, fm.horizontalAdvance(text.mid(start, p - start)));
++            start = p + 1;
++        }
++    }
++    return longest;
++}
++
++void ComboBoxMenu::reflowItemForPolicy(int row) {
++    if (m_policyViewWidth <= 0 || m_view == nullptr)
++        return;
++    if (row < 0 || row >= m_view->count())
++        return;
++    QListWidgetItem *item = m_view->item(row);
++    if (item == nullptr)
++        return;
++    // 列表视图里条目横向**铺满视口**,item 的 sizeHint 宽只决定"视口该多宽"
++    // (adjustViewSize 取最宽条目 + 2 当视图宽),所以这里按视口宽倒推。
++    const int viewW = qMax(m_policyViewWidth, m_view->minimumWidth());
++    const int textW = qMax(24, viewW - kItemTextInset
++                                   - (item->icon().isNull() ? 0 : kItemIconInset));
++    const QFontMetrics fm(m_view->font());
++    int rowH = m_itemHeight;
++    if (fm.horizontalAdvance(item->text()) > textW) {
++        // 换行:用 Qt 自己的文本引擎(与绘制同一条排版路径)量行数与高度。
++        // 词边界优先;整段装不下时允许在任意位置折(WrapAtWordBoundaryOrAnywhere),
++        // 这样"一条放不下就换行"对任何文字都成立,不会剩一段被裁掉。
++        QTextLayout layout(item->text(), m_view->font());
++        QTextOption option;
++        option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
++        layout.setTextOption(option);
++        layout.beginLayout();
++        qreal used = 0;
++        for (;;) {
++            QTextLine line = layout.createLine();
++            if (!line.isValid())
++                break;
++            line.setLineWidth(textW);
++            used += line.height();
++        }
++        layout.endLayout();
++        // +8 = ::item 的上下留白(#comboListWidget::item margin-top 4 + 底 4)
++        rowH = qMax(m_itemHeight, static_cast<int>(used) + 8);
++    }
++    item->setSizeHint(QSize(qMax(1, viewW - 2), rowH));
++}
++
++void ComboBoxMenu::reflowItemsForPolicy() {
++    if (m_policyViewWidth <= 0 || m_view == nullptr)
++        return;
++    for (int i = 0; i < m_view->count(); ++i)
++        reflowItemForPolicy(i);
++}
++
++int ComboBoxMenu::applyHostWidthPolicy(QWidget *host, int sideMargin) {
++    if (m_view == nullptr)
++        return 0;
++    if (host == nullptr)
++        host = parentWidget();
++    if (host == nullptr)
++        return 0;
++    m_policySideMargin = qMax(0, sideMargin);
++    // 字体要先抛光:视图的 14px 来自 menu.qss,不抛光时量到的是应用默认字体,行数会算错。
++    m_view->ensurePolished();
++
++    QWidget *top = host->window() != nullptr ? host->window() : host;
++    const int winW = top->width() > 0 ? top->width() : host->width();
++    // ① 铺满宿主窗口的可用宽度(两侧各留 sideMargin,免得贴边)
++    int target = qMax(winW - m_policySideMargin * 2, qMin(host->width(), winW));
++    // ②/③ 窗口比"一条不可断开的片段"还窄时,弹层只长到刚好装下它(仍然不裁字)
++    const int run = longestUnbreakableRun();
++    if (run > 0)
++        target = qMax(target, run + kItemTextInset + kItemIconInset);
++    // ④ 上限 = 光标所在屏的可用宽度 - 16(比屏幕还宽 = 换个方向看不全)
++    const QRect ss = currentScreenGeometry();
++    if (ss.isValid())
++        target = qMin(target, qMax(ss.width() - 16, 120));
++    m_policyViewWidth = qMax(target, 1);
++
++    m_view->setWordWrap(true);
++    reflowItemsForPolicy();
++    m_view->setMinimumWidth(m_policyViewWidth);
++    adjustViewSize(QPoint(), MenuAnimationType::None);
++    adjustSize();
++    return m_policyViewWidth;
++}
++
+ void ComboBoxMenu::showEvent(QShowEvent *e) {
+     QWidget::showEvent(e);
+     // qf 的 RoundMenu 是 QMenu(focusPolicy NoFocus),按键由弹层窗口自己收 —— 这里保持
+     // 同样的路由:容器是弹层窗口,焦点控件为空时按键直接落到容器(见 keyPressEvent)。
+     m_view->setAttribute(Qt::WA_UnderMouse, true);
+     m_closedEmitted = false;
+@@ -670,32 +798,43 @@ void ComboBoxMenu::animateAndShow(const QPoint &pos, MenuAnimationType aniType)
+             });
+     posAni->start();
+ }
+ 
+ void ComboBoxMenu::exec(const QPoint &pos, MenuAnimationType aniType) {
+     // python combo_box.py:553-556 ComboBoxMenu.exec
++    if (m_policyViewWidth < 0)   // 直接调 exec 的调用方也走同一套宽度规矩
++        applyHostWidthPolicy(parentWidget(), m_policySideMargin);
+     adjustViewSize(pos, aniType);
+     adjustSize();
+     animateAndShow(pos, aniType);
+     show();
+ }
+ 
+ void ComboBoxMenu::popup() {
+-    // 兼容既有调用(EditableComboBox / ModelComboBox):父控件下方居中,
+-    // 判定逻辑同 python ComboBoxBase._showComboMenu(combo_box.py:325-351)
++    // 兼容既有调用(EditableComboBox / ModelComboBox):弹层贴着宿主控件那一行展开,
++    // 上下判定逻辑同 python ComboBoxBase._showComboMenu(combo_box.py:325-351),
++    // 宽度走全局规矩(applyHostWidthPolicy:铺满宿主窗口,长条目换行)。
+     QWidget *owner = parentWidget();
+     if (!owner || count() == 0)
+         return;
+-    if (m_view->width() < owner->width()) {   // combo_box.py:325-327
++    applyHostWidthPolicy(owner, m_policySideMargin);   // ★ 先定宽度,后面全按它算
++    if (m_view->width() < owner->width()) {   // combo_box.py:325-327(下拉框比窗口还宽时的兜底)
+         m_view->setMinimumWidth(owner->width());
+         adjustSize();
+     }
+     if (m_defaultIndex >= 0)                  // combo_box.py:335-336 setDefaultAction
+         setDefaultIndex(m_defaultIndex);
+-    const int x = negHalf(width()) + layout()->contentsMargins().left()
+-                  + owner->width() / 2;       // combo_box.py:339
++    // x:面板左缘 = 宿主**窗口**左缘 + sideMargin —— 弹层横贯窗口,不再"以下拉框为圆心"
++    // (原来的 combo_box.py:339 那套居中口径只在拿不到顶层窗口时留着兜底)。
++    QWidget *top = owner->window();
++    int x = negHalf(width()) + layout()->contentsMargins().left()
++            + owner->width() / 2;             // combo_box.py:339
++    if (top != nullptr && top != owner) {
++        const QPoint winInOwner = owner->mapFromGlobal(top->mapToGlobal(QPoint(0, 0)));
++        x = winInOwner.x() + m_policySideMargin;
++    }
+     const QPoint pd = owner->mapToGlobal(QPoint(x, owner->height()));
+     const QPoint pu = owner->mapToGlobal(QPoint(x, 0));
+     const int hd = heightForAnimation(pd, MenuAnimationType::DropDown);   // :341
+     const int hu = heightForAnimation(pu, MenuAnimationType::PullUp);     // :344
+     if (hd >= hu)
+         exec(pd, MenuAnimationType::DropDown);                            // :347-348
+diff --git a/src/fluent/fluent_setting_cards.cpp b/src/fluent/fluent_setting_cards.cpp
+index ae8d2ba..d5acfc7 100644
+--- a/src/fluent/fluent_setting_cards.cpp
++++ b/src/fluent/fluent_setting_cards.cpp
+@@ -1,8 +1,9 @@
+ #include "fluent_setting_cards.h"
+ 
++#include <QAbstractItemView>
+ #include <QColorDialog>
+ #include <QCursor>
+ #include <QFontMetrics>
+ #include <QGuiApplication>
+ #include <QScreen>
+ #include <QHBoxLayout>
+@@ -201,12 +202,23 @@ ComboBox::ComboBox(QWidget *parent) : QComboBox(parent) {
+     fluent::FluentStyle::instance()->install(this, "combo_box");
+     // python ComboBox.__init__:382 setFont(self) → 14px
+     setFont(fluent::appFont(14));
+     // 原生弹层(QComboBox 的 QListView/容器)自 2026-09 起**不再使用**:
+     // 弹出层是 qf 原版 ComboBoxMenu(见 showPopup(),Qt 的原生弹出路径一次都不会走到),
+     // 所以这里不再给它铺滚动条/委托/主题订阅 —— 少一份会误导维护者的死代码。
++    //
++    // 但"弹层宽度铺满窗口、文字不省略"这条规矩要**两条路径都写着同一句话**(用户 2026-09-27):
++    // 真正生效的宽度在 ComboBoxMenu::applyHostWidthPolicy(见下面 showPopup),这里把同一条
++    // 规矩铺到 Qt 自己的 view() 上 —— 哪天有人不覆盖 showPopup 直接 new 一个 QComboBox,
++    // 弹层也不会退回"窄长方形 + 省略号"。
++    if (QAbstractItemView *v = view()) {          // Qt6:view() 返回 QAbstractItemView*
++        v->setTextElideMode(Qt::ElideNone);
++        v->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++        if (QListView *list = qobject_cast<QListView *>(v))   // setWordWrap 只在 QListView 上
++            list->setWordWrap(true);
++    }
+ }
+ 
+ // qf 度量算法(取证:Python 实测 ComboBox sizeHint == minimumSizeHint == 156x32,
+ // 字体 pixelSize=14 / fm.height()=19 / 当前文本宽 112):
+ //   combo_box.qss:1-11  ComboBox { padding: 5px 31px 6px 11px; border: 1px }
+ //   → width  = fm.horizontalAdvance(当前文本) + 11(左) + 31(右) + 2(边框) = 文本宽 + 44
+@@ -267,44 +279,18 @@ void ComboBox::showPopup() {
+     connect(menu, &QObject::destroyed, this, [this, menu] {
+         if (m_menu == menu)
+             m_menu = nullptr;
+     });
+ 
+     menu->setMaxVisibleItems(m_maxVisibleItems);              // :329
+-    // ★ 弹层宽度 = max(下拉框自身宽度, **最宽那一条的文字** + 装饰)。
+-    //
+-    // 为什么改(用户报障原文):"设置很多下拉菜单都显示不全文字,完全没有任何横向压缩必要"。
+-    // 实测:设置页「版本下载源」的弹层只有 **122px** 宽,而里面"智能（自动选更快的源）"这条
+-    // 需要约 150px,于是长条目被省略号截掉 —— 根因是下面那句只把弹层顶到"下拉框自身宽度"
+-    // (qf combo_box.py:325-327 的原样照搬):**当前选中项短、别的项长**时就不够了。
+-    // 用户要的是"文字必须完整",所以这里按**最宽条目**算宽度。
+-    // 装饰宽度 44 = 左侧勾选/图标位 + 右侧内边距 + 边框(与 ComboBox 自身 qss 盒同口径),
+-    // 再加 8px 余量,免得某些字体下刚好卡边界。
+-    {
+-        const QFontMetrics fm(font());
+-        int widest = 0;
+-        for (int i = 0; i < count(); ++i)
+-            widest = std::max(widest, fm.horizontalAdvance(itemText(i)));
+-        int needed = widest + 52;
+-        // 但**不能顶破屏幕**:设置页里有一项是 Java 可执行文件路径,实测文本宽 1316px,
+-        // 照字面走会得到一个比屏幕还宽的弹层(安卓逻辑宽只有 1200),那等于换个方向看不全。
+-        // 上限 = 光标所在屏的可用宽度 - 16(留一点边),超长路径仍然省略号(这种情况用户看的是路径,
+-        // 弹层给不了全部 —— 真正的解法是把路径显示成可复制/可编辑的控件,不在弹层宽度这一层)。
+-        const QScreen *screenAtCursor = QGuiApplication::screenAt(QCursor::pos());
+-        const QScreen *target = screenAtCursor != nullptr ? screenAtCursor : QGuiApplication::primaryScreen();
+-        if (target != nullptr)
+-            needed = std::min(needed, target->availableGeometry().width() - 16);
+-        if (menu->view()->minimumWidth() < needed) {
+-            menu->view()->setMinimumWidth(needed);
+-            menu->adjustSize();
+-        }
+-        if (qEnvironmentVariableIsSet("SXCL_MENU_TRACE"))
+-            std::fprintf(stderr, "[sxcl-menu] items=%d widest=%d combo=%d menu=%dx%d\n", count(),
+-                         widest, width(), menu->width(), menu->height());
+-    }
+-    if (menu->view()->width() < width()) {                    // :325-327
++    // ★ 弹层宽度:一条全局规矩,实现在控件层 ComboBoxMenu::applyHostWidthPolicy(见
++    //   patches/libqf/README.md「补丁 3」)。这里只把宿主控件交给它 —— 每个页面各写一遍宽度
++    //   算法正是这次要收敛掉的东西:以前这里是"最宽那一条文字 + 52",qf 原版是"下拉框自身宽度",
++    //   两边都不对(用户 2026-09-27:弹层要铺满窗口,放不下换行)。
++    menu->applyHostWidthPolicy(this);                         // 用户 2026-09-27 的规矩
++    if (menu->view()->width() < width()) {                    // :325-327(下拉框比窗口还宽时兜底)
+         menu->view()->setMinimumWidth(width());
+         menu->adjustSize();
+     }
+     if (currentIndex() >= 0)
+         menu->setDefaultIndex(currentIndex());                // :335-336
+ 
+diff --git a/src/fluent/fluent_input.h b/src/fluent/fluent_input.h
+index 49f54b5..5e1e942 100644
+--- a/src/fluent/fluent_input.h
++++ b/src/fluent/fluent_input.h
+@@ -9,20 +9,25 @@
+ #include <QTextEdit>
+ #include <QToolButton>
+ 
+ #include "fluent_menu.h"
+ 
+ class QPainter;
++class QCompleter;
+ 
+ // 输入框(自带清除按钮,按钮样式走 line_edit.qss 的 #lineEditButton)
+ // 聚焦时在底部绘制主题色强调弧(python LineEdit.paintEvent 复刻)
+ class LineEdit : public QLineEdit {
+     Q_OBJECT
+ public:
+     explicit LineEdit(QWidget *parent = nullptr);
+     void setClearButtonEnabled(bool on);
++    // ── 补全弹层也是"下拉弹层"(用户 2026-09-27:「以后你就给我显示完整个窗口的宽度」)──
++    // 覆盖 QLineEdit::setCompleter:装完补全器顺手把同一条宽度规矩铺到它的弹层上
++    // (宽度 = 宿主窗口可用宽度、文字不省略)。用 LineEdit 的页面不必各写一遍。
++    void setCompleter(QCompleter *completer);
+     bool isClearButtonEnabled() const { return m_clearOn; }
+     void setClearButtonIcon(const QIcon &icon);
+     // python focusedBorderColor(自定义亮/暗色;未设置时回退主题色)
+     void setCustomFocusedBorderColor(const QColor &light, const QColor &dark);
+     QColor focusedBorderColor() const;
+ 
+@@ -37,12 +42,13 @@ protected:
+         return m_clearBtn && m_clearBtn->isVisible() ? m_clearBtn->width() + 6
+                                                      : 0;
+     }
+ 
+ private:
+     QToolButton *m_clearBtn = nullptr;
++    QObject *m_completerPolicy = nullptr; // 补全弹层的宽度规矩(见 setCompleter)
+     bool m_clearOn = true;
+     QColor m_lightFocusBorder; // invalid = 主题色
+     QColor m_darkFocusBorder;
+ };
+ 
+ // 输入框内小按钮:透明底 + 居中图标(python LineEditButton;图标自绘,
+diff --git a/src/fluent/fluent_input.cpp b/src/fluent/fluent_input.cpp
+index 15c8e40..c08a99b 100644
+--- a/src/fluent/fluent_input.cpp
++++ b/src/fluent/fluent_input.cpp
+@@ -1,15 +1,21 @@
+ #include "fluent_input.h"
+ 
++#include <QAbstractItemView>
+ #include <QApplication>
++#include <QCompleter>
+ #include <QEvent>
++#include <QGuiApplication>
+ #include <QIcon>
++#include <QListView>
+ #include <QMouseEvent>
+ #include <QPainter>
+ #include <QPainterPath>
++#include <QPointer>
+ #include <QResizeEvent>
++#include <QScreen>
+ #include <QStyledItemDelegate>
+ #include <QToolButton>
+ 
+ #include "fluent_icon.h"
+ #include "fluent_scroll.h"
+ #include "fluent_style.h"
+@@ -45,12 +51,81 @@ void LineEdit::ensureClearButton() {
+ void LineEdit::setClearButtonEnabled(bool on) {
+     m_clearOn = on;
+     if (m_clearBtn)
+         updateClearButtonState();
+ }
+ 
++// ================================================================
++// 补全弹层:与下拉弹层同一条宽度规矩(用户 2026-09-27)
++// ================================================================
++namespace {
++
++// python/qf 的下拉弹层宽度规矩在 ComboBoxMenu::applyHostWidthPolicy(fluent_menu.cpp);
++// 补全弹层是 QCompleter 自己的 QListView(Qt 在 show 之前 setGeometry),所以规矩装在
++// Show 事件上:真正显示前改成"宿主窗口可用宽度 + 左缘对齐窗口",条目照样换行、不省略。
++class CompleterPopupPolicy : public QObject {
++public:
++    CompleterPopupPolicy(QWidget *host, QAbstractItemView *popup)
++        : QObject(popup), m_host(host), m_popup(popup) {}
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override {
++        if (event->type() == QEvent::Show && m_host != nullptr && m_popup != nullptr)
++            widenToHostWindow();
++        return QObject::eventFilter(watched, event);
++    }
++
++private:
++    void widenToHostWindow() {
++        QWidget *top = m_host->window() != nullptr ? m_host->window() : m_host.data();
++        const int winW = top->width();
++        if (winW <= 0)
++            return;
++        const QScreen *screen = m_popup->screen() != nullptr ? m_popup->screen()
++                                                            : QGuiApplication::primaryScreen();
++        int width = qMax(winW - 24, 160);   // 铺满宿主窗口,两侧各留 12
++        if (screen != nullptr) {
++            const QRect avail = screen->availableGeometry();
++            width = qMin(width, qMax(avail.width() - 16, 160));
++        }
++        int x = top->mapToGlobal(QPoint(0, 0)).x() + 12;
++        if (screen != nullptr) {
++            const QRect avail = screen->availableGeometry();
++            x = qMin(x, avail.right() + 1 - width);
++            x = qMax(x, avail.left());
++        }
++        const QRect geo = m_popup->geometry();
++        m_popup->setGeometry(x, geo.y(), width, geo.height());
++    }
++
++    QPointer<QWidget> m_host;
++    QPointer<QAbstractItemView> m_popup;
++};
++
++} // namespace
++
++void LineEdit::setCompleter(QCompleter *completer) {
++    QLineEdit::setCompleter(completer);
++    if (m_completerPolicy != nullptr) {
++        m_completerPolicy->deleteLater();
++        m_completerPolicy = nullptr;
++    }
++    if (completer == nullptr)
++        return;
++    QAbstractItemView *popup = completer->popup();
++    if (popup == nullptr)
++        return;
++    // 同一条规矩在补全弹层上的形态:不省略、不横向压缩(宽度由 Show 事件对齐窗口)
++    popup->setTextElideMode(Qt::ElideNone);
++    popup->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++    if (QListView *list = qobject_cast<QListView *>(popup))   // setWordWrap 只在 QListView 上
++        list->setWordWrap(true);
++    m_completerPolicy = new CompleterPopupPolicy(this, popup);
++    popup->installEventFilter(m_completerPolicy);
++}
++
+ void LineEdit::setClearButtonIcon(const QIcon &icon) {
+     if (m_clearBtn)
+         m_clearBtn->setIcon(icon);
+ }
+ 
+ void LineEdit::updateClearButtonState() {
