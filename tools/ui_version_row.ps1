@@ -1,4 +1,4 @@
-﻿# (C) Silent X Craft Launcher -- "version row" acceptance (user 2026-09-26, three points).
+# (C) Silent X Craft Launcher -- "version row" acceptance (user 2026-09-26, three points).
 #
 # What this proves, per run (every number is measured on this machine, nothing is guessed):
 #
@@ -207,7 +207,9 @@ function Get-IconStats([string]$png, [int]$x, [int]$y, [int]$w, [int]$h, [double
 function Invoke-RowRun([string]$tag, [string]$route, [string]$theme) {
   $env:SXCL_UI_SETTINGS = $ini
   $env:SXCL_UI_GAME_DIR = $game
-  $env:SXCL_UI_WINDOW = '1100x750'
+  # 1100x900: the versions route has to show all five rows at once (the painted column has no
+  # widget to scroll to), and the screen here is 2560x1440 so the window fits.
+  $env:SXCL_UI_WINDOW = '1100x900'
   $env:SXCL_UI_ROUTE = $route
   $env:SXCL_UI_THEME = $theme
   $env:SXCL_UI_MANIFEST = $manifest
@@ -222,6 +224,13 @@ function Invoke-RowRun([string]$tag, [string]$route, [string]$theme) {
   Start-Process -FilePath $exe -RedirectStandardOutput $out -RedirectStandardError $err -Wait | Out-Null
   $lines = @(Get-Content $out -Encoding utf8 -ErrorAction SilentlyContinue) + @(Get-Content $err -Encoding utf8 -ErrorAction SilentlyContinue)
   return @{ png = $png; lines = $lines }
+}
+# which page is on screen when the dump was taken (the dump's own root line says it)
+function Get-CurrentPage($lines) {
+  foreach ($line in $lines) {
+    if ($line -match '^ScrollArea #sxclPage_(\w+)') { return $Matches[1] }
+  }
+  return ''
 }
 function Get-Rows($lines, [string]$pattern) {
   $rows = @{}
@@ -290,14 +299,25 @@ $selectRows = @{}
 $selectShot = @{}
 $selectLines = @{}
 $cardInfo = @{}
+$cardInfoByTheme = @{}
 foreach ($theme in @('dark','light')) {
   $case = 'select/' + $theme
   $run = Invoke-RowRun ('select_' + $theme) 'select' $theme
+  $page = Get-CurrentPage $run.lines
+  if ($page -ne 'select') {
+    # A stray click from outside (this session drives a real window) can send the window
+    # somewhere else; that is not a product failure, so retry once and say so.
+    Write-Output ('  NOTE the window was on page "' + $page + '" instead of select; re-running once')
+    $run = Invoke-RowRun ('select_' + $theme) 'select' $theme
+    $page = Get-CurrentPage $run.lines
+  }
+  if ($page -ne 'select') { Write-Output ('  -> FAIL the select page is not the current page (got "' + $page + '")'); $fail++ }
   $lines = $run.lines
   $selectLines[$theme] = $lines
   $selectShot[$theme] = $run.png
   $pattern = 'version-row select: id=(?<id>\S+) state=(?<state>\S+) launchable=(?<launchable>\d) problem=(?<problem>\S+) base="(?<base>[^"]*)" baseFrom=(?<baseFrom>\S+) coreReliable=(?<coreReliable>\d) info="(?<info>[^"]*)" note="(?<note>[^"]*)" action="(?<action>[^"]*)" path="(?<path>[^"]*)" tip="(?<tip>[^"]*)"'
   $rows = Get-Rows $lines $pattern
+  if ($theme -eq 'dark') { $selectRows = $rows }
   Write-Output ''
   Write-Output ('== ' + $case + ': evidence lines (one per row) ==')
   foreach ($id in $ids) {
@@ -327,11 +347,13 @@ foreach ($theme in @('dark','light')) {
       if ($r.info -ne '') { Write-Output ('    -> FAIL broken row still writes an info line: "' + $r.info + '"'); $fail++ }
       if ($r.note -eq '' -or $r.action -eq '') { Write-Output '    -> FAIL broken row is missing its sentence or its action'; $fail++ }
       if ($inline.Length -gt 20) { Write-Output ('    -> FAIL inline text is ' + $inline.Length + ' chars (cap 20): "' + $inline + '"'); $fail++ }
-      foreach ($ch in @('\', '/', '(', ')', '(', ')', '.')) {
-        if ($inline.Contains($ch) -and $ch -ne '.') { Write-Output ('    -> FAIL inline text contains "' + $ch + '": ' + $inline); $fail++ }
+      # one sentence = no full stop / no semicolon; and a "hint" must not smuggle in a path,
+      # parentheses or jargon punctuation
+      foreach ($ch in @('\', '/', '(', ')', (C @(0xFF08)), (C @(0xFF09)), (C @(0x3002)), (C @(0xFF1B)), (C @(0xFF1A)))) {
+        if ($inline.Contains($ch)) { Write-Output ('    -> FAIL inline text contains "' + $ch + '": ' + $inline); $fail++ }
       }
-      if ($inline.Contains((C @(0x3002)))) { Write-Output '    -> FAIL inline text has a full stop (more than one sentence)'; $fail++ }
-      if ($r.tip -notlike ('*' + $r.path + '*')) { Write-Output ('    -> FAIL the tip does not carry the path: ' + $r.tip); $fail++ }
+      $nativePath = $r.path.Replace('/', '\')
+      if ($r.tip -notlike ('*' + $nativePath + '*')) { Write-Output ('    -> FAIL the tip does not carry the path: ' + $r.tip); $fail++ }
       if ($r.tip.Length -le $inline.Length) { Write-Output '    -> FAIL the tip is not richer than the inline text'; $fail++ }
     } else {
       if ($r.note -ne '' -or $r.action -ne '') { Write-Output ('    -> FAIL launchable row still carries a problem note/action: "' + $r.note + '" "' + $r.action + '"'); $fail++ }
@@ -394,19 +416,23 @@ foreach ($theme in @('dark','light')) {
     if ($infoLabel -ne $null) { Write-Output ('    inline info label: "' + $infoLabel.text + '"') }
     $cardInfo[$id] = @{ icon = $icon; title = $title; note = $note; action = $action; info = $infoLabel; cx = $cx; cy = $cy }
   }
+  $cardInfoByTheme[$theme] = $cardInfo
 }
 
-# ---- screen level (dark run): every icon box must carry its own colours ----
+# ---- screen level (both themes): every icon box must carry its own colours ----
+foreach ($theme in @('dark','light')) {
 Write-Output ''
-Write-Output '== select/dark: pixel features inside each icon box =='
-$png = $selectShot['dark']
-if (-not (Test-Path $png)) {
-  Write-Output ('  -> FAIL screenshot missing: ' + $png); $fail++
-} else {
+  Write-Output ('== select/' + $theme + ': pixel features inside each icon box ==')
+  $png = $selectShot[$theme]
+  $cardInfo = $cardInfoByTheme[$theme]
+  if (-not (Test-Path $png)) {
+    Write-Output ('  -> FAIL screenshot missing: ' + $png); $fail++
+    continue
+  }
   $bi = New-Object System.Drawing.Bitmap($png)
   $dpr = [math]::Round($bi.Width / 1100.0, 2); $shotW = $bi.Width
   $bi.Dispose()
-  Write-Output ('  shot ' + $shotW + 'x' + ([int]($shotW * 750.0 / 1100.0)) + ' dpr=' + $dpr)
+  Write-Output ('  shot ' + $shotW + 'x' + ([int]($shotW * 900.0 / 1100.0)) + ' dpr=' + $dpr)
   $bmpRef = New-Object System.Drawing.Bitmap($png)
   foreach ($id in $ids) {
     if (-not $cardInfo.ContainsKey($id)) { continue }
@@ -428,24 +454,63 @@ if (-not (Test-Path $png)) {
   $bmpRef.Dispose()
 }
 
+
 # =====================================================================================
 # B (continued) -- route "versions": the same helper feeds the painted rows
 # =====================================================================================
 $case = 'versions/dark'
 $run = Invoke-RowRun 'versions_dark' 'versions' 'dark'
+$page = Get-CurrentPage $run.lines
+if ($page -ne 'versions') {
+  Write-Output ('  NOTE the window was on page "' + $page + '" instead of versions; re-running once')
+  $run = Invoke-RowRun 'versions_dark' 'versions' 'dark'
+  $page = Get-CurrentPage $run.lines
+}
+if ($page -ne 'versions') { Write-Output ('  -> FAIL the versions page is not the current page (got "' + $page + '")'); $fail++ }
 $lines = $run.lines
-$pattern = 'version-row page: id=(?<id>\S+) state=(?<state>\S+) iconRect=(?<x>\d+),(?<y>\d+),(?<w>\d+)x(?<h>\d+) chip="(?<chip>[^"]*)" tip="(?<tip>[^"]*)" vis=(?<vis>\d) win=(?<winw>\d+)x(?<winh>\d+)'
-$pageRows = @{}
+$pattern = 'version-row page: id=(?<id>\S+) state=(?<state>\S+) iconRect=(?<x>\d+),(?<y>\d+),(?<w>\d+)x(?<h>\d+) chip="(?<chip>[^"]*)" tip="(?<tip>[^"]*)" vis=(?<vis>\d) inView=(?<inview>\d) list=(?<lx>\d+),(?<ly>\d+),(?<lw>\d+)x(?<lh>\d+) win=(?<winw>\d+)x(?<winh>\d+)'
+# the dump's own geometry of the painted list, taken at the very same moment as the screenshot
+$dumpList = $null
+$lm = [regex]::Match(($lines -join "`n"), '#versionList \((\d+),(\d+) (\d+)x(\d+)\)')
+if ($lm.Success) {
+  $dumpList = @([int]$lm.Groups[1].Value, [int]$lm.Groups[2].Value, [int]$lm.Groups[3].Value, [int]$lm.Groups[4].Value)
+  Write-Output ('  dump #versionList = ' + ($dumpList -join ','))
+}
+if ($dumpList -eq $null) { Write-Output '  -> FAIL the dump has no #versionList line'; $fail++ }
+$pageLines = @{}
 foreach ($line in $lines) {
   $m = [regex]::Match($line, $pattern)
   if (-not $m.Success) { continue }
   if ($m.Groups['vis'].Value -ne '1') { continue }  # hidden copies (inside the download page) do not count
-  $pageRows[$m.Groups['id'].Value] = @{
+  if (-not $pageLines.ContainsKey($m.Groups['id'].Value)) { $pageLines[$m.Groups['id'].Value] = @() }
+  $pageLines[$m.Groups['id'].Value] += @{
     state = $m.Groups['state'].Value; x = [int]$m.Groups['x'].Value; y = [int]$m.Groups['y'].Value
     w = [int]$m.Groups['w'].Value; h = [int]$m.Groups['h'].Value
     chip = $m.Groups['chip'].Value; tip = $m.Groups['tip'].Value
+    inview = $m.Groups['inview'].Value
+    list = @([int]$m.Groups['lx'].Value, [int]$m.Groups['ly'].Value, [int]$m.Groups['lw'].Value, [int]$m.Groups['lh'].Value)
     winw = [int]$m.Groups['winw'].Value; winh = [int]$m.Groups['winh'].Value
   }
+}
+# keep the reading whose list geometry matches the dump (a stale pre-layout reading is not a fact)
+$pageRows = @{}
+foreach ($id in $pageLines.Keys) {
+  $pick = $null
+  foreach ($entry in $pageLines[$id]) {
+    if ($dumpList -ne $null -and ($entry.list -join ',') -eq ($dumpList -join ',')) { $pick = $entry }
+  }
+  if ($pick -eq $null) {
+    Write-Output ('  -> FAIL ' + $id + ': none of the ' + $pageLines[$id].Count + ' readings matches the dump list geometry (' + (($pageLines[$id][-1].list) -join ',') + ' vs ' + $(if ($dumpList -ne $null) { $dumpList -join ',' } else { '-' }) + ')')
+    $fail++
+    $pick = $pageLines[$id][-1]
+  }
+  # also make sure an icon slot really sits inside the list
+  $inside = ($pick.x -ge $pick.list[0]) -and ($pick.y -ge $pick.list[1]) -and (($pick.x + $pick.w) -le ($pick.list[0] + $pick.list[2])) -and (($pick.y + $pick.h) -le ($pick.list[1] + $pick.list[3]))
+  if (-not $inside) {
+    Write-Output ('  -> FAIL ' + $id + ': icon slot ' + $pick.x + ',' + $pick.y + ' is outside the list rect ' + ($pick.list -join ','))
+    $fail++
+  }
+  $pageRows[$id] = $pick
 }
 Write-Output ''
 Write-Output ('== ' + $case + ': evidence lines (painted rows, vis=1 only) ==')
@@ -460,6 +525,7 @@ foreach ($id in $ids) {
   Write-Output ('  ' + $id + ': icon=' + $p.state + ' iconRect=' + $p.x + ',' + $p.y + ' ' + $p.w + 'x' + $p.h + ' chip="' + $p.chip + '" tip="' + $p.tip + '"')
   if ($p.state -ne $want) { Write-Output ('    -> FAIL icon state ' + $p.state + ', expected ' + $want); $fail++ }
   if ($p.w -ne 20 -or $p.h -ne 20) { Write-Output ('    -> FAIL icon slot ' + $p.w + 'x' + $p.h + ' (want 20x20)'); $fail++ }
+  if ($p.inview -ne '1') { Write-Output '    -> FAIL the row is scrolled out of view (cannot be measured)'; $fail++ }
   if ($p.x -lt 0 -or $p.y -lt 0 -or ($p.x + $p.w) -gt $p.winw -or ($p.y + $p.h) -gt $p.winh) {
     Write-Output '    -> FAIL icon slot is outside the window'; $fail++
   }
@@ -547,7 +613,7 @@ foreach ($id in @('314159','271828')) {
   Write-Output ('  ' + $id + ': before="' + $b + '" (' + $b.Length + ')  after="' + $p.chip + '" (' + $p.chip.Length + ')')
   if ($p.chip -eq $b) { Write-Output '    -> FAIL the chip text did not change'; $fail++ }
 }
-Write-Output ('inline text cap used by this script: problem rows <= 20 chars (max measured ' + $maxInline + '), info rows <= 32 chars')
+Write-Output ('inline text cap used by this script: problem rows (note+action) <= 20 chars, info rows <= 32 chars; max measured here = ' + $maxInline + ' chars')
 
 Write-Output ''
 Write-Output ('product files: ' + $work)

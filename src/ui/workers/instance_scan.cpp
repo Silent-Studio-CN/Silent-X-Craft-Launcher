@@ -123,7 +123,10 @@ VersionRowInfo versionRowInfo(const InstalledInstance &inst, const QString &game
         /* ② 能启动的行:只说"这是什么版本"。以前这里还写"有 jar / 无自己的 jar" ——
          *    对玩家没用("jar"是什么?正常版本来就不该有/可以有,取决于装法),删。
          *    summary 本身就是"原版"时不重复写第二遍(以前是"原版 · 原版 1.12.2")。 */
-        if (summary.isEmpty() || summary == QLatin1String("原版")) {
+        // 注意:这里必须用 QStringLiteral —— QLatin1String 会把 UTF-8 的"原版"按字节拆成
+        // 6 个 Latin-1 字符,与核心库给的 QString 永远不相等(实测:行内会变成
+        // "原版 · 原版 1.12.2",正是用户点名要删的那种重复)。
+        if (summary.isEmpty() || summary == QStringLiteral("原版")) {
             out.info = out.base.isEmpty() ? QString() : QStringLiteral("原版 %1").arg(out.base);
         } else {
             out.info = out.base.isEmpty() ? summary

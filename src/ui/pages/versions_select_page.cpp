@@ -573,8 +573,10 @@ private:
                     font.setWeight(QFont::DemiBold);
                     title->setFont(font);
                 }
-                // 长版本名**省略**而不是把卡片撑宽（自适应：横向滚动条一律不出）
-                title->setToolTip(name);
+                /* 长版本名**省略**而不是把卡片撑宽（自适应：横向滚动条一律不出）。
+                 * 起不来的那一行把 tooltip 给**同一份详情**（名字 + 完整原因 + 位置）——
+                 * 标题是最常被悬停的地方，只写个名字的话，详细原因就还是"看不到"。 */
+                title->setToolTip(inst.launchable ? name : row.tip);
                 text->addWidget(title);
 
                 /* 小字那一行:**能启动的**只报"这是什么版本";**不能启动的**只报

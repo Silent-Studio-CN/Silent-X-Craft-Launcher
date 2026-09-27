@@ -1115,38 +1115,53 @@ private:
             return;
         const QVector<GameVersion> &items = m_model->items();
         const QPoint origin = m_list->viewport()->mapTo(win, QPoint(0, 0));
+        const QScrollBar *bar = m_list->verticalScrollBar();
+        const int scroll = (bar != nullptr) ? bar->value() : 0;
+        const QRect viewportRect = m_list->viewport()->rect();
         for (int i = 0; i < items.size(); ++i) {
             const QString state = m_model->stateAt(i);
             if (state.isEmpty())
                 continue; // 没装过的行:这一列留白,没有状态可报
-            const QRect rowRect = m_list->visualRect(m_model->index(i, 0)).adjusted(0, 2, 0, -2);
-            if (rowRect.isEmpty())
-                continue;
+            /* 行矩形**自己算**,不问 visualRect:这一页的模型刚 setVersions 完、视图的布局
+             * 还没跑,visualRect 会给出上一版布局的坐标(实测整体偏了一行的距离,取证脚本
+             * 照它去截图上数像素会数到别的行)。判据只有一条 —— 委托就是按
+             * (0, i*行高 - 滚动量, 视口宽, 行高) 画的(setUniformItemSizes(true) + spacing 0)。 */
             const int icon = VersionRowDelegate::ICON; // 与委托同一个常量,不写第二遍
-            const QRect slot(origin.x() + rowRect.left() + VersionRowDelegate::ICON_LEFT,
-                             origin.y() + rowRect.top() + (rowRect.height() - icon) / 2, icon,
-                             icon);
+            const QRect rowRect(0, i * VersionRowDelegate::ROW_HEIGHT - scroll, viewportRect.width(),
+                                VersionRowDelegate::ROW_HEIGHT);
+            const QRect rowDraw = rowRect.adjusted(0, 2, 0, -2); // 委托里的 option.rect
+            const QRect slot(origin.x() + rowDraw.left() + VersionRowDelegate::ICON_LEFT,
+                             origin.y() + rowDraw.top() + (rowDraw.height() - icon) / 2, icon, icon);
             QString chip = m_model->problemAt(i);
             QString tip = m_model->detailAt(i);
             chip.replace(QLatin1Char('\n'), QStringLiteral(" | "));
             tip.replace(QLatin1Char('\n'), QStringLiteral(" | "));
             std::fprintf(stderr,
                          "[sxcl-ui] version-row page: id=%s state=%s iconRect=%d,%d,%dx%d "
-                         "chip=\"%s\" tip=\"%s\" vis=%d win=%dx%d\n",
+                         "chip=\"%s\" tip=\"%s\" vis=%d inView=%d list=%d,%d,%dx%d win=%dx%d\n",
                          items.at(i).id.toUtf8().constData(), state.toUtf8().constData(),
                          slot.x(), slot.y(), slot.width(), slot.height(),
                          chip.toUtf8().constData(), tip.toUtf8().constData(),
-                         (m_list->isVisible() && win->isVisible()) ? 1 : 0, win->width(),
-                         win->height());
+                         (m_list->isVisible() && win->isVisible()) ? 1 : 0,
+                         viewportRect.intersects(rowDraw) ? 1 : 0,
+                         // 列表自己的窗口坐标:验收脚本拿它和**dump 里同一时刻**的 #versionList
+                         // 对齐 —— 对不上就说明这组坐标是布局跑之前的旧值(那是假读数)
+                         m_list->mapTo(win, QPoint(0, 0)).x(),
+                         m_list->mapTo(win, QPoint(0, 0)).y(), m_list->width(), m_list->height(),
+                         win->width(), win->height());
         }
     }
 
-    /** 排一次取证(界面线程,下一拍打):showVersions 之后与这一份实例上屏时各排一次。 */
+    /** 排一次取证(界面线程,150ms 之后打):showVersions 之后与这一份实例上屏时各排一次。
+     *
+     * 为什么不是"下一拍"(singleShot(0)):模型刚换完时视图的**布局还没跑**(LayoutRequest
+     * 还在队列里),那时量到的 viewport 位置是上一版布局的 —— 实测整体偏了 118px,
+     * 取证脚本拿它去截图上数像素会数到空白。150ms 远小于抓图的 5s,不影响任何产品路径。 */
     void scheduleRowEvidence() {
         if (m_evidencePending)
             return;
         m_evidencePending = true;
-        QTimer::singleShot(0, this, [this] {
+        QTimer::singleShot(150, this, [this] {
             m_evidencePending = false;
             printRowEvidence();
         });
