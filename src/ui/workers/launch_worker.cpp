@@ -224,13 +224,13 @@ LaunchWorker::~LaunchWorker() {
 void LaunchWorker::start() {
     if (m_started.exchange(true))
         return;
-    // 与 install_worker 同一个坑:QThread 带 parent 时 moveToThread 会被 Qt 拒绝
-    // ("Cannot move objects with a parent"),run() 就还在界面线程里跑。线程对象由析构函数收尾。
+    // 与 install_worker 同一个坑:调用方是 new LaunchWorker(request, 页面) ——
+    // **带 parent 的对象**被 Qt 拒绝 moveToThread("Cannot move objects with a parent"),
+    // run() 就留在界面线程里跑(启动前的补全/校验把界面按住)。
+    // 现在**不搬家**:新线程里直接跑 run()(与 workers/mods_worker.cpp 同一个口径)。
     // 线程对象没有 parent,**由本类析构函数 delete**(不接 finished->deleteLater:
     // 那样析构里再 delete 会与排队的删除撞成二次释放)。
-    m_thread = new QThread();
-    moveToThread(m_thread);
-    connect(m_thread, &QThread::started, this, &LaunchWorker::run);
+    m_thread = QThread::create([this] { run(); });
     connect(m_thread, &QThread::finished, this, [this] { m_running.store(false); });
     m_thread->start();
 }

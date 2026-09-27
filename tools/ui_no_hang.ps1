@@ -1,4 +1,4 @@
-﻿# (C) Silent X Craft Launcher -- UI "no hang" acceptance.
+# (C) Silent X Craft Launcher -- UI "no hang" acceptance.
 #
 # Why: user report 2026-09-26 -- "launching the game, SXCL still shows Not Responding".
 # The shell keeps a hang watchdog (src/ui/crash_handler.cpp): if the GUI thread does not run
@@ -74,8 +74,16 @@ foreach ($route in $routes) {
   $shot = Join-Path $work ($route + '.png')
   Remove-Item -Force -ErrorAction SilentlyContinue $shot
   $env:SXCL_UI_SHOT = $shot
-  # no other acceptance hook may interfere with this run
-  Remove-Item Env:SXCL_UI_RAILS_TEST -ErrorAction SilentlyContinue
+  # no other acceptance hook may interfere with this run. Clearing only RAILS_TEST was not
+  # enough: when this script runs in the same shell right after another acceptance script,
+  # hooks that one set (e.g. SXCL_UI_WINCHECK=...;quit) leak into these runs and make the app
+  # quit on its own -- 5 s runs with no screenshot, which looks like a "NO-HANG: FAIL" that has
+  # nothing to do with hangs. Every hook this script does not own is cleared here.
+  foreach ($v in @('SXCL_UI_RAILS_TEST', 'SXCL_UI_WINCHECK', 'SXCL_UI_NAV', 'SXCL_UI_MODS_QUERY',
+                   'SXCL_UI_MODS_SOURCES', 'SXCL_UI_THEME_SWITCH', 'SXCL_UI_RESIZE',
+                   'SXCL_UI_AUTH_DIALOG', 'SXCL_UI_MANIFEST_URL', 'SXCL_UI_ROW_EVIDENCE')) {
+    Remove-Item ('Env:' + $v) -ErrorAction SilentlyContinue
+  }
 
   $before = Get-HangNames
   $out = Join-Path $work ($route + '.out.txt')

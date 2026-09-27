@@ -107,6 +107,21 @@ void pumpReply(QNetworkReply *reply, int maxWaitMs) {
 
 /* 把回复里已经到达的字节收进 pending,并在结束时置上 finished/ioError */
 void harvestReply(QtBody *b) {
+    /* 先问一句"设备还开着吗":回复底下就是那条 QSslSocket,对端把空闲连接关掉之后,Qt 的回复
+     * **既不发 finished 也不置 error**,而 readAll() 会一路读到**已经关掉的 socket** 上 ——
+     * 每读一次 Qt 就回一行 "QIODevice::read (QSslSocket): device not open" 并返回空,
+     * 我们的循环就空转、stderr 刷屏(现场日志里重复出现的那条;登录窗开着退出的现场也复现到 2 行)。
+     * 只在"回复还没结束 + 设备已经关了"这一种组合下提前收尾:**回复真结束了的正常收尾仍然走
+     * 下面这条路,把最后一批字节读干净 —— 不跳过任何数据**。
+     * 出口与 60 秒停滞看门狗同一个:报 IO 错误 = 这次尝试作废,引擎保留已下部分、
+     * 换路或原路续传,不丢进度。 */
+    if (!b->reply->isFinished() && !b->reply->isOpen()) {
+        sxcl_log_write(SXCL_LOG_WARN, "net", "%s -> 连接已关闭(读不出数据),放弃本次尝试",
+                       b->maskedUrl.constData());
+        b->ioError = true;
+        b->finished = true;
+        return;
+    }
     const int before = b->pending.size();
     b->pending += b->reply->readAll();
     if (b->pending.size() != before) {
@@ -769,6 +784,15 @@ public:
                 return;
             if (job->cancelled)
                 return;
+            /* 连接被对端掐了、回复又没结束:再读只会换来一行
+             * "QIODevice::read (QSslSocket): device not open" + 空数据 —— 如实按传输中断收尾,
+             * 不再空转刷屏(与直连路径 harvestReply 同一个判据)。 */
+            if (!reply->isFinished() && !reply->isOpen()) {
+                job->ioError = true;
+                job->finished = true;
+                job->cv.wakeAll();
+                return;
+            }
         }
         const QByteArray chunk = reply->readAll();
         if (!chunk.isEmpty()) {
@@ -906,7 +930,9 @@ public:
         QNetworkReply *reply = job->reply;
         if (reply == nullptr)
             return;
-        const QByteArray rest = reply->readAll();
+        /* 设备已经关掉的回复不要再读(Qt 每次都会回一行 "device not open" 并返回空)。
+         * 正常收尾时设备还开着,这一读照旧把最后一批字节拿干净 —— 不跳过任何数据。 */
+        const QByteArray rest = reply->isOpen() ? reply->readAll() : QByteArray();
         const QNetworkReply::NetworkError err = reply->error();
         const QVariant statusAttr = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
         bool ioError = false;
@@ -1135,6 +1161,17 @@ int qtRequestDirect(QtTransport *t, const sxcl_http_request *req, const QUrl &ur
     const int deadlineMs = req->timeout_ms > 0 ? int(req->timeout_ms) + 1000 : kDefaultTimeoutMs + 1000;
     int status = 0;
     for (;;) {
+        /* **取消必须能立刻收场**:这一段等在"响应头到达"之前(DNS/连接/TLS 阶段),而
+         * cancel_all 只 abort 已经登记 body 的请求(见 qtCancelAll)—— 登录/轮询这类
+         * 30 秒超时的请求一旦卡在这里,cancel() 就撤不掉它:调用方(AccountTask 等)只能等满超时,
+         * 退出路径于是被按住十几秒(现场:关掉登录窗退进程,进程多活 10 秒以上)。
+         * 出口与 qtRead 里的取消一致:返回 SXCL_NET_ERR_CANCELLED。
+         * 注:池路径不需要这一手 —— NetWorker::sweep() 每 120ms 扫一次 cancelled。 */
+        if (t->cancelled) {
+            reply->abort();
+            reply->deleteLater();
+            return SXCL_NET_ERR_CANCELLED;
+        }
         status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         /* 3xx 不是最终状态:Qt 正按 RedirectPolicy 继续跟。
          * 实测 BMCLAPI(镜像站)每个文件都先 302 到预签名 URL、再 200(共 2 跳);

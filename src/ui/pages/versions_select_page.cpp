@@ -99,6 +99,13 @@ const char *const kImportKey = "folder_import";
 constexpr int kMarkX = 2;
 constexpr int kMarkInset = 12;
 
+/* 逐行取证开关(SXCL_UI_ROW_EVIDENCE=1):下面那行 "version-row select:" 是给验收脚本
+ * 读的,默认一行都不打 —— 实例多的时候它就是界面线程上的一次停顿(与版本页同一个口径)。 */
+bool rowEvidenceWanted() {
+    static const bool on = qEnvironmentVariableIntValue("SXCL_UI_ROW_EVIDENCE") == 1;
+    return on;
+}
+
 QString normPath(const QString &path) {
     return QDir::cleanPath(QDir::fromNativeSeparators(path));
 }
@@ -805,19 +812,21 @@ private:
          * (与各页 logState 同一类通路)。tip 里的换行压成 " | ",免得破行。 */
         QString tipOneLine = row.tip;
         tipOneLine.replace(QLatin1Char('\n'), QStringLiteral(" | "));
-        std::fprintf(stderr,
-                     "[sxcl-ui] version-row select: id=%s state=%s launchable=%d "
-                     "problem=%s base=\"%s\" baseFrom=%s coreReliable=%d info=\"%s\" "
-                     "note=\"%s\" action=\"%s\" path=\"%s\" tip=\"%s\" group=%s order=%d\n",
-                     name.toUtf8().constData(), row.state.toUtf8().constData(),
-                     inst.launchable ? 1 : 0,
-                     sxcl_instance_problem_id(
-                         static_cast<sxcl_instance_problem>(inst.problemCode)),
-                     row.base.toUtf8().constData(), row.baseFrom.toUtf8().constData(),
-                     row.coreReliable ? 1 : 0, row.info.toUtf8().constData(),
-                     row.note.toUtf8().constData(), row.action.toUtf8().constData(),
-                     row.path.toUtf8().constData(), tipOneLine.toUtf8().constData(),
-                     group.toUtf8().constData(), order);
+        if (rowEvidenceWanted()) {
+            std::fprintf(stderr,
+                         "[sxcl-ui] version-row select: id=%s state=%s launchable=%d "
+                         "problem=%s base=\"%s\" baseFrom=%s coreReliable=%d info=\"%s\" "
+                         "note=\"%s\" action=\"%s\" path=\"%s\" tip=\"%s\" group=%s order=%d\n",
+                         name.toUtf8().constData(), row.state.toUtf8().constData(),
+                         inst.launchable ? 1 : 0,
+                         sxcl_instance_problem_id(
+                             static_cast<sxcl_instance_problem>(inst.problemCode)),
+                         row.base.toUtf8().constData(), row.baseFrom.toUtf8().constData(),
+                         row.coreReliable ? 1 : 0, row.info.toUtf8().constData(),
+                         row.note.toUtf8().constData(), row.action.toUtf8().constData(),
+                         row.path.toUtf8().constData(), tipOneLine.toUtf8().constData(),
+                         group.toUtf8().constData(), order);
+        }
     }
 
     void choose(const QString &name) {

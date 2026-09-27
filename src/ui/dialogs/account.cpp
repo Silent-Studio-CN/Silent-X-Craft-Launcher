@@ -9,6 +9,7 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer> // 退出路径的耗时取证(取消后线程多久收工)
 #include <QMutexLocker>
 #include <QThread>
 
@@ -118,10 +119,17 @@ AccountTask::~AccountTask() {
         //   等到了 → 正常删除;
         //   等不到(极罕见:卡在系统调用里)→ 如实打一条诊断,**把 QThread 脱手**,
         //   宁可泄漏一个对象,也不让用户关不掉窗口 / 退不出程序。
+        QElapsedTimer waitClock;
+        waitClock.start();
         if (m_thread->wait(3000)) {
+            // 取证:取消之后线程多久真的收工(退出路径的耗时全靠这一行定位)
+            std::fprintf(stderr, "[sxcl-ui] 登录线程取消后 %lld ms 收工\n",
+                         (long long)waitClock.elapsed());
             delete m_thread;
         } else {
-            std::fprintf(stderr, "[sxcl-ui] 登录线程 3 秒内没有结束,退出时不再等它(对象脱手)\n");
+            std::fprintf(stderr,
+                         "[sxcl-ui] 登录线程 3 秒内没有结束(%lld ms),退出时不再等它(对象脱手)\n",
+                         (long long)waitClock.elapsed());
             m_thread->setParent(nullptr);
         }
         m_thread = nullptr;
@@ -164,6 +172,7 @@ bool AccountTask::running() const {
 
 void AccountTask::cancel() {
     m_cancel.store(true);
+    m_cancelAtMs.store(QDateTime::currentMSecsSinceEpoch());
     QMutexLocker locker(&m_transportMutex);
     if (m_transport != nullptr)
         m_transport->cancel_all(m_transport->ctx);
@@ -256,7 +265,21 @@ void AccountTask::runLogin(sxcl_transport *transport, char *err, size_t errLen) 
     opts.cb.on_open_url = &AccountTask::cbOpenUrl;
 
     sxcl_auth_session *session = new sxcl_auth_session();
+    QElapsedTimer loginClock;
+    loginClock.start();
     const int rc = sxcl_auth_login(transport, &opts, session, err, errLen);
+    {
+        const int loginMs = int(loginClock.elapsed());
+        const int wasCancelled = m_cancel.load() ? 1 : 0;
+        const qint64 cancelAt = m_cancelAtMs.load();
+        const int cancelLatency =
+            cancelAt > 0 ? int(QDateTime::currentMSecsSinceEpoch() - cancelAt) : -1;
+        /* 取证行:登录链什么时候返回、是不是被取消的、取消落下之后多久它才真的收工。
+         * 退出路径"进程多活几秒"这类现场,全靠这一行分辨是"取消没送到"还是"别处在等"。 */
+        std::fprintf(stderr,
+                     "[sxcl-ui] account-task: 登录流程返回 rc=%d 耗时=%dms cancelled=%d 取消后=%dms\n",
+                     rc, loginMs, wasCancelled, cancelLatency);
+    }
 
     // docs/09 §6.3:微软令牌一到手就**立刻加密落盘**,哪怕后面某一跳失败。
     // (第 6 跳被应用资质挡住时,用户不该被迫再输一次设备码 —— 那是第一版踩过的坑。)

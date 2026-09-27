@@ -1,4 +1,4 @@
-﻿# (C) Silent X Craft Launcher -- UI stall evidence (counts, not just "did it hang").
+# (C) Silent X Craft Launcher -- UI stall evidence (counts, not just "did it hang").
 #
 # Why: user report 2026-09-27 -- the launcher "still says Not Responding"; the runtime log
 # showed [sxcl-ui] ui-stall repeatedly (1000 / 1001 / 3005 ms) plus dozens of
@@ -58,10 +58,7 @@ $scenarios = @(
   # switching routes through the product hook that calls
   # QMetaObject::invokeMethod(window(), "switchToRoute", ...): it has to be a real invokable
   # method, otherwise Qt answers "No such method" and the page switch is silently dropped.
-  @{ name = 'route_switch'; env = @{ SXCL_UI_ROUTE = 'home'; SXCL_UI_THEME_SWITCH = 'dark' } },
-  # the device-code login dialog is open when the user closes the launcher: every thread it
-  # started has to be reclaimed on the way out (the auth_exit block below reports the numbers).
-  @{ name = 'auth_exit'; keep = 6000; env = @{ SXCL_UI_ROUTE = 'settings'; SXCL_UI_AUTH_DIALOG = '1' } }
+  @{ name = 'route_switch'; env = @{ SXCL_UI_ROUTE = 'home'; SXCL_UI_THEME_SWITCH = 'dark' } }
 )
 # every hook this script owns must start from a known state
 $owned = @('SXCL_UI_ROUTE', 'SXCL_UI_NAV', 'SXCL_UI_MODS_SOURCES', 'SXCL_UI_MODS_SOURCES_DELAY',
@@ -162,13 +159,19 @@ foreach ($sc in $scenarios) {
 }
 
 # ---------------------------------------------------------------- 2) login dialog open + quit
-# User-visible requirement: with the device-code login dialog open, closing the launcher must
+# User-visible requirement: with the device-code login dialog open, quitting the launcher must
 # reclaim the login thread **deterministically** -- the process has to be gone within a second of
-# the window closing, with no hang report and no detached thread left behind.
-# The teardown time is measured from the moment the screenshot appears (the app quits right
-# after it) to the moment the process is really gone.
-if ($Only.Count -eq 0 -or ($Only -contains 'auth_exit')) {
-  $name = 'auth_exit'
+# the product's own close path, with no hang report and no detached thread left behind.
+#
+# The trigger is the product path, not a kill: SXCL_UI_WINCHECK runs "probe;probe;probe;quit" and
+# the 4th step calls MainWindow::requestClose() (closeEvent -> finishAndQuit), the same thing the
+# window's X does. Two runs, so the auth dialog is the only difference:
+#   close_plain : settings page, product close, no dialog   -> baseline wall time
+#   auth_exit   : same + the login dialog open (device-code login in flight)
+# A run that is still alive after -AuthTimeoutMs is killed and reported as a failure (the field
+# symptom was "the process lives on for 10+ s after the dialog is gone").
+$AuthTimeoutMs = 25000
+function Invoke-CloseRun([string]$name, [bool]$withDialog) {
   foreach ($k in $owned) { Remove-Item ('Env:' + $k) -ErrorAction SilentlyContinue }
   $logDir = Join-Path $Work ('logs_' + $Tag + '_' + $name)
   Remove-Item -Recurse -Force $logDir -ErrorAction SilentlyContinue
@@ -177,30 +180,46 @@ if ($Only.Count -eq 0 -or ($Only -contains 'auth_exit')) {
   Remove-Item -Recurse -Force $dataDir -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
   $env:SXCL_UI_ROUTE = 'settings'
-  $env:SXCL_UI_AUTH_DIALOG = '1'
+  $env:SXCL_UI_WINCHECK = 'probe;probe;probe;quit'
   $env:SXCL_UI_SETTINGS = $ini
   $env:SXCL_UI_GAME_DIR = (Join-Path $mc '.minecraft')
   $env:SXCL_LOG_DIR = $logDir
   $env:SXCL_UI_DATA_DIR = $dataDir
+  if ($withDialog) { $env:SXCL_UI_AUTH_DIALOG = '1' }
+  else { Remove-Item Env:SXCL_UI_AUTH_DIALOG -ErrorAction SilentlyContinue }
   Remove-Item Env:SXCL_UI_DUMP -ErrorAction SilentlyContinue
-  $env:SXCL_UI_SHOT_DELAY = '6000'
-  $shot = Join-Path $Work ('shot_' + $Tag + '_' + $name + '.png')
-  Remove-Item -Force $shot -ErrorAction SilentlyContinue
-  $env:SXCL_UI_SHOT = $shot
+  Remove-Item Env:SXCL_UI_SHOT -ErrorAction SilentlyContinue   # no screenshot: the close path is the exit
+  Remove-Item Env:SXCL_UI_SHOT_DELAY -ErrorAction SilentlyContinue
   $out = Join-Path $Work ('run_' + $Tag + '_' + $name + '.txt')
   $err = $out + '.err'
   Remove-Item -Force $out, $err -ErrorAction SilentlyContinue
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   $proc = Start-Process -FilePath $Exe -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
-  while (-not $proc.HasExited -and -not (Test-Path $shot)) { Start-Sleep -Milliseconds 40 }
-  $teardownFrom = [int]$sw.ElapsedMilliseconds
-  $proc.WaitForExit()
+  while (-not $proc.HasExited -and $sw.ElapsedMilliseconds -lt $AuthTimeoutMs) { Start-Sleep -Milliseconds 50 }
+  $timedOut = -not $proc.HasExited
+  if ($timedOut) {
+    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+  }
   $sw.Stop()
-  $teardown = [int]$sw.ElapsedMilliseconds - $teardownFrom
-  Write-Output ('  (teardown from last frame to process gone: ' + $teardown + ' ms)')
-  Measure-Run $name $logDir $out $err ([int]$sw.ElapsedMilliseconds) $proc.ExitCode $shot
-  if ($teardown -gt 1000) { $fails += ($name + ': teardown ' + $teardown + ' ms (> 1000 ms)') }
-  $totals.teardown = $teardown
+  $ms = [int]$sw.ElapsedMilliseconds
+  $exit = if ($timedOut) { -1 } else { $proc.ExitCode }
+  Write-Output ('  ' + $name.PadRight(18) + ' ms=' + $ms + ' exit=' + $exit + $(if ($timedOut) { ' (TIMED OUT: had to be killed)' } else { '' }))
+  Measure-Run $name $logDir $out $err $ms $exit $out   # $out stands in for "no screenshot expected"
+  if ($timedOut) { $script:fails += ($name + ': still alive after ' + $AuthTimeoutMs + ' ms (had to be killed)') }
+  # NB: everything this function prints on purpose goes to the script pipeline (that is what the
+  # evidence file captures); the number the caller needs travels in a script-scoped map instead of
+  # the return value, otherwise the printed lines become part of it.
+  $script:closeMs[$name] = $ms
+}
+$script:closeMs = @{}
+if ($Only.Count -eq 0 -or ($Only -contains 'auth_exit')) {
+  Invoke-CloseRun 'close_plain' $false
+  Invoke-CloseRun 'auth_exit' $true
+  $delta = $script:closeMs['auth_exit'] - $script:closeMs['close_plain']
+  Write-Output ('  (close with the login dialog open costs ' + $delta + ' ms more than without it)')
+  if ($delta -gt 1000) { $fails += ('auth_exit: +' + $delta + ' ms vs the same close without the dialog (> 1000 ms)') }
+  $totals.teardown = $delta
 }
 
 # ---------------------------------------------------------------- 3) the socket case

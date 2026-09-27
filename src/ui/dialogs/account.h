@@ -108,6 +108,7 @@ private:
     QString m_tenant;
     QString m_tokenPath;
     std::atomic<bool> m_cancel{false};
+    std::atomic<qint64> m_cancelAtMs{0}; // 取证:取消是几点落下的(退出路径耗时定位用)
     QThread *m_thread = nullptr;
     // 在飞的传输后端:取消时要能从 UI 线程调 cancel_all(net.h 明说它是线程安全的)
     mutable QMutex m_transportMutex;

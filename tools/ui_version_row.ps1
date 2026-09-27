@@ -216,6 +216,8 @@ function Invoke-RowRun([string]$tag, [string]$route, [string]$theme) {
   $env:SXCL_UI_ROUTE = $route
   $env:SXCL_UI_THEME = $theme
   $env:SXCL_UI_MANIFEST = $manifest
+  # per-row "version-row page/select:" evidence is opt-in (SXCL_UI_ROW_EVIDENCE); see versions_page.cpp
+  $env:SXCL_UI_ROW_EVIDENCE = '1'
   $env:SXCL_UI_DUMP = '1'
   $env:SXCL_UI_DUMP_DEPTH = '14'
   $env:SXCL_UI_SHOT_DELAY = '5000'
