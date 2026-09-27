@@ -614,6 +614,30 @@ sxcl::ui::MainWindow window;
         }
     }
 
+    // ── 取证通路:按**产品自己的最小尺寸规则**改窗口大小(SXCL_UI_RESIZE=<宽>x<高>) ──
+    // 与 SXCL_UI_WINDOW 的**唯一**区别:这个**不放开** setMinimumSize —— 用来验"窗口绝不能缩到
+    // 比下限更小"(用户 2026-09-27:「给它设个最小比例,小到什么程度就不能再缩小」)。
+    // 复现:对 900x600 的下限请求 700x450,实际必须仍是 900x600。
+    const QString resizeSpec = qEnvironmentVariable("SXCL_UI_RESIZE");
+    if (!resizeSpec.isEmpty()) {
+        const QStringList parts = resizeSpec.split(QLatin1Char('x'), Qt::SkipEmptyParts);
+        bool okW = false, okH = false;
+        const int w = parts.size() > 0 ? parts.at(0).toInt(&okW) : 0;
+        const int h = parts.size() > 1 ? parts.at(1).toInt(&okH) : 0;
+        if (okW && okH && w > 0 && h > 0) {
+            window.resize(w, h);
+            QTimer::singleShot(600, &app, [&window, w, h] {
+                std::fprintf(stderr,
+                             "[sxcl-ui] resize 请求=%dx%d 实际=%dx%d 最小=%dx%d\n", w, h,
+                             window.width(), window.height(), window.minimumWidth(),
+                             window.minimumHeight());
+            });
+        } else {
+            std::fprintf(stderr, "[sxcl-ui] SXCL_UI_RESIZE 要写成 <宽>x<高>(收到 \"%s\")\n",
+                         resizeSpec.toUtf8().constData());
+        }
+    }
+
     // 验收通路:用 SXCL_UI_ROUTE 指定起始路由(对应 build/ref/py_<route>.png)
     const QString route = qEnvironmentVariable("SXCL_UI_ROUTE");
     if (!route.isEmpty())
@@ -1024,6 +1048,44 @@ sxcl::ui::MainWindow window;
             timer->deleteLater();
         });
         QTimer::singleShot(sourcesDelay > 0 ? sourcesDelay : 450, &app, [timer]() { timer->start(); });
+    }
+
+    // 验收通路:把模组页的**版本筛选**拨到某个版本(SXCL_UI_MODS_VERSION=1.21.1|all)。
+    //   筛选区三件之一(名字/版本/来源),验收要能复现"拨到哪个版本就按哪个版本搜"。
+    //   动的是界面上真的那个下拉(#modsVersionFilter)。
+    const QString modsVersion = qEnvironmentVariable("SXCL_UI_MODS_VERSION");
+    if (!modsVersion.isEmpty()) {
+        const int versionDelay = qEnvironmentVariableIntValue("SXCL_UI_MODS_VERSION_DELAY");
+        QTimer::singleShot(versionDelay > 0 ? versionDelay : 500, &app, [&window, modsVersion]() {
+            QComboBox *box = nullptr;
+            const QList<QComboBox *> all =
+                window.findChildren<QComboBox *>(QStringLiteral("modsVersionFilter"));
+            for (QComboBox *candidate : all) {
+                if (candidate->isVisible()) { // 两份模组页(模组/光影)同名,只认眼前那个
+                    box = candidate;
+                    break;
+                }
+            }
+            if (box == nullptr) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] 找不到版本筛选下拉(SXCL_UI_MODS_VERSION 需要 "
+                             "SXCL_UI_ROUTE=download)\n");
+                return;
+            }
+            const bool wantAll = modsVersion.compare(QStringLiteral("all"), Qt::CaseInsensitive) == 0;
+            int index = 0;
+            if (!wantAll) {
+                index = box->findData(modsVersion);
+                if (index < 0) {
+                    box->insertItem(1, modsVersion, modsVersion); // 不在常用列表里就插到"全部"后面
+                    index = 1;
+                }
+            }
+            box->setCurrentIndex(index);
+            std::fprintf(stderr, "[sxcl-ui] mods-version-filter: want=%s current=%s\n",
+                         modsVersion.toUtf8().constData(),
+                         box->currentData().toString().toUtf8().constData());
+        });
     }
 
     // 验收通路:模组页真的搜一次(SXCL_UI_MODS_QUERY=<关键词>)。
