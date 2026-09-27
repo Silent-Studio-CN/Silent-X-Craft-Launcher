@@ -35,12 +35,25 @@ class IconSelectButton : public QAbstractButton {
 public:
     explicit IconSelectButton(QWidget *parent = nullptr);
 
-    // assets/icons/edition/<file>;空串 = 不画图标(也不会崩)
+    // assets/icons/<dir>/<file>;空串 = 不画图标(也不会崩)
+    //   * 默认 dir = "edition"(下载页的版本形态:Java 咖啡杯 / 基岩版原版 LOGO);
+    //   * 主页的正版/离线两枚在 "ui"(microsoft.svg 四色方块 + disconnected.svg 断线线稿),
+    //     见 assets/icons/ui/NOTICE.md;
+    // 目录解析写在一处(编译期 SXCL_UI_EDITION_DIR / 环境变量 / exe 旁的 assets/icons/<dir> /
+    // SXCL_UI_BLOCK_DIR 的兄弟目录 <dir>)—— 与 SxclIcons、ui_icons 同一套口径。
     void setIconFile(const QString &file);
     QString iconFile() const { return m_iconFile; }
+    void setIconDir(const QString &dir);
+    QString iconDir() const { return m_iconDir; }
     // 图标的**绘制高度**(逻辑像素);宽度按素材横纵比算,按钮尺寸 = 绘制盒 + 2 * kPad
     void setIconHeight(int height);
     int iconHeight() const { return m_iconHeight; }
+
+    /* 单色线稿:按**主题令牌**在绘制时现染(未选中 textSecondary、选中 accent)。
+     * 默认**关** —— 原版彩色素材(微软四色方块、Java 咖啡杯、基岩版 LOGO)绝不许被染成一色,
+     * 那正是这几枚图标的识别度所在。开着它的只有断线那类线稿。 */
+    void setMonochrome(bool on);
+    bool isMonochrome() const { return m_monochrome; }
     // 当前算出来的绘制盒(逻辑像素)= 按钮去掉内边距那一块
     QSize iconBoxSize() const;
 
@@ -53,7 +66,9 @@ protected:
 
 private:
     QString m_iconFile;
+    QString m_iconDir = QStringLiteral("edition");
     int m_iconHeight = 20;
+    bool m_monochrome = false;
     bool m_hover = false;
 };
 

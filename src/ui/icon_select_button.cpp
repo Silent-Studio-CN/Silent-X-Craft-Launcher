@@ -54,57 +54,62 @@ qreal screenDpr() {
     return 1.0;
 }
 
-/* 原版图标目录 assets/icons/edition 的解析顺序(与 SxclIcons / IconRegistry 同一套口径):
- *   1) 编译期钉死的 SXCL_UI_EDITION_DIR(CMake 注入,开发期就是源码树里的那份);
- *   2) 环境变量 SXCL_EDITION_DIR(取证时可以指到别处);
- *   3) 可执行文件旁的 assets/icons/edition(装机后按 exe 相对路径找);
- *   4) SXCL_UI_BLOCK_DIR(assets/icons/blocks)的**兄弟目录** edition —— 与 ui_icons.cpp
- *      从 blocks 推 assets/icons/ui 是同一个办法,少一个编译期开关也不会错位。 */
-QString editionDir() {
-    static QString cached;
-    static bool resolved = false;
-    if (resolved)
-        return cached;
-    resolved = true;
+/* 图标目录 assets/icons/<sub> 的解析顺序(与 SxclIcons / IconRegistry / ui_icons 同一套口径):
+ *   1) 编译期钉死的 SXCL_UI_EDITION_DIR(CMake 注入,**只对 edition 这一个子目录有意义**);
+ *   2) 环境变量 SXCL_EDITION_DIR(取证时可以指到别处,同样只管 edition);
+ *   3) 可执行文件旁的 assets/icons/<sub>(装机后按 exe 相对路径找);
+ *   4) SXCL_UI_BLOCK_DIR(assets/icons/blocks)的**兄弟目录** <sub> —— 与 ui_icons.cpp
+ *      从 blocks 推 assets/icons/ui 是同一个办法,少一个编译期开关也不会错位。
+ * sub = "edition"(下载页版本形态)/ "ui"(主页正版·离线两枚,见 assets/icons/ui/NOTICE.md)。 */
+QString iconAssetDir(const QString &sub) {
+    static QHash<QString, QString> cache;
+    const QHash<QString, QString>::const_iterator hit = cache.constFind(sub);
+    if (hit != cache.constEnd())
+        return hit.value();
+
     QStringList candidates;
+    if (sub == QLatin1String("edition")) {
 #ifdef SXCL_UI_EDITION_DIR
-    candidates << QString::fromLatin1(SXCL_UI_EDITION_DIR);
+        candidates << QString::fromLatin1(SXCL_UI_EDITION_DIR);
 #endif
-    const QString env = qEnvironmentVariable("SXCL_EDITION_DIR");
-    if (!env.isEmpty())
-        candidates << env;
+        const QString env = qEnvironmentVariable("SXCL_EDITION_DIR");
+        if (!env.isEmpty())
+            candidates << env;
+    }
     candidates << QDir(QCoreApplication::applicationDirPath())
-                      .filePath(QStringLiteral("assets/icons/edition"));
+                      .filePath(QStringLiteral("assets/icons/") + sub);
 #ifdef SXCL_UI_BLOCK_DIR
     {
         QString blocks = QString::fromLatin1(SXCL_UI_BLOCK_DIR);
         const int cut = blocks.lastIndexOf(QLatin1Char('/'));
-        candidates << (cut > 0 ? blocks.left(cut) : blocks) + QStringLiteral("/edition");
+        candidates << (cut > 0 ? blocks.left(cut) : blocks) + QLatin1Char('/') + sub;
     }
 #endif
+    QString found;
     for (const QString &c : candidates) {
         if (QFileInfo::exists(c)) {
-            cached = c;
-            return cached;
+            found = c;
+            break;
         }
     }
-    cached.clear();
-    return cached;
+    cache.insert(sub, found);
+    return found;
 }
 
-QString assetPath(const QString &file) {
-    const QString dir = editionDir();
+QString assetPath(const QString &sub, const QString &file) {
+    const QString dir = iconAssetDir(sub);
     return dir.isEmpty() ? QString() : dir + QLatin1Char('/') + file;
 }
 
 // 素材的原始像素尺寸:svg 取 viewBox 尺寸,png 只读文件头(不解码整图)
-QSize assetNaturalSize(const QString &file) {
+QSize assetNaturalSize(const QString &sub, const QString &file) {
     static QHash<QString, QSize> cache;
     if (file.isEmpty())
         return QSize();
-    if (cache.contains(file))
-        return cache.value(file);
-    const QString path = assetPath(file);
+    const QString key0 = sub + QLatin1Char('#') + file;
+    if (cache.contains(key0))
+        return cache.value(key0);
+    const QString path = assetPath(sub, file);
     QSize size;
     if (file.endsWith(QLatin1String(".svg"), Qt::CaseInsensitive)) {
         QSvgRenderer renderer(path);
@@ -114,23 +119,23 @@ QSize assetNaturalSize(const QString &file) {
         QImageReader reader(path);
         size = reader.size();
     }
-    cache.insert(file, size);
+    cache.insert(key0, size);
     return size;
 }
 
 // 图标位图缓存:同一份文件 + 同一个物理盒尺寸只解码/渲染一次(悬停会反复重绘)
-QPixmap iconPixmap(const QString &file, const QSize &box) {
+QPixmap iconPixmap(const QString &sub, const QString &file, const QSize &box) {
     static QHash<QString, QPixmap> cache;
     if (file.isEmpty() || box.isEmpty())
         return QPixmap();
-    const QString path = assetPath(file);
+    const QString path = assetPath(sub, file);
     if (path.isEmpty())
         return QPixmap();
     const qreal dpr = screenDpr();
     const int pw = qMax(1, int(qRound(box.width() * dpr)));
     const int ph = qMax(1, int(qRound(box.height() * dpr)));
-    const QString key = file + QLatin1Char('#') + QString::number(pw) + QLatin1Char('x') +
-                        QString::number(ph);
+    const QString key = sub + QLatin1Char('#') + file + QLatin1Char('#') + QString::number(pw) +
+                        QLatin1Char('x') + QString::number(ph);
     if (cache.contains(key))
         return cache.value(key);
 
@@ -186,6 +191,33 @@ QPixmap iconPixmap(const QString &file, const QSize &box) {
     return pm;
 }
 
+/* 单色线稿的着色:SourceIn 保留 alpha、把颜色换成调用时给的**令牌色**(现取,切主题跟着变)。
+ * 缓存键带上颜色 —— 主题一换,同一份(文件,盒子)要取到另一份。 */
+QPixmap tintedPixmap(const QString &sub, const QString &file, const QSize &box,
+                     const QColor &color) {
+    static QHash<QString, QPixmap> cache;
+    if (file.isEmpty() || box.isEmpty() || !color.isValid())
+        return QPixmap();
+    const QString key = sub + QLatin1Char('#') + file + QLatin1Char('@') +
+                        color.name(QColor::HexArgb) + QLatin1Char('#') + QString::number(box.width()) +
+                        QLatin1Char('x') + QString::number(box.height());
+    const QHash<QString, QPixmap>::const_iterator hit = cache.constFind(key);
+    if (hit != cache.constEnd())
+        return hit.value();
+    const QPixmap src = iconPixmap(sub, file, box);
+    if (src.isNull()) {
+        cache.insert(key, QPixmap());
+        return QPixmap();
+    }
+    QPixmap out = src; // 浅拷贝;下面 begin 时自动 detach
+    QPainter p(&out);
+    p.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    p.fillRect(out.rect(), color);
+    p.end();
+    cache.insert(key, out);
+    return out;
+}
+
 } // namespace
 
 IconSelectButton::IconSelectButton(QWidget *parent) : QAbstractButton(parent) {
@@ -201,6 +233,22 @@ void IconSelectButton::setIconFile(const QString &file) {
     update();
 }
 
+void IconSelectButton::setIconDir(const QString &dir) {
+    const QString next = dir.trimmed().isEmpty() ? QStringLiteral("edition") : dir.trimmed();
+    if (next == m_iconDir)
+        return;
+    m_iconDir = next;
+    updateGeometry(); // 素材尺寸变了 -> 图标盒宽度跟着变
+    update();
+}
+
+void IconSelectButton::setMonochrome(bool on) {
+    if (on == m_monochrome)
+        return;
+    m_monochrome = on;
+    update();
+}
+
 void IconSelectButton::setIconHeight(int height) {
     m_iconHeight = qMax(8, height);
     updateGeometry();
@@ -209,7 +257,7 @@ void IconSelectButton::setIconHeight(int height) {
 
 QSize IconSelectButton::iconBoxSize() const {
     // 宽度由素材横纵比算出来:宽幅 LOGO 得到宽盒,近正方形的咖啡杯得到方盒
-    const QSize natural = assetNaturalSize(m_iconFile);
+    const QSize natural = assetNaturalSize(m_iconDir, m_iconFile);
     if (natural.isEmpty() || natural.height() <= 0)
         return QSize(m_iconHeight, m_iconHeight);
     const int w = qMax(1, int(qRound(double(m_iconHeight) * natural.width() / natural.height())));
@@ -262,7 +310,14 @@ void IconSelectButton::paintEvent(QPaintEvent *) {
     // ---- 图标:水平居中、贴上边距,整数逻辑矩形(亚像素会让像素画发糊)----
     const QSize iconBox = iconBoxSize();
     const QRect target(QPoint((width() - iconBox.width()) / 2, kPad), iconBox);
-    const QPixmap pm = iconPixmap(m_iconFile, iconBox);
+    /* 图标:彩色素材原样画(微软四色 LOGO 的识别度就在这里);单色线稿按令牌现染 ——
+     * 未选中的断线用次要文字色,选中的用 accent(与下面那条指示条同一个令牌)。 */
+    const QPixmap pm =
+        m_monochrome ? tintedPixmap(m_iconDir, m_iconFile, iconBox,
+                                    isChecked() ? ThemeBridge::instance().accent()
+                                                : ThemeBridge::instance().token(
+                                                      QStringLiteral("textSecondary")))
+                     : iconPixmap(m_iconDir, m_iconFile, iconBox);
     if (!pm.isNull())
         p.drawPixmap(target, pm);
 

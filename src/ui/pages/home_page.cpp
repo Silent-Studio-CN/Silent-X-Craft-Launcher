@@ -22,12 +22,13 @@
 // launch.offline_name / game.default_dir / game.known_dirs。
 
 #include "page_factory.h"
+#include "elided_label.h" // 单行标签"装不下就省略号"(左栏被窗口挤窄时要用)
 #include "game_folders.h"
-#include "page_shell.h" // pageTokenText(取令牌色;与下载/团队/更多同一份)
 
 #include "dialogs/account.h"
 #include "dialogs/auth_dialog.h" // 未登录/凭据过期 -> 直接开登录窗（而不是偷偷用离线跑起来）
 #include "fluent_theme.h"
+#include "icon_select_button.h" // 正版/离线两枚 LOGO 的"图标当选项"控件(选中态 = 图标下一条 accent)
 #include "libqf.h"
 #include "main_window.h"
 #include "theme_bridge.h"
@@ -41,10 +42,11 @@
 #include "fluent/fluent_input.h"
 #include "fluent/fluent_labels.h"
 #include "fluent/fluent_scroll.h"
-#include "fluent/fluent_segmented.h" // Pivot:离线/正版的滑动选项(PCL 形态)
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
+
+#include <cstdio>
 
 #include <QDesktopServices>
 #include <QDir>
@@ -64,8 +66,9 @@
 namespace sxcl::ui {
 namespace {
 
-const QColor kSubtitleLight(0x60, 0x60, 0x60);
-const QColor kSubtitleDark(0xAA, 0xAA, 0xAA);
+/* 右栏(账号)固定宽度:300 逻辑像素 —— 用户要的是新版那个版面,新版就是 300。
+ * 固定宽度意味着窗口变窄时被挤的是左栏,账号卡不会被压成一条。 */
+constexpr int kRightColumnWidth = 300;
 
 } // namespace
 
@@ -78,12 +81,19 @@ protected:
 
 private:
     void buildContent();
-    void refresh();              // 重读"当前版本"与账户状态,重画两张卡
+    // 四张卡各建各的(版面 = 左右两栏;说明见 buildContent 开头)
+    void buildHeroCard(const ThemeTokens &tokens);
+    void buildFolderCard(const ThemeTokens &tokens);
+    void buildMultiplayerCard(const ThemeTokens &tokens);
+    void buildPlayerCard(const ThemeTokens &tokens);
+    void refresh();              // 重读"当前版本"与账户状态,重画卡上的字
     QString currentVersion() const;
+    void setEdition(bool premium); // 正版 / 离线:两枚 LOGO 的选中态 + 账号卡换页 + 启动落到哪一路
     void changeVersion();        // → 路由 select(版本选择页)
     void changeDirectory();
     void autoDetectDirectory();
     void openDirectory();
+    void launch();               // 主页那一枚「启动游戏」:按当前形态落到正版/离线两路之一
     void launchWithAccount();
     void launchOffline();
     void launchFallback(); // window() 不是 MainWindow 时的统一错误出口
@@ -91,15 +101,25 @@ private:
 
     QString m_gameDir;
     QWidget *m_view = nullptr;
-    QVBoxLayout *m_vBox = nullptr;
+    QVBoxLayout *m_vBox = nullptr;      // 整页:只有"左右两栏"这一行
+    QHBoxLayout *m_columns = nullptr;
+    QWidget *m_leftHost = nullptr;      // 左栏宿主(游戏)
+    QWidget *m_rightHost = nullptr;     // 右栏宿主(账号,固定 300)
+    QVBoxLayout *m_leftCol = nullptr;
+    QVBoxLayout *m_rightCol = nullptr;
 
     BodyLabel *m_versionName = nullptr;   // 大号:当前版本(文件夹名)
-    BodyLabel *m_versionDetail = nullptr; // 小字:MC 版本 + 加载器 + 有没有 jar
-    BodyLabel *m_accountState = nullptr;  // 正版卡的状态行
+    BodyLabel *m_versionDetail = nullptr; // 小字:加载器 + 有没有自己的 jar
+    PrimaryPushButton *m_launchButton = nullptr; // 主页唯一的一枚启动
+    BodyLabel *m_accountState = nullptr;  // 账号卡的状态行
     PushButton *m_accountButton = nullptr;
     QLineEdit *m_offlineEdit = nullptr;   // 离线 ID(状态保留)
-    Pivot *m_loginPivot = nullptr;        // 离线 / 正版 的滑动选项(PCL 形态)
-    QStackedWidget *m_loginStack = nullptr; // 两张卡二选一显示
+    QStackedWidget *m_accountPane = nullptr; // 正版页 / 离线页 二选一
+    IconSelectButton *m_premiumLogo = nullptr; // microsoft.svg(四色,不染)
+    IconSelectButton *m_offlineLogo = nullptr; // disconnected.svg(线稿,按令牌染)
+    int m_panePremium = -1;
+    int m_paneOffline = -1;
+    bool m_premium = false;               // 当前形态;默认离线(用户点名)
     BodyLabel *m_dirName = nullptr;       // 当前文件夹的名字
     BodyLabel *m_dirDisplay = nullptr;    // 完整路径
 };
@@ -120,16 +140,12 @@ HomePage::HomePage(QWidget *parent) : ScrollArea(parent) {
     setWidget(m_view);
 
     m_vBox = new QVBoxLayout(m_view);
-    m_vBox->setContentsMargins(28, 24, 28, 24);
+    m_vBox->setContentsMargins(24, 20, 24, 24);
     m_vBox->setSpacing(16);
     m_vBox->setAlignment(Qt::AlignTop);
 
-    auto *title = new TitleLabel(QStringLiteral("主页"), m_view);
-    auto *subtitle = new SubtitleLabel(QStringLiteral("Silent X Craft Launcher v0.2.0"), m_view);
-    subtitle->setTextColor(kSubtitleLight, kSubtitleDark);
-    m_vBox->addWidget(title);
-    m_vBox->addWidget(subtitle);
-
+    /* 原来"主页 / Silent X Craft Launcher v0.2.0"那两行大标题按新版版面**删掉**:
+     * 路由名已经在左边导航里写着,版本号属于关于页;这一页第一眼该是"当前版本 + 启动"。 */
     buildContent();
     refresh();
 
@@ -146,210 +162,236 @@ void HomePage::showEvent(QShowEvent *event) {
 }
 
 void HomePage::buildContent() {
-    const ThemeTokens &tokens = FluentTheme::instance().tokens();
+    /* 版面 = **左右两栏**(用户 2026-09-26 点名:「能不能把主页的布局改成原来新版的那个布局,
+     * 但不是要新版啊,只是要它的布局」)。新版主页就是这一版:左栏游戏(拉伸)/ 右栏账号(**固定 300**)。
+     * 控件仍然是老界面这一套(CardWidget / BodyLabel / PrimaryPushButton)——
+     * ui2 那几个 HeroCard / PlayerCard / Accordion 类一枚都没搬回来(用户没要新版)。 */
+    m_columns = new QHBoxLayout();
+    m_columns->setContentsMargins(0, 0, 0, 0);
+    m_columns->setSpacing(16);
+    m_vBox->addLayout(m_columns);
 
-    // ── ① 当前版本卡 ──
-    auto *versionCard = new CardWidget(m_view);
-    auto *versionLay = new QHBoxLayout(versionCard);
-    versionLay->setContentsMargins(20, 16, 20, 16);
-    versionLay->setSpacing(16);
+    m_leftHost = new QWidget(m_view);
+    m_leftHost->setObjectName(QStringLiteral("homeGameColumn"));
+    m_leftHost->setStyleSheet(QStringLiteral("background: transparent;"));
+    /* 左栏再被挤也要留 320:窗口最小尺寸 900x600 时(主窗口 kMinimumWidth/kMinimumHeight)
+     * 内容宽 = 851 - 24*2 - 300 - 16 = 487,左栏在这个下限之上都能摆下。 */
+    m_leftHost->setMinimumWidth(320);
+    m_leftCol = new QVBoxLayout(m_leftHost);
+    m_leftCol->setContentsMargins(0, 0, 0, 0);
+    m_leftCol->setSpacing(16);
+    m_columns->addWidget(m_leftHost, 1);
+
+    m_rightHost = new QWidget(m_view);
+    m_rightHost->setObjectName(QStringLiteral("homeAccountColumn"));
+    m_rightHost->setStyleSheet(QStringLiteral("background: transparent;"));
+    m_rightHost->setFixedWidth(kRightColumnWidth); // 300:新版同一个数
+    m_rightCol = new QVBoxLayout(m_rightHost);
+    m_rightCol->setContentsMargins(0, 0, 0, 0);
+    m_rightCol->setSpacing(16);
+    m_columns->addWidget(m_rightHost, 0);
+
+    const ThemeTokens &tokens = FluentTheme::instance().tokens();
+    buildHeroCard(tokens);
+    buildFolderCard(tokens);
+    buildMultiplayerCard(tokens);
+    buildPlayerCard(tokens);
+    m_leftCol->addStretch(1);
+    m_rightCol->addStretch(1);
+}
+
+// ── 左栏 ①:当前版本大卡(版本名 + 元信息 + 启动 + 更换版本)──
+void HomePage::buildHeroCard(const ThemeTokens &tokens) {
+    auto *card = new CardWidget(m_leftHost);
+    card->setObjectName(QStringLiteral("homeHeroCard"));
+    auto *lay = new QVBoxLayout(card);
+    lay->setContentsMargins(24, 20, 24, 20);
+    lay->setSpacing(10);
+
+    auto *caption = new BodyLabel(QStringLiteral("当前版本"), card);
+    caption->setTextColor(tokens.textTertiary);
+    lay->addWidget(caption);
+
+    m_versionName = new BodyLabel(QStringLiteral("（还没有已安装的版本）"), card);
+    m_versionName->setObjectName(QStringLiteral("homeVersionName"));
+    /* 26px 的版本名是这一页最大的一行字:窗口压到最小尺寸时它也必须能省略,
+     * 不能撑得整页横向溢出(否则右栏会被推出窗口外边 —— 2026-09-26 实测过)。 */
+    makeLabelElide(m_versionName, 120);
     {
-        auto *text = new QVBoxLayout();
-        text->setSpacing(4);
-        auto *caption = new BodyLabel(QStringLiteral("当前游戏版本"), versionCard);
-        caption->setTextColor(tokens.textTertiary);
-        text->addWidget(caption);
-        m_versionName = new BodyLabel(QStringLiteral("（还没有已安装的版本）"), versionCard);
-        {
-            QFont font = m_versionName->font();
-            font.setPixelSize(26);
-            font.setWeight(QFont::DemiBold);
-            m_versionName->setFont(font);
-        }
-        text->addWidget(m_versionName);
-        m_versionDetail = new BodyLabel(QString(), versionCard);
-        m_versionDetail->setTextColor(tokens.textTertiary);
-        text->addWidget(m_versionDetail);
-        versionLay->addLayout(text, 1);
+        QFont font = m_versionName->font();
+        font.setPixelSize(26);
+        font.setWeight(QFont::DemiBold);
+        m_versionName->setFont(font);
     }
-    auto *changeBtn = new PrimaryPushButton(QStringLiteral("更换"), versionCard);
+    lay->addWidget(m_versionName);
+
+    m_versionDetail = new BodyLabel(QString(), card);
+    m_versionDetail->setObjectName(QStringLiteral("homeVersionDetail"));
+    m_versionDetail->setWordWrap(true);
+    m_versionDetail->setTextColor(tokens.textTertiary);
+    lay->addWidget(m_versionDetail);
+
+    auto *row = new QHBoxLayout();
+    row->setSpacing(12);
+    /* 主页**只有这一枚启动**(新版版面就是这样):落到哪一路由当前形态决定 ——
+     * 见 launch()。原来"正版卡一个启动 + 离线卡一个启动"的两枚按钮不再各摆一个。 */
+    m_launchButton = new PrimaryPushButton(QStringLiteral("启动游戏"), card);
+    m_launchButton->setObjectName(QStringLiteral("homeLaunchButton"));
+    applyButtonFont(m_launchButton);
+    connect(m_launchButton, &QAbstractButton::clicked, this, [this] { launch(); });
+    row->addWidget(m_launchButton);
+    auto *changeBtn = new PushButton(QStringLiteral("更换版本"), card);
     applyButtonFont(changeBtn);
     connect(changeBtn, &QAbstractButton::clicked, this, [this] { changeVersion(); });
-    versionLay->addWidget(changeBtn, 0, Qt::AlignVCenter);
-    m_vBox->addWidget(versionCard);
+    row->addWidget(changeBtn);
+    row->addStretch(1);
+    lay->addLayout(row);
+    m_leftCol->addWidget(card);
+}
 
-    // ── ② 启动区:**PCL 那样的滑动选项**(离线 / 正版二选一,不同时摆在眼前) ──
-    // 用户 2026-09-22 晚点名:「正版和离线做 PCL 一样的滑动选项，不同时存在，默认离线」。
-    // Pivot 就是 libqf 里那套带滑动指示条的分段控件(与 PCL 的登录方式切换同一个形态)。
-    /* 整块装进**一张卡**(与上下的版本卡 / 文件夹卡同宽、同内边距)。
-     * 用户 2026-09-22 晚(第二次)点名:「正版登录和离线登录的块不对页」——
-     * 以前这块是**裸的**:滑块贴着页面左边缘(没有卡的 20px 内边距),里面又各套了一层卡,
-     * 于是"标题 / 滑块 / 卡里的文字"三样各对齐到不同的 x,和别的卡怎么都差一截。 */
-    auto *loginCard = new CardWidget(m_view);
-    auto *loginLay = new QVBoxLayout(loginCard);
-    loginLay->setContentsMargins(20, 16, 20, 16);
-    loginLay->setSpacing(12);
-    m_loginPivot = new Pivot(loginCard);
-    m_loginPivot->addItem(QStringLiteral("offline"), QStringLiteral("离线启动"));
-    m_loginPivot->addItem(QStringLiteral("account"), QStringLiteral("正版登录"));
-    m_loginPivot->setIndicatorColor(FluentTheme::instance().tokens().accent,
-                                    FluentTheme::instance().tokens().accent);
-    /* PivotItem 默认是 **18pt** 的大字(qf 移动端的口径),摆在主页上会和那条 3px 指示条挤在一起 ——
-     * 用户 2026-09-22 晚点名「主页两个登录滑块和文字串了」。这里把字号/内边距/选中态**显式钉死**,
-     * 不再依赖 qf 那套字号。 */
-    for (const QString &key : {QStringLiteral("offline"), QStringLiteral("account")}) {
-        if (PivotItem *it = m_loginPivot->item(key)) {
-            QFont f = it->font();
-            f.setPixelSize(14);
-            f.setWeight(QFont::DemiBold);
-            it->setFont(f);
-            it->setProperty("hasIcon", false);
-            it->setFixedHeight(34);
-            it->setCursor(Qt::PointingHandCursor);
-        }
-    }
-    m_loginPivot->setFixedHeight(38);
-    m_loginPivot->setStyleSheet(
-        QStringLiteral("Pivot { background: transparent; border: none; }"
-                       // 内边距 10px:两个条目各 80 宽,文字 56 + 20 = 76 才装得下(18px 会被切掉)
-                       "PivotItem { background: transparent; border: none; padding: 4px 10px; }"
-                       "PivotItem[isSelected='true'] { color: %1; }"
-                       "PivotItem[isSelected='false'] { color: %2; }")
-            .arg(pageTokenText("accent"), pageTokenText("textSecondary")));
-    loginLay->addWidget(m_loginPivot, 0, Qt::AlignLeft);
-
-    auto *launchStack = new QStackedWidget(loginCard);
-    m_loginStack = launchStack;
-    /* 页序**必须**跟着滑块条目走(滑块第一条是"离线启动")。
-     * 2026-09-23 崩溃级 bug:两条各按自己方便的顺序 addWidget —— 滑块 [离线,正版]、
-     * 栈 [正版,离线],于是"选离线看到的却是正版那一页(登录/刷新),选正版看到的却是离线 ID 填空"。
-     * 现在两个下标都**由 addWidget 的返回值定**,默认页取离线的那个,不再靠"数第几个"，
-     * 以后谁挪了代码块也不会再错位。 */
-    int accountIndex = -1;
-    int offlineIndex = -1;
-    {
-        // 左:正版启动(裸页,**不再套第二层卡** —— 夹心卡在视觉上就是"不对页")
-        auto *accountCard = new QWidget(launchStack);
-        accountCard->setStyleSheet(QStringLiteral("background: transparent;"));
-        auto *accountLay = new QVBoxLayout(accountCard);
-        accountLay->setContentsMargins(0, 0, 0, 0);
-        accountLay->setSpacing(8);
-        auto *accountTitle = new StrongBodyLabel(QStringLiteral("正版启动"), accountCard);
-        accountTitle->setStyleSheet(
-            QStringLiteral("color: %1; font-size: 15px;").arg(pageTokenText("accent")));
-        accountLay->addWidget(accountTitle);
-        m_accountState = new BodyLabel(QStringLiteral("读取账户状态…"), accountCard);
-        m_accountState->setWordWrap(true);
-        m_accountState->setTextColor(tokens.textTertiary);
-        accountLay->addWidget(m_accountState);
-        accountLay->addStretch(1);
-        m_accountButton = new PrimaryPushButton(QStringLiteral("启动"), accountCard);
-        applyButtonFont(m_accountButton);
-        connect(m_accountButton, &QAbstractButton::clicked, this, [this] { launchWithAccount(); });
-        accountLay->addWidget(m_accountButton, 0, Qt::AlignLeft);
-        accountIndex = launchStack->addWidget(accountCard);
-
-        // 右:离线启动(用户点名:ID 输入框 + 状态保留;已登录正版也能用这一路)
-        auto *offlineCard = new QWidget(launchStack);
-        offlineCard->setStyleSheet(QStringLiteral("background: transparent;"));
-        auto *offlineLay = new QVBoxLayout(offlineCard);
-        offlineLay->setContentsMargins(0, 0, 0, 0);
-        offlineLay->setSpacing(8);
-        auto *offlineTitle = new StrongBodyLabel(QStringLiteral("离线启动"), offlineCard);
-        offlineTitle->setStyleSheet(
-            QStringLiteral("color: %1; font-size: 15px;").arg(pageTokenText("accent")));
-        offlineLay->addWidget(offlineTitle);
-        auto *offlineNote = new BodyLabel(
-            QStringLiteral("离线 ID 就是游戏里的玩家名；已登录正版的账号也可以用这一路。"), offlineCard);
-        offlineNote->setWordWrap(true);
-        offlineNote->setTextColor(tokens.textTertiary);
-        offlineLay->addWidget(offlineNote);
-        offlineLay->addStretch(1);
-        auto *row = new QWidget(offlineCard);
-        auto *rowLay = new QHBoxLayout(row);
-        rowLay->setContentsMargins(0, 0, 0, 0);
-        rowLay->setSpacing(8);
-        m_offlineEdit = new LineEdit(row);
-        m_offlineEdit->setPlaceholderText(QStringLiteral("离线 ID（默认 Player）"));
-        m_offlineEdit->setText(offlinePlayerName());
-        m_offlineEdit->setFixedHeight(32);
-        rowLay->addWidget(m_offlineEdit, 1);
-        auto *offlineBtn = new PrimaryPushButton(QStringLiteral("启动"), row);
-        applyButtonFont(offlineBtn);
-        /* 稳定 objectName:验收钩子(SXCL_UI_LAUNCH)点**真的那个启动按钮** ——
-         * 这样"界面点启动 -> 补全文件 -> 起进程"整条链在真机上也能被验到,不必只靠命令行。 */
-        offlineBtn->setObjectName(QStringLiteral("homeOfflineLaunchButton"));
-        connect(offlineBtn, &QAbstractButton::clicked, this, [this] { launchOffline(); });
-        rowLay->addWidget(offlineBtn, 0);
-        offlineLay->addWidget(row);
-        offlineIndex = launchStack->addWidget(offlineCard);
-    }
-    // 默认**离线**(用户点名):正版那条要等用户主动切过去/登录
-    m_loginStack->setCurrentIndex(offlineIndex);
-    m_loginPivot->setCurrentItem(QStringLiteral("offline"));
-    connect(m_loginPivot, &Pivot::currentItemChanged, this,
-            [this, accountIndex, offlineIndex](const QString &key) {
-                m_loginStack->setCurrentIndex(key == QLatin1String("account") ? accountIndex
-                                                                              : offlineIndex);
-            });
-    loginLay->addWidget(launchStack, 1);
-    m_vBox->addWidget(loginCard);
-
-    // ── ③ 当前文件夹卡(用户:显示文件夹自己的名字,不强制叫 .minecraft)──
-    auto *dirCard = new CardWidget(m_view);
-    auto *dirLay = new QHBoxLayout(dirCard);
-    dirLay->setContentsMargins(20, 12, 20, 12);
-    dirLay->setSpacing(12);
-    dirLay->addWidget(new BodyLabel(QStringLiteral("当前文件夹"), dirCard));
-    m_dirName = new BodyLabel(QString(), dirCard);
+// ── 左栏 ②:当前文件夹卡(文件夹自己的名字 + 完整路径 + 三个动作)──
+void HomePage::buildFolderCard(const ThemeTokens &tokens) {
+    auto *card = new CardWidget(m_leftHost);
+    card->setObjectName(QStringLiteral("homeFolderCard"));
+    auto *lay = new QHBoxLayout(card);
+    lay->setContentsMargins(16, 12, 16, 12);
+    lay->setSpacing(8); // 12 太宽:这一行有"名字 + 路径 + 三个按钮",窄窗口下先挤没了空间
+    lay->addWidget(new BodyLabel(QStringLiteral("当前文件夹"), card));
+    m_dirName = new BodyLabel(QString(), card);
     {
         QFont font = m_dirName->font();
         font.setPixelSize(14);
         font.setWeight(QFont::DemiBold);
         m_dirName->setFont(font);
     }
-    dirLay->addWidget(m_dirName);
-    m_dirDisplay = new BodyLabel(m_gameDir, dirCard);
+    makeLabelElide(m_dirName, 48); // 文件夹名可以很长("1.21.5-optifine-自定义"),必须能省略
+    lay->addWidget(m_dirName);
+    m_dirDisplay = new BodyLabel(m_gameDir, card);
+    m_dirDisplay->setObjectName(QStringLiteral("homeFolderPath"));
     m_dirDisplay->setTextColor(tokens.textTertiary);
-    dirLay->addWidget(m_dirDisplay, 1);
-    auto *changeDirBtn = new PushButton(QStringLiteral("更改"), dirCard);
+    makeLabelElide(m_dirDisplay, 60); // 路径最容易被挤:给它一个"再挤也留 60"的下限
+    lay->addWidget(m_dirDisplay, 1);
+    auto *changeDirBtn = new PushButton(QStringLiteral("更改"), card);
     applyButtonFont(changeDirBtn);
     connect(changeDirBtn, &QAbstractButton::clicked, this, [this] { changeDirectory(); });
-    dirLay->addWidget(changeDirBtn);
-    auto *detectBtn = new PushButton(QStringLiteral("自动检测"), dirCard);
+    lay->addWidget(changeDirBtn);
+    auto *detectBtn = new PushButton(QStringLiteral("自动检测"), card);
     applyButtonFont(detectBtn);
     connect(detectBtn, &QAbstractButton::clicked, this, [this] { autoDetectDirectory(); });
-    dirLay->addWidget(detectBtn);
-    auto *openBtn = new PushButton(QStringLiteral("打开"), dirCard);
+    lay->addWidget(detectBtn);
+    auto *openBtn = new PushButton(QStringLiteral("打开"), card);
     applyButtonFont(openBtn);
     connect(openBtn, &QAbstractButton::clicked, this, [this] { openDirectory(); });
-    dirLay->addWidget(openBtn);
-    m_vBox->addWidget(dirCard);
+    lay->addWidget(openBtn);
+    m_leftCol->addWidget(card);
+}
 
-    // ── ④ 联机入口卡(home_page.py:112-136,原样保留)──
-    auto *mpCard = new CardWidget(m_view);
-    auto *mpLay = new QHBoxLayout(mpCard);
-    mpLay->setContentsMargins(20, 12, 20, 12);
-    mpLay->setSpacing(12);
-    auto *mpIcon = new QLabel(mpCard);
-    mpIcon->setPixmap(fluent::icon(QStringLiteral("Globe"), FluentTheme::instance().isDark())
-                          .pixmap(28, 28));
-    mpLay->addWidget(mpIcon);
-    auto *mpText = new QVBoxLayout();
-    mpText->setSpacing(2);
-    mpText->addWidget(new StrongBodyLabel(QStringLiteral("联机 · 和朋友一起玩"), mpCard));
-    auto *mpDesc = new BodyLabel(
-        QStringLiteral("房间码加入 / P2P 打洞 / 中继兜底（开发中，先留入口）"), mpCard);
-    mpDesc->setTextColor(tokens.textTertiary);
-    mpText->addWidget(mpDesc);
-    mpLay->addLayout(mpText, 1);
-    auto *lookBtn = new PushButton(QStringLiteral("看看方案"), mpCard);
+// ── 左栏 ③:联机入口卡(home_page.py:112-136,原样保留)──
+void HomePage::buildMultiplayerCard(const ThemeTokens &tokens) {
+    auto *card = new CardWidget(m_leftHost);
+    card->setObjectName(QStringLiteral("homeMultiplayerCard"));
+    auto *lay = new QHBoxLayout(card);
+    lay->setContentsMargins(20, 12, 20, 12);
+    lay->setSpacing(12);
+    auto *icon = new QLabel(card);
+    icon->setPixmap(fluent::icon(QStringLiteral("Globe"), FluentTheme::instance().isDark())
+                        .pixmap(28, 28));
+    lay->addWidget(icon);
+    auto *text = new QVBoxLayout();
+    text->setSpacing(2);
+    text->addWidget(new StrongBodyLabel(QStringLiteral("联机 · 和朋友一起玩"), card));
+    auto *desc = new BodyLabel(
+        QStringLiteral("房间码加入 / P2P 打洞 / 中继兜底（开发中，先留入口）"), card);
+    desc->setTextColor(tokens.textTertiary);
+    makeLabelElide(desc, 80); // 同上:窄窗口下先省略,不许把整页撑宽
+    text->addWidget(desc);
+    lay->addLayout(text, 1);
+    auto *lookBtn = new PushButton(QStringLiteral("看看方案"), card);
     applyButtonFont(lookBtn);
     connect(lookBtn, &QAbstractButton::clicked, this, [this] { openMultiplayer(); });
-    mpLay->addWidget(lookBtn);
-    m_vBox->addWidget(mpCard);
+    lay->addWidget(lookBtn);
+    m_leftCol->addWidget(card);
+}
 
-    m_vBox->addStretch(1);
+// ── 右栏:账号卡(正版 / 离线 = 新版那两枚 LOGO + 各自的输入)──
+void HomePage::buildPlayerCard(const ThemeTokens &tokens) {
+    auto *card = new CardWidget(m_rightHost);
+    card->setObjectName(QStringLiteral("homePlayerCard"));
+    auto *lay = new QVBoxLayout(card);
+    lay->setContentsMargins(20, 16, 20, 16);
+    lay->setSpacing(12);
+
+    /* 顶行:标题 + 右上角两枚 LOGO(用户 2026-09-26 点名:「正版和离线登录,按照新版原来那个
+     * 微软和断线的 logo 来做」)。素材是自绘的,出处见 assets/icons/ui/NOTICE.md:
+     *   microsoft.svg    —— 四色方块,**保留官方四色,绝不染色**(识别度就在这里);
+     *   disconnected.svg —— 断开的链环 + 一道斜杠,单色线稿,按主题令牌现染。 */
+    auto *top = new QHBoxLayout();
+    top->setSpacing(8);
+    auto *caption = new BodyLabel(QStringLiteral("账户"), card);
+    caption->setTextColor(tokens.textTertiary);
+    top->addWidget(caption);
+    top->addStretch(1);
+
+    m_premiumLogo = new IconSelectButton(card);
+    m_premiumLogo->setObjectName(QStringLiteral("homeEditionPremiumButton"));
+    m_premiumLogo->setIconDir(QStringLiteral("ui"));
+    m_premiumLogo->setIconFile(QStringLiteral("microsoft.svg"));
+    m_premiumLogo->setIconHeight(20);
+    m_premiumLogo->setToolTip(QStringLiteral("正版"));
+    connect(m_premiumLogo, &QAbstractButton::clicked, this, [this] { setEdition(true); });
+    top->addWidget(m_premiumLogo);
+
+    m_offlineLogo = new IconSelectButton(card);
+    m_offlineLogo->setObjectName(QStringLiteral("homeEditionOfflineButton"));
+    m_offlineLogo->setIconDir(QStringLiteral("ui"));
+    m_offlineLogo->setIconFile(QStringLiteral("disconnected.svg"));
+    m_offlineLogo->setIconHeight(20);
+    m_offlineLogo->setMonochrome(true);
+    m_offlineLogo->setToolTip(QStringLiteral("离线"));
+    connect(m_offlineLogo, &QAbstractButton::clicked, this, [this] { setEdition(false); });
+    top->addWidget(m_offlineLogo);
+    lay->addLayout(top);
+
+    m_accountPane = new QStackedWidget(card);
+    m_accountPane->setObjectName(QStringLiteral("homeAccountPane"));
+    { // 正版那一页:账户状态 + 登录 / 刷新
+        auto *pane = new QWidget(m_accountPane);
+        pane->setStyleSheet(QStringLiteral("background: transparent;"));
+        auto *v = new QVBoxLayout(pane);
+        v->setContentsMargins(0, 0, 0, 0);
+        v->setSpacing(10);
+        m_accountState = new BodyLabel(QStringLiteral("读取账户状态…"), pane);
+        m_accountState->setObjectName(QStringLiteral("homeAccountState"));
+        m_accountState->setWordWrap(true);
+        m_accountState->setTextColor(tokens.textTertiary);
+        v->addWidget(m_accountState);
+        m_accountButton = new PushButton(QStringLiteral("登录"), pane);
+        m_accountButton->setObjectName(QStringLiteral("homeAccountButton"));
+        applyButtonFont(m_accountButton);
+        connect(m_accountButton, &QAbstractButton::clicked, this, [this] { launchWithAccount(); });
+        v->addWidget(m_accountButton, 0, Qt::AlignLeft);
+        v->addStretch(1);
+        m_panePremium = m_accountPane->addWidget(pane);
+    }
+    { // 离线那一页:就一个 ID 输入框(状态保留)
+        auto *pane = new QWidget(m_accountPane);
+        pane->setStyleSheet(QStringLiteral("background: transparent;"));
+        auto *v = new QVBoxLayout(pane);
+        v->setContentsMargins(0, 0, 0, 0);
+        v->setSpacing(10);
+        m_offlineEdit = new LineEdit(pane);
+        m_offlineEdit->setObjectName(QStringLiteral("homeOfflineNameEdit"));
+        m_offlineEdit->setPlaceholderText(QStringLiteral("离线 ID（默认 Player）"));
+        m_offlineEdit->setText(offlinePlayerName());
+        m_offlineEdit->setFixedHeight(32);
+        v->addWidget(m_offlineEdit);
+        v->addStretch(1);
+        m_paneOffline = m_accountPane->addWidget(pane);
+    }
+    lay->addWidget(m_accountPane, 1);
+    m_rightCol->addWidget(card);
+
+    setEdition(false); // 默认离线(用户点名;正版那条要用户主动切过去)
 }
 
 QString HomePage::currentVersion() const {
@@ -382,36 +424,64 @@ void HomePage::refresh() {
                                         : QStringLiteral("靠继承 / 没有 jar"));
         if (!QFileInfo::exists(json))
             bits << QStringLiteral("缺版本 JSON");
-        bits << QStringLiteral("目录名就是版本名（可以随便改，不影响启动）");
         m_versionDetail->setText(bits.join(QStringLiteral(" · ")));
     }
 
-    // ② 账户状态(正版卡)
+    // ② 账户状态(右栏账号卡)
     const AccountSnapshot account = loadAccountSnapshot();
     if (accountCanLaunch(account)) {
         m_accountState->setText(QStringLiteral("已登录：%1（玩家名 %2）")
                                     .arg(account.accountName, account.playerName));
-        m_accountButton->setText(QStringLiteral("用正版身份启动"));
-        m_accountButton->setEnabled(!version.isEmpty());
+        /* 已登录就**不再摆第二枚"启动"**:启动在上面那张大卡上(新版版面只有那一枚),
+         * 这里留下的只有"还能补做的事"(没登录 -> 登录;凭据过期 -> 刷新 / 重新登录)。 */
+        m_accountButton->setVisible(false);
     } else if (account.loggedIn) {
         m_accountState->setText(
             QStringLiteral("登录了，但这个账号这次用不上：%1")
                 .arg(!account.hasMcToken || account.mcExpired
                          ? QStringLiteral("凭据已过期（设置 → 账户 里刷新）")
                          : QStringLiteral("没有 Java 版档案")));
-        m_accountButton->setText(QStringLiteral("登录 / 刷新"));
-        m_accountButton->setEnabled(true);
+        m_accountButton->setText(QStringLiteral("刷新 / 重新登录"));
+        m_accountButton->setVisible(true);
     } else {
         m_accountState->setText(QStringLiteral("还没登录。登录后可以用正版身份启动；"
-                                               "不想登录就切回上面的「离线启动」。"));
+                                               "不想登录就用离线。"));
         m_accountButton->setText(QStringLiteral("登录"));
-        m_accountButton->setEnabled(true);
+        m_accountButton->setVisible(true);
     }
+
+    // 启动那一枚:有版本才点得动(没版本时按下去只会弹一句"先装一个",不如直接禁用)
+    if (m_launchButton != nullptr)
+        m_launchButton->setEnabled(!version.isEmpty());
 
     // ③ 当前文件夹(名字 + 路径)
     const QDir dir(m_gameDir);
     m_dirName->setText(dir.dirName().isEmpty() ? m_gameDir : dir.dirName());
     m_dirDisplay->setText(QDir::toNativeSeparators(m_gameDir));
+}
+
+void HomePage::setEdition(bool premium) {
+    m_premium = premium;
+    /* 两枚 LOGO 就是选项本身(用户点名要新版那两枚):选中的那枚图标下面一条 accent 指示条,
+     * 另一枚没有 —— 这个控件(IconSelectButton)的选中态本来就是按这个口径画的。 */
+    if (m_premiumLogo != nullptr)
+        m_premiumLogo->setChecked(premium);
+    if (m_offlineLogo != nullptr)
+        m_offlineLogo->setChecked(!premium);
+    if (m_accountPane != nullptr)
+        m_accountPane->setCurrentIndex(premium ? m_panePremium : m_paneOffline);
+    std::fprintf(stderr, "[sxcl-ui] 主页形态: %s\n", premium ? "正版" : "离线");
+}
+
+void HomePage::launch() {
+    /* 主页只有这一枚「启动游戏」:落到哪一路由**当前形态**决定。
+     *   离线 -> launchOffline()(先把 ID 落盘,再强制离线身份起);
+     *   正版 -> launchWithAccount()(账号不能用就去登录窗,**绝不**偷偷用离线身份跑起来)。 */
+    if (m_premium) {
+        launchWithAccount();
+        return;
+    }
+    launchOffline();
 }
 
 void HomePage::changeVersion() {
@@ -473,7 +543,7 @@ void HomePage::launchWithAccount() {
     if (!accountCanLaunch(account)) {
         if (!account.loggedIn) {
             InfoBar::push(InfoBar::Type::Info, QStringLiteral("先登录正版账号"),
-                          QStringLiteral("这一路要用正版身份启动；不想登录就切回上面的「离线启动」。"),
+                          QStringLiteral("这一路要用正版身份启动；不想登录就用离线（断线那枚）。"),
                           window(), 5000);
         } else if (!account.hasMcToken || account.mcExpired) {
             InfoBar::push(InfoBar::Type::Warning, QStringLiteral("登录凭据过期了，先刷新或重新登录"),
@@ -483,7 +553,7 @@ void HomePage::launchWithAccount() {
         } else {
             InfoBar::push(InfoBar::Type::Warning, QStringLiteral("这个账户没有 Java 版档案"),
                           QStringLiteral("没买 Java 版（或档案没取到），正版这一路用不了；"
-                                         "想进游戏请切回「离线启动」。"),
+                                         "想进游戏就切到离线。"),
                           window(), 8000);
         }
         if (AuthLoginDialog *dialog = AuthLoginDialog::open(window())) {
