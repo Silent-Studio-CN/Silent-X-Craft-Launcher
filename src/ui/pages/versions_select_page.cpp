@@ -584,13 +584,15 @@ private:
                  * ("原版 · 无自己的 jar · 不能启动：需要安装 1.12.2 作为前置版本"),
                  * 读着像报错(用户 2026-09-26 点名)。完整原因与路径在整行的 tooltip 里。 */
                 if (inst.launchable) {
-                    if (!row.info.isEmpty()) {
-                        auto *detail = new BodyLabel(row.info, card);
-                        detail->setObjectName(QStringLiteral("sxclVersionRowInfo"));
-                        detail->setWordWrap(true);
-                        detail->setTextColor(secondary, secondary);
-                        text->addWidget(detail);
-                    }
+                    /* 没有版本信息可写时**照样摆一个空标签**:每一行都保持"名字在上、小字在
+                     * 下"的两行结构 —— 否则那一行的名字会在卡片里垂直居中,与旁边几行错开
+                     * (实测 424242 那行标题拿到 46px 高,其余行是 22px)。空标签不写一个字,
+                     * 既没有"未知"也没有"猜"。 */
+                    auto *detail = new BodyLabel(row.info, card);
+                    detail->setObjectName(QStringLiteral("sxclVersionRowInfo"));
+                    detail->setWordWrap(true);
+                    detail->setTextColor(secondary, secondary);
+                    text->addWidget(detail);
                 } else {
                     auto *line = new QWidget(card);
                     line->setObjectName(QStringLiteral("sxclVersionRowNoteRow"));
