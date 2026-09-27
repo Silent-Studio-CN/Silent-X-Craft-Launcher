@@ -192,13 +192,18 @@ static void tracePopupWidth(QWidget *popup, QWidget *window, const QString &kind
 // 控件都打三组数:
 //
 //   text=<w>x<h>  当前字体下这份文本的**自然**尺寸(单行宽 / 不换行高度)
-//   need=<w>x<h>  控件按该文字 + 自己的内边距算出的首选尺寸(QWidget::sizeHint())
+//   need=<w>x<h>  不换行的控件:按该文字 + 自身内边距算出的首选尺寸(QWidget::sizeHint());
+//                 换行的控件(QLabel::setWordWrap):**当前宽度下排完真的需要多大** ——
+//                 宽 = 这一行用到的宽,高 = QLabel::heightForWidth(当前宽)
 //   got =<w>x<h>  布局这次真的给了多少(QWidget::width()/height())
 //
 // 判据(两个布尔,直接印在行尾):
-//   CUT-W  文字自然宽装不进"控件宽 - 自身内边距" -> 这一行在屏幕上会被切掉
-//   CUT-H  文字自然高装不进"控件高 - 自身内边距" -> 行高不够(多行/换行文本)
+//   CUT-W  不换行:文字自然宽装不进"控件宽 - 自身内边距" -> 这一行在屏幕上会被切掉;
+//          换行:某个**不可断开的词**比控件还宽 -> 折不开,只能横向裁
+//   CUT-H  给的高 < 文字需要的高(换行控件 = 当前宽度下排完需要的高)-> 最后几行被裁
 // 内边距 = need - text(字体换了它不变,所以拿它当常数是安全的)。
+//
+// why 换行控件要单独一套:见下面 textMetrics() 里的长注释(单行模型对折行文本会报"假截断")。
 //
 // 依据:docs/05-UI-1to1规格.md §3 的字号表 + §7 的逐页结构;规格里那些数字都是
 // **桌面 1100x750 + 桌面字体**下量出来的,安卓逻辑宽只有 800,同一份固定尺寸就会挤。
@@ -216,13 +221,41 @@ static QString textMetrics(QWidget *widget, const QString &full) {
     const QSize hint = w->sizeHint();
     const int padW = qMax(0, hint.width() - textW);
     const int padH = qMax(0, hint.height() - textH);
-    const bool cutW = w->width() > 0 && textW + padW > w->width();
-    const bool cutH = w->height() > 0 && textH + padH > w->height();
+    int needW = hint.width();
+    int needH = hint.height();
+    bool cutW = w->width() > 0 && textW + padW > w->width();
+    bool cutH = w->height() > 0 && textH + padH > w->height();
+    /* ── 换行的控件(QLabel::setWordWrap)得**另外**算 ────────────────────────────
+     * 上面那套是"单行模型":文字自然宽 + sizeHint 高。对换行控件两个数都是假的 ——
+     * 实测(team 页 900x600)那段 906px 的说明文字:text=906x19 need=240x76 got=795x38,
+     * 而屏幕上它就是**折成了两行**,一个字都没被切。为什么假:
+     *   * 它宽 795 也照样把文字折行画出来(QLabel 是折行,不是截断),所以"文字自然宽 906 >
+     *     控件宽 795"根本不代表切字;
+     *   * sizeHint 的高(76)是 Qt 拿一个 240px 的**试探宽度**排出来的"要 4 行",而布局是
+     *     按真实宽度(795)给的(2 行 = 38)—— 拿前者当"需要多高"当然永远差一截。
+     * 立论:换行控件里**只有 Qt 自己的排版**说了算 —— QLabel::heightForWidth(实际宽度)。
+     * 所以换行控件改用这一对:
+     *   need = (这一行真正会用到的宽, 当前宽度下排完需要的高)
+     * 判据不变,而且照样抓得住真截断:
+     *   CUT-H  给的高 < 当前宽度下排完需要的高  -> 最后几行真的被裁了;
+     *   CUT-W  某个**不可断开的词**比控件还宽  -> 折不开,只能横向裁(见 laid 的宽)。
+     * 非换行控件一字不动(还是上面那套单行模型)。 */
+    if (w->width() > 0 && w->sizePolicy().hasHeightForWidth()) {
+        const int laidH = w->heightForWidth(w->width());
+        if (laidH > 0) {
+            const int avail = qMax(1, w->width() - padW);
+            const QRect laid = fm.boundingRect(QRect(0, 0, avail, 0), Qt::TextWordWrap, full);
+            needW = qMin(textW, avail);
+            needH = laidH; // 含内边距(Qt 自己算的)
+            cutW = laid.width() > avail;
+            cutH = laidH > w->height();
+        }
+    }
     QString out = QStringLiteral(" [text=%1x%2 need=%3x%4 got=%5x%6]")
                       .arg(textW)
                       .arg(textH)
-                      .arg(hint.width())
-                      .arg(hint.height())
+                      .arg(needW)
+                      .arg(needH)
                       .arg(w->width())
                       .arg(w->height());
     if (cutW)
@@ -355,13 +388,15 @@ public:
 //   step 动作(每一步都是产品路径;切页走 switchToRoute —— 导航项的 routeChanged 直连它):
 //     1 **切回版本选择页**(起点规范化:三次运行才是同一条时间线)+ 确保侧2 展开
 //     2 主栏展开(状态机要立刻把侧2 收成 48)
-//     3 **切到下载页**(它那条侧栏也是生来就展开的:外壳必须收敛 —— 主栏让位)
+//     3 **切到下载页 + 点汉堡键把它的侧栏拉出来**(外壳必须收敛 —— 主栏让位)
 //     4 切回版本选择页(那一步两条都是 48:0 条也合法,我们不主动展开)
 //     5 在版本选择页把侧2 再展开
 //     6 再切到下载页(侧2 这时**藏在**别的页上、还展开着:它不该被算进"看得见的栏")
 //     7 再切回版本选择页(那条一直没被收起:仍然是唯一一条展开的)
-//   第 3 步就是 docs/27 §12 末尾那条已知边界("主栏展开着的时候切到生来就展开的页面,
-//   那一步没有任何 collapsedChanged 发出来")的复现路径;第 6/7 步验"藏着的栏不参与"。
+//   第 3 步覆盖的规则:主栏展开着的时候把页内那条拉出来,外壳必须让主栏让位
+//   (2026-09-27 之前那条栏是"生来就展开",那一步没有任何 collapsedChanged 发出来,
+//   正是 docs/27 §12 末尾那条已知边界;现在改成**点它的汉堡键**拉出来,同一条规则照验);
+//   第 6/7 步验"藏着的栏不参与"。
 //   * 为什么必须等落定:NavPanel::collapsedChanged 是**动画结束**才发的(qf 的
 //     _onExpandAniFinished 同口径),外壳再去收另一条栏又要 150ms —— 量在过渡态上
 //     只会自己造假 FAIL(§12 第 3 条);
@@ -477,7 +512,12 @@ static void sxclRailsProbeTick(SxclRailsProbe *st) {
         sxclRailsEnsure(mainRail, true, "主栏");
         break;
     case 3:
-        sxclRailsRoute(window, "download"); // **切页**:主栏还展开着(322),下载页侧栏生来展开
+        /* **切页 + 在下载页把它的侧栏拉出来**。
+         * 2026-09-27 之后下载页那条侧栏**不再是生来展开**(用户点名「下载页左 1 左 2 两个栏
+         * 默认都是收回去的」),所以这一步按产品路径点它的汉堡键把它展开 —— 这一拍要验的那条
+         * 规则一个字没变:主栏还展开着(322)时把页内那条拉出来,外壳必须让主栏让位(48)。 */
+        sxclRailsRoute(window, "download");
+        sxclRailsEnsure(sxclPageRail(window), true, "侧2(download)");
         break;
     case 4:
         sxclRailsRoute(window, "select"); // 切回来:上一次让位之后两条都是 48(0 条也合法)
@@ -876,21 +916,31 @@ sxcl::ui::MainWindow window;
     if (qEnvironmentVariableIntValue("SXCL_UI_AUTH_DIALOG") == 1) {
         QTimer::singleShot(400, &app, [&window] {
             QWidget *page = window.sessionPage(QStringLiteral("settings"));
-            if (page == nullptr) {
-                std::fprintf(stderr,
-                             "[sxcl-ui] SXCL_UI_AUTH_DIALOG 需要设置页:请加 SXCL_UI_ROUTE=settings\n");
-                return;
-            }
-            const QList<PushSettingCard *> cards = page->findChildren<PushSettingCard *>();
-            for (PushSettingCard *card : cards) {
-                if (card->button() != nullptr &&
-                    card->button()->text() == QStringLiteral("登录")) {
-                    card->button()->click();
-                    std::fprintf(stderr, "[sxcl-ui] 已点击设置页「账户 → 登录」\n");
-                    return;
+            if (page != nullptr) {
+                const QList<PushSettingCard *> cards = page->findChildren<PushSettingCard *>();
+                for (PushSettingCard *card : cards) {
+                    if (card->button() != nullptr &&
+                        card->button()->text() == QStringLiteral("登录")) {
+                        card->button()->click();
+                        std::fprintf(stderr, "[sxcl-ui] 已点击设置页「账户 → 登录」\n");
+                        return;
+                    }
                 }
             }
-            std::fprintf(stderr, "[sxcl-ui] 设置页里没找到「登录」按钮\n");
+            /* 主页那条路也开同一个登录窗(主页账户区只有这一枚按钮,见 home_page.cpp):
+             * SXCL_UI_ROUTE=home + SXCL_UI_AUTH_DIALOG=1 时点它 —— 同样是**点界面上真的按钮**。
+             * 已经是登录态(按钮写着「退出登录」)就什么都不点:那一下会注销。 */
+            QWidget *home = window.sessionPage(QStringLiteral("home"));
+            QAbstractButton *accountButton =
+                home != nullptr
+                    ? home->findChild<QAbstractButton *>(QStringLiteral("homeAccountButton"))
+                    : nullptr;
+            if (accountButton != nullptr && accountButton->text() == QStringLiteral("登录")) {
+                accountButton->click();
+                std::fprintf(stderr, "[sxcl-ui] 已点击主页「账户 → 登录」\n");
+                return;
+            }
+            std::fprintf(stderr, "[sxcl-ui] 没找到可点的「登录」按钮(设置页 / 主页都没有)\n");
         });
     }
 
@@ -1218,10 +1268,12 @@ sxcl::ui::MainWindow window;
     if (!modsVersion.isEmpty()) {
         const int versionDelay = qEnvironmentVariableIntValue("SXCL_UI_MODS_VERSION_DELAY");
         QTimer::singleShot(versionDelay > 0 ? versionDelay : 500, &app, [&window, modsVersion]() {
-            QComboBox *box = nullptr;
-            const QList<QComboBox *> all =
-                window.findChildren<QComboBox *>(QStringLiteral("modsVersionFilter"));
-            for (QComboBox *candidate : all) {
+            /* 版本筛选是**可输入的输入框**（用户 2026-09-27：「那个版本号儿，换成输入框啊」），
+             * 所以这里就是往那个框里打字；"all" = 清空 = 不筛版本。 */
+            QLineEdit *box = nullptr;
+            const QList<QLineEdit *> all =
+                window.findChildren<QLineEdit *>(QStringLiteral("modsVersionFilter"));
+            for (QLineEdit *candidate : all) {
                 if (candidate->isVisible()) { // 两份模组页(模组/光影)同名,只认眼前那个
                     box = candidate;
                     break;
@@ -1229,23 +1281,18 @@ sxcl::ui::MainWindow window;
             }
             if (box == nullptr) {
                 std::fprintf(stderr,
-                             "[sxcl-ui] 找不到版本筛选下拉(SXCL_UI_MODS_VERSION 需要 "
+                             "[sxcl-ui] 找不到版本筛选输入框(SXCL_UI_MODS_VERSION 需要 "
                              "SXCL_UI_ROUTE=download)\n");
                 return;
             }
             const bool wantAll = modsVersion.compare(QStringLiteral("all"), Qt::CaseInsensitive) == 0;
-            int index = 0;
-            if (!wantAll) {
-                index = box->findData(modsVersion);
-                if (index < 0) {
-                    box->insertItem(1, modsVersion, modsVersion); // 不在常用列表里就插到"全部"后面
-                    index = 1;
-                }
-            }
-            box->setCurrentIndex(index);
+            const QString text = wantAll ? QString() : modsVersion;
+            box->setText(text);
+            /* 当作"用户打的字":页面那边要把它记成"用户改过了"，免得之后又被实例默认值覆盖 */
+            QMetaObject::invokeMethod(box, "textEdited", Qt::DirectConnection,
+                                      Q_ARG(QString, text));
             std::fprintf(stderr, "[sxcl-ui] mods-version-filter: want=%s current=%s\n",
-                         modsVersion.toUtf8().constData(),
-                         box->currentData().toString().toUtf8().constData());
+                         modsVersion.toUtf8().constData(), box->text().toUtf8().constData());
         });
     }
 
@@ -1296,21 +1343,31 @@ sxcl::ui::MainWindow window;
     if (installIndex > 0) {
         const int installDelay = qEnvironmentVariableIntValue("SXCL_UI_MODS_INSTALL_DELAY");
         QTimer::singleShot(installDelay > 0 ? installDelay : 7000, &app, [&window, installIndex]() {
-            QList<QAbstractButton *> visible;
-            const QList<QAbstractButton *> all =
-                window.findChildren<QAbstractButton *>(QStringLiteral("modsInstallButton"));
-            for (QAbstractButton *candidate : all) {
+            /* 行上**没有按钮**了（用户 2026-09-27：「都做成选项卡没有按钮，点击就是代表我要点它」）：
+             * 点整张卡 = 我要它。这里就点真的那一张卡的 clicked（走与鼠标点击同一条接线）。 */
+            QList<QWidget *> visible;
+            const QList<QWidget *> cards =
+                window.findChildren<QWidget *>(QStringLiteral("modsResultCard"));
+            const QList<QWidget *> fileCards =
+                window.findChildren<QWidget *>(QStringLiteral("modsFileChoiceCard"));
+            for (QWidget *candidate : cards) {
+                if (candidate->isVisible()) {
+                    visible.append(candidate);
+                }
+            }
+            for (QWidget *candidate : fileCards) {
                 if (candidate->isVisible()) {
                     visible.append(candidate);
                 }
             }
             if (visible.size() < installIndex) {
-                std::fprintf(stderr, "[sxcl-ui] 第 %d 个「装」不存在(当前可见 %d 个)\n", installIndex,
+                std::fprintf(stderr, "[sxcl-ui] 第 %d 张结果卡不存在(当前可见 %d 张)\n", installIndex,
                              static_cast<int>(visible.size()));
                 return;
             }
-            visible.at(installIndex - 1)->click();
-            std::fprintf(stderr, "[sxcl-ui] 模组页已点第 %d 个「装」\n", installIndex);
+            QMetaObject::invokeMethod(visible.at(installIndex - 1), "clicked", Qt::DirectConnection);
+            std::fprintf(stderr, "[sxcl-ui] 模组页已点第 %d 张结果卡(行上无按钮,点整行=我要它)\n",
+                         installIndex);
         });
     }
 
@@ -1374,6 +1431,26 @@ sxcl::ui::MainWindow window;
             for (sxcl::ui::NavPanel *panel : panels) {
                 panel->setCollapsed(true);
                 std::fprintf(stderr, "[sxcl-ui] 侧2 已折叠(SXCL_UI_COLLAPSE)\n");
+            }
+        });
+    }
+
+    // 验收通路:把当前页面里的侧栏**展开**(SXCL_UI_EXPAND=1)—— 与上面那条 COLLAPSE 对称。
+    //   下载页的侧栏现在**默认是收起的**(用户 2026-09-27:「下载页左 1 左 2 两个栏默认都是收回去的」),
+    //   而要量"展开态那张排版"(咖啡杯 | 竖直分隔线 | 基岩 LOGO)的验收脚本得先把它展开:
+    //   走面板自己的公开 API,不在这里改状态。
+    if (qEnvironmentVariableIntValue("SXCL_UI_EXPAND") == 1) {
+        const int expandDelay = qEnvironmentVariableIntValue("SXCL_UI_EXPAND_DELAY");
+        QTimer::singleShot(expandDelay > 0 ? expandDelay : 1200, &app, [&window]() {
+            QWidget *page = window.pageStack() != nullptr ? window.pageStack()->currentWidget()
+                                                          : nullptr;
+            if (page == nullptr)
+                return;
+            const QList<sxcl::ui::NavPanel *> panels = page->findChildren<sxcl::ui::NavPanel *>();
+            for (sxcl::ui::NavPanel *panel : panels) {
+                panel->setCollapsed(false);
+                std::fprintf(stderr, "[sxcl-ui] 侧栏已展开(SXCL_UI_EXPAND):%s\n",
+                             panel->objectName().toUtf8().constData());
             }
         });
     }
@@ -1447,6 +1524,36 @@ sxcl::ui::MainWindow window;
                          name.toUtf8().constData(), homeEditionPick.toUtf8().constData(),
                          pair.at(0) != nullptr && pair.at(0)->isChecked(),
                          pair.at(1) != nullptr && pair.at(1)->isChecked());
+        });
+    }
+
+    // 验收通路:点顶栏那枚「玩家」标记(头像 + 玩家名)—— 用户 2026-09-27 点名
+    //   「单击之后进到账户管理页」。SXCL_UI_ACCOUNT_CLICK=1:往那枚控件上**真的**发一次
+    //   鼠标按下 + 抬起(与手点走同一条事件路),再把切到的路由打出来。
+    //   **不直接调 switchToRoute** —— 那样验的就只是外壳,验不到"点它到底接没接上"。
+    if (qEnvironmentVariableIntValue("SXCL_UI_ACCOUNT_CLICK") == 1) {
+        const int accountDelay = qEnvironmentVariableIntValue("SXCL_UI_ACCOUNT_CLICK_DELAY");
+        QTimer::singleShot(accountDelay > 0 ? accountDelay : 1800, &app, [&window]() {
+            QWidget *chip = window.findChild<QWidget *>(QStringLiteral("titlebarAccountChip"));
+            if (chip == nullptr) {
+                std::fprintf(stderr, "[sxcl-ui] 找不到顶栏账户标记(titlebarAccountChip)\n");
+                return;
+            }
+            const QPoint local = chip->rect().center();
+            const QPoint global = chip->mapToGlobal(local);
+            QMouseEvent press(QEvent::MouseButtonPress, QPointF(local), QPointF(global),
+                              Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QMouseEvent release(QEvent::MouseButtonRelease, QPointF(local), QPointF(global),
+                                Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(chip, &press);
+            QApplication::sendEvent(chip, &release);
+            QWidget *page = window.pageStack() != nullptr ? window.pageStack()->currentWidget()
+                                                          : nullptr;
+            std::fprintf(stderr,
+                         "[sxcl-ui] 顶栏账户标记已点:rect=(%d,%d %dx%d) route=%s page=%s\n",
+                         chip->x(), chip->y(), chip->width(), chip->height(),
+                         window.currentRouteKey().toUtf8().constData(),
+                         page != nullptr ? page->objectName().toUtf8().constData() : "(null)");
         });
     }
 
