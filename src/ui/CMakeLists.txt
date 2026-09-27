@@ -84,6 +84,8 @@ set(SXCL_UI_SOURCES
   icon_select_button.cpp icon_select_button.h
   #   folder_icons.* 文件夹自定义图标（用户点名：悬停文件夹出设置按钮，从应用内挑图标）
   folder_icons.cpp   folder_icons.h
+  #   flow_layout.* 流式布局（docs/25 总则：控件必须完整显示自己，放不下**换行**、不许压扁/裁切）
+  flow_layout.cpp    flow_layout.h
   nav.cpp            nav.h
   main_window.cpp    main_window.h
   #   tray.*       任务栏托盘图标:「最小化 = 隐藏窗口」后的恢复入口(新增设计,

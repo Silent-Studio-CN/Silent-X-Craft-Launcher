@@ -32,6 +32,7 @@
 #include "../workers/mods_worker.h"
 #include "../workers/ui_paths.h"
 
+#include "flow_layout.h" // 筛选区：放不下就换行，控件保证完整显示（docs/25 总则）
 #include "fluent_theme.h"
 #include "libqf.h"
 
@@ -144,30 +145,37 @@ private:
         m_context->setTextColor(secondary, secondary);
         lay->addWidget(m_context);
 
-        auto *row = new QHBoxLayout();
-        row->setSpacing(8);
-        m_search = new SearchLineEdit(this);
+        /* ── 筛选区：**一个流式布局**装下这一整行 ──
+         * 用户 2026-09-27 的规矩（docs/25 的总则）：每个控件都保证**能完整显示自己**，
+         * 放不下就**换行**，绝不压缩/裁切。以前这里是两个 QHBoxLayout，窗口一窄，两个勾选框
+         * 就被压成 41px、文字被切掉（"一直被压缩"就是它）。 */
+        auto *filterRow = new QWidget(this);
+        filterRow->setObjectName(QStringLiteral("modsFilterRow"));
+        m_filterFlow = new FlowLayout(filterRow, 0, 10, 8);
+
+        m_search = new SearchLineEdit(filterRow);
         m_search->setPlaceholderText(m_shaders ? QStringLiteral("搜光影包")
                                                : QStringLiteral("搜模组"));
         m_search->setFixedHeight(34);
         /* 稳定的 objectName:验收钩子(SXCL_UI_MODS_QUERY)靠它**往真控件里打字再点真的搜索按钮**,
          * 而不是在 main.cpp 里另起一条"自己调核心库"的旁路(那样验不到接线本身)。 */
         m_search->setObjectName(QStringLiteral("modsSearchBox"));
-        row->addWidget(m_search, 1);
-        m_go = new PrimaryPushButton(QStringLiteral("搜索"), this);
+        /* 自己的自然宽就是下限；它是这一行里唯一带 Expanding 的项(吃掉剩下的宽度)。 */
+        m_search->setMinimumWidth(qMax(200, m_search->sizeHint().width()));
+        m_search->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        m_filterFlow->addWidget(m_search);
+
+        m_go = new PrimaryPushButton(QStringLiteral("搜索"), filterRow);
         applyButtonFont(m_go);
         m_go->setObjectName(QStringLiteral("modsSearchButton"));
         m_go->setFixedHeight(34);
-        row->addWidget(m_go, 0);
-        lay->addLayout(row);
+        m_go->setMinimumWidth(m_go->sizeHint().width());
+        m_go->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        m_filterFlow->addWidget(m_go);
 
         // ── 来源**勾选项**（用户 2026-09-26：「模组下载的两个圆要作为勾选的选项」）──
         // 两个源**能同时勾上**：勾上哪个就搜哪个，勾两个就两个都搜，结果合并成一份列表
         // （每一条自带真实来源标记）。这不是"先选一个源、再在它下面搜"。
-        auto *sourceRow = new QWidget(this);
-        auto *sourceLay = new QHBoxLayout(sourceRow);
-        sourceLay->setContentsMargins(0, 0, 0, 0);
-        sourceLay->setSpacing(18);
         struct SourceSpec {
             const char *key;
             const char *objectName;
@@ -176,19 +184,21 @@ private:
                                     {"curseforge", "modsSourceCurseForge"}};
         for (const SourceSpec &spec : specs) {
             const QString key = QString::fromLatin1(spec.key);
-            auto *box = new CheckBox(modsSourceDisplayName(key), sourceRow);
+            auto *box = new CheckBox(modsSourceDisplayName(key), filterRow);
             /* 稳定 objectName：验收钩子(SXCL_UI_MODS_SOURCES)与 dump 都按它认这两个勾选框。 */
             box->setObjectName(QString::fromLatin1(spec.objectName));
             box->setTristate(false); // qf 的 CheckBox 默认三态(那份是给演示用的),这里只要勾/不勾
             box->setFixedHeight(28);
             box->setCursor(Qt::PointingHandCursor);
+            /* 勾选框也**保证自己能完整显示**：自然宽是下限，布局只会把它换行，不会压它。 */
+            box->setMinimumWidth(box->sizeHint().width());
+            box->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
             QObject::connect(box, &QAbstractButton::toggled, this,
                              [this, key] { onSourceToggled(key); });
-            sourceLay->addWidget(box, 0, Qt::AlignLeft);
+            m_filterFlow->addWidget(box);
             m_sourceBoxes.insert(key, box);
         }
-        sourceLay->addStretch(1);
-        lay->addWidget(sourceRow);
+        lay->addWidget(filterRow);
         /* 注意：这里**没有** key 输入栏 —— 官方 key 是编译期内置的(include/sxcl/mods_key.h)，
          * 用户 2026-09-26 点名「不要让用户自己填写」。没有内置 key 时 CurseForge 那个框点不动
          * （见 refreshSourceBoxes 的 tooltip），而不是摆个框让用户去申请。 */
@@ -952,6 +962,7 @@ private:
     SearchLineEdit *m_search = nullptr;
     PrimaryPushButton *m_go = nullptr;
     BodyLabel *m_context = nullptr;
+    FlowLayout *m_filterFlow = nullptr;        // 筛选区那一行（流式：放不下换行，不压控件）
     QHash<QString, QCheckBox *> m_sourceBoxes; // "modrinth" / "curseforge" -> 那个勾选框
     QVBoxLayout *m_list = nullptr;
     ModsWorker *m_worker = nullptr;
