@@ -1298,6 +1298,16 @@ private:
         }
     }
 
+    /** 逐行取证是**开关式**的(SXCL_UI_ROW_EVIDENCE=1):它是给验收脚本读的,不是给用户看的。
+     *
+     * 为什么要开关(用户 2026-09-27):这一页的行数是**整份清单**(实测 206 行),逐行
+     * fprintf(stderr, …) 是界面线程上的一次几百毫秒停顿 —— 从终端跑起来时更狠(每行一次
+     * 控制台写),现场日志里的 "页面卡住 3008ms" 就有它一份。产品路径上一行都不打。 */
+    static bool rowEvidenceWanted() {
+        static const bool on = qEnvironmentVariableIntValue("SXCL_UI_ROW_EVIDENCE") == 1;
+        return on;
+    }
+
     /** 排一次取证(界面线程,150ms 之后打):showVersions 之后与这一份实例上屏时各排一次。
      *
      * 为什么不是"下一拍"(singleShot(0)):模型刚换完时视图的**布局还没跑**(LayoutRequest
@@ -1306,6 +1316,8 @@ private:
     void scheduleRowEvidence() {
         if (m_evidencePending)
             return;
+        if (!rowEvidenceWanted())
+            return; // 没开开关:产品路径上不打这几百行(见 rowEvidenceWanted)
         m_evidencePending = true;
         QTimer::singleShot(150, this, [this] {
             m_evidencePending = false;

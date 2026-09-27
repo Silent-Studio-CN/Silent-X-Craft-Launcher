@@ -121,6 +121,9 @@ function Invoke-Run([string]$tag, [string]$size, [string]$shotPath) {
   $env:SXCL_UI_THEME = 'dark'
   $env:SXCL_UI_MANIFEST = $manifest
   $env:SXCL_UI_CATEGORY = 'all'      # default is "release"; the 4 types must share one screen
+  # the per-row "version-row page:" lines are opt-in: printing one line per manifest row from the
+  # GUI thread is a multi-hundred-ms freeze on the product path (user report 2026-09-27).
+  $env:SXCL_UI_ROW_EVIDENCE = '1'
   $env:SXCL_UI_DUMP = '1'
   $env:SXCL_UI_DUMP_DEPTH = '14'
   # A screenshot is not just evidence -- it is also what makes this run EXIT (SXCL_UI_SHOT

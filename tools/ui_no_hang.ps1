@@ -16,11 +16,23 @@
 #
 # Temp/acceptance files always live under D:\SilentStudio\_test (never %TEMP%, never C:).
 # Keep this file ASCII-only + UTF-8 BOM (Windows PowerShell 5.1 parses .ps1 as ANSI without a BOM).
+#
+# Parameters (all optional; the defaults are exactly the old behaviour):
+#   -Exe    <path>  run another build's sxcl-ui.exe (e.g. a private build dir)
+#   -Work   <dir>   where temp fixtures/screenshots go
+#   -LogDir <dir>   pin SXCL_LOG_DIR for every run, so the logs and any hang report the app
+#                   writes land here instead of the user's %APPDATA%\SilentXCraftLauncher\logs
+#                   (never delete/overwrite the evidence in the user's own log directory).
+param(
+  [string]$Exe = '',
+  [string]$Work = 'D:\SilentStudio\_test\ui_no_hang',
+  [string]$LogDir = ''
+)
 $ErrorActionPreference = 'Continue'
-$exe = Join-Path $PSScriptRoot '..\build-ui\src\ui\Release\sxcl-ui.exe'
-$work = 'D:\SilentStudio\_test\ui_no_hang'
+$exe = if ($Exe -ne '') { $Exe } else { Join-Path $PSScriptRoot '..\build-ui\src\ui\Release\sxcl-ui.exe' }
+$work = $Work
 New-Item -ItemType Directory -Force -Path $work | Out-Null
-$crashDir = Join-Path $env:APPDATA 'SilentXCraftLauncher\logs\crashes'
+$crashDir = if ($LogDir -ne '') { Join-Path $LogDir 'crashes' } else { Join-Path $env:APPDATA 'SilentXCraftLauncher\logs\crashes' }
 New-Item -ItemType Directory -Force -Path $crashDir | Out-Null
 
 # ---------------------------------------------------------------- fixture (game dir + settings)
@@ -55,6 +67,8 @@ $fails = @()
 foreach ($route in $routes) {
   $env:SXCL_UI_ROUTE = $route
   $env:SXCL_UI_SETTINGS = $ini
+  # pin the app's log dir when asked to: logs + any hang report stay out of the user's own logs
+  if ($LogDir -ne '') { $env:SXCL_LOG_DIR = $LogDir } else { Remove-Item Env:SXCL_LOG_DIR -ErrorAction SilentlyContinue }
   $env:SXCL_UI_DUMP = '1'
   $env:SXCL_UI_SHOT_DELAY = '12000'
   $shot = Join-Path $work ($route + '.png')

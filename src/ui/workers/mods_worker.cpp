@@ -55,11 +55,27 @@ void ModsWorker::start() {
     if (m_thread != nullptr) {
         return;
     }
-    m_thread = new QThread();
-    moveToThread(m_thread);
-    connect(m_thread, &QThread::started, this, &ModsWorker::run);
-    connect(m_thread, &QThread::finished, this, [this] { m_thread = nullptr; });
-    m_thread->start();
+    /* run() **必须**在别的线程里跑。这里原来是 moveToThread(m_thread),而调用方一律是
+     * new ModsWorker(req, 页面) —— Qt 对**带 parent 的对象**拒绝搬家,只打一行
+     * "QObject::moveToThread: Cannot move objects with a parent" 就返回,于是 run()
+     * 留在了**界面线程**:一次搜索、每张模组图标都拿界面线程去等网络(实测 1~3 秒),
+     * 日志里就是一条条 ui-stall(用户 2026-09-27:「页面卡住 3008ms 延迟」,同一份日志里
+     * 几十行 moveToThread)。现在**不搬家**:在新线程里直接跑 run()。
+     * 对象、parent、生命周期一个字节都不动,只是阻塞的活落到了别的线程上。 */
+    QThread *thread = QThread::create([this] { run(); });
+    m_thread = thread;
+    /* 线程跑完就收掉它的壳:模组页每搜一次、每张图标都新建一个 worker(一次几十个),
+     * 壳不回收就是几十条空转的线程(QThread 的默认 run() 是事件循环,没人 quit 就一直在)。
+     * finished 从工作线程发、在**界面线程**里收(队列投递),所以 m_thread 只在界面线程里读写。
+     * 注意:**不要**给它挂 parent —— 那会让它出现在页面的 findChildren<QThread*>() 里,
+     * "页面下还有任务在跑"的判据会被这些一次性请求搅浑(main_window.cpp:258)。 */
+    connect(thread, &QThread::finished, this, [this, thread] {
+        if (m_thread == thread) {
+            m_thread = nullptr;
+        }
+        thread->deleteLater();
+    });
+    thread->start();
 }
 
 void ModsWorker::run() {

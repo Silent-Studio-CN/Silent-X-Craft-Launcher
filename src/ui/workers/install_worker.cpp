@@ -212,15 +212,14 @@ InstallWorker::~InstallWorker() {
 void InstallWorker::start() {
     if (m_started.exchange(true))
         return; // 只起一次
-    // ★ QThread 这里**不能**给 parent(this):带 parent 的对象 moveToThread 会被 Qt 拒绝
-    //   ("QObject::moveToThread: Cannot move objects with a parent"),run() 就还在界面线程里跑 ——
-    //   界面会卡住。线程对象的生命周期由本类的析构函数负责(quit + wait + deleteLater)。
+    // ★ run() 必须**在别的线程里跑**,而这里原来用的是 moveToThread(m_thread):
+    //   调用方是 new InstallWorker(request, 页面) —— Qt 对**带 parent 的对象**拒绝搬家
+    //   ("QObject::moveToThread: Cannot move objects with a parent"),run() 就留在了界面线程:
+    //   整条安装链(下载 + 解包 + 装加载器)把界面按住几分钟,用户看到的就是"未响应"。
+    //   现在**不搬家**:新线程里直接跑 run()(与 workers/mods_worker.cpp 同一个口径)。
     // 线程对象没有 parent,**由本类析构函数 delete**(不接 finished->deleteLater:
     // 那样析构里再 delete 会与排队的删除撞成二次释放)。
-    m_thread = new QThread();
-    // 工作对象搬到新线程:槽 run() 在那条线程里执行,界面线程的 start() 立刻返回。
-    moveToThread(m_thread);
-    connect(m_thread, &QThread::started, this, &InstallWorker::run);
+    m_thread = QThread::create([this] { run(); });
     connect(m_thread, &QThread::finished, this, [this] { m_running.store(false); });
     m_thread->start();
 }
