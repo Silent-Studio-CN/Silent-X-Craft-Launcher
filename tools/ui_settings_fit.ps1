@@ -1,4 +1,4 @@
-﻿# (C) Silent X Craft Launcher -- settings page "fit to window" acceptance (user 2026-09-26).
+# (C) Silent X Craft Launcher -- settings page "fit to window" acceptance (user 2026-09-26).
 # ASCII-only output lines; run with pwsh.
 #   1) no HORIZONTAL scrollbar / drag range on the settings page at 900x600 / 1100x750 / 1280x800
 #   2) every setting card's right edge <= viewport right edge
@@ -28,7 +28,9 @@ $samples = @(
   (C @(0x542F,0x52A8,0x65F6,0x81EA,0x52A8,0x68C0,0x67E5,0x66F4,0x65B0)),   # startup update check (title)
   (C @(0x6D45,0x8272)),                                                     # light / dark / auto (content)
   (C @(0x6BCF,0x4E2A,0x7248,0x672C,0x5404,0x7528,0x4E00,0x5957)),           # version isolation (long content)
-  (C @(0x542F,0x52A8,0x524D,0x8865,0x5168,0x65F6)),                         # file check off (longest content)
+  # file check off (longest content): the 2026-09-27 copy rewrite replaced this subtitle, so the
+  # sample follows the new sentence's first 12 characters ("skip sha1 check of downloaded files").
+  (C @(0x8DF3,0x8FC7,0x5DF2,0x4E0B,0x8F7D,0x6587,0x4EF6,0x7684,0x54C8,0x5E0C,0x6821,0x9A8C)),
   (C @(0x8BBE,0x5907,0x7801,0x767B,0x5F55)),                                 # device code login (content)
   (C @(0x57FA,0x4E8E,0x20,0x51,0x74,0x36))                                  # about: "Qt6" (content)
 )

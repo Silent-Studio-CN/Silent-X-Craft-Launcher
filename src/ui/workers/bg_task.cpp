@@ -9,6 +9,7 @@
 #include "bg_task.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QMetaObject>
 #include <QPointer>
 #include <QThread>
@@ -17,6 +18,19 @@
 #include <utility>
 
 namespace sxcl::ui {
+namespace {
+
+/* 析构等待的**硬上限**(用户 2026-09-27,父任务查到的根因)。
+ *
+ * 原样是"最多等 8 秒":设置页的 java-detect 在退出时还没跑完,退出路径就被按住 ——
+ * 实测 select 路由退出卡 3104 ms 并落了一份 hang 报告(看门狗阈值 3 秒)。
+ * 退出路径上**绝不允许**等一条"可能几十秒"的后台活,所以这里改成 300 ms 硬上限:
+ *   * 到期就不等了 —— 线程自己跑完(QThread::create 的跑完即止形态,没有事件循环要 quit),
+ *     对象脱手(setParent(nullptr) 之后不删它,免得删一个在跑的 QThread 直接终止进程);
+ *   * 线程那边的回填本来就靠 QPointer 自查(self.isNull() 就不回填),页面没了它一个字都不写。 */
+constexpr int kJoinTimeoutMs = 300;
+
+} // namespace
 
 BgTask::BgTask(QObject *owner) : QObject(owner), m_owner(owner) {}
 
@@ -24,12 +38,23 @@ BgTask::~BgTask() {
     cancel();
     if (m_thread == nullptr)
         return;
+    if (!m_thread->isRunning()) { // 已经跑完了:直接收壳,不用等、也不用打读数
+        delete m_thread;
+        m_thread = nullptr;
+        return;
+    }
+    const qint64 startedMs = QDateTime::currentMSecsSinceEpoch();
     /* 收尾:让工作线程自己跑完(它是 QThread::create 的"跑完就结束"形态,没有事件循环要 quit)。
      * 等不到就**不删**它 —— 删一个还在跑的 QThread 会让进程直接终止;
      * 工作线程那边靠 QPointer 自查,页面已经没了就不会再回填。 */
-    if (!m_thread->wait(8000)) {
-        std::fprintf(stderr, "[sxcl-ui] BgTask: 工作线程 8 秒内没结束(不回填,进程退出时一并收掉)\n");
-        m_thread->setParent(nullptr); // 不随本对象删除
+    const bool finished = m_thread->wait(kJoinTimeoutMs);
+    const qint64 waitedMs = QDateTime::currentMSecsSinceEpoch() - startedMs;
+    /* 验收读数(退出路径的耗时就是这么量的;SXCL_UI_TRACE 不是必需 —— 这一行只在退出路径
+     * 真的要等的时候才出现,而且它自己就是"退出被后台活拖住多久"的数字)。 */
+    std::fprintf(stderr, "[sxcl-ui] bg-task: 析构等待=%lldms 上限=%dms 线程结束=%s\n",
+                 static_cast<long long>(waitedMs), kJoinTimeoutMs, finished ? "是" : "否(脱手)");
+    if (!finished) {
+        m_thread->setParent(nullptr); // 不随本对象删除(对象脱手,线程自己收尾)
         m_thread = nullptr;
         return;
     }

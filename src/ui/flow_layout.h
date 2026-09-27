@@ -38,11 +38,18 @@ public:
     QSize sizeHint() const override;
     void setGeometry(const QRect &rect) override;
 
+    /** 每一行都**靠右**排(默认关:不设时行为与以前逐像素一致 —— 模组页筛选区就是那个口径)。
+     *  两行卡右侧的控件列要它:一行放不下换行之后,第二行也得贴右边缘,
+     *  否则只有第一行靠右、后面的行全掉到最左边(实测 900x600 的内置 JRE 卡就是那样)。 */
+    void setAlignRight(bool on) { m_alignRight = on; }
+    bool alignRight() const { return m_alignRight; }
+
 private:
     int doLayout(const QRect &rect, bool testOnly) const;
     QList<QLayoutItem *> m_items;
     int m_hSpace;
     int m_vSpace;
+    bool m_alignRight = false;
 };
 
 } // namespace sxcl::ui

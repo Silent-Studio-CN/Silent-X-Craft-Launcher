@@ -3,9 +3,8 @@
  * Copyright by SilentStudio.
  * All rights reserved.
  */
-
 #include "page_factory.h"
-
+#include "../flow_layout.h" // 流式布局:放不下就换行,不压控件(docs/25 §0)
 #include <QApplication>
 #include <QColor>
 #include <QComboBox>
@@ -22,6 +21,8 @@
 #include <QPushButton>
 #include <QSizePolicy>
 #include <QStringList>
+#include <QStyle>        // subControlRect(量下拉框真正留给文字的那块宽度)
+#include <QStyleOption>
 #include <QFileInfo>
 #include <QFont>
 #include <QFrame>
@@ -29,6 +30,10 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMetaObject>
+#include <QPainter>   // 两行卡里那条分隔线(空着的地方画线,见 TwoRowSettingCard)
+#include <QShowEvent> // showEvent:布局排完之后再钉下拉框宽度下限(见 enforceNoSqueeze)
+#include <QTimer>
+#include <QPen>
 #include <QPushButton>
 #include <QSet>
 #include <QSignalBlocker>
@@ -59,6 +64,8 @@
 #include "fluent/fluent_menu.h"          // RoundMenu(「下载 Java」的组件菜单,对应 qf RoundMenu)
 #include "fluent/fluent_scroll.h"        // ScrollArea(= Python qf ScrollArea)
 #include "fluent/fluent_setting_cards.h" // SettingCard 家族 / ComboBox / SettingCardGroup
+#include "fluent/fluent_slider.h"        // Slider(带主题色的圆角滑条;用户 2026-09-27 点名换掉原生那条)
+#include "fluent/fluent_spinbox.h"       // SpinBox(与滑条配套的数值框,同一套 fluent 外观)
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
@@ -365,6 +372,11 @@ struct JavaEntry {
     }
 };
 
+/* Java"实测能不能跑"的两条时间上限(见 detectCached 的说明;用户 2026-09-27 的退出路径要求:
+ * 设置页这条探测在退出时还在跑,原来最多能把退出按住 8 秒)。 */
+constexpr int kJavaVerifyTimeoutMs = 1500; // 单个候选
+constexpr int kJavaVerifyBudgetMs = 3000;  // 整趟(按候选数摊薄)
+
 // finder.py:86-94 compatibility_for_major
 void fillCompatibility(JavaEntry &entry) {
     if (entry.major < 8) {
@@ -464,7 +476,15 @@ QVector<JavaEntry> discoverJavaInstallations() {
             key += entry.path + QLatin1Char('|') + QString::number(entry.major) + QLatin1Char('\n');
         if (key == cacheKey)
             return &cache;
-        (void)sxcl_java_detect(env, sxcl_java_current_os(), 4000, &cache);
+        /* 超时口径(用户 2026-09-27,退出路径那条线查出来的):
+         *   * 单个候选**最多 1.5 秒** —— 启动器只需要知道"这个 java 能不能用",
+         *     原来那个 4 秒是给"机器很慢但确实能起来"留的余量,一个候选 4 秒 ×8 个候选
+         *     就是几十秒的后台活,退出时谁等谁卡;
+         *   * 整趟**最多 3 秒** —— 按候选数把单候选的预算摊薄,候选再多也不会越滚越大。 */
+        const int perCandidate =
+            std::max(200, kJavaVerifyBudgetMs / std::max(1, static_cast<int>(list.size())));
+        (void)sxcl_java_detect(env, sxcl_java_current_os(),
+                              std::min(kJavaVerifyTimeoutMs, perCandidate), &cache);
         cacheKey = key;
         return &cache;
     };
@@ -641,18 +661,26 @@ public:
         right->setSpacing(8);                  // :85
         right->setContentsMargins(0, 0, 20, 0); // :86
 
-        m_slider = new QSlider(Qt::Horizontal, this); // :88
-        m_slider->setRange(minimum, maximum);         // :90
-        m_slider->setSingleStep(step);                // :91
-        m_slider->setPageStep(step);                  // :92
-        m_slider->setFixedWidth(180);                 // :93
-        m_slider->setValue(value);                    // :94
+        /* 用户 2026-09-27:「最大内存分配那个滑条换个样式,太丑了」。
+         * 原来那条是**原生 QSlider**(扁平灰槽 + 方把手,跟整页 fluent 观感不搭),
+         * 换成 libqf 的 Slider:圆角轨道 + 主题色已走段 + 圆形把手,与 libqf 自己的
+         * RangeSettingCard 同一套画法;右边那个数值框一并换成配套的 SpinBox,
+         * 免得"滑条是圆的、旁边杵着个方框"。两个都是 QSlider/QSpinBox 的派生,
+         * 下面的读写逻辑(setValue / valueChanged / aligned)一行都不用改。 */
+        m_slider = new Slider(Qt::Horizontal, this); // :88
+        m_slider->setRange(minimum, maximum);        // :90
+        m_slider->setSingleStep(step);               // :91
+        m_slider->setPageStep(step);                 // :92
+        /* 宽度下限 = 它自己的 sizeHint 口径:libqf 给同一条滑条的下限是 268
+         * (fluent_setting_cards.cpp:360),这里跟它一致。原来写死 180 又短又难拖。 */
+        m_slider->setMinimumWidth(268);
+        m_slider->setValue(value);                   // :94
 
-        m_spin = new QSpinBox(this);                  // :96
+        m_spin = new SpinBox(this);                   // :96
         m_spin->setRange(minimum, maximum);           // :97
         m_spin->setSingleStep(step);                  // :98
         m_spin->setSuffix(QStringLiteral(" MB"));     // :99
-        m_spin->setFixedWidth(110);                   // :100
+        m_spin->setMinimumWidth(110);                 // :100
         m_spin->setValue(value);                      // :101
 
         right->addWidget(m_slider);                   // :103
@@ -807,47 +835,293 @@ JavaProbeText androidJavaProbeText() {
     return out;
 }
 
+/** 单个标签的"单行 + 省略号"守门人:resize 时按当前宽度重写文案。
+ *  文案会被外部改(游戏目录 / Java 状态 / 账户状态都会 setContent),所以这里认"我们上次写进去的
+ *  那一版" —— 当前文本与它不一致 = 外部刚 setText 了新文案,把它记成新的"完整版"。
+ *  (放在这里是因为两行卡的副标题也要它;下面"设置卡跟着窗口自适应"那一节就是它在用。) */
+class ElidedLabelFilter : public QObject {
+public:
+    explicit ElidedLabelFilter(QLabel *label) : QObject(label), m_label(label) {
+        label->installEventFilter(this); // 挂上才收得到 resize(父对象关系不管事件)
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (event->type() == QEvent::Resize || event->type() == QEvent::Show)
+            apply();
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    void apply() {
+        if (m_busy || m_label == nullptr)
+            return;
+        const QString current = m_label->text();
+        if (current != m_shown)
+            m_full = current; // 外部 setText 了新文案
+        const int available = m_label->width();
+        if (available <= 0 || m_full.isEmpty()) {
+            m_shown.clear();
+            return;
+        }
+        const QString shown = QFontMetrics(m_label->font()).elidedText(m_full, Qt::ElideRight, available);
+        m_shown = shown;
+        if (shown == current)
+            return;
+        m_busy = true;
+        m_label->setText(shown); // 只有真的变了才写回,避免与布局互相触发
+        m_busy = false;
+    }
+
+    QLabel *m_label = nullptr;
+    QString m_full;  // 完整文案
+    QString m_shown; // 我们最后写进去的那一版(用来区分"外部改的"与"我们改的")
+    bool m_busy = false;
+};
+
+// ────────────────── 两行卡:Java / 内置 JRE 这一段统一的卡片形态 ──────────────────
+//
+// 用户 2026-09-27 原话(起因:「设置页从版本隔离往下的 Java 运行时、内置 JRE 全都错乱了,
+// 重新排版」):「记住了,就两行:一个选项卡中间什么都没有,那块做一条线;左边上面大写下面
+// 小字(主标题/副标题),最左边是 logo 不是小图标;右侧下拉/按钮排好。」
+// 四条落地,一条不多:
+//   1) 左列**只有两行** —— 上主标题、下副标题。原来 Java 卡里那条状态行、内置 JRE 卡里的
+//      "来源行 / 已装行 / 状态行"全部并进副标题这一行(见 setSubtitle):卡片再不会长成三行四行;
+//   2) 最左是 **28x28 的 logo**(不是基类那个 16x16 的小图标);
+//   3) 右侧控件**右对齐**;一行放不下就**换行**(FlowLayout,docs/25 §0),绝不把控件压窄;
+//   4) 卡里**空着的地方画一条线** —— 文字列与控件列之间那块空白上画一条竖线;副标题那行
+//      空着时,在它的位置上画一条横线(见 paintEvent)。
+//
+// 高度纪律:基类 SettingCard 把高度**写死**成 50/70(照 Python 口径),两行卡要按内容长,
+// 所以这里解开固定高度,改由 heightForWidth() 算:控件换行时卡片自己变高,而不是把第二行
+// 裁掉(docs/25 §0 第 3 条)。
+namespace {
+constexpr int kRowMarginH = 16;       // 左右内边距(与基类 hBox 的 16 一致)
+constexpr int kRowMarginV = 14;       // 上下内边距
+constexpr int kRowLogoSize = 28;      // 「最左边是 logo 不是小图标」
+constexpr int kRowGap = 16;           // logo / 文字列 / 控件列之间的间距
+constexpr int kRowSubtitleMax = 260;  // 副标题最长就这么宽(再长的状态行省略号 + tooltip)
+constexpr int kRowDividerMinGap = 18; // 中间那块空白窄于这个宽度就不画线(画出来像贴在控件上)
+
+// 两行卡的副标题写实时读数时要用的颜色(亮/暗一对,与页面上其它状态文字的取值逐字一致)
+const QColor kStatusSuccess(0x52, 0xc4, 0x1a), kStatusSuccessDark(0x73, 0xd1, 0x3d);
+const QColor kStatusWarn(0xfa, 0x8c, 0x16), kStatusWarnDark(0xff, 0xa9, 0x40);
+const QColor kStatusDanger(0xff, 0x4d, 0x4f), kStatusDangerDark(0xff, 0x78, 0x75);
+const QColor kStatusInfo(0x00, 0x78, 0xd4), kStatusInfoDark(0x00, 0xbc, 0xf2);
+} // namespace
+
+class TwoRowSettingCard : public SettingCard {
+public:
+    TwoRowSettingCard(const QIcon &logo, const QString &title, const QString &subtitle,
+                      QWidget *parent = nullptr)
+        : SettingCard(logo, title, QString(), parent) {
+        setIconSize(kRowLogoSize, kRowLogoSize); // 「最左边是 logo 不是小图标」
+        setMinimumHeight(2 * kRowMarginV + kRowLogoSize);
+        setMaximumHeight(QWIDGETSIZE_MAX); // 解开基类的固定高度(两行卡按内容长)
+
+        /* 副标题:CaptionLabel(比主标题小一号 = 用户说的"下面小字"),并且**接管基类那个
+         * contentLabel 的指针** —— 这样基类的 setContent() 也落在副标题上,卡里不会多出一行
+         * 谁也不看的隐藏标签。 */
+        auto *caption = new CaptionLabel(QString(), this);
+        caption->setObjectName(QStringLiteral("rowSubtitle")); // dump / 验收按它认副标题行
+        caption->setWordWrap(false);
+        /* 上限 = 260:再长的实时读数(下载失败时会把核心库原文带上来)也不能把卡片顶破视口;
+         * 超出部分按整页同一口径变省略号,全文进 tooltip(见 setSubtitle)。 */
+        caption->setMaximumWidth(kRowSubtitleMax);
+        new ElidedLabelFilter(caption);
+        m_vBox->removeWidget(m_contentLabel);
+        delete m_contentLabel;
+        m_contentLabel = caption;
+        m_subtitle = caption;
+        m_vBox->addWidget(m_subtitle, 0, Qt::AlignLeft);
+
+        /* 两行文字是**独立元素**:宽度下限就是自己的 sizeHint(docs/25 §0 第 1 条)——
+         * 布局只会把右侧控件换行,不会把这两行压出省略号。 */
+        m_titleLabel->setWordWrap(false);
+        m_titleLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        m_subtitle->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+
+        /* 右侧控件列:**右对齐 + 换行**(FlowLayout,与模组页筛选区同一套)。 */
+        m_controls = new QWidget(this);
+        m_controls->setObjectName(QStringLiteral("rowControls"));
+        m_controlFlow = new FlowLayout(m_controls, 0, 8, 8);
+        /* 整体贴右边缘 —— **每一行**都贴(换行之后第二行也得靠右,见 FlowLayout::setAlignRight)。 */
+        m_controlFlow->setAlignRight(true);
+        m_controls->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+
+        /* 基类在文字列后面留了一根 addStretch(1):留着它,右侧控件列永远只按**最窄**拿到宽度
+         * (流式布局于是总是换行,窗口再宽也回不去)。收掉它,把"文字列之外的全部宽度"给控件列。
+         * 注意**只能收弹簧**:addStretch 与 addSpacing 造的都是 QSpacerItem,按尺寸区分 ——
+         * 弹簧是 0x0,间距是 16x0。一起删掉的话文字列会与控件列贴在一起(实测踩过)。 */
+        for (int i = hBox()->count() - 1; i >= 0; --i) {
+            QLayoutItem *item = hBox()->itemAt(i);
+            if (item == nullptr || item->spacerItem() == nullptr)
+                continue;
+            const QSize hint = item->sizeHint();
+            if (hint.width() == 0 && hint.height() == 0)
+                delete hBox()->takeAt(i);
+        }
+        /* 上下也留内边距:卡高 = 内容高 + 上下各 kRowMarginV —— 右侧控件列因此在卡里**垂直居中**
+         * (heightForWidth 就是按这个口径算的,两处必须一致)。 */
+        hBox()->setContentsMargins(kRowMarginH, kRowMarginV, 0, kRowMarginV);
+        hBox()->addWidget(m_controls, 1);
+        hBox()->addSpacing(kRowMarginH);
+
+        m_defaultSubtitle = subtitle; // 卡片自己的静态说明(实时读数散了就回到它)
+        setSubtitle(subtitle);
+    }
+
+    /** 副标题(第二行)。
+     *  * text 为空 -> 回到卡片自己的静态说明(所以这一行**永远**有内容,不会空着);
+     *  * light/dark 给"有话要说"的实时读数用(成功绿 / 警告橙 / 错误红);不给就是主题次要色。
+     *  长文案在上限处省略号,全文进 tooltip —— 一条 80 字的错误原文不能把卡片顶破视口。 */
+    void setSubtitle(const QString &text, const QColor &light = QColor(),
+                     const QColor &dark = QColor()) {
+        m_subtitleText = text.isEmpty() ? m_defaultSubtitle : text;
+        m_subtitle->setText(m_subtitleText);  // 超长的由 ElidedLabelFilter 变省略号
+        m_subtitle->setToolTip(m_subtitleText);
+        const ThemeTokens &tokens = FluentTheme::instance().tokens();
+        if (light.isValid())
+            m_subtitle->setTextColor(light, dark.isValid() ? dark : light);
+        else
+            m_subtitle->setTextColor(tokens.textSecondary, tokens.textSecondary);
+    }
+
+    CaptionLabel *subtitleLabel() const { return m_subtitle; } // 状态/说明都写在副标题这一行
+    FlowLayout *controlRow() const { return m_controlFlow; }  // 右侧控件那一行(右对齐 + 换行)
+
+    /** 左列**只有两行**(主标题 + 副标题):验收"不许三行四行"就认这个。 */
+    int textRowCount() const {
+        int rows = m_titleLabel->isVisible() && !m_titleLabel->text().isEmpty() ? 1 : 0;
+        if (m_subtitle->isVisible() && !m_subtitle->text().isEmpty())
+            ++rows;
+        return rows;
+    }
+    /** 右侧控件排了几行(按可见控件的 y 去重):宽窗口一行,窄窗口才换行。 */
+    int controlRowCount() const {
+        QSet<int> rows;
+        for (int i = 0; i < m_controlFlow->count(); ++i) {
+            QWidget *widget = m_controlFlow->itemAt(i)->widget();
+            if (widget != nullptr && widget->isVisible() && widget->width() > 0)
+                rows.insert(widget->y());
+        }
+        return static_cast<int>(rows.size());
+    }
+    /** 卡里"空着的地方"该画几条线:① 文字列与控件列之间那块空白上的竖线;
+     *  ② 副标题那行真的空着时,它位置上的横线。paintEvent 与验收读数共用这一份判据。 */
+    int dividerLineCount() const {
+        int lines = 0;
+        if (hasCenterDivider())
+            ++lines;
+        if (m_subtitle->text().isEmpty())
+            ++lines;
+        return lines;
+    }
+    QLabel *titleLabel() const { return m_titleLabel; }
+
+    /** 这张卡的后台还有"可能几十秒"的活在跑吗?(Java / 内置 JRE 下载时是 true)
+     *  退出路径据此决定"等它还是脱手" —— 见 SettingsPage::~SettingsPage 的说明。 */
+    virtual bool backgroundWorkRunning() const { return false; }
+
+    int heightForWidth(int width) const override {
+        const int inner = width - 2 * kRowMarginH;
+        const int controlsWidth =
+            qMax(1, inner - kRowLogoSize - 2 * kRowGap - textColumnWidth());
+        const int controlsHeight =
+            m_controls != nullptr ? m_controls->heightForWidth(controlsWidth) : 0;
+        return qMax(textColumnHeight(), qMax(controlsHeight, kRowLogoSize)) + 2 * kRowMarginV;
+    }
+
+    QSize sizeHint() const override {
+        QSize hint = QFrame::sizeHint();
+        hint.setHeight(heightForWidth(width() > 0 ? width() : 640));
+        return hint;
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override {
+        SettingCard::paintEvent(event); // 卡片底(圆角 + 描边)照旧由基类画
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.setPen(QPen(FluentTheme::instance().tokens().separator, 0)); // 0 宽 = 1 设备像素
+        const int textLeft = kRowMarginH + kRowLogoSize + kRowGap;
+        const int textRight = textLeft + textColumnWidth();
+        /* ① 文字列与控件列之间那块**空白**上的竖线 */
+        if (hasCenterDivider()) {
+            const int x = (textRight + leftmostVisibleControl()) / 2;
+            painter.drawLine(x, kRowMarginV, x, height() - kRowMarginV);
+        }
+        /* ② 副标题那行真的空着时,在那一行的位置上画横线(有内容就画内容,不画线) */
+        if (m_subtitle->text().isEmpty()) {
+            const int y = m_subtitle->y() + m_subtitle->height() / 2;
+            painter.drawLine(textLeft, y, textRight, y);
+        }
+    }
+
+private:
+    /** 文字列与控件列之间那块空白够不够画一条竖线(太窄就不画:画出来像贴在控件上)。 */
+    bool hasCenterDivider() const {
+        const int textRight = kRowMarginH + kRowLogoSize + kRowGap + textColumnWidth();
+        return leftmostVisibleControl() - textRight >= kRowDividerMinGap;
+    }
+    int textColumnWidth() const {
+        /* 副标题的实际宽度 = min(文字自然宽, 上限):QLabel::sizeHint() 返回的是**整段文字**的宽,
+         * 而布局还会按 maximumWidth 夹一道 —— 这里必须用夹过的那一个,否则"中间那块空白"
+         * 会被算窄,分隔线就不画了(实测 900x600 的内置 JRE 卡踩过)。 */
+        const int column = qMin(m_subtitle->sizeHint().width(), kRowSubtitleMax);
+        return qMax(m_titleLabel->sizeHint().width(), column);
+    }
+    int textColumnHeight() const {
+        return m_titleLabel->sizeHint().height() + m_subtitle->sizeHint().height();
+    }
+    /** 控件列里**最靠左的那个可见控件**(卡片坐标系):它的左边就是那块空白的右边界。 */
+    int leftmostVisibleControl() const {
+        int left = width();
+        for (int i = 0; i < m_controlFlow->count(); ++i) {
+            QWidget *widget = m_controlFlow->itemAt(i)->widget();
+            if (widget != nullptr && widget->isVisible() && widget->width() > 0)
+                left = qMin(left, widget->x() + m_controls->x());
+        }
+        return left;
+    }
+    CaptionLabel *m_subtitle = nullptr;
+    QWidget *m_controls = nullptr;
+    FlowLayout *m_controlFlow = nullptr;
+    QString m_defaultSubtitle;
+    QString m_subtitleText;
+};
+
 // ──────────────────── 卡片:JavaSettingCard(java_setting_card.py:94-272)────────────────────
-class JavaSettingCard : public SettingCard {
+class JavaSettingCard : public TwoRowSettingCard {
 public:
     using SelectionHandler = std::function<void(const QString &)>;
 
     explicit JavaSettingCard(QWidget *parent = nullptr)
-        : SettingCard(FluentIcon::qicon(FluentIcon::DEVELOPER_TOOLS),
-                      QStringLiteral("Java 运行路径"),
-                      QStringLiteral("选择用于启动 Minecraft 的 Java 运行时"), parent) {
-        setFixedHeight(96); // :104
-
+        : TwoRowSettingCard(FluentIcon::qicon(FluentIcon::DEVELOPER_TOOLS),
+                            QStringLiteral("Java 运行路径"),
+                            QStringLiteral("选择用于启动 Minecraft 的 Java 运行时"), parent) {
         m_combo = new ComboBox(this);      // :107
-        m_combo->setMinimumWidth(320);     // :108
+        /* :108 原来写死 320,而最长的那条(实测 "Java 26.0.2 - D:\ProgramData\JAVA\
+         * Jdk26.0.2\bin\java.exe")要 **398** —— 压到 320 就是把路径切掉(dump 里 CUT-W
+         * need=398x32 got=320x32)。改成认**最长条目**:AdjustToContents 让 sizeHint 按最宽的
+         * 那条算,fitComboWidth() 再把它钉成宽度下限 —— 选哪一条它都能完整显示自己。 */
+        m_combo->setMinimumWidth(320);     // :108(初值;够不够由 fitComboWidth() 抬)
+        m_combo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
         m_importButton = new PushButton(QStringLiteral("导入"), this);        // :109
         m_downloadButton = new PushButton(QStringLiteral("下载 Java"), this); // :110
         /* 「重新检测」:只在**没检出可用的 Java** 时出现 —— 用户刚装完 Java 回来点它,
-         * 不用重启启动器(检测本身是后台任务,点一下不会卡界面)。放同一行右端,
-         * 不加新行、不动卡片高度。 */
+         * 不用重启启动器(检测本身是后台任务,点一下不会卡界面)。放同一行右端。 */
         m_retryButton = new PushButton(QStringLiteral("重新检测"), this);
-        m_retryButton->setVisible(false);
+        showRetry(false);
         connect(m_retryButton, &QPushButton::clicked, this, [this] { refresh(); });
-        m_statusLabel = new CaptionLabel(QString(), this);                    // :112
-        m_statusLabel->setTextColor(QColor(0x52, 0xc4, 0x1a), QColor(0x73, 0xd1, 0x3d)); // :113
-
-        auto *rightLayout = new QVBoxLayout();        // :115
-        rightLayout->setSpacing(6);                   // :116
-        rightLayout->setContentsMargins(0, 0, 0, 0);  // :117
-
-        auto *topRow = new QHBoxLayout();             // :119
-        topRow->setSpacing(8);                        // :120
-        topRow->addWidget(m_combo);                   // :121
-        topRow->addWidget(m_downloadButton);          // :122
-        topRow->addWidget(m_importButton);            // :123
-        topRow->addWidget(m_retryButton);             // 没检出可用的 Java 时的重试(平时藏着)
-        topRow->setAlignment(Qt::AlignRight);         // :124
-
-        rightLayout->addLayout(topRow);               // :126
-        rightLayout->addWidget(m_statusLabel, 0, Qt::AlignRight); // :127
-
-        hBox()->addLayout(rightLayout, 0);            // :129
-        hBox()->addSpacing(16);                       // :130
+        /* 控件行 = 两行卡右侧那一列(自己就是流式布局 + 右对齐,见 TwoRowSettingCard):
+         * 每个控件先拿自己的自然宽(下拉框 = 最长那条 Java 路径),一行放不下就**换行**,
+         * 绝不把下拉框压窄 —— 900x600 下"下载 Java/导入"会掉到第二行,卡片高度自己长。 */
+        m_comboFlow = controlRow();                   // :119-120
+        m_comboFlow->addWidget(m_combo);              // :121
+        m_comboFlow->addWidget(m_downloadButton);     // :122
+        m_comboFlow->addWidget(m_importButton);       // :123
+        m_comboFlow->addWidget(m_retryButton);        // 没检出可用的 Java 时的重试(平时藏着)
 
         connect(m_importButton, &QPushButton::clicked, this, [this] { importJava(); });   // :132
         connect(m_downloadButton, &QPushButton::clicked, this, [this] {                // :133
@@ -890,9 +1164,10 @@ public:
         const QSignalBlocker blocker(m_combo);
         m_combo->clear();
         m_combo->addItem(QStringLiteral("正在检测…"));
-        m_statusLabel->setText(QStringLiteral("正在检测 Java 运行时…"));
-        m_statusLabel->setTextColor(FluentTheme::instance().tokens().textTertiary);
-        m_retryButton->setVisible(false);
+        fitComboWidth(); // 探到之前也不许比自己窄(它只增不减,所以骨架这行不会把宽度缩回去)
+        setStatus(QStringLiteral("正在检测 Java 运行时…"),
+                  FluentTheme::instance().tokens().textTertiary);
+        showRetry(false);
     }
 
     // 界面线程:把工作线程探到的结果填进界面(java_setting_card.py:139-174 的填法逐条不变)
@@ -909,17 +1184,17 @@ public:
                 // (别的启动器的 Java 在它自己的私有目录里,安卓不允许我们读;共享存储是 noexec)。
                 // 一行结论放回原来那行 CaptionLabel(不加控件、不改布局),逐条明细放 tooltip。
                 m_combo->addItem(QStringLiteral("未检测到 Java，请手动导入"));
-                m_statusLabel->setText(QStringLiteral("未找到可用的 Java 运行时"));
-                m_statusLabel->setTextColor(QColor(0xfa, 0x8c, 0x16), QColor(0xff, 0xa9, 0x40));
+                setStatus(QStringLiteral("未找到可用的 Java 运行时"), kStatusWarn, kStatusWarnDark);
                 const JavaProbeText probe = androidJavaProbeText();
                 if (!probe.shortText.isEmpty())
-                    m_statusLabel->setText(probe.shortText); // 仍然是那一行 CaptionLabel(12px)
+                    setStatus(probe.shortText, kStatusWarn, kStatusWarnDark); // 还是副标题那一行
                 if (!probe.detail.isEmpty()) {
-                    m_statusLabel->setToolTip(probe.detail);
+                    subtitleLabel()->setToolTip(probe.detail);
                     m_combo->setToolTip(probe.detail);
                     m_downloadButton->setToolTip(probe.detail);
                 }
-                m_retryButton->setVisible(true); // 一个都没检出:给一个**能点**的重试
+                showRetry(true); // 一个都没检出:给一个**能点**的重试
+                fitComboWidth();
                 return;
             }
 
@@ -951,14 +1226,12 @@ public:
                 }
                 if (!anyUsable && !m_installations.isEmpty()) {
                     const JavaEntry &first = m_installations.first();
-                    m_statusLabel->setText(QStringLiteral("检测到 Java 但都用不了：%1")
-                                               .arg(first.verdictText));
-                    m_statusLabel->setTextColor(QColor(0xfa, 0x8c, 0x16),
-                                                QColor(0xff, 0xa9, 0x40));
+                    setStatus(QStringLiteral("检测到 Java 但都用不了：%1").arg(first.verdictText),
+                              kStatusWarn, kStatusWarnDark);
                     QStringList tips;
                     for (const JavaEntry &entry : m_installations)
                         tips << QStringLiteral("%1\n  %2").arg(entry.path, entry.reason);
-                    m_statusLabel->setToolTip(tips.join(QStringLiteral("\n\n")));
+                    subtitleLabel()->setToolTip(tips.join(QStringLiteral("\n\n")));
                     m_downloadButton->setToolTip(tips.join(QStringLiteral("\n\n")));
                 }
             }
@@ -982,6 +1255,9 @@ public:
             }
 
             m_combo->setCurrentIndex(selected);            // :171
+            /* 条目齐了:把"最长的那一条有多宽"钉成下拉框的宽度下限 —— 这才是它自己的
+             * sizeHint(docs/25 §0 第 1 条)。以前写死 320,长路径一进来就被切。 */
+            fitComboWidth();
             updateStatus(m_installations.at(selected));    // :173-174
         }
         // 一个可用的都没有 -> 把「重新检测」露出来(不是只写一行红字)
@@ -992,7 +1268,7 @@ public:
                 break;
             }
         }
-        m_retryButton->setVisible(!anyUsable);
+        showRetry(!anyUsable);
     }
 
     // java_setting_card.py:186-190 selected_path
@@ -1003,22 +1279,33 @@ public:
     }
 
 private:
+    /* 显示/隐藏「重新检测」。隐藏时把它的几何收成自己的 sizeHint —— 流式布局不给隐藏项排位置
+     * (QWidgetItem::setGeometry 对空项直接返回),它会**留着建出来时的尺寸**,dump 里就成了
+     * "need=82x32 got=100x30 CUT-H" 这种假截断。收成 sizeHint 之后这一条就不存在了。 */
+    void showRetry(bool show) {
+        m_retryButton->setVisible(show);
+        if (!show)
+            m_retryButton->resize(m_retryButton->sizeHint());
+    }
+
+    /* 下拉框的**宽度下限** = 它自己的 sizeHint(AdjustToContents 之后 = 最宽的那条条目)。
+     * 只在"条目刚填完"时往上钉一次:sizeHint 与控件宽度无关,所以这一步收敛、不会互相触发;
+     * 它也只增不减 —— 换到短条目时宽度不缩回去(整行不会跳来跳去)。 */
+    void fitComboWidth() {
+        m_combo->setMinimumWidth(qMax(m_combo->minimumWidth(), m_combo->sizeHint().width()));
+    }
+
     // java_setting_card.py:199-207 _update_status
     void updateStatus(const JavaEntry &entry) {
         const ThemeTokens &tokens = FluentTheme::instance().tokens();
         if (!entry.usable) { // 检测到但用不了:状态行说清结论 + 原因,别显示"✓ 兼容"骗人
-            m_statusLabel->setText(QStringLiteral("%1：%2").arg(entry.verdictText, entry.reason));
-            m_statusLabel->setTextColor(tokens.danger);
-            m_statusLabel->setToolTip(entry.hint);
+            setStatus(QStringLiteral("%1：%2").arg(entry.verdictText, entry.reason),
+                      tokens.danger);
+            subtitleLabel()->setToolTip(entry.hint);
             return;
         }
-        if (entry.compatible) {
-            m_statusLabel->setText(QStringLiteral("%1").arg(entry.compatibilityLabel));
-            m_statusLabel->setTextColor(tokens.success);
-        } else {
-            m_statusLabel->setText(QStringLiteral("%1").arg(entry.compatibilityLabel));
-            m_statusLabel->setTextColor(tokens.danger);
-        }
+        setStatus(QStringLiteral("%1").arg(entry.compatibilityLabel),
+                  entry.compatible ? tokens.success : tokens.danger);
     }
 
     void onSelectionChanged(int index) { // :192-197
@@ -1044,8 +1331,7 @@ private:
 
         sxcl_java_info info{};
         if (sxcl_java_inspect(path.toUtf8().constData(), &info) != 0 || info.major <= 0) {
-            m_statusLabel->setText(QStringLiteral("无法识别所选 Java 运行时")); // :263
-            m_statusLabel->setTextColor(QColor(0xff, 0x4d, 0x4f), QColor(0xff, 0x78, 0x75));
+            setStatus(QStringLiteral("无法识别所选 Java 运行时"), kStatusDanger, kStatusDangerDark); // :263
             return;
         }
 
@@ -1126,8 +1412,7 @@ private:
         }
         m_cancelRequested.store(false);
         m_downloadButton->setText(QStringLiteral("取消下载"));
-        m_statusLabel->setText(QStringLiteral("正在获取官方 JRE 清单…"));
-        m_statusLabel->setTextColor(QColor(0x00, 0x78, 0xd4), QColor(0x00, 0xbc, 0xf2));
+        setStatus(QStringLiteral("正在获取官方 JRE 清单…"), kStatusInfo, kStatusInfoDark);
 
         // 这两份 QByteArray 必须活到 install 调用结束(绝不能写成 xxx.toUtf8().constData():
         // 那是临时对象,语句一结束就失效 —— request 里存的是裸指针)
@@ -1195,7 +1480,7 @@ private:
     // 下载中再点一次 = 取消(请求是异步的,核心库会在文件边界上停下来)
     void cancelDownload() {
         m_cancelRequested.store(true);
-        m_statusLabel->setText(QStringLiteral("正在取消…"));
+        setStatus(QStringLiteral("正在取消…"));
     }
 
     bool cancelRequested() const { return m_cancelRequested.load(); }
@@ -1221,7 +1506,16 @@ private:
     PushButton *m_importButton = nullptr;
     PushButton *m_downloadButton = nullptr;
     PushButton *m_retryButton = nullptr;   // 没检出可用 Java 时的「重新检测」
-    CaptionLabel *m_statusLabel = nullptr;
+    /* 状态行 = 这张卡的**副标题**(第二行):所有状态都从 setStatus() 写进去,
+     * 免得绕过 TwoRowSettingCard 的宽度纪律(直接往标签 setText,长文案会把卡片顶宽)。 */
+    void setStatus(const QString &text, const QColor &light = QColor(),
+                   const QColor &dark = QColor()) {
+        setSubtitle(text, light, dark);
+    }
+
+    bool backgroundWorkRunning() const override { return m_worker.joinable(); } // 官方 JRE 下载中
+
+    FlowLayout *m_comboFlow = nullptr; // 右侧控件那一行(两行卡的流式布局,右对齐 + 换行)
     QVector<JavaEntry> m_installations;
     BgTask *m_probe = nullptr;             // Java 探测的工作线程外壳(界面线程绝不等它)
     QVector<JavaEntry> m_probed;           // 工作线程写、界面线程读(队列投递保证先后)
@@ -1241,7 +1535,7 @@ private:
 
     // 界面线程:一行状态 + 百分比(进度条不新加控件,复用卡片里那行 CaptionLabel)
     void onInstallProgress(const QString &message, int percent) {
-        m_statusLabel->setText(QStringLiteral("%1（%2%）").arg(message, QString::number(percent)));
+        setStatus(QStringLiteral("%1（%2%）").arg(message, QString::number(percent)));
     }
 
     // java_setting_card.py:237-248 _on_download_finished
@@ -1249,24 +1543,21 @@ private:
                            const QString &javaPath) {
         m_downloadButton->setText(QStringLiteral("下载 Java"));
         if (ok) {
-            m_statusLabel->setText(QStringLiteral("已安装官方 JRE"));
-            m_statusLabel->setTextColor(QColor(0x52, 0xc4, 0x1a), QColor(0x73, 0xd1, 0x3d));
+            setStatus(QStringLiteral("已安装官方 JRE"), kStatusSuccess, kStatusSuccessDark);
             refresh(javaPath); // :244 装完立刻选中它
             if (m_onSelection)
                 m_onSelection(javaPath); // :245 selectionChanged -> 设置页落盘 game.java_path
             InfoBar::push(InfoBar::Type::Success, QStringLiteral("Java 安装完成"),
                           trName("java.success", "{name} 安装完成", detail), window(), 6000);
         } else if (cancelled) {
-            m_statusLabel->setText(QStringLiteral("已取消下载"));
-            m_statusLabel->setTextColor(QColor(0xfa, 0x8c, 0x16), QColor(0xff, 0xa9, 0x40));
+            setStatus(QStringLiteral("已取消下载"), kStatusWarn, kStatusWarnDark);
         } else {
-            m_statusLabel->setText(QStringLiteral("%1").arg(detail.left(80)));
-            m_statusLabel->setTextColor(QColor(0xff, 0x4d, 0x4f), QColor(0xff, 0x78, 0x75));
+            setStatus(QStringLiteral("%1").arg(detail.left(80)), kStatusDanger, kStatusDangerDark);
             UiErrorContext ctx;
             ctx.page = QStringLiteral("设置页 / settings");
             ctx.action = QStringLiteral("安装官方 JRE");
             ctx.reason = detail; // 核心库/下载器给的真实原因(状态码/校验/网络),原样进剪贴板
-            ctx.detail = QStringLiteral("版本状态行:%1").arg(m_statusLabel->text());
+            ctx.detail = QStringLiteral("版本状态行:%1").arg(subtitleLabel()->text());
             ctx.title = QStringLiteral("Java 安装失败");
             pushUiError(window(), ctx, 10000);
         }
@@ -1380,23 +1671,29 @@ QVector<HostedJre> scanHostedJres(const QString &root) {
 
 } // namespace
 
-class HostedJreCard : public SettingCard {
+class HostedJreCard : public TwoRowSettingCard {
 public:
     explicit HostedJreCard(QWidget *parent = nullptr)
-        : SettingCard(FluentIcon::qicon(FluentIcon::DEVELOPER_TOOLS),
-                      QStringLiteral("内置 JRE（自托管）"),
-                      QStringLiteral("从我们自己的 index.json 下载随包分发的运行时"), parent) {
-        /* 三行:来源输入 / 已装组件 / 状态。
-         * 原来还有第四行"生效来源（编译期默认）：https://raw.githubusercontent.com/…" ——
-         * 用户 2026-09-23 点名:「SXCL 有很多这种不应该写出来的文字,应该删掉」:
-         * 那是我们自己内部的取值优先级(环境变量/设置项/编译期默认)与仓库地址,
-         * 对用户一点用没有,还容易看成一堆乱码一样的 URL —— 删掉。 */
-        setFixedHeight(106);
+        : TwoRowSettingCard(FluentIcon::qicon(FluentIcon::DEVELOPER_TOOLS),
+                            QStringLiteral("内置 JRE（自托管）"),
+                            QStringLiteral("从自建清单下载随包分发的 Java 运行时"),
+                            parent) {
+        /* 这张卡以前是**四行**:来源输入 / "生效来源…" / "已装组件：无" / 状态 ——
+         * 用户 2026-09-27 点名:「内置 JRE 什么"已装组件：无"这个用你说吗?影响布局就移除。」
+         * 现在只有**两行**(两行卡的形态):左列主标题 + 副标题,右侧[地址框][版本][开始下载]
+         * 右对齐排一行;来源、已装组件、进度、错误全部并进**副标题那一行**(见 updateSubtitle),
+         * 没内容就不写 —— "无"这种话一个字都不占地方。 */
 
         m_urlEdit = new QLineEdit(this);
-        m_urlEdit->setMinimumWidth(330);
-        m_urlEdit->setPlaceholderText(
-            QStringLiteral("index.json 地址"));
+        /* 宽度下限 300:够放一条像样的地址,又让[地址][版本][开始下载]在**最小窗口**下也能
+         * 排成一行(放不下会换行,但换行总归不如一行干净);它自己的 sizeHint 比这小得多,
+         * 所以这不是"压控件",是给它一个合适的最小宽度。 */
+        m_urlEdit->setMinimumWidth(300);
+        /* **不拉伸**固定成自己的自然宽(QLineEdit 默认是 Expanding,会把整行剩余宽度吃光 ——
+         * 那样"文字列与控件列之间那块空白"就不存在了,分隔线没地方画;而且用户要的是
+         * "右侧下拉/按钮排好",不是让一个输入框横贯整行)。 */
+        m_urlEdit->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        m_urlEdit->setPlaceholderText(QStringLiteral("index.json 地址"));
         m_urlEdit->setToolTip(QStringLiteral("设置键：%1\n留空表示不覆盖——环境变量 %2 优先，"
                                              "其次是编译期默认的 GitHub raw 地址。")
                                   .arg(QString::fromUtf8(SXCL_JRE_INDEX_URL_SETTING),
@@ -1415,29 +1712,12 @@ public:
         m_downloadButton->setObjectName(QStringLiteral("hostedJreDownloadButton"));
         m_component->setObjectName(QStringLiteral("hostedJreComponent"));
         m_urlEdit->setObjectName(QStringLiteral("hostedJreSourceUrl"));
-        m_statusLabel = new CaptionLabel(QString(), this);
-        m_sourceLabel = new CaptionLabel(QString(), this);
-        m_installedLabel = new CaptionLabel(QString(), this);
 
-        auto *rightLayout = new QVBoxLayout();
-        rightLayout->setSpacing(4);
-        rightLayout->setContentsMargins(0, 0, 0, 0);
-
-        auto *topRow = new QHBoxLayout();
-        topRow->setSpacing(8);
-        topRow->addWidget(m_urlEdit);
-        topRow->addWidget(m_component);
-        topRow->addWidget(m_downloadButton);
-        topRow->setAlignment(Qt::AlignRight);
-
-        rightLayout->addLayout(topRow);
-        /* 只留一条**能动手**的提示(地址都没有时),平时不显示 —— 见 refreshSource()。 */
-        rightLayout->addWidget(m_sourceLabel, 0, Qt::AlignRight);
-        rightLayout->addWidget(m_installedLabel, 0, Qt::AlignRight);
-        rightLayout->addWidget(m_statusLabel, 0, Qt::AlignRight);
-
-        hBox()->addLayout(rightLayout, 0);
-        hBox()->addSpacing(16);
+        /* 右侧控件 = 两行卡那一列(自己就是流式布局 + 右对齐 + 放不下换行)。 */
+        m_controlFlow = controlRow();
+        m_controlFlow->addWidget(m_urlEdit);
+        m_controlFlow->addWidget(m_component);
+        m_controlFlow->addWidget(m_downloadButton);
 
         connect(m_urlEdit, &QLineEdit::editingFinished, this, [this] { saveSourceUrl(); });
         connect(m_downloadButton, &QPushButton::clicked, this, [this] {
@@ -1480,10 +1760,10 @@ public:
     }
 
     bool installing() const { return m_worker.joinable(); }
-    /** 供验收钩子直接读(界面读数):卡片上三行的原文。 */
-    QString sourceText() const { return m_sourceLabel->text(); }
-    QString installedText() const { return m_installedLabel->text(); }
-    QString statusText() const { return m_statusLabel->text(); }
+    /** 供验收钩子直接读(界面读数):副标题那一行现在就是"来源 / 已装 / 状态"合起来的那一行。 */
+    QString statusText() const { return subtitleLabel()->text(); }
+    QString sourceText() const { return m_sourceSaved; }
+    QString installedText() const { return m_installedText; }
 
 private:
     // ── 来源:设置里存的(可编辑)与这次真正会用的,分开显示 ──
@@ -1509,26 +1789,27 @@ private:
         const int rc = sxcl_jre_resolve_index_url(nullptr, setting.isEmpty() ? nullptr : setting.constData(),
                                                   env.isEmpty() ? nullptr : env.constData(), resolved,
                                                   sizeof(resolved));
-        if (rc != SXCL_JRE_OK) {
-            /* 只有这一种情况值得写字:地址都没有 -> 用户得动手填。其余一律不显示 ——
-             * 用户 2026-09-23:「SXCL 有很多这种不应该写出来的文字,应该删掉」。 */
-            m_sourceLabel->setText(QStringLiteral("还没有可用的 index.json 地址 —— 请在上面填一个"));
-            m_sourceLabel->setTextColor(QColor(0xff, 0x4d, 0x4f), QColor(0xff, 0x78, 0x75));
-            m_sourceLabel->setToolTip(QString());
-            return;
-        }
-        m_sourceLabel->clear();
-        m_sourceLabel->setToolTip(QString());
+        /* 只有**这一种**情况值得写字:地址都没有 -> 用户得动手填。其余一律不写 ——
+         * 用户 2026-09-23:「SXCL 有很多这种不应该写出来的文字,应该删掉」。 */
+        if (rc != SXCL_JRE_OK)
+            setStatus(QStringLiteral("还没有可用的 index.json 地址，请在上面填一个"),
+                      kStatusDanger, kStatusDangerDark);
+        else if (m_statusFromSource)
+            clearStatus();
+        m_statusFromSource = (rc != SXCL_JRE_OK);
+        updateSubtitle();
     }
 
     void refreshInstalled() {
         const QString root = runtimeRoot();
         m_installed = root.isEmpty() ? QVector<HostedJre>() : scanHostedJres(root);
         if (m_installed.isEmpty()) {
-            m_installedLabel->setText(QStringLiteral("已装组件：无"));
-            m_installedLabel->setTextColor(QColor(0x60, 0x60, 0x60), QColor(0xa0, 0xa0, 0xa0));
-            m_installedLabel->setToolTip(root.isEmpty() ? QString()
-                                                        : QStringLiteral("运行时根目录：%1").arg(root));
+            /* 用户 2026-09-27:「内置 JRE 什么"已装组件：无"这个用你说吗?影响布局就移除。」
+             * 一个都没装就**什么都不写**(副标题回到那张卡自己的静态说明)。 */
+            m_installedText.clear();
+            m_installedTip = root.isEmpty() ? QString()
+                                            : QStringLiteral("运行时根目录：%1").arg(root);
+            updateSubtitle();
             return;
         }
         QStringList parts;
@@ -1539,10 +1820,11 @@ private:
                                                                         : item.version);
             tips << item.dir;
         }
-        m_installedLabel->setText(QStringLiteral("已装 %1 个：%2").arg(m_installed.size())
-                                      .arg(parts.join(QStringLiteral(" · "))));
-        m_installedLabel->setTextColor(QColor(0x52, 0xc4, 0x1a), QColor(0x73, 0xd1, 0x3d));
-        m_installedLabel->setToolTip(tips.join(QStringLiteral("\n")));
+        /* 不写"已装 N 个"这种计数(用户的口径:不用你说"共 N 个版本"这类话)——
+         * 有就是有:装了什么、什么版本。 */
+        m_installedText = QStringLiteral("已装：%1").arg(parts.join(QStringLiteral(" · ")));
+        m_installedTip = tips.join(QStringLiteral("\n"));
+        updateSubtitle();
     }
 
     QString runtimeRoot() const {
@@ -1561,9 +1843,9 @@ private:
         QStringList parts;
         for (const HostedJre &item : m_installed)
             parts << QStringLiteral("%1=%2").arg(item.component, item.version);
-        uiTrace(QStringLiteral("jre-hosted | 来源=%1 设置值=%2 已装=%3 [%4] 根=%5")
-                    .arg(m_sourceLabel->text(), m_sourceSaved.isEmpty() ? QStringLiteral("(空)")
-                                                                        : m_sourceSaved)
+        uiTrace(QStringLiteral("jre-hosted | 副标题=%1 设置值=%2 已装=%3 [%4] 根=%5")
+                    .arg(subtitleLabel()->text(),
+                         m_sourceSaved.isEmpty() ? QStringLiteral("(空)") : m_sourceSaved)
                     .arg(m_installed.size())
                     .arg(parts.join(QStringLiteral(",")), runtimeRoot()));
     }
@@ -1595,8 +1877,7 @@ private:
 
         m_cancelRequested.store(false);
         m_downloadButton->setText(QStringLiteral("取消下载"));
-        m_statusLabel->setText(QStringLiteral("正在取 index.json…"));
-        m_statusLabel->setTextColor(QColor(0x00, 0x78, 0xd4), QColor(0x00, 0xbc, 0xf2));
+        setStatus(QStringLiteral("正在取 index.json…"), kStatusInfo, kStatusInfoDark);
 
         m_worker = std::thread([this, rootUtf8, major] {
             // 来源从**同一份设置文件**读(与设置页写的是同一个;见 settingsFilePath 的说明)。
@@ -1677,7 +1958,7 @@ private:
 
     void cancelDownload() {
         m_cancelRequested.store(true);
-        m_statusLabel->setText(QStringLiteral("正在取消…"));
+        setStatus(QStringLiteral("正在取消…"));
     }
 
     bool cancelRequested() const { return m_cancelRequested.load(); }
@@ -1716,8 +1997,7 @@ private:
         QMetaObject::invokeMethod(
             this,
             [this, line, trace] {
-                m_statusLabel->setText(line);
-                m_statusLabel->setTextColor(QColor(0x00, 0x78, 0xd4), QColor(0x00, 0xbc, 0xf2));
+                setStatus(line, kStatusInfo, kStatusInfoDark);
                 // 核心库回调逐条留痕:验收直接拿这一段核对阶段/百分比/速度/剩余
                 uiTrace(QStringLiteral("jre-hosted | ") + trace);
             },
@@ -1739,16 +2019,13 @@ private:
                            const QString &stage, const QString &indexUrl, int code) {
         m_downloadButton->setText(QStringLiteral("开始下载"));
         if (ok) {
-            m_statusLabel->setText(QStringLiteral("已装好：%1").arg(home));
-            m_statusLabel->setTextColor(QColor(0x52, 0xc4, 0x1a), QColor(0x73, 0xd1, 0x3d));
+            setStatus(QStringLiteral("已装好：%1").arg(home), kStatusSuccess, kStatusSuccessDark);
             InfoBar::push(InfoBar::Type::Success, QStringLiteral("内置 JRE 安装完成"),
                           QStringLiteral("%1（版本 %2）").arg(home, detail), window(), 6000);
         } else if (cancelled) {
-            m_statusLabel->setText(QStringLiteral("已取消下载"));
-            m_statusLabel->setTextColor(QColor(0xfa, 0x8c, 0x16), QColor(0xff, 0xa9, 0x40));
+            setStatus(QStringLiteral("已取消下载"), kStatusWarn, kStatusWarnDark);
         } else {
-            m_statusLabel->setText(QStringLiteral("%1").arg(detail.left(80)));
-            m_statusLabel->setTextColor(QColor(0xff, 0x4d, 0x4f), QColor(0xff, 0x78, 0x75));
+            setStatus(QStringLiteral("%1").arg(detail.left(80)), kStatusDanger, kStatusDangerDark);
             // 统一错误出口:完整上下文进剪贴板 + 进运行日志(界面只显示原因的前 300 字)
             UiErrorContext ctx;
             ctx.page = QStringLiteral("设置页 / settings");
@@ -1769,14 +2046,49 @@ private:
                     .arg(stage, detail, home));
     }
 
+    /* 副标题(第二行)是这张卡唯一的"读数行":来源 / 已装组件 / 进度 / 错误按优先级挑一条写,
+     * 没有内容就回到卡片自己的静态说明 —— 于是"卡片两行"与"该看的都看得见"不再打架。 */
+    void updateSubtitle() {
+        if (!m_statusText.isEmpty()) {
+            setSubtitle(m_statusText, m_statusLight, m_statusDark);
+            return;
+        }
+        if (!m_installedText.isEmpty()) {
+            setSubtitle(m_installedText, kStatusSuccess, kStatusSuccessDark);
+            subtitleLabel()->setToolTip(m_installedTip);
+            return;
+        }
+        setSubtitle(QString()); // 回到静态说明
+        if (!m_installedTip.isEmpty())
+            subtitleLabel()->setToolTip(m_installedTip);
+    }
+    /* 状态 = 副标题那一行里优先级最高的一条(下载中 / 失败 / 地址缺失)。 */
+    void setStatus(const QString &text, const QColor &light = QColor(),
+                   const QColor &dark = QColor()) {
+        m_statusText = text;
+        m_statusLight = light;
+        m_statusDark = dark;
+        updateSubtitle();
+    }
+    void clearStatus() {
+        m_statusText.clear();
+        updateSubtitle();
+    }
+
+    bool backgroundWorkRunning() const override { return m_worker.joinable(); } // 自托管 JRE 下载中
+
     QLineEdit *m_urlEdit = nullptr;
     ComboBox *m_component = nullptr;
     PushButton *m_downloadButton = nullptr;
-    CaptionLabel *m_statusLabel = nullptr;
-    CaptionLabel *m_sourceLabel = nullptr;
-    CaptionLabel *m_installedLabel = nullptr;
+    FlowLayout *m_controlFlow = nullptr; // 右侧控件那一行(两行卡的流式布局,右对齐 + 换行)
     QVector<HostedJre> m_installed;
     QString m_sourceSaved;
+    QString m_statusText;      // 下载中 / 失败 的实时读数(空 = 没有)
+    QColor m_statusLight;      // 它自己的颜色(成功绿 / 警告橙 / 错误红)
+    QColor m_statusDark;
+    QString m_installedText;   // 已装组件(空 = 一个都没装 -> 一个字都不写)
+    QString m_installedTip;
+    bool m_statusFromSource = false; // 当前这条状态是不是"地址缺失"那条(来源修好了要撤掉)
     std::function<void(const QString &)> m_onSave;
     std::thread m_worker;
     std::atomic<bool> m_cancelRequested{false};
@@ -1992,6 +2304,38 @@ private:
     std::function<void(const QString &)> m_onSave;
 };
 
+// ───────── 下拉框:把"样式真正留给文字的那块宽度"算清楚(用户 2026-09-27 的"字没了")─────────
+//
+// 用户原话:「压缩问题现在非常严重:设置里"版本列表刷新频率 两分钟"的"中"字没了,"主题模式 深色"的
+// "色"没了,弹窗消息"顶部居中"的"中"字没了 —— 这种字全都给我独立元素,谁都不能挤压它。」
+//
+// 实测(900x600 深色;截图逐像素量 + dump 对照):这几个下拉框的**控件宽度确实等于**
+// ComboBox::sizeHint()(文本 + 44,qf 的 QSS 盒:左 11 + 右 31 + 边框 2)—— 可屏幕上最后一个字
+// 还是没了。原因在**样式自己**:Qt 在画非可编辑的 QComboBox 时,会从盒子里再扣掉箭头那一块
+// (实测又少了约 13px),于是"顶部居中"画出来只剩"顶部居"。
+// 所以宽度下限不能只认 sizeHint,要按**样式自己报的文字区**反推:
+//     需要的宽 = 文本宽 + (控件宽 - 文字区宽)
+// 括号里那一块(内边距 + 边框 + 箭头)与控件宽无关,是个常数,所以钉一次就收敛、不会来回跳。
+// 这一步是**全局兜底**:设置页上每一个下拉框都过它(用户的要求是"这种字全都...谁都不能挤压它")。
+namespace {
+int comboTextFloorWidth(QComboBox *combo) {
+    if (combo == nullptr || combo->width() <= 0)
+        return 0;
+    const QFontMetrics metrics(combo->font());
+    const int advance = metrics.horizontalAdvance(combo->currentText());
+    QStyleOptionComboBox option;
+    option.initFrom(combo);
+    option.editable = combo->isEditable();
+    option.currentText = combo->currentText();
+    const QRect field = combo->style()->subControlRect(QStyle::CC_ComboBox, &option,
+                                                       QStyle::SC_ComboBoxEditField, combo);
+    if (field.width() <= 0)
+        return qMax(combo->sizeHint().width(), advance + 44); // 样式说不出话时按 qf 的盒模型兜底
+    const int overhead = qMax(0, combo->width() - field.width());
+    return advance + overhead + 2; // +2:再留一点余量,免得字体/取整刚好卡边界
+}
+} // namespace
+
 // ───────────── 设置卡"跟着窗口自适应"(用户 2026-09-26 点名;别再回退)─────────────
 //
 // 用户原话:「左右默认大小下还能左右拖放,让你适配到自缩放不行吗」。
@@ -2012,51 +2356,13 @@ private:
 // 宽屏显示整句、窄屏才省略;右侧控件仍钉在自己的最小宽度上(观感与改动前一致)。
 constexpr int kCardLabelMinWidth = 160;
 
-/** 单个标签的"单行 + 省略号"守门人:resize 时按当前宽度重写文案。
- *  文案会被外部改(游戏目录 / Java 状态 / 账户状态都会 setContent),所以这里认"我们上次写进去的
- *  那一版" —— 当前文本与它不一致 = 外部刚 setText 了新文案,把它记成新的"完整版"。 */
-class ElidedLabelFilter : public QObject {
-public:
-    explicit ElidedLabelFilter(QLabel *label) : QObject(label), m_label(label) {
-        label->installEventFilter(this); // 挂上才收得到 resize(父对象关系不管事件)
-    }
-
-protected:
-    bool eventFilter(QObject *watched, QEvent *event) override {
-        if (event->type() == QEvent::Resize || event->type() == QEvent::Show)
-            apply();
-        return QObject::eventFilter(watched, event);
-    }
-
-private:
-    void apply() {
-        if (m_busy || m_label == nullptr)
-            return;
-        const QString current = m_label->text();
-        if (current != m_shown)
-            m_full = current; // 外部 setText 了新文案
-        const int available = m_label->width();
-        if (available <= 0 || m_full.isEmpty()) {
-            m_shown.clear();
-            return;
-        }
-        const QString shown = QFontMetrics(m_label->font()).elidedText(m_full, Qt::ElideRight, available);
-        m_shown = shown;
-        if (shown == current)
-            return;
-        m_busy = true;
-        m_label->setText(shown); // 只有真的变了才写回,避免与布局互相触发
-        m_busy = false;
-    }
-
-    QLabel *m_label = nullptr;
-    QString m_full;  // 完整文案
-    QString m_shown; // 我们最后写进去的那一版(用来区分"外部改的"与"我们改的")
-    bool m_busy = false;
-};
-
 /** 一张设置卡:标题/副标题两行文字可压缩 + 省略号,多余宽度给这两行。 */
 void makeSettingCardFit(SettingCard *card) {
+    /* 两行卡自己管宽度(见 TwoRowSettingCard):左列按文字自然宽,右侧控件换行。
+     * 这里用 dynamic_cast 而不是 qobject_cast:TwoRowSettingCard 是纯 C++ 派生、**没有**
+     * Q_OBJECT(qobject_cast 会对没有 Q_OBJECT 的类型触发 static_assert,直接编译不过)。 */
+    if (dynamic_cast<TwoRowSettingCard *>(card) != nullptr)
+        return;
     QHBoxLayout *row = card->hBox();
     if (row == nullptr)
         return;
@@ -2179,9 +2485,23 @@ private:
     PushSettingCard *m_logoutCard = nullptr;
     AccountTask *m_accountTask = nullptr;
 
+    /** 退出路径(用户 2026-09-27:绝不许被后台活按住):正在下载 Java / 内置 JRE 的卡片
+     *  **不让它析构** —— 那两张卡的析构里要 join 下载线程,而核心库在文件边界上收工,
+     *  等多久说不准。父对象一摘,卡片继续活着:线程的回调目标因此始终有效,
+     *  进程该退就退(细节见实现处的注释)。 */
+    ~SettingsPage() override;
+    void releaseCardsWithRunningWork();
+
+    // 窗口显示后跑一遍(见 showEvent):① 每个下拉框按"样式真正留给文字的宽度"钉宽度下限;
+    // ② 把每张两行卡与每个下拉框的读数打成机器可读的一行(验收脚本读它,不猜)。
+    void enforceNoSqueeze();
+
     // 游戏目录探测(候选扫描 + 每个候选里数版本)只在**工作线程**里跑 ——
     // 它以前在 buildContent() 里同步跑,是设置页构造耗时的一部分(见 buildContent 的说明)。
     BgTask *m_dirProbe = nullptr;
+
+protected:
+    void showEvent(QShowEvent *event) override;
 };
 
 SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
@@ -2282,6 +2602,87 @@ SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
     const QList<SettingCard *> cards = findChildren<SettingCard *>();
     for (SettingCard *card : cards)
         makeSettingCardFit(card);
+}
+
+SettingsPage::~SettingsPage() {
+    releaseCardsWithRunningWork();
+}
+
+void SettingsPage::releaseCardsWithRunningWork() {
+    /* 为什么是"脱手"而不是"等一会"(实测根因,父任务 2026-09-27 的退出路径那条线):
+     * Java / 内置 JRE 的下载跑在工作线程里,卡的析构会 join 它 —— 而核心库是"在文件边界上
+     * 收工",一个几十 MB 的包可能还要几秒。退出路径上多等一秒,用户看到的就是"点了关闭没反应",
+     * 而且超过 3 秒还会被看门狗判成卡死、落一份 hang 报告(实测 3104 ms)。
+     * 做法:把卡片的父对象摘掉(先 hide,否则它会变成独立窗口弹出来),卡片于是不被析构,
+     * 线程、卡片、控件全都还活着 —— 不存在"回填到一个正在析构的对象"这种悬空,
+     * 进程退出时随线程一起被操作系统收掉。只在"退出时确实还在下载"这一种情况下发生。 */
+    const QList<SettingCard *> cards = findChildren<SettingCard *>();
+    for (SettingCard *card : cards) {
+        auto *row = dynamic_cast<TwoRowSettingCard *>(card);
+        if (row == nullptr || !row->backgroundWorkRunning())
+            continue;
+        row->hide();
+        row->setParent(nullptr);
+    }
+}
+
+void SettingsPage::showEvent(QShowEvent *event) {
+    ScrollArea::showEvent(event);
+    /* 这一遍必须等**布局真的排完**:showEvent 里子控件的几何还没最终落定(量出来的宽度是上一轮
+     * 的),所以排一个 0 延时的定时器,等事件循环把布局跑完再量。两件事都幂等(只抬高宽度下限、
+     * 只打读数),多跑一遍不改任何可见状态。 */
+    QTimer::singleShot(0, this, [this] { enforceNoSqueeze(); });
+}
+
+void SettingsPage::enforceNoSqueeze() {
+    if (m_view == nullptr)
+        return;
+    /* ① 每一个下拉框:宽度下限 = 文本宽 + 样式真正拿走的那一块(见 comboTextFloorWidth)。
+     * 都是"只增不减",所以重复跑收敛;抬高之后布局给它的宽度只会更宽,不会反过来压别的控件。 */
+    const QList<QComboBox *> combos = m_view->findChildren<QComboBox *>();
+    for (QComboBox *combo : combos) {
+        const int floor = comboTextFloorWidth(combo);
+        if (floor > combo->minimumWidth())
+            combo->setMinimumWidth(floor);
+    }
+    if (!uiTraceEnabled())
+        return;
+    /* ② 机器可读读数(验收脚本按它断言,不靠"看着像"):
+     *    combo-fit | 每个下拉框:文本需要多宽、样式留给文字多宽、ok=1 才算"字没被裁";
+     *    row-card  | 每张两行卡:文字行=2、控件排了几行、空着的地方画了几条线。 */
+    for (QComboBox *combo : combos) {
+        const QFontMetrics metrics(combo->font());
+        const int advance = metrics.horizontalAdvance(combo->currentText());
+        QStyleOptionComboBox option;
+        option.initFrom(combo);
+        option.editable = combo->isEditable();
+        option.currentText = combo->currentText();
+        const QRect field = combo->style()->subControlRect(QStyle::CC_ComboBox, &option,
+                                                           QStyle::SC_ComboBoxEditField, combo);
+        uiTrace(QStringLiteral("combo-fit | 文本=%1 需要=%2 文字区=%3 控件=%4 下限=%5 ok=%6")
+                    .arg(combo->currentText())
+                    .arg(advance)
+                    .arg(field.width())
+                    .arg(combo->width())
+                    .arg(combo->minimumWidth())
+                    .arg(field.width() >= advance ? 1 : 0));
+    }
+    /* findChildren<TwoRowSettingCard*> 同样会踩"没有 Q_OBJECT"的 static_assert,所以按
+     * SettingCard 找、再用 dynamic_cast 认两行卡(它与 makeSettingCardFit 里同一套判断)。 */
+    const QList<SettingCard *> allCards = m_view->findChildren<SettingCard *>();
+    for (SettingCard *card : allCards) {
+        TwoRowSettingCard *row = dynamic_cast<TwoRowSettingCard *>(card);
+        if (row == nullptr)
+            continue;
+        uiTrace(QStringLiteral("row-card | 标题=%1 logo=%2 文字行=%3 控件行=%4 分隔线=%5 卡=%6x%7")
+                    .arg(row->titleLabel()->text())
+                    .arg(row->iconLabel()->width())
+                    .arg(row->textRowCount())
+                    .arg(row->controlRowCount())
+                    .arg(row->dividerLineCount())
+                    .arg(row->width())
+                    .arg(row->height()));
+    }
 }
 
 void SettingsPage::refreshPageBackground() {
@@ -2411,7 +2812,7 @@ void SettingsPage::buildContent() {
 #if !defined(Q_OS_ANDROID)
     m_closeAfterCard = new SwitchSettingCard(
         FluentIcon::qicon(FluentIcon::POWER_BUTTON), QStringLiteral("结束后关闭"),
-        QStringLiteral("安装/下载成功之后自动退出启动器(失败或取消时不退,原因要看得见)"),
+        QStringLiteral("安装或下载成功后自动退出启动器；失败或取消时保留窗口"),
         m_store.flag(kKeyCloseAfterInstall, false), generalGroup);
     connect(m_closeAfterCard, &SwitchSettingCard::checkedChanged, this,
             [this](bool checked) { m_store.set(kKeyCloseAfterInstall, checked); });
@@ -2428,7 +2829,7 @@ void SettingsPage::buildContent() {
     m_toastPosCard = new ComboBoxSettingCard(
         FluentIcon::qicon(FluentIcon::MESSAGE),
         trText("page.settings.toast_position", "消息弹窗位置"),
-        QStringLiteral("顶部通知条从哪一侧出现（默认顶部居中）"),
+        QStringLiteral("通知条出现的位置（默认顶部居中）"),
         {QStringLiteral("顶部居中"), QStringLiteral("底部居中"), QStringLiteral("左上角"),
          QStringLiteral("右上角"), QStringLiteral("左下角"), QStringLiteral("右下角")},
         {QStringLiteral("top"), QStringLiteral("bottom"), QStringLiteral("top_left"),
@@ -2453,8 +2854,8 @@ void SettingsPage::buildContent() {
     m_isolationCard = new SwitchSettingCard( // :276-282
         FluentIcon::qicon(FluentIcon::FOLDER), trText("page.settings.version_isolation", "版本隔离"),
         // 2026-09-22 晚:A2 真落地了 —— 说清"独立的是什么、共用的又是什么",
-        QStringLiteral("每个版本各用一套 mods / saves / config / options.txt"
-                       "（assets 与 libraries 仍然共用；默认关）"),
+        QStringLiteral("每个版本各用一套 mods / saves / config / options.txt；"
+                       "assets 与 libraries 仍然共用"),
         m_store.flag(kKeyVersionIsolation, true), gameGroup);
     gameGroup->addSettingCard(m_isolationCard); // :283
 
@@ -2505,12 +2906,11 @@ void SettingsPage::buildContent() {
     // 顺序纪律:先把卡片 new 出来(建进 gameGroup),再 addSettingCard —— 反过来会把 nullptr 塞进组里。
     m_skipFileCheckCard = new SwitchSettingCard(
         FluentIcon::qicon(FluentIcon::CERTIFICATE), QStringLiteral("关闭文件校验"),
-        QStringLiteral("启动前补全时「存在就算过」：不比对大小与哈希、也不补资源文件。"
-                       "代价是文件坏了不会被发现（默认关）"),
+        QStringLiteral("跳过已下载文件的哈希校验，可加快启动，但文件损坏时不会被发现"),
         m_store.flag(kKeySkipFileCheck, false), gameGroup);
     m_assetsLevelCard = new ComboBoxSettingCard(
         FluentIcon::qicon(FluentIcon::UPDATE), QStringLiteral("启动前补全资源"),
-        QStringLiteral("资源对象（5000+ 个文件）补到哪一档；只比大小最快，强校验最稳"),
+        QStringLiteral("资源文件的校验强度：只比大小最快，逐个校验 SHA-1 最稳妥"),
         QStringList{QStringLiteral("不补（只要库与主 jar）"), QStringLiteral("只比大小（默认）"),
                     QStringLiteral("强校验（逐个算 SHA-1）")},
         QStringList{QStringLiteral("0"), QStringLiteral("1"), QStringLiteral("2")},
@@ -2527,7 +2927,7 @@ void SettingsPage::buildContent() {
         m_store.flag(kKeyDebugMode, false), advancedGroup);
     m_downloadEngineCard = new SwitchSettingCard( // :346-352
         FluentIcon::qicon(FluentIcon::SPEED_OFF), QStringLiteral("多线程下载引擎-测试"),
-        QStringLiteral("启用后使用多线程分片下载，可大幅提升下载速度；如果遇到安装问题可关闭此开关"),
+        QStringLiteral("启用后使用多线程分片下载以提升速度；遇到安装问题时可关闭"),
         m_store.flag(kKeyDownloadEngine, true), advancedGroup);
     m_resetCard = new PushSettingCard( // :353-359
         QStringLiteral("重置所有设置"), FluentIcon::qicon(FluentIcon::CANCEL),
@@ -2540,7 +2940,7 @@ void SettingsPage::buildContent() {
     auto *downloadGroup = new SettingCardGroup(QString::fromUtf8(kGroupDownload), m_view);
     m_connCard = new SpinSettingCard( // :367-374
         FluentIcon::qicon(FluentIcon::SPEED_HIGH), QStringLiteral("并发连接数"),
-        QStringLiteral("同时进行的下载连接数；带宽跑不满时可以调高（4 - 128）"), 4, 128, 4,
+        QStringLiteral("同时进行的下载连接数；带宽跑不满时可调高，范围为 4 - 128"), 4, 128, 4,
         QString(),
         // 核心库便捷读取(sxcl_settings_download_max_conn)的兜底是 1(= 不分片),而 Python 设置页
         // 默认 32、范围 4-128 —— 范围下限都够不着 1,所以这里按 Python 的 UI 口径取 32。
@@ -2549,7 +2949,7 @@ void SettingsPage::buildContent() {
         [this](int value) { m_store.set(kKeyMaxConn, value); }, downloadGroup);
     m_limitCard = new SpinSettingCard( // :375-383
         FluentIcon::qicon(FluentIcon::SPEED_OFF), QStringLiteral("下载限速"),
-        QStringLiteral("0 = 不限速；单位 KB/s（1024KB/s = 1MB/s），对所有下载连接全局生效"),
+        QStringLiteral("0 表示不限速；单位为 KB/s，对所有下载连接生效"),
         0, 1048576, 256, QStringLiteral(" KB/s"), speedLimitKbps(),
         [this](int value) { applySpeedLimit(value); }, downloadGroup);
     m_verifyCard = new SwitchSettingCard( // :384-391
@@ -2573,12 +2973,12 @@ void SettingsPage::buildContent() {
     m_loginCard = new PushSettingCard( // 设备码流为主(核心库 --device-code 的那条路)
         QStringLiteral("登录"), FluentIcon::qicon(FluentIcon::ACCEPT),
         QStringLiteral("登录 Microsoft 账户"),
-        QStringLiteral("设备码登录：用浏览器输入 8 位代码即可，不需要本地监听端口"),
+        QStringLiteral("设备码登录：在浏览器输入 8 位代码即可完成授权"),
         accountGroup);
     m_refreshCard = new PushSettingCard( // 免密续期:refresh token → 重跑后半条链
         QStringLiteral("刷新"), FluentIcon::qicon(FluentIcon::SYNC),
         QStringLiteral("刷新登录状态"),
-        QStringLiteral("用已保存的 refresh token 免密续期并重查权益，不用再输一次设备码"),
+        QStringLiteral("用已保存的登录凭据免密续期，不必重新输入设备码"),
         accountGroup);
     m_logoutCard = new PushSettingCard( // 删掉本机加密保存的凭据(幂等)
         QStringLiteral("注销"), FluentIcon::qicon(FluentIcon::CANCEL),

@@ -157,6 +157,10 @@ int FlowLayout::doLayout(const QRect &rect, bool testOnly) const {
         const int extra = effective.width() - lineWidths.at(li);
         const int grow = (expandingCount > 0 && extra > 0) ? extra / expandingCount : 0;
         int lx = effective.x();
+        /* 靠右(两行卡的控件列):整行右移"这一行没用掉的宽度"。
+         * 带 Expanding 项的行不用移 —— 那一项自己会把剩余宽度吃掉。 */
+        if (m_alignRight && expandingCount == 0 && extra > 0)
+            lx += extra;
         for (int idx : line) {
             QLayoutItem *item = m_items.at(idx);
             const QSize nat = itemNatural(item);
