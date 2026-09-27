@@ -130,7 +130,13 @@ public:
     QStringList sessionPageKeys() const;
     QWidget *sessionPage(const QString &key) const { return m_pages.value(key, nullptr); }
 
-    void switchToRoute(const QString &routeKey);
+    /* 换页的唯一入口。**必须是 Q_INVOKABLE**:仓库里十几处"返回/跳转"是按名字调的
+     * (more_page.cpp:36、launch_page.cpp:959、download_progress_page.cpp:634、
+     *  download_config_page.cpp:1164、main.cpp 的主题切换/下载钩子…):
+     *   QMetaObject::invokeMethod(window(), "switchToRoute", ...)
+     * 不是 Q_INVOKABLE 时 Qt 只回一行 "No such method sxcl::ui::MainWindow::switchToRoute(QString)"
+     * 并返回 false —— 换页被**静默丢掉**,用户点了没反应(现场日志里就是这一行)。 */
+    Q_INVOKABLE void switchToRoute(const QString &routeKey);
 
     // ═══════════════ 窗口行为(用户定义的语义;**新增设计**)═══════════════
     // 四条规则的实现都收在本类里:窗口状态只有一个地方改(tray 只发信号、nav 不参与),
