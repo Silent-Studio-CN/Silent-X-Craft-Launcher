@@ -58,7 +58,6 @@
 #include "sxcl/settings.h" // 启动恢复:ui.theme / ui.accent / ui.language(环境变量优先)
 
 // ComboBox:弹出层取证要用它的 showPopup()
-#include "fluent/fluent_segmented.h"   // Pivot:验收钩子要拨到「离线启动」那一档
 #include "fluent/fluent_setting_cards.h"
 
 // ── 运行日志(核心库 include/sxcl/log.h)──────────────────────────────────
@@ -1009,21 +1008,24 @@ sxcl::ui::MainWindow window;
     if (qEnvironmentVariableIntValue("SXCL_UI_LAUNCH") == 1) {
         const int launchDelay = qEnvironmentVariableIntValue("SXCL_UI_LAUNCH_DELAY");
         QTimer::singleShot(launchDelay > 0 ? launchDelay : 800, &app, [&window]() {
-            /* 先把登录方式滑块拨到「离线启动」:有已登录账户时主页会自动停在「正版登录」那一档,
-             * 直接按正版启动会拿**真账户**去跑游戏 —— 验收不能这么干。 */
-            const QList<Pivot *> pivots = window.findChildren<Pivot *>();
-            for (Pivot *pivot : pivots) {
-                if (pivot->item(QStringLiteral("offline")) != nullptr) {
-                    pivot->setCurrentItem(QStringLiteral("offline"));
-                    break;
-                }
+            /* 先把形态切到「离线」:正版那一路会拿**真账户**去跑游戏 —— 验收不能这么干。
+             * 主页现在的形态选项是新版那两枚 LOGO(微软 = 正版,断线 = 离线),点"断线"就是切离线。 */
+            const QList<QAbstractButton *> editions =
+                window.findChildren<QAbstractButton *>(QStringLiteral("homeEditionOfflineButton"));
+            if (!editions.isEmpty()) {
+                editions.first()->click();
+                std::fprintf(stderr,
+                             "[sxcl-ui] home-edition switched to offline (homeEditionOfflineButton)\n");
+            } else {
+                std::fprintf(stderr,
+                             "[sxcl-ui] home-edition offline logo not found "
+                             "(homeEditionOfflineButton)\n");
             }
-            /* 按 objectName 找那个按钮。**不要求可见**:登录滑块可能还停在「正版登录」那一档
-             * (有已登录账户时主页会自动停在那里),离线卡片就是 hidden 的 —— 但点它的
-             * clicked 照样走 launchOffline()。可见的那一个优先。 */
+            /* 按 objectName 找主页那一枚启动。**不要求可见**:页面还没显示出来时也一样点得动,
+             * 而且点它的 clicked 走的就是 launch()(按当前形态落到离线那一路)。可见的那一个优先。 */
             QAbstractButton *button = nullptr;
             const QList<QAbstractButton *> found =
-                window.findChildren<QAbstractButton *>(QStringLiteral("homeOfflineLaunchButton"));
+                window.findChildren<QAbstractButton *>(QStringLiteral("homeLaunchButton"));
             std::fprintf(stderr, "[sxcl-ui] 主页启动按钮候选 %d 个\n", (int)found.size());
             for (QAbstractButton *candidate : found) {
                 if (candidate->isVisible()) {
@@ -1036,12 +1038,12 @@ sxcl::ui::MainWindow window;
             }
             if (button == nullptr) {
                 std::fprintf(stderr,
-                             "[sxcl-ui] 找不到主页的「启动」按钮(SXCL_UI_LAUNCH 需要 "
-                             "SXCL_UI_ROUTE=home,并且设置里有 game.selected_version)\n");
+                             "[sxcl-ui] home-launch: button not found (SXCL_UI_LAUNCH needs "
+                             "SXCL_UI_ROUTE=home and a game.selected_version in the settings)\n");
                 return;
             }
             button->click();
-            std::fprintf(stderr, "[sxcl-ui] 主页已点「启动」(SXCL_UI_LAUNCH)\n");
+            std::fprintf(stderr, "[sxcl-ui] home-launch: clicked (SXCL_UI_LAUNCH)\n");
         });
     }
 
@@ -1093,6 +1095,44 @@ sxcl::ui::MainWindow window;
             std::fprintf(stderr,
                          "[sxcl-ui] 已点 %s(SXCL_UI_EDITION=%s):java=%d bedrock=%d\n",
                          name.toUtf8().constData(), editionPick.toUtf8().constData(),
+                         pair.at(0) != nullptr && pair.at(0)->isChecked(),
+                         pair.at(1) != nullptr && pair.at(1)->isChecked());
+        });
+    }
+
+
+    // 验收通路:点主页账号卡右上角那两枚形态 LOGO(SXCL_UI_HOME_EDITION=premium|offline)。
+    //   用户 2026-09-26 点名:「正版和离线登录,按照新版原来那个微软和断线的 logo 来做」——
+    //   验收要能复现"点哪个是哪个"以及"选中的那枚图标下面有 accent 指示条"
+    //   (像素判据见 tools/ui_home_layout.ps1)。与 SXCL_UI_EDITION 同一个口径:
+    //   **点界面上真的那个按钮**,不在这里直接改状态。
+    const QString homeEditionPick = qEnvironmentVariable("SXCL_UI_HOME_EDITION");
+    if (!homeEditionPick.isEmpty()) {
+        const int homeEditionDelay = qEnvironmentVariableIntValue("SXCL_UI_HOME_EDITION_DELAY");
+        QTimer::singleShot(homeEditionDelay > 0 ? homeEditionDelay : 1800, &app,
+                           [&window, homeEditionPick]() {
+            const bool wantPremium =
+                homeEditionPick.compare(QStringLiteral("premium"), Qt::CaseInsensitive) == 0;
+            const QString name = wantPremium ? QStringLiteral("homeEditionPremiumButton")
+                                             : QStringLiteral("homeEditionOfflineButton");
+            auto *button = window.findChild<QAbstractButton *>(name);
+            if (button == nullptr) {
+                std::fprintf(stderr,
+                             "[sxcl-ui] home-edition button not found: %s "
+                             "(SXCL_UI_HOME_EDITION needs SXCL_UI_ROUTE=home)\n",
+                             name.toUtf8().constData());
+                return;
+            }
+            button->click();
+            const QList<QAbstractButton *> pair{
+                window.findChild<QAbstractButton *>(QStringLiteral("homeEditionPremiumButton")),
+                window.findChild<QAbstractButton *>(QStringLiteral("homeEditionOfflineButton"))};
+            /* 这一行是**验收脚本的判据**,所以留在 ASCII:tools/ui_home_layout.ps1 按
+             * "home-edition click ... premium=1 offline=0" 断言"点哪个是哪个"。 */
+            std::fprintf(stderr,
+                         "[sxcl-ui] home-edition click %s (SXCL_UI_HOME_EDITION=%s): "
+                         "premium=%d offline=%d\n",
+                         name.toUtf8().constData(), homeEditionPick.toUtf8().constData(),
                          pair.at(0) != nullptr && pair.at(0)->isChecked(),
                          pair.at(1) != nullptr && pair.at(1)->isChecked());
         });
