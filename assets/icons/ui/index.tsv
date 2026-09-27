@@ -1,0 +1,4 @@
+# assets/icons/ui/* 的出处表(与 assets/icons/pcl/index.tsv 同格式:文件	名称	来源	风格	尺寸)
+# 这一份只列**本目录**里的 svg;逐枚的来龙去脉写在同目录的 NOTICE.md。
+ui/mod.svg	模组	SilentStudio 自绘(见 assets/icons/ui/NOTICE.md §Mod)	fill+stroke	24
+ui/shader.svg	光影	SilentStudio 自绘(见 assets/icons/ui/NOTICE.md §光影)	fill+stroke	24

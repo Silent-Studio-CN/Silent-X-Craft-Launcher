@@ -49,7 +49,14 @@ int configuredMemoryMb();
 // versions/ 下"有 jar 或 json"的目录名,名字倒序(installed.py:38-57)
 QStringList scanInstalledVersions(const QString &gameDir);
 // 只看 id 里有没有加载器关键字(home_page.py:212-230;判定顺序照抄 Python)
+// **筛选键**:返回 "Forge" / "NeoForge" / "Fabric" / 空(模组页拿它 toLower 当键用)。
 QString versionLoaderTag(const QString &gameDir, const QString &versionId);
+/* 同一个加载器的**展示用**写法:人话名 + 版本号("Forge 14.23.5.2859" / "OptiFine"),认不出来
+ * 就返回空串。用户 2026-09-27 口径:界面上只许出现人话 —— 加载器按"人话名 + 版本号"展示,
+ * **没有版本号就只写名字**,不存在的加载器一个字都不写。
+ * 与 versionLoaderTag 的区别:它多认 Quilt / LiteLoader / OptiFine,而且带版本号 ——
+ * 别拿它当筛选键(筛选键是不带版本号的小写 id)。 */
+QString versionLoaderLabel(const QString &gameDir, const QString &versionId);
 
 // 文件夹探测(folders.py:112-151)+ 挑选(folders.py:154-160)+ 描述(folders.py:163-164)
 QVector<GameFolder> detectGameFolders(const QString &configuredDir);

@@ -73,7 +73,7 @@ class NavButton : public NavigationPushButton {
     Q_OBJECT
 public:
     NavButton(const QIcon &icon, const QString &qfIconName, const QString &blockKind,
-              const QString &text, QWidget *parent = nullptr);
+              const QString &text, int semantic, QWidget *parent = nullptr);
 
     /** 页面给的现成图标(文件夹自定义图标);空 = 回到 qfIcon / blockKind。 */
     void setPixmapIcon(const QPixmap &pm);
@@ -92,6 +92,8 @@ protected:
 private:
     QString m_qfIconName;
     QString m_blockKind;
+    // 第三套图标(NavItem.semantic):画的时候**现取**主题色再染一遍 svg —— 不是构造期烤死颜色
+    int m_semantic = -1;
     QPixmap m_pixmap;
     QString m_subtitle;
     bool m_actionReserve = false;

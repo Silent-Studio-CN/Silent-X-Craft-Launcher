@@ -18,6 +18,7 @@
 
 #include <QString>
 
+class QEvent;
 class QTimer;
 
 namespace sxcl::ui {
@@ -41,11 +42,17 @@ protected:
     // 关闭(accept/reject/窗口关闭都走这里):先取消并**脱开**后台任务,
     // 再交给基类做淡出动画 —— 这样关窗永远不会被在飞的网络请求拖住。
     void done(int code) override;
+    // 主窗移动/改尺寸时把这一层重新贴回去(见 centerOnParent)
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void buildUi();
+    /* 把登录窗**摆到启动器自己窗口的正中间**(用户 2026-09-27:「让这个窗口处于启动器自己窗口的
+     * 中间,不要单独旋出去一个」)。主窗那一块几何就是它的外框:遮罩正好盖满主窗,卡片居中。 */
+    void centerOnParent();
     void startLogin();
     void retry();
+    bool m_centerReported = false; // 居中读数只打一次(窗口被挪动时不必刷屏)
 
     void onUserCode(const QString &code, const QString &verificationUri);
     void onDeviceCodeInfo(int intervalSeconds, int expiresInSeconds);

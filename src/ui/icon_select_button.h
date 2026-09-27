@@ -48,13 +48,23 @@ public:
     // 图标的**绘制高度**(逻辑像素);宽度按素材横纵比算,按钮尺寸 = 绘制盒 + 2 * kPad
     void setIconHeight(int height);
     int iconHeight() const { return m_iconHeight; }
+    /* 强行指定绘制盒(逻辑像素,未旋转那一份);空 = 按素材横纵比算(默认)。
+     * 用途:两枚横纵比不同的图标要摆在一起且**尺寸必须一样**(主页正版/离线那两枚)。 */
+    void setIconBoxSize(const QSize &size);
+    QSize iconBoxOverride() const { return m_boxOverride; }
+    /* 竖起来画:整枚图标转 90°,绘制盒的长宽对调,**选中态那条指示条跟着转**(变竖的)。
+     * 用途:侧栏折叠成 48 宽时,宽幅 LOGO(基岩版那条 7:1 的标题)横着放不下 —— 竖着就是一条。 */
+    void setVertical(bool on);
+    bool isVertical() const { return m_vertical; }
+    /* 未旋转那一份绘制盒(素材横纵比 / iconHeight / 覆盖值算出来的原始盒)。 */
+    QSize rawIconBoxSize() const;
 
     /* 单色线稿:按**主题令牌**在绘制时现染(未选中 textSecondary、选中 accent)。
      * 默认**关** —— 原版彩色素材(微软四色方块、Java 咖啡杯、基岩版 LOGO)绝不许被染成一色,
      * 那正是这几枚图标的识别度所在。开着它的只有断线那类线稿。 */
     void setMonochrome(bool on);
     bool isMonochrome() const { return m_monochrome; }
-    // 当前算出来的绘制盒(逻辑像素)= 按钮去掉内边距那一块
+    // 当前算出来的绘制盒(逻辑像素,屏幕上的那一份)= 按钮去掉内边距那一块
     QSize iconBoxSize() const;
 
     QSize sizeHint() const override;
@@ -68,6 +78,8 @@ private:
     QString m_iconFile;
     QString m_iconDir = QStringLiteral("edition");
     int m_iconHeight = 20;
+    QSize m_boxOverride; // 非空 = 绘制盒按它来(未旋转那一份)
+    bool m_vertical = false;
     bool m_monochrome = false;
     bool m_hover = false;
 };

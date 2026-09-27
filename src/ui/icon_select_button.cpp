@@ -242,6 +242,22 @@ void IconSelectButton::setIconDir(const QString &dir) {
     update();
 }
 
+void IconSelectButton::setIconBoxSize(const QSize &size) {
+    if (m_boxOverride == size)
+        return;
+    m_boxOverride = size;
+    updateGeometry();
+    update();
+}
+
+void IconSelectButton::setVertical(bool on) {
+    if (m_vertical == on)
+        return;
+    m_vertical = on;
+    updateGeometry(); // 长宽对调 -> 按钮自己的尺寸跟着变
+    update();
+}
+
 void IconSelectButton::setMonochrome(bool on) {
     if (on == m_monochrome)
         return;
@@ -255,8 +271,12 @@ void IconSelectButton::setIconHeight(int height) {
     update();
 }
 
-QSize IconSelectButton::iconBoxSize() const {
-    // 宽度由素材横纵比算出来:宽幅 LOGO 得到宽盒,近正方形的咖啡杯得到方盒
+QSize IconSelectButton::rawIconBoxSize() const {
+    // 宽度由素材横纵比算出来:宽幅 LOGO 得到宽盒,近正方形的咖啡杯得到方盒;
+    // 调用方指定过绘制盒(setIconBoxSize)就按它来 —— 两枚横纵比不同的图标要摆在一起时,
+    // 尺寸一致这件事只能由调用方钉。
+    if (m_boxOverride.isValid() && !m_boxOverride.isEmpty())
+        return m_boxOverride;
     const QSize natural = assetNaturalSize(m_iconDir, m_iconFile);
     if (natural.isEmpty() || natural.height() <= 0)
         return QSize(m_iconHeight, m_iconHeight);
@@ -264,10 +284,21 @@ QSize IconSelectButton::iconBoxSize() const {
     return QSize(w, m_iconHeight);
 }
 
+QSize IconSelectButton::iconBoxSize() const {
+    // 屏幕上的那一份:竖起来画时,未旋转盒的长宽对调
+    const QSize raw = rawIconBoxSize();
+    return m_vertical ? QSize(raw.height(), raw.width()) : raw;
+}
+
 QSize IconSelectButton::sizeHint() const {
-    // 高度 = 上边距 + 图标 + (4 间距 + 2 指示条) + 下边距 —— 指示条画在控件内部,
-    // 所以两种状态、两颗图标的高度都一样,选中/取消选中时布局不跳。
+    /* 指示条画在控件内部,所以两种状态、两颗图标的高度都一样,选中/取消选中时布局不跳。
+     *   * 横着画:高 = 上边距 + 图标 + (4 间距 + 2 指示条) + 下边距;
+     *   * 竖着画:指示条跑到图标**右边**(它就是"图标下方那条线"跟着图标转了 90°),
+     *     所以改成宽 = 左边距 + 图标 + (4 间距 + 2 指示条) + 右边距,高 = 图标 + 上下边距。 */
     const QSize box = iconBoxSize();
+    if (m_vertical)
+        return QSize(box.width() + kPad + kIndicatorGap + kIndicatorH + kPadBottom,
+                     box.height() + 2 * kPad);
     return QSize(box.width() + 2 * kPad,
                  box.height() + kPad + kIndicatorGap + kIndicatorH + kPadBottom);
 }
@@ -307,27 +338,52 @@ void IconSelectButton::paintEvent(QPaintEvent *) {
     if (!isEnabled())
         p.setOpacity(0.4);
 
-    // ---- 图标:水平居中、贴上边距,整数逻辑矩形(亚像素会让像素画发糊)----
-    const QSize iconBox = iconBoxSize();
-    const QRect target(QPoint((width() - iconBox.width()) / 2, kPad), iconBox);
+    // ---- 图标:居中、整数逻辑矩形(亚像素会让像素画发糊)----
+    //   * 横着画:水平居中、贴上边距;
+    //   * 竖着画:垂直居中、贴左边距(整枚图标逆时针转 90°,像书脊那样从下往上读)。
+    const QSize raw = rawIconBoxSize();     // 渲染成这一份(未旋转)
+    const QSize screenBox = iconBoxSize();  // 屏幕上占这一块(竖着画时是 raw 的长宽对调)
+    const QRect target = m_vertical
+                             ? QRect(QPoint(kPad, (height() - screenBox.height()) / 2), screenBox)
+                             : QRect(QPoint((width() - screenBox.width()) / 2, kPad), screenBox);
     /* 图标:彩色素材原样画(微软四色 LOGO 的识别度就在这里);单色线稿按令牌现染 ——
      * 未选中的断线用次要文字色,选中的用 accent(与下面那条指示条同一个令牌)。 */
     const QPixmap pm =
-        m_monochrome ? tintedPixmap(m_iconDir, m_iconFile, iconBox,
+        m_monochrome ? tintedPixmap(m_iconDir, m_iconFile, raw,
                                     isChecked() ? ThemeBridge::instance().accent()
                                                 : ThemeBridge::instance().token(
                                                       QStringLiteral("textSecondary")))
-                     : iconPixmap(m_iconDir, m_iconFile, iconBox);
-    if (!pm.isNull())
-        p.drawPixmap(target, pm);
+                     : iconPixmap(m_iconDir, m_iconFile, raw);
+    if (!pm.isNull()) {
+        if (!m_vertical) {
+            p.drawPixmap(target.topLeft(), pm);
+        } else {
+            p.save();
+            p.translate(target.center());
+            p.rotate(-90);
+            p.drawPixmap(QPoint(-raw.width() / 2, -raw.height() / 2), pm);
+            p.restore();
+        }
+    }
 
-    // ---- 选中态:图标**下方**那条指示条(2 逻辑像素厚,长度 = 图标宽度)----
+    // ---- 选中态:那条 2 逻辑像素的指示条(长度 = 图标自己的长度)----
+    // 竖着画时它**跟着图标一起转** —— 用户 2026-09-27:「它底色的那条蓝线也变成竖的」。
     if (isChecked()) {
-        const QRectF bar(target.left(), target.bottom() + 1 + kIndicatorGap, target.width(),
-                         kIndicatorH);
         p.setPen(Qt::NoPen);
         p.setBrush(ThemeBridge::instance().accent());
-        p.drawRoundedRect(bar, kIndicatorH / 2.0, kIndicatorH / 2.0);
+        if (!m_vertical) {
+            const QRectF bar(target.left(), target.bottom() + 1 + kIndicatorGap, target.width(),
+                             kIndicatorH);
+            p.drawRoundedRect(bar, kIndicatorH / 2.0, kIndicatorH / 2.0);
+        } else {
+            p.save();
+            p.translate(target.center());
+            p.rotate(-90);
+            const QRectF bar(-raw.width() / 2.0, raw.height() / 2.0 + 1 + kIndicatorGap,
+                             raw.width(), kIndicatorH);
+            p.drawRoundedRect(bar, kIndicatorH / 2.0, kIndicatorH / 2.0);
+            p.restore();
+        }
     }
 }
 

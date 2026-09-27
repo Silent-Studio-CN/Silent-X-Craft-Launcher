@@ -79,6 +79,9 @@ public:
 private:
     IconRegistry() = default;
     void parseIndex();
+    void parseIndexFile(const QString &path);
+    /** 语义名对应的实际文件路径(file 带 "ui/" 前缀 = assets/icons/ui/* 那一套自绘图标)。 */
+    QString assetPath(const QString &file) const;
 
     QString m_dir;
     QVector<Entry> m_entries;

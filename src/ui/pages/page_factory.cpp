@@ -34,6 +34,9 @@ QWidget *createPageForRoute(const QString &routeKey, QWidget *parent) {
     // 版本选择页:主页的"更换"按钮点进来的(不在侧边栏,按需建页 —— 见 switchToRoute)。
     if (routeKey == QStringLiteral("select"))
         return createVersionsSelectPage(parent);
+    // 账户管理页:顶栏那枚头像/玩家名点进来的(同样不在侧边栏,按需建页)。
+    if (routeKey == QStringLiteral("account"))
+        return createAccountPage(parent);
     return nullptr;
 }
 

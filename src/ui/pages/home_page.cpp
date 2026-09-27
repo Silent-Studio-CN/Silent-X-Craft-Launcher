@@ -4,19 +4,30 @@
  * All rights reserved.
  */
 
-// 主页 —— **2026-09-22 界面重构**(用户口述,规格见 docs/25 §2)。
+// 主页 —— **2026-09-27 版面**(用户口述,逐条照做)。
 //
-// 用户原话:「原"主页"替换当前游戏版本名(不是版本号,是可以自定义的版本名……区分的方法是
-// versions 下各个文件夹名字)。然后左边栏右侧的大部分空间分为正版启动和离线。我们支持已经
-// 登陆正版的玩家以离线登录。记得离线提供 ID 输入框,也加入状态保留哈。然后,原来的所有安装
-// 版本都堆在主页整体砍掉。改成版本选择页。」
+// 用户原话:
+//   * 「主页右边账户两个滑块大小缩放,让它们长宽高都差不多大小;整个右侧的账户就选项卡从顶拉到底,
+//      分别展示账户、然后玩家的他全身的那个皮肤模型就可以了。」
+//   * 「登录过了这个账户,这次用不上什么,这些文字又给我整那个流水账,赶紧删掉;什么刷新重新登录
+//      都删掉。有已经存的,你要重新登录就点退出登录,然后重新登录;没有登录过的就是登录,
+//      哪有那么多事儿?」
+//   * 「主页除了右面的排版以外,当前文件夹保留,联机那个东西直接去掉(移到左侧一栏的联机,
+//      后续再实现)。」
+//   * 「当前版本 1.12.1 下面那个"有自己的 JAR"改成这个游戏的配置:要么"原版 1.12.1",
+//      要么把 Mod 加载器/光影列出来。」
 //
-// 所以这一页现在是:
-//   ① 当前版本卡 —— 大号显示**文件夹名**(可点/「更换」→ 版本选择页 select)
-//   ② 启动区左右两半 —— 左:正版启动(登录/启动) 右:离线启动(ID 输入框 + 启动)
-//   ③ 游戏目录卡(改名"当前文件夹",显示文件夹自己的名字 + 完整路径)
-//   ④ 联机入口卡(Python 版原有,保留)
-// 原来的版本卡网格(renderCards/createVersionCard)整块搬去了 versions_select_page.cpp。
+// 所以这一页现在长这样:
+//   左栏(拉伸) ① 当前版本卡(版本名 + **这一版的配置** + 启动 / 更换版本)
+//              ② 当前文件夹卡(名字 + 完整路径 + 更改 / 自动检测 / 打开)
+//   右栏(定宽) ③ 账户卡(顶):两枚形态 LOGO(**等大**)+ 一枚按钮(登录 / 退出登录,按状态给)
+//              ④ 皮肤卡(从顶拉到底):玩家**全身**皮肤模型
+//
+// 删掉的(不是没做,是用户点名删的):
+//   * 联机入口卡(联机在左边栏那一栏里,后续再实现);
+//   * 账户卡上那几行状态文字(「已登录:…」「登录了,但这个账号这次用不上:…」)与
+//     「刷新 / 重新登录」按钮 —— 账户区只按状态给一枚按钮;
+//   * 版本行里的「有自己的 jar」/「靠继承 / 没有 jar」/「缺版本 JSON」。
 //
 // 状态保留(写我们自己的设置文件,见 game_folders.h):game.selected_version /
 // launch.offline_name / game.default_dir / game.known_dirs。
@@ -26,11 +37,13 @@
 #include "game_folders.h"
 
 #include "dialogs/account.h"
-#include "dialogs/auth_dialog.h" // 未登录/凭据过期 -> 直接开登录窗（而不是偷偷用离线跑起来）
+#include "dialogs/auth_dialog.h" // 未登录/凭据过期 -> 直接开登录窗(而不是偷偷用离线跑起来)
 #include "fluent_theme.h"
 #include "icon_select_button.h" // 正版/离线两枚 LOGO 的"图标当选项"控件(选中态 = 图标下一条 accent)
 #include "libqf.h"
 #include "main_window.h"
+#include "skin_image.h"
+#include "skin_store.h"
 #include "theme_bridge.h"
 #include "workers/ui_error.h"
 
@@ -55,6 +68,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShowEvent>
@@ -66,9 +80,64 @@
 namespace sxcl::ui {
 namespace {
 
-/* 右栏(账号)固定宽度:300 逻辑像素 —— 用户要的是新版那个版面,新版就是 300。
- * 固定宽度意味着窗口变窄时被挤的是左栏,账号卡不会被压成一条。 */
+/* 右栏(账户 + 皮肤)固定宽度:300 逻辑像素 —— 用户要的是新版那个版面,新版就是 300。
+ * 固定宽度意味着窗口变窄时被挤的是左栏,账户卡与皮肤不会被压成一条。 */
 constexpr int kRightColumnWidth = 300;
+
+/* 两枚形态 LOGO 的绘制盒:**同一个正方形**。
+ * 用户 2026-09-27:「主页右边账户两个滑块大小缩放,让它们长宽高都差不多大小」——
+ * 素材横纵比不一样(微软四色方块接近 1:1、断线链环 24x24),以前按素材比例算盒子,
+ * 两枚按钮的宽高就对不上;现在两枚都钉在这个盒子上,按钮尺寸逐像素相同。 */
+constexpr int kEditionLogoBox = 24;
+
+/* 皮肤卡里的全身模型:一块自绘的画布。皮肤从 SkinStore 现取(拿不到就画剪影占位),
+ * 主题一切、账户一换都只重画这一块,不动版面。 */
+class SkinView : public QWidget {
+public:
+    explicit SkinView(QWidget *parent) : QWidget(parent) {
+        setObjectName(QStringLiteral("homeSkinView"));
+        setMinimumHeight(160);
+        connect(&SkinStore::instance(), &SkinStore::changed, this, [this] { update(); });
+    }
+
+    QSize sizeHint() const override { return QSize(160, 320); }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        const QImage skin = SkinStore::instance().skin();
+        // 模型比例固定 16:32 —— 先按可用高度算,再按可用宽度收一次(绝不裁切、绝不变形)
+        const int availH = qMax(16, height() - 16);
+        const int availW = qMax(16, width() - 16);
+        const int modelH = qMin(availH, availW * 2);
+        QPixmap pm = skin.isNull() ? skinBodyPlaceholder(modelH) : skinBodyPixmap(skin, modelH);
+        if (pm.isNull())
+            pm = skinBodyPlaceholder(modelH);
+        QPainter p(this);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p.drawPixmap(QPoint((width() - pm.width()) / 2, (height() - pm.height()) / 2), pm);
+    }
+};
+
+// 这一版的"配置"行:要么"原版 <版本>",要么把 Mod 加载器 / 光影列出来(用户点名的规则)。
+QStringList installedShaderPacks(const QString &gameDir) {
+    const QDir dir(gameDir + QStringLiteral("/shaderpacks"));
+    if (!dir.exists())
+        return QStringList();
+    const QFileInfoList entries =
+        dir.entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+    QStringList names;
+    for (const QFileInfo &entry : entries) {
+        QString name = entry.fileName();
+        if (entry.isFile()) {
+            if (!name.endsWith(QLatin1String(".zip"), Qt::CaseInsensitive))
+                continue; // 光影包就是 zip 或文件夹
+            name.chop(4);
+        }
+        if (!name.isEmpty())
+            names.append(name);
+    }
+    return names;
+}
 
 } // namespace
 
@@ -81,14 +150,17 @@ protected:
 
 private:
     void buildContent();
-    // 四张卡各建各的(版面 = 左右两栏;说明见 buildContent 开头)
+    // 三张卡各建各的(版面 = 左右两栏;说明见文件头)
     void buildHeroCard(const ThemeTokens &tokens);
     void buildFolderCard(const ThemeTokens &tokens);
-    void buildMultiplayerCard(const ThemeTokens &tokens);
-    void buildPlayerCard(const ThemeTokens &tokens);
+    void buildAccountCard(const ThemeTokens &tokens);
+    void buildSkinCard();
     void refresh();              // 重读"当前版本"与账户状态,重画卡上的字
     QString currentVersion() const;
-    void setEdition(bool premium); // 正版 / 离线:两枚 LOGO 的选中态 + 账号卡换页 + 启动落到哪一路
+    QString versionDetailText() const; // 这一版的配置(原版 … / 加载器 · 光影 …)
+    void setEdition(bool premium);     // 正版 / 离线:两枚 LOGO 的选中态 + 账号卡换页 + 启动落到哪一路
+    void onAccountClicked();           // 账户区那唯一一枚按钮:登录 / 退出登录(按状态)
+    void logout();
     void changeVersion();        // → 路由 select(版本选择页)
     void changeDirectory();
     void autoDetectDirectory();
@@ -97,22 +169,21 @@ private:
     void launchWithAccount();
     void launchOffline();
     void launchFallback(); // window() 不是 MainWindow 时的统一错误出口
-    void openMultiplayer();
 
     QString m_gameDir;
     QWidget *m_view = nullptr;
     QVBoxLayout *m_vBox = nullptr;      // 整页:只有"左右两栏"这一行
     QHBoxLayout *m_columns = nullptr;
     QWidget *m_leftHost = nullptr;      // 左栏宿主(游戏)
-    QWidget *m_rightHost = nullptr;     // 右栏宿主(账号,固定 300)
+    QWidget *m_rightHost = nullptr;     // 右栏宿主(账户 + 皮肤,固定 300)
     QVBoxLayout *m_leftCol = nullptr;
     QVBoxLayout *m_rightCol = nullptr;
 
     BodyLabel *m_versionName = nullptr;   // 大号:当前版本(文件夹名)
-    BodyLabel *m_versionDetail = nullptr; // 小字:加载器 + 有没有自己的 jar
+    BodyLabel *m_versionDetail = nullptr; // 小字:这一版的配置(原版 … / 加载器 · 光影)
     PrimaryPushButton *m_launchButton = nullptr; // 主页唯一的一枚启动
-    BodyLabel *m_accountState = nullptr;  // 账号卡的状态行
-    PushButton *m_accountButton = nullptr;
+    PushButton *m_accountButton = nullptr;       // 账户区唯一的一枚按钮
+    AccountTask *m_accountTask = nullptr;        // 退出登录(工作线程;主线程不阻塞)
     QLineEdit *m_offlineEdit = nullptr;   // 离线 ID(状态保留)
     QStackedWidget *m_accountPane = nullptr; // 正版页 / 离线页 二选一
     IconSelectButton *m_premiumLogo = nullptr; // microsoft.svg(四色,不染)
@@ -194,13 +265,13 @@ void HomePage::buildContent() {
     const ThemeTokens &tokens = FluentTheme::instance().tokens();
     buildHeroCard(tokens);
     buildFolderCard(tokens);
-    buildMultiplayerCard(tokens);
-    buildPlayerCard(tokens);
+    buildAccountCard(tokens);
+    buildSkinCard();
     m_leftCol->addStretch(1);
-    m_rightCol->addStretch(1);
+    // 右栏**不加弹性项**:账户卡在顶、皮肤卡吃掉剩下的整条高度(用户:"从顶拉到底")
 }
 
-// ── 左栏 ①:当前版本大卡(版本名 + 元信息 + 启动 + 更换版本)──
+// ── 左栏 ①:当前版本大卡(版本名 + 这一版的配置 + 启动 + 更换版本)──
 void HomePage::buildHeroCard(const ThemeTokens &tokens) {
     auto *card = new CardWidget(m_leftHost);
     card->setObjectName(QStringLiteral("homeHeroCard"));
@@ -253,10 +324,20 @@ void HomePage::buildHeroCard(const ThemeTokens &tokens) {
 void HomePage::buildFolderCard(const ThemeTokens &tokens) {
     auto *card = new CardWidget(m_leftHost);
     card->setObjectName(QStringLiteral("homeFolderCard"));
-    auto *lay = new QHBoxLayout(card);
+    /* **名字与路径各占一行**(用户 2026-09-27:「那游戏目录你不能让 .minecraft 和目录路径他妈
+     * 重叠在一起吧?有那么玩儿的吗?」)。以前两个都塞在同一行的 QHBoxLayout 里,各挂一个
+     * makeLabelElide 的"再挤也留 XX"下限 —— 窗口一窄就被压到 48 / 60,一个被切断、一个只剩
+     * 省略号,看着就是两段文字叠在一起。现在按 docs/25 §0 的总则拆成两行:
+     *   ① 第一行:「当前文件夹」+ 文件夹名 + 右侧三个动作;**名字绝不省略**
+     *      (它是这一行里最短的一个,自己的 sizeHint 就是宽度下限,窗口再窄也轮不到它被压);
+     *   ② 第二行:完整路径**独占整行宽度**;真的超过整行宽才在**行尾**省略,全文挂在 tooltip 上。 */
+    auto *lay = new QVBoxLayout(card);
     lay->setContentsMargins(16, 12, 16, 12);
-    lay->setSpacing(8); // 12 太宽:这一行有"名字 + 路径 + 三个按钮",窄窗口下先挤没了空间
-    lay->addWidget(new BodyLabel(QStringLiteral("当前文件夹"), card));
+    lay->setSpacing(6);
+
+    auto *nameRow = new QHBoxLayout();
+    nameRow->setSpacing(8);
+    nameRow->addWidget(new BodyLabel(QStringLiteral("当前文件夹"), card));
     m_dirName = new BodyLabel(QString(), card);
     {
         QFont font = m_dirName->font();
@@ -264,67 +345,50 @@ void HomePage::buildFolderCard(const ThemeTokens &tokens) {
         font.setWeight(QFont::DemiBold);
         m_dirName->setFont(font);
     }
-    makeLabelElide(m_dirName, 48); // 文件夹名可以很长("1.21.5-optifine-自定义"),必须能省略
-    lay->addWidget(m_dirName);
-    m_dirDisplay = new BodyLabel(m_gameDir, card);
-    m_dirDisplay->setObjectName(QStringLiteral("homeFolderPath"));
-    m_dirDisplay->setTextColor(tokens.textTertiary);
-    makeLabelElide(m_dirDisplay, 60); // 路径最容易被挤:给它一个"再挤也留 60"的下限
-    lay->addWidget(m_dirDisplay, 1);
+    /* 这里**故意不挂 makeLabelElide**:那个守门人的口径是"再挤也留 XX、不够就上省略号",
+     * 名字会因此被切。名字保持自己的自然宽(= 它自己的宽度下限):真要放不下,是**窗口**
+     * 先放不下(窗口下限 900x600,见 tools/ui_min_size.ps1),而不是名字被压。 */
+    nameRow->addWidget(m_dirName);
+    nameRow->addStretch(1);
     auto *changeDirBtn = new PushButton(QStringLiteral("更改"), card);
     applyButtonFont(changeDirBtn);
     connect(changeDirBtn, &QAbstractButton::clicked, this, [this] { changeDirectory(); });
-    lay->addWidget(changeDirBtn);
+    nameRow->addWidget(changeDirBtn);
     auto *detectBtn = new PushButton(QStringLiteral("自动检测"), card);
     applyButtonFont(detectBtn);
     connect(detectBtn, &QAbstractButton::clicked, this, [this] { autoDetectDirectory(); });
-    lay->addWidget(detectBtn);
+    nameRow->addWidget(detectBtn);
     auto *openBtn = new PushButton(QStringLiteral("打开"), card);
     applyButtonFont(openBtn);
     connect(openBtn, &QAbstractButton::clicked, this, [this] { openDirectory(); });
-    lay->addWidget(openBtn);
+    nameRow->addWidget(openBtn);
+    lay->addLayout(nameRow);
+
+    m_dirDisplay = new BodyLabel(m_gameDir, card);
+    m_dirDisplay->setObjectName(QStringLiteral("homeFolderPath"));
+    m_dirDisplay->setTextColor(tokens.textTertiary);
+    /* 独占一行:整行宽度都归它。下限留 120(它是一行里最容易被挤的那个,但绝不会被挤到看不见);
+     * 超过整行宽时按行尾省略,全文见 tooltip —— 用户允许的就这一种省略。 */
+    makeLabelElide(m_dirDisplay, 120);
+    m_dirDisplay->setToolTip(m_gameDir);
+    lay->addWidget(m_dirDisplay);
     m_leftCol->addWidget(card);
 }
 
-// ── 左栏 ③:联机入口卡(home_page.py:112-136,原样保留)──
-void HomePage::buildMultiplayerCard(const ThemeTokens &tokens) {
-    auto *card = new CardWidget(m_leftHost);
-    card->setObjectName(QStringLiteral("homeMultiplayerCard"));
-    auto *lay = new QHBoxLayout(card);
-    lay->setContentsMargins(20, 12, 20, 12);
-    lay->setSpacing(12);
-    auto *icon = new QLabel(card);
-    icon->setPixmap(fluent::icon(QStringLiteral("Globe"), FluentTheme::instance().isDark())
-                        .pixmap(28, 28));
-    lay->addWidget(icon);
-    auto *text = new QVBoxLayout();
-    text->setSpacing(2);
-    text->addWidget(new StrongBodyLabel(QStringLiteral("联机 · 和朋友一起玩"), card));
-    auto *desc = new BodyLabel(
-        QStringLiteral("房间码加入 / P2P 打洞 / 中继兜底（开发中，先留入口）"), card);
-    desc->setTextColor(tokens.textTertiary);
-    makeLabelElide(desc, 80); // 同上:窄窗口下先省略,不许把整页撑宽
-    text->addWidget(desc);
-    lay->addLayout(text, 1);
-    auto *lookBtn = new PushButton(QStringLiteral("看看方案"), card);
-    applyButtonFont(lookBtn);
-    connect(lookBtn, &QAbstractButton::clicked, this, [this] { openMultiplayer(); });
-    lay->addWidget(lookBtn);
-    m_leftCol->addWidget(card);
-}
-
-// ── 右栏:账号卡(正版 / 离线 = 新版那两枚 LOGO + 各自的输入)──
-void HomePage::buildPlayerCard(const ThemeTokens &tokens) {
+// ── 右栏 ①:账户卡(两枚等大的形态 LOGO + 一枚按钮)──
+void HomePage::buildAccountCard(const ThemeTokens &tokens) {
     auto *card = new CardWidget(m_rightHost);
     card->setObjectName(QStringLiteral("homePlayerCard"));
     auto *lay = new QVBoxLayout(card);
     lay->setContentsMargins(20, 16, 20, 16);
     lay->setSpacing(12);
 
-    /* 顶行:标题 + 右上角两枚 LOGO(用户 2026-09-26 点名:「正版和离线登录,按照新版原来那个
+    /* 顶行:标题 + 两枚 LOGO(用户 2026-09-26 点名:「正版和离线登录,按照新版原来那个
      * 微软和断线的 logo 来做」)。素材是自绘的,出处见 assets/icons/ui/NOTICE.md:
      *   microsoft.svg    —— 四色方块,**保留官方四色,绝不染色**(识别度就在这里);
-     *   disconnected.svg —— 断开的链环 + 一道斜杠,单色线稿,按主题令牌现染。 */
+     *   disconnected.svg —— 断开的链环 + 一道斜杠,单色线稿,按主题令牌现染。
+     * 两枚**画在同一个正方形盒子里**(kEditionLogoBox):用户 2026-09-27 点名"长宽高都差不多大小",
+     * 所以尺寸不再跟着素材横纵比走 —— 两枚按钮的宽高逐像素相同(差 0 px)。 */
     auto *top = new QHBoxLayout();
     top->setSpacing(8);
     auto *caption = new BodyLabel(QStringLiteral("账户"), card);
@@ -336,7 +400,7 @@ void HomePage::buildPlayerCard(const ThemeTokens &tokens) {
     m_premiumLogo->setObjectName(QStringLiteral("homeEditionPremiumButton"));
     m_premiumLogo->setIconDir(QStringLiteral("ui"));
     m_premiumLogo->setIconFile(QStringLiteral("microsoft.svg"));
-    m_premiumLogo->setIconHeight(20);
+    m_premiumLogo->setIconBoxSize(QSize(kEditionLogoBox, kEditionLogoBox));
     m_premiumLogo->setToolTip(QStringLiteral("正版"));
     connect(m_premiumLogo, &QAbstractButton::clicked, this, [this] { setEdition(true); });
     top->addWidget(m_premiumLogo);
@@ -345,30 +409,29 @@ void HomePage::buildPlayerCard(const ThemeTokens &tokens) {
     m_offlineLogo->setObjectName(QStringLiteral("homeEditionOfflineButton"));
     m_offlineLogo->setIconDir(QStringLiteral("ui"));
     m_offlineLogo->setIconFile(QStringLiteral("disconnected.svg"));
-    m_offlineLogo->setIconHeight(20);
+    m_offlineLogo->setIconBoxSize(QSize(kEditionLogoBox, kEditionLogoBox));
     m_offlineLogo->setMonochrome(true);
     m_offlineLogo->setToolTip(QStringLiteral("离线"));
     connect(m_offlineLogo, &QAbstractButton::clicked, this, [this] { setEdition(false); });
     top->addWidget(m_offlineLogo);
     lay->addLayout(top);
 
+    /* 账户区**只有这一枚按钮**,文字按状态给(用户 2026-09-27):
+     *   已登录(本机存着账户)= 「退出登录」;没登录过 = 「登录」。
+     * 别的文字与按钮(状态行 / 「刷新 / 重新登录」)全删 —— 要重新登录就点退出登录再登录。 */
+    m_accountButton = new PushButton(QStringLiteral("登录"), card);
+    m_accountButton->setObjectName(QStringLiteral("homeAccountButton"));
+    applyButtonFont(m_accountButton);
+    connect(m_accountButton, &QAbstractButton::clicked, this, [this] { onAccountClicked(); });
+
     m_accountPane = new QStackedWidget(card);
     m_accountPane->setObjectName(QStringLiteral("homeAccountPane"));
-    { // 正版那一页:账户状态 + 登录 / 刷新
+    { // 正版那一页:就上面那一枚按钮
         auto *pane = new QWidget(m_accountPane);
         pane->setStyleSheet(QStringLiteral("background: transparent;"));
         auto *v = new QVBoxLayout(pane);
         v->setContentsMargins(0, 0, 0, 0);
         v->setSpacing(10);
-        m_accountState = new BodyLabel(QStringLiteral("读取账户状态…"), pane);
-        m_accountState->setObjectName(QStringLiteral("homeAccountState"));
-        m_accountState->setWordWrap(true);
-        m_accountState->setTextColor(tokens.textTertiary);
-        v->addWidget(m_accountState);
-        m_accountButton = new PushButton(QStringLiteral("登录"), pane);
-        m_accountButton->setObjectName(QStringLiteral("homeAccountButton"));
-        applyButtonFont(m_accountButton);
-        connect(m_accountButton, &QAbstractButton::clicked, this, [this] { launchWithAccount(); });
         v->addWidget(m_accountButton, 0, Qt::AlignLeft);
         v->addStretch(1);
         m_panePremium = m_accountPane->addWidget(pane);
@@ -389,9 +452,20 @@ void HomePage::buildPlayerCard(const ThemeTokens &tokens) {
         m_paneOffline = m_accountPane->addWidget(pane);
     }
     lay->addWidget(m_accountPane, 1);
-    m_rightCol->addWidget(card);
+    m_rightCol->addWidget(card, 0);
 
     setEdition(false); // 默认离线(用户点名;正版那条要用户主动切过去)
+}
+
+// ── 右栏 ②:皮肤卡(玩家的**全身**皮肤模型,从顶拉到底)──
+void HomePage::buildSkinCard() {
+    auto *card = new CardWidget(m_rightHost);
+    card->setObjectName(QStringLiteral("homeSkinCard"));
+    auto *lay = new QVBoxLayout(card);
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setSpacing(0);
+    lay->addWidget(new SkinView(card), 1); // 卡片里只有模型本身,没有一个字
+    m_rightCol->addWidget(card, 1);        // 吃掉账户卡下面剩下的整条高度
 }
 
 QString HomePage::currentVersion() const {
@@ -403,52 +477,47 @@ QString HomePage::currentVersion() const {
     return installed.isEmpty() ? QString() : installed.first();
 }
 
-void HomePage::refresh() {
-    // ① 当前版本
+QString HomePage::versionDetailText() const {
     const QString version = currentVersion();
-    if (version.isEmpty()) {
-        m_versionName->setText(QStringLiteral("（还没有已安装的版本）"));
-        m_versionDetail->setText(
-            QStringLiteral("去「下载 → Minecraft 版本」装一个，装完这里就能启动"));
-    } else {
-        m_versionName->setText(version);
-        QStringList bits;
-        const QString tag = versionLoaderTag(m_gameDir, version);
-        if (!tag.isEmpty())
-            bits << tag;
-        const QString json = m_gameDir + QStringLiteral("/versions/") + version + QLatin1Char('/') +
-                             version + QStringLiteral(".json");
-        const QString jar = m_gameDir + QStringLiteral("/versions/") + version + QLatin1Char('/') +
-                            version + QStringLiteral(".jar");
-        bits << (QFileInfo::exists(jar) ? QStringLiteral("有自己的 jar")
-                                        : QStringLiteral("靠继承 / 没有 jar"));
-        if (!QFileInfo::exists(json))
-            bits << QStringLiteral("缺版本 JSON");
-        m_versionDetail->setText(bits.join(QStringLiteral(" · ")));
-    }
+    if (version.isEmpty())
+        return QStringLiteral("去「下载 → Minecraft 版本」装一个，装完这里就能启动");
 
-    // ② 账户状态(右栏账号卡)
-    const AccountSnapshot account = loadAccountSnapshot();
-    if (accountCanLaunch(account)) {
-        m_accountState->setText(QStringLiteral("已登录：%1（玩家名 %2）")
-                                    .arg(account.accountName, account.playerName));
-        /* 已登录就**不再摆第二枚"启动"**:启动在上面那张大卡上(新版版面只有那一枚),
-         * 这里留下的只有"还能补做的事"(没登录 -> 登录;凭据过期 -> 刷新 / 重新登录)。 */
-        m_accountButton->setVisible(false);
-    } else if (account.loggedIn) {
-        m_accountState->setText(
-            QStringLiteral("登录了，但这个账号这次用不上：%1")
-                .arg(!account.hasMcToken || account.mcExpired
-                         ? QStringLiteral("凭据已过期（设置 → 账户 里刷新）")
-                         : QStringLiteral("没有 Java 版档案")));
-        m_accountButton->setText(QStringLiteral("刷新 / 重新登录"));
-        m_accountButton->setVisible(true);
-    } else {
-        m_accountState->setText(QStringLiteral("还没登录。登录后可以用正版身份启动；"
-                                               "不想登录就用离线。"));
-        m_accountButton->setText(QStringLiteral("登录"));
-        m_accountButton->setVisible(true);
+    /* 用户 2026-09-27:「当前版本 1.12.1 下面那个"有自己的 JAR"改成这个游戏的配置:
+     * 要么"原版 1.12.1",要么把 Mod 加载器/光影列出来。」—— 只留这两类事实,
+     * "有自己的 jar / 靠继承 / 缺版本 JSON"这些都不再出现在界面上。 */
+    QStringList bits;
+    // 加载器按"人话名 + 版本号"写(Forge 14.23.5.2859 / Fabric 0.15.11 / OptiFine …);
+    // 一个加载器都没有 = 原版,那就只写"原版 <版本号>"。见 game_folders.h 的口径说明。
+    const QString loader = versionLoaderLabel(m_gameDir, version);
+    if (!loader.isEmpty())
+        bits << loader;
+    const QStringList shaders = installedShaderPacks(m_gameDir);
+    if (!shaders.isEmpty()) {
+        QString text = shaders.mid(0, 2).join(QStringLiteral("、"));
+        if (shaders.size() > 2)
+            text += QStringLiteral(" 等 %1 个").arg(shaders.size());
+        bits << QStringLiteral("光影：") + text;
     }
+    if (bits.isEmpty())
+        return QStringLiteral("原版 ") + version;
+    return bits.join(QStringLiteral(" · "));
+}
+
+void HomePage::refresh() {
+    // ① 当前版本 + 这一版的配置
+    const QString version = currentVersion();
+    if (version.isEmpty())
+        m_versionName->setText(QStringLiteral("（还没有已安装的版本）"));
+    else
+        m_versionName->setText(version);
+    m_versionDetail->setText(versionDetailText());
+
+    // ② 账户(右栏账户卡):**只有一枚按钮**,文字按状态给 —— 登录 / 退出登录
+    const AccountSnapshot account = loadAccountSnapshot();
+    const bool signedIn = account.loggedIn;
+    m_accountButton->setText(signedIn ? QStringLiteral("退出登录") : QStringLiteral("登录"));
+    // 皮肤:登录了就用这个账户的皮肤(取图在工作线程),没登录就是空 -> 画剪影占位
+    SkinStore::instance().setAccount(signedIn ? account.uuid : QString());
 
     // 启动那一枚:有版本才点得动(没版本时按下去只会弹一句"先装一个",不如直接禁用)
     if (m_launchButton != nullptr)
@@ -456,8 +525,11 @@ void HomePage::refresh() {
 
     // ③ 当前文件夹(名字 + 路径)
     const QDir dir(m_gameDir);
-    m_dirName->setText(dir.dirName().isEmpty() ? m_gameDir : dir.dirName());
+    const QString dirName = dir.dirName().isEmpty() ? m_gameDir : dir.dirName();
+    m_dirName->setText(dirName);
+    m_dirName->setToolTip(dirName); // 名字原则上不被切;窗口真小到放不下时,悬停还能看全
     m_dirDisplay->setText(QDir::toNativeSeparators(m_gameDir));
+    m_dirDisplay->setToolTip(QDir::toNativeSeparators(m_gameDir));
 }
 
 void HomePage::setEdition(bool premium) {
@@ -473,15 +545,39 @@ void HomePage::setEdition(bool premium) {
     std::fprintf(stderr, "[sxcl-ui] 主页形态: %s\n", premium ? "正版" : "离线");
 }
 
-void HomePage::launch() {
-    /* 主页只有这一枚「启动游戏」:落到哪一路由**当前形态**决定。
-     *   离线 -> launchOffline()(先把 ID 落盘,再强制离线身份起);
-     *   正版 -> launchWithAccount()(账号不能用就去登录窗,**绝不**偷偷用离线身份跑起来)。 */
-    if (m_premium) {
-        launchWithAccount();
+/* 账户区那一枚按钮:本机**存着账户**就是「退出登录」,没存过就是「登录」。
+ * 用户 2026-09-27:「有已经存的,你要重新登录就点退出登录,然后重新登录;没有登录过的就是登录,
+ * 哪有那么多事儿?」—— 所以这里不弹任何确认/解释,也不再有第二枚按钮。 */
+void HomePage::onAccountClicked() {
+    if (loadAccountSnapshot().loggedIn) {
+        logout();
         return;
     }
-    launchOffline();
+    if (AuthLoginDialog *dialog = AuthLoginDialog::open(window())) {
+        connect(dialog, &AuthLoginDialog::accountChanged, this, [this] { refresh(); });
+    }
+}
+
+void HomePage::logout() {
+    if (m_accountTask != nullptr && m_accountTask->running())
+        return;
+    auto *task = new AccountTask(AccountTask::Operation::Logout, this);
+    m_accountTask = task;
+    connect(task, &AccountTask::finished, this,
+            [this, task](bool ok, const QString &message, const QString &rawError) {
+                if (!ok) {
+                    QString detail = message;
+                    if (!rawError.isEmpty())
+                        detail += QStringLiteral("\n") + rawError;
+                    InfoBar::push(InfoBar::Type::Error, QStringLiteral("退出登录"), detail, window(),
+                                  8000);
+                }
+                if (m_accountTask == task)
+                    m_accountTask = nullptr;
+                task->deleteLater();
+                refresh();
+            });
+    task->start();
 }
 
 void HomePage::changeVersion() {
@@ -530,6 +626,17 @@ void HomePage::openDirectory() {
     QDesktopServices::openUrl(QUrl::fromLocalFile(m_gameDir));
 }
 
+void HomePage::launch() {
+    /* 主页只有这一枚「启动游戏」:落到哪一路由**当前形态**决定。
+     *   离线 -> launchOffline()(先把 ID 落盘,再强制离线身份起);
+     *   正版 -> launchWithAccount()(账号不能用就去登录窗,**绝不**偷偷用离线身份跑起来)。 */
+    if (m_premium) {
+        launchWithAccount();
+        return;
+    }
+    launchOffline();
+}
+
 void HomePage::launchWithAccount() {
     if (currentVersion().isEmpty()) {
         InfoBar::push(InfoBar::Type::Warning, QStringLiteral("还没有版本可以启动"),
@@ -537,37 +644,14 @@ void HomePage::launchWithAccount() {
         return;
     }
     const AccountSnapshot account = loadAccountSnapshot();
-    /* 用户 2026-09-22 晚点名：「正版登录不登录就启动？」—— 这一路（「正版登录」那一页）
-     * 的按钮**只负责登录**：账号不能用就**绝不起游戏**。以前会掉进"离线身份启动"，
-     * 用户看到的就是"没登录也能开"，以为正版登录是摆设。想不用账号玩，切到「离线启动」那一页。 */
+    /* 用户 2026-09-22 晚点名:「正版登录不登录就启动?」—— 这一路的按钮**只负责登录**:
+     * 账号不能用就**绝不起游戏**。账号为什么不能用**不再写一屏流水账**(用户 2026-09-27):
+     * 没登录 / 凭据过期 / 没有 Java 版档案 —— 一律把登录窗摆出来,用户自己决定。 */
     if (!accountCanLaunch(account)) {
-        if (!account.loggedIn) {
-            InfoBar::push(InfoBar::Type::Info, QStringLiteral("先登录正版账号"),
-                          QStringLiteral("这一路要用正版身份启动；不想登录就用离线（断线那枚）。"),
-                          window(), 5000);
-        } else if (!account.hasMcToken || account.mcExpired) {
-            InfoBar::push(InfoBar::Type::Warning, QStringLiteral("登录凭据过期了，先刷新或重新登录"),
-                          QStringLiteral("凭据已过期：在下面的登录窗口里重新登录一次（或去 设置 → 账户 "
-                                         "点「刷新」免密续期）。"),
-                          window(), 8000);
-        } else {
-            InfoBar::push(InfoBar::Type::Warning, QStringLiteral("这个账户没有 Java 版档案"),
-                          QStringLiteral("没买 Java 版（或档案没取到），正版这一路用不了；"
-                                         "想进游戏就切到离线。"),
-                          window(), 8000);
-        }
         if (AuthLoginDialog *dialog = AuthLoginDialog::open(window())) {
-            QObject::connect(dialog, &AuthLoginDialog::accountChanged, this,
-                             [this] { refresh(); });
+            connect(dialog, &AuthLoginDialog::accountChanged, this, [this] { refresh(); });
         }
         return;
-    }
-    if (accountCanLaunch(account)) {
-        InfoBar::push(InfoBar::Type::Info, QStringLiteral("用已登录的正版账户启动"),
-                      QStringLiteral("%1（玩家名 %2，内存 %3 MB）")
-                          .arg(currentVersion(), account.playerName)
-                          .arg(configuredMemoryMb()),
-                      window(), 4000);
     }
     // 正版那一路:交给启动页按"能用账户就用"的规则走(可能是登录页/设备码)
     if (auto *mw = qobject_cast<MainWindow *>(window())) {
@@ -602,15 +686,6 @@ void HomePage::launchFallback() {
     ctx.reason = QStringLiteral("启动器未初始化(window() 不是 MainWindow)");
     ctx.title = QStringLiteral("无法启动");
     pushUiError(window(), ctx, 5000);
-}
-
-void HomePage::openMultiplayer() {
-    if (auto *mw = qobject_cast<MainWindow *>(window())) {
-        mw->switchToRoute(QStringLiteral("multiplayer"));
-        return;
-    }
-    InfoBar::push(InfoBar::Type::Info, QStringLiteral("联机"),
-                  QStringLiteral("联机页即将上线"), window(), 2500);
 }
 
 QWidget *createHomePage(QWidget *parent) { return new HomePage(parent); }

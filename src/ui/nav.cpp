@@ -51,7 +51,8 @@ QByteArray qfIconSvg(const QString &name, bool dark) {
 
 // 画 16x16 图标盒里的图标(盒的左上角已由调用方给出)
 void paintIcon(QPainter &p, const QRectF &box, const QString &qfIconName,
-               const QString &blockKind, bool dark, const QPixmap &custom = QPixmap()) {
+               const QString &blockKind, bool dark, const QPixmap &custom = QPixmap(),
+               int semantic = -1) {
     if (!custom.isNull()) {
         // 页面给的现成图标(文件夹自定义图标,见 NavItem.iconPixmap):已经按目标尺寸做好,
         // 直接居中画 —— 与方块图那条同样的整数矩形,避免半像素模糊。
@@ -70,6 +71,19 @@ void paintIcon(QPainter &p, const QRectF &box, const QString &qfIconName,
             const QRect target = box.toRect(); // qf: QRectF(11.5,10,16,16).toRect() = QRect(12,10,16,16)
             p.drawPixmap(target, pm);
         }
+        return;
+    }
+    if (semantic >= 0 && semantic < IconRegistry::Count) {
+        /* 第三套图标(NavItem.semantic —— 下载页左栏的"模组 / 光影"就是它)。
+         * **必须在这里画**:以前 addItem 只把 QIcon 交给了 libqf 的基类,而本类的 paintEvent
+         * 整段自绘、根本不碰那个图标 —— 于是这两格在栏里是**空白**的,用户 2026-09-27 看到的
+         * 就是"别就麦块版本一个草方块"。现在按主题令牌现染 svg,再走与 qf 图标同一条渲染路径
+         * (QSvgRenderer 直接渲染到矩形,不是先出 QPixmap)。 */
+        const QByteArray svg = IconRegistry::instance().tinted(
+            static_cast<IconRegistry::Semantic>(semantic),
+            ThemeBridge::instance().iconColor());
+        if (!svg.isEmpty())
+            drawSvgIcon(svg, &p, box);
         return;
     }
     if (!qfIconName.isEmpty()) {
@@ -124,10 +138,11 @@ void NavToolButton::paintEvent(QPaintEvent *) {
 // ---------------------------------------------------------------- NavButton
 
 NavButton::NavButton(const QIcon &icon, const QString &qfIconName, const QString &blockKind,
-                     const QString &text, QWidget *parent)
+                     const QString &text, int semantic, QWidget *parent)
     : NavigationPushButton(icon, text, true, parent),
       m_qfIconName(qfIconName),
-      m_blockKind(blockKind) {
+      m_blockKind(blockKind),
+      m_semantic(semantic) {
     setFixedSize(40, 36); // qf navigation_widget.py:48 setFixedSize(40, 36)
 }
 
@@ -179,7 +194,7 @@ void NavButton::paintEvent(QPaintEvent *) {
 
     // ---- 图标:16x16,位于 (11.5, 10) ----
     paintIcon(p, QRectF(kIconLeft, kIconTop, kIconSide, kIconSide), m_qfIconName, m_blockKind, dark,
-              m_pixmap);
+              m_pixmap, m_semantic);
 
     // ---- 文字:折叠态不画 ----
     if (isCompacted())
@@ -272,7 +287,7 @@ NavigationPushButton *NavPanel::addItem(const NavItem &item) {
         // 第三套:IconRegistry 语义名(mod.svg / shader.svg 这类 PCL 图标,见 nav.h 的说明)
         icon = IconRegistry::instance().themedIcon(static_cast<IconRegistry::Semantic>(item.semantic));
     }
-    auto *btn = new NavButton(icon, item.qfIcon, item.blockKind, item.title, this);
+    auto *btn = new NavButton(icon, item.qfIcon, item.blockKind, item.title, item.semantic, this);
     btn->setObjectName(QStringLiteral("nav_") + item.routeKey);
     const QColor accent = ThemeBridge::instance().accent();
     btn->setIndicatorColor(accent, accent); // 指示条跟随 libqf 主题色

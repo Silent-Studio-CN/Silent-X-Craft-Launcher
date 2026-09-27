@@ -27,6 +27,8 @@ QWidget *createMorePage(QWidget *parent);
 QWidget *createVersionsSelectPage(QWidget *parent);
 // 模组/光影那一栏(docs/22 的 A1):shaders = 1 时装进 shaderpacks、搜光影包
 QWidget *createModsPage(QWidget *parent, bool shaders);
+// 账户管理页(用户 2026-09-27:顶栏头像点进来的那一页;**先留空**,做到跳转那一步)
+QWidget *createAccountPage(QWidget *parent);
 
 // 路由 -> 页面对象(nullptr = 未移植)
 QWidget *createPageForRoute(const QString &routeKey, QWidget *parent);

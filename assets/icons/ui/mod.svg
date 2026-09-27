@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- 模组(Mod):一枚"扩展模块"芯片 —— 我们自己的图形(不借任何第三方资产)。
+       为什么不是拼图块:PCL 那一枚就是拼图块(见 assets/icons/pcl/mod.svg),用户 2026-09-27
+       点名「Mod 和光影的图标赶紧找东西替代上」—— 换一枚语义不同、16px 下也认得出的:
+       方形模块本体 + 四边引脚 = 插上去就能用的扩展件。
+       currentColor 由使用方按主题令牌替换(见 src/ui/nav.cpp 的 paintIcon / icon_registry.h)。 -->
+  <path fill="currentColor" d="M6.6 6.6h10.8v10.8H6.6z"/>
+  <g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+    <path d="M3.4 9.4h3.2M3.4 12h3.2M3.4 14.6h3.2"/>
+    <path d="M17.4 9.4h3.2M17.4 12h3.2M17.4 14.6h3.2"/>
+    <path d="M9.4 3.4v3.2M12 3.4v3.2M14.6 3.4v3.2"/>
+    <path d="M9.4 17.4v3.2M12 17.4v3.2M14.6 17.4v3.2"/>
+  </g>
+</svg>

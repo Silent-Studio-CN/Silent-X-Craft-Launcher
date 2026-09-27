@@ -61,6 +61,7 @@
 #endif
 
 #include "theme_bridge.h"
+#include "titlebar_account.h" // 顶栏"头像 + 玩家名"(点它进账户管理页)
 #include "tray.h"             // 任务栏托盘(最小化=隐藏后的恢复入口;新增设计)
 #include "workers/install_worker.h" // 退出时主动取消安装(InstallWorker::cancel)要用它的类型
 #include "workers/ui_paths.h" // uiSettingsFilePath / uiTrace(与各页同口径)
@@ -572,6 +573,19 @@ void MainWindow::buildUi() {
     for (QAbstractButton *b : chromeButtons)
         FluentStyleSheet::apply(b, FluentStyleSheet::FLUENT_WINDOW);
 
+    /* ── 顶栏那枚「玩家」:头像 + 玩家名,夹在标题与三键之间 ──
+     * 用户 2026-09-27:「正版账户登录完的玩家,拉取他的模型头像……放到顶栏 SXCL 右侧、
+     * 最小化最大化关闭的左侧,头像跟上玩家名,单击之后进到账户管理页。」
+     * 位置就是**布局里三键的前一个** —— 弹性项之后、最小化键之前(不写死坐标,
+     * 三键宽度将来变了它也跟着走)。*/
+    m_accountChip = new TitlebarAccount(m_titleBar);
+    if (auto *lay = qobject_cast<QBoxLayout *>(m_titleBar->layout())) {
+        const int at = lay->indexOf(minBtn);
+        lay->insertWidget(at >= 0 ? at : lay->count(), m_accountChip, 0, Qt::AlignVCenter);
+    }
+    connect(m_accountChip, &TitlebarAccount::clicked, this,
+            [this] { switchToRoute(QStringLiteral("account")); });
+
     // ── 三键 = 用户定义的语义(docs/13-窗口行为.md)────────────────────────────
     // 三个都**不**再直连 QWidget 的默认动作,一律走本类的方法 —— 窗口状态只有一个地方改
     // (托盘与自检都调同一批方法,不会出现"谁把窗口藏了/谁又把它显示出来"互相覆盖):
@@ -648,6 +662,8 @@ void MainWindow::buildUi() {
     switchToRoute(QStringLiteral("home"));
 
     layoutTitleBar();
+    if (m_accountChip != nullptr)
+        m_accountChip->refresh(); // 起窗就读一次账户(没登录就是一枚占位头像,不写任何文字)
 }
 
 void MainWindow::layoutTitleBar() {
@@ -874,6 +890,9 @@ void MainWindow::switchToRoute(const QString &routeKey) {
     m_lastNavItem = routeKey; // main_window.py:147
     m_stack->setCurrentWidget(page);
     m_nav->setCurrent(routeKey);
+    // 顶栏那枚玩家标记:切页顺手重读一次(便宜 —— 令牌文件时间戳没变就不解密)
+    if (m_accountChip != nullptr)
+        m_accountChip->refresh();
 }
 
 // ─────────────────── 临时页机制(main_window.py:153-283)───────────────────
@@ -1588,6 +1607,9 @@ void MainWindow::showEvent(QShowEvent *e) {
     /* 窗口**藏着的这段时间**里也可能换过页(装完自动回版本页之类):那时"看得见的栏"是空集,
      * 收敛无从下手 —— 所以再现的时候再问一次,把藏着时攒下的"两条 322"收掉。 */
     scheduleRailConverge();
+    // 窗口再现(从托盘回来)时账户可能已经换过了(在设置页里退出登录/重新登录后的那把锁)
+    if (m_accountChip != nullptr)
+        m_accountChip->refresh();
 }
 
 void MainWindow::hideEvent(QHideEvent *e) {

@@ -58,10 +58,14 @@ const MapRow kMap[] = {
      "index.tsv: 原名称「刷新」(PageDownloadLeft.xaml)—— 语义直给"},
     {IconRegistry::Search, "搜索", "search", "icon_01389e71.svg",
      "index.tsv: 来源 MySearchBox.xaml(搜索框里的放大镜),原表未给名"},
-    {IconRegistry::Mod, "模组", "mod", "mod.svg",
-     "index.tsv:15 原名称「Mod」(PageDownloadLeft.xaml)—— PCL 下载页左栏的「模组」位"},
-    {IconRegistry::Shader, "光影", "shader", "shader.svg",
-     "index.tsv:19 原名称「光影包」(PageDownloadLeft.xaml)—— 同一栏第三格的「光影」位"},
+    /* Mod / Shader 这两枚**不用 PCL 那两张**(拼图块 / 光影包):用户 2026-09-27 点名
+     * 「Mod 和光影的图标赶紧找东西替代上,别就麦块版本一个草方块」。
+     * file 前面的 "ui/" 是相对 assets/icons 的子目录(见 assetPath);出处写在本目录的
+     * index.tsv 与 NOTICE.md 里 —— 索引那一条断言(测试里查 inIndex)照旧成立。 */
+    {IconRegistry::Mod, "模组", "mod", "ui/mod.svg",
+     "assets/icons/ui/index.tsv —— 自绘「扩展模块」芯片,出处见 assets/icons/ui/NOTICE.md"},
+    {IconRegistry::Shader, "光影", "shader", "ui/shader.svg",
+     "assets/icons/ui/index.tsv —— 自绘「对比圆」,出处见 assets/icons/ui/NOTICE.md"},
 };
 
 const MapRow &row(IconRegistry::Semantic s) { return kMap[int(s)]; }
@@ -186,11 +190,16 @@ bool IconRegistry::resolveIconDir() {
     return false;
 }
 
-void IconRegistry::parseIndex() {
-    QFile f(indexFile());
+/* 索引文件(与 assets/icons/pcl/index.tsv 同格式):文件	名称	来源	风格[	尺寸]。
+ * 两份都要读:
+ *   * assets/icons/pcl/index.tsv —— PCL 那套素材的原文出处;
+ *   * assets/icons/ui/index.tsv  —— **我们自己画**的那两枚(mod / shader)的出处。
+ * 为什么自绘的也要有一份索引:界面侧那条"每个语义图标都要在索引里有出处"的断言是按
+ * 索引文件查的(tests/ui_smoke_test.cpp 的 inIndex 那一条)—— 换图标不能靠绕开检查。 */
+void IconRegistry::parseIndexFile(const QString &path) {
+    QFile f(path);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
         return;
-    QHash<QString, int> byFile;
     while (!f.atEnd()) {
         const QString line = QString::fromUtf8(f.readLine()).trimmed();
         if (line.isEmpty() || line.startsWith(QLatin1Char('#')))
@@ -198,7 +207,6 @@ void IconRegistry::parseIndex() {
         const QStringList cols = line.split(QLatin1Char('\t'));
         if (cols.size() < 4)
             continue;
-        byFile.insert(cols[0], byFile.size()); // 只用于判存在
         for (Entry &e : m_entries) {
             if (e.file == cols[0]) {
                 e.pclName = cols[1];
@@ -208,6 +216,25 @@ void IconRegistry::parseIndex() {
             }
         }
     }
+}
+
+void IconRegistry::parseIndex() {
+    parseIndexFile(indexFile());
+    parseIndexFile(assetPath(QStringLiteral("ui/index.tsv")));
+}
+
+/* 语义图标文件的实际路径。file 带 "ui/" 前缀 = 隔壁那一套(assets/icons/ui/*,自绘),
+ * 其余 = PCL 那套(m_dir = assets/icons/pcl)。 */
+QString IconRegistry::assetPath(const QString &file) const {
+    if (m_dir.isEmpty())
+        return QString();
+    if (file.startsWith(QLatin1String("ui/"))) {
+        QDir icons(m_dir); // .../assets/icons/pcl
+        if (icons.cdUp())  // .../assets/icons
+            return icons.filePath(file);
+        return QString();
+    }
+    return m_dir + QLatin1Char('/') + file;
 }
 
 bool IconRegistry::load() {
@@ -224,7 +251,7 @@ bool IconRegistry::load() {
     }
     parseIndex();
     for (int i = 0; i < m_entries.size(); ++i) {
-        QFile f(m_dir + QLatin1Char('/') + m_entries[i].file);
+        QFile f(assetPath(m_entries[i].file));
         QByteArray data;
         if (f.open(QIODevice::ReadOnly))
             data = f.readAll();

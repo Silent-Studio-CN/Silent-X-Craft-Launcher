@@ -212,6 +212,12 @@ function Invoke-EditionRun([string]$tag, [string]$pick, [string]$expect, [string
   $env:SXCL_UI_SETTINGS = $ini
   $env:SXCL_UI_WINDOW = '1100x750'
   $env:SXCL_UI_DUMP = '1'
+  # The download page's rails are COLLAPSED by default since 2026-09-27 (the user asked for that
+  # explicitly), and the collapsed footer stacks the two icons and stands the LOGO upright. This
+  # script measures the EXPANDED layout (cup | separator | LOGO), so it asks the app to expand the
+  # page's rails through the panel's own public API first (SXCL_UI_EXPAND, the mirror of
+  # SXCL_UI_COLLAPSE).
+  $env:SXCL_UI_EXPAND = '1'
   if ($pick -ne '') {
     $env:SXCL_UI_EDITION = $pick
   } else {

@@ -84,6 +84,14 @@ set(SXCL_UI_SOURCES
   icon_select_button.cpp icon_select_button.h
   #   folder_icons.* 文件夹自定义图标（用户点名：悬停文件夹出设置按钮，从应用内挑图标）
   folder_icons.cpp   folder_icons.h
+  #   skin_image.*  玩家皮肤贴图 -> 头像 / 全身正面像（纯函数：拼贴图，不碰网络与磁盘）
+  #   skin_store.*  皮肤取图那一层（会话服务 -> 皮肤 PNG；工作线程 + 磁盘缓存 + changed()）
+  skin_image.cpp     skin_image.h
+  skin_store.cpp     skin_store.h
+  #   titlebar_account.* 顶栏的「头像 + 玩家名」（点它进账户管理页；用户 2026-09-27 点名）
+  titlebar_account.cpp titlebar_account.h
+  #   账户管理页（顶栏头像点进来的那一页；用户点名"先留空，做到跳转那一步就可以"）
+  pages/account_page.cpp
   #   flow_layout.* 流式布局（docs/25 总则：控件必须完整显示自己，放不下**换行**、不许压扁/裁切）
   flow_layout.cpp    flow_layout.h
   nav.cpp            nav.h

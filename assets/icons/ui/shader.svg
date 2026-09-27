@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- 光影(Shader):明暗各一半的对比圆 —— 我们自己的图形(不借任何第三方资产)。
+       语义直给:左明右暗 = 光影。16px 下比"太阳/棱镜"那类复杂图形清楚得多。
+       currentColor 由使用方按主题令牌替换(见 src/ui/nav.cpp 的 paintIcon / icon_registry.h)。 -->
+  <circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.7"/>
+  <path fill="currentColor" d="M12 3.4a8.6 8.6 0 0 1 0 17.2z"/>
+</svg>

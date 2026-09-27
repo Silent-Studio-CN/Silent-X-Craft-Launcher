@@ -30,6 +30,7 @@ class QTimer;
 namespace sxcl::ui {
 
 class SxclTray;
+class TitlebarAccount;
 
 // 窗口形态(用户对三键的语义要求)。
 //
@@ -94,6 +95,9 @@ public:
     Q_INVOKABLE void notifyInstallFinished(bool ok, bool cancelled);
 
     NavPanel *navPanel() const { return m_nav; }
+    /* 顶栏那枚「玩家」(头像 + 玩家名):点它进账户管理页。给取证脚本一个只读读数入口
+     * (名字/有没有真皮肤),界面本身不需要知道它。 */
+    TitlebarAccount *accountChip() const { return m_accountChip; }
 
     /* **副栏登记 + "同一时刻最多一条栏展开"**(docs/27 §11;用户 2026-09-26 口径:
      * 「不管有多少栏,同时只保持有一个栏可以伸出来」)。
@@ -264,6 +268,8 @@ private:
 
     FluentTitleBar *m_titleBar = nullptr;
     QLabel *m_iconLabel = nullptr; // qf 的 18x18 窗口图标位(未设窗口图标 -> 空白占位)
+    // 顶栏的账户标记(头像 + 玩家名;用户 2026-09-27 点名):夹在标题与三键之间
+    TitlebarAccount *m_accountChip = nullptr;
     NavPanel *m_nav = nullptr;
     QVector<QPointer<NavPanel>> m_rails; // 主栏 + 各页面登记的副栏(同一时刻只允许一条展开)
     StackedWidget *m_stack = nullptr; // libqf 的 StackedWidget(类名要能被 QSS 命中,见 .cpp)

@@ -191,6 +191,76 @@ QStringList scanInstalledVersions(const QString &gameDir) {
     return versions;
 }
 
+namespace {
+
+/* 加载器:关键词 -> 人话名(**只有展示用**;筛选键请用 versionLoaderTag 的小写 id)。
+ * 顺序即判定顺序:neoforge 必须排在 forge 前面(NeoForge 的 id 里也含 forge),
+ * fabric-loader / quilt-loader 排在 fabric / quilt 前面(这样才能取到后面的版本号)。 */
+struct LoaderKey {
+    const char *needle;
+    const char *name;
+};
+const LoaderKey kLoaderKeys[] = {
+    {"neoforge", "NeoForge"},
+    {"forge", "Forge"},
+    {"fabric-loader", "Fabric"},
+    {"fabric", "Fabric"},
+    {"quilt-loader", "Quilt"},
+    {"quilt", "Quilt"},
+    {"liteloader", "LiteLoader"},
+    {"optifine", "OptiFine"},
+};
+
+} // namespace
+
+QString versionLoaderLabel(const QString &gameDir, const QString &versionId) {
+    /* 判定用的字符串:版本 JSON 自己写的 id 优先(它才是权威),读不到就退回目录名。
+     * 这条路只读那**一个**版本文件,不扫目录、不碰别的实例 —— 界面线程可以直接调(主页那一行)。 */
+    QString id = versionId;
+    QFile file(gameDir + QStringLiteral("/versions/") + versionId + QLatin1Char('/') +
+               versionId + QStringLiteral(".json"));
+    if (file.open(QIODevice::ReadOnly)) {
+        QJsonParseError error{};
+        const QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &error);
+        if (error.error == QJsonParseError::NoError && doc.isObject()) {
+            const QString jsonId = doc.object().value(QStringLiteral("id")).toString().trimmed();
+            if (!jsonId.isEmpty())
+                id = jsonId;
+        }
+    }
+    /* 版本 id 里可能同时写着好几个加载器(PCL 那种 "1.12.2-forge-…-liteloader-…"),
+     * 所以**全认一遍**再用 " + " 连起来 —— 与版本行那条口径一致。 */
+    const QString low = id.toLower();
+    QStringList parts;
+    QStringList seen;
+    for (const LoaderKey &key : kLoaderKeys) {
+        const int at = low.indexOf(QLatin1String(key.needle));
+        if (at < 0)
+            continue;
+        const QString name = QString::fromLatin1(key.name);
+        if (seen.contains(name))
+            continue; // fabric-loader / fabric 这类同名的针脚只算一次
+        seen.append(name);
+        // 版本号:紧跟在关键词后面(中间最多隔一个分隔符)的那段数字(**必须有数字才算**)
+        int i = at + int(qstrlen(key.needle));
+        if (i < id.size() && (id.at(i) == QLatin1Char('-') || id.at(i) == QLatin1Char('_') ||
+                              id.at(i) == QLatin1Char(' ')))
+            ++i;
+        QString version;
+        if (i < id.size() && id.at(i).isDigit()) {
+            while (i < id.size() && (id.at(i).isDigit() || id.at(i) == QLatin1Char('.'))) {
+                version.append(id.at(i));
+                ++i;
+            }
+            while (version.endsWith(QLatin1Char('.')))
+                version.chop(1);
+        }
+        // 没有版本号就**只写名字**(用户 2026-09-27 口径);一个字都不猜
+        parts.append(version.isEmpty() ? name : QStringLiteral("%1 %2").arg(name, version));
+    }
+    return parts.join(QStringLiteral(" + "));
+}
+
 QString versionLoaderTag(const QString &gameDir, const QString &versionId) {
     QFile file(gameDir + QStringLiteral("/versions/") + versionId + QLatin1Char('/') +
                versionId + QStringLiteral(".json"));

@@ -45,12 +45,15 @@ foreach ($size in @('900x600','1100x750','1280x800')) {
 # SXCL_UI_RAILS_TEST drives the product path through seven steps:
 #   1 back to version-select (+ ensure side2)   5 expand side2 again on select
 #   2 expand the main rail                      6 switch to download (side2 is hidden now)
-#   3 switch to download (page rail is born     7 switch back to select
-#     expanded -> the shell must make the
-#     main rail give way)
+#   3 switch to download + expand its rail      7 switch back to select
+#     (the shell must make the main rail
+#      give way -> nav 48 / sub 322)
 #   4 switch back to select
-# Step 1 normalizes the start page, so all three configurations follow one timeline
-# (SXCL_UI_ROUTE=download starts on a page whose own rail is born expanded as well).
+# Step 1 normalizes the start page, so all three configurations follow one timeline.
+# NOTE (2026-09-27): the download page's rails are COLLAPSED by default now (the user asked for
+# that explicitly: "download page side 1 and side 2 both start collapsed"), so step 3 expands
+# that rail through its own hamburger button (SxclRailsEnsure) instead of relying on it being
+# born expanded. The rule under test is unchanged: one visible expanded rail at most.
 # Every step waits for the animations to settle and prints:
 #   [rails] step=<n> expanded=<count> nav=<w> sub=<w> name=<objectName> route=<route> who=<names>
 # expanded counts rails VISIBLE to the window that are not collapsed (same rule as the

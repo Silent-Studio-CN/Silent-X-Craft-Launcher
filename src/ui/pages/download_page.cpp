@@ -63,7 +63,9 @@
 #pragma warning(pop)
 #endif
 
+#include <QGridLayout>
 #include <QHBoxLayout>
+#include <QMargins>
 #include <QPainter> // 页脚那条竖直分隔线:容器 paintEvent 里画(docs/27 §12)
 #include <QStackedWidget>
 #include <QVBoxLayout>
@@ -113,16 +115,35 @@ CardWidget *buildPlaceholderCard(const QString &title, const QString &body, QWid
  * 位置每次绘制时按子控件几何现算,所以折叠/展开/换主题都不用额外接线。 */
 class EditionPickRow : public QWidget {
 public:
-    explicit EditionPickRow(QWidget *parent) : QWidget(parent) {}
+    explicit EditionPickRow(QWidget *parent) : QWidget(parent) {
+        m_grid = new QGridLayout(this);
+        m_grid->setContentsMargins(0, 0, 0, 0);
+        m_grid->setSpacing(12); // 两颗图标之间留 12:竖直分隔线就画在这段的中点
+    }
 
     void setButtons(QWidget *left, QWidget *right) {
         m_left = left;
         m_right = right;
+        relayout();
+    }
+
+    /* 侧栏折叠(48 宽)时:**两枚图标改成上下摞**。
+     * 用户 2026-09-27:「侧边栏缩回去的时候:Java 版那个咖啡杯可以放下;基岩版让基岩图标竖起来
+     * (尺寸不变,整条竖着),它底色的那条蓝线也变成竖的;展开时恢复成排版竖线。」
+     * 转 90° 那件事在按钮自己身上(IconSelectButton::setVertical),这里只管把两颗摆成一列 ——
+     * 横着摆的话(15 + 12 + 20)已经超过折叠轨道 48 减去页脚内边距的那点宽度。 */
+    void setStacked(bool stacked) {
+        if (m_stacked == stacked)
+            return;
+        m_stacked = stacked;
+        relayout();
+        update();
     }
 
 protected:
     void paintEvent(QPaintEvent *) override {
-        if (m_left == nullptr || m_right == nullptr)
+        // 那条竖直分隔线只在**横排**时存在:摞起来以后两颗图标之间是横向的间隔,没有竖线可画
+        if (m_stacked || m_left == nullptr || m_right == nullptr)
             return;
         const QRect a = m_left->geometry();
         const QRect b = m_right->geometry();
@@ -137,8 +158,24 @@ protected:
     }
 
 private:
+    void relayout() {
+        if (m_left == nullptr || m_right == nullptr)
+            return;
+        m_grid->removeWidget(m_left);
+        m_grid->removeWidget(m_right);
+        if (m_stacked) {
+            m_grid->addWidget(m_left, 0, 0, Qt::AlignCenter);
+            m_grid->addWidget(m_right, 1, 0, Qt::AlignCenter);
+        } else {
+            m_grid->addWidget(m_left, 0, 0, Qt::AlignCenter);
+            m_grid->addWidget(m_right, 0, 1, Qt::AlignCenter);
+        }
+    }
+
+    QGridLayout *m_grid = nullptr;
     QWidget *m_left = nullptr;
     QWidget *m_right = nullptr;
+    bool m_stacked = false;
 };
 
 QWidget *buildPlaceholderTab(const QString &title, const QString &body, QWidget *parent) {
@@ -184,9 +221,10 @@ QWidget *createDownloadPage(QWidget *parent) {
         inner->addItem(item);
     }
     inner->setCurrent(QStringLiteral("download_mc"));
-    // 进页面就把那套展开动画演一遍(用户点名"要包含完整的动画"):48 -> 322 / 150ms / OutQuad。
-    // 之后三横菜单照常折叠/展开,与主侧边栏一模一样。
-    inner->setCollapsed(false);
+    /* 用户 2026-09-27:「下载页左 1 左 2 两个栏**默认都是收回去的**。」
+     * 所以这里**不**自动展开(以前进页面会把这条栏演一遍 48 -> 322 的展开动画,左 2 一起手就是
+     * 322,连锁着把左 1 也顶成"被收起"那条);三横菜单照常折叠/展开,动画一个字节没动。 */
+    inner->setCollapsed(true);
     leftLay->addWidget(inner, 1); // 侧栏吃掉竖直方向的余量
 
     // ── 侧栏页脚:版本形态(Java 版 / 基岩版)**两个图标点选** ──
@@ -200,14 +238,13 @@ QWidget *createDownloadPage(QWidget *parent) {
     //   * 点选只做一件事:写 game.edition 并立即存盘(重启后记得住),不弹任何解释性弹窗。
     {
         auto *foot = new CardWidget(leftCol);
+        // 给页脚一个能找到的名字:折叠态的版面(两枚图标上下摞、页脚 38 宽 < 48 轨道)要能按 dump 量
+        foot->setObjectName(QStringLiteral("sxclEditionFoot"));
         auto *fl = new QVBoxLayout(foot);
         fl->setContentsMargins(12, 8, 12, 8);
         fl->setSpacing(6);
         auto *rowHost = new EditionPickRow(foot);
         rowHost->setObjectName(QStringLiteral("sxclEditionPickRow"));
-        auto *row = new QHBoxLayout(rowHost);
-        row->setContentsMargins(0, 0, 0, 0);
-        row->setSpacing(12); // 两颗图标之间留 12:竖直分隔线就画在这段的中点
 
         auto *javaBtn = new IconSelectButton(rowHost);
         javaBtn->setObjectName(QStringLiteral("sxclEditionJavaButton")); // dump/验收按它认这个钮
@@ -232,8 +269,6 @@ QWidget *createDownloadPage(QWidget *parent) {
         // 二选一:同一个父控件上的 autoExclusive —— 点一个,另一个自己弹起来(单选语义)
         javaBtn->setAutoExclusive(true);
         bedrockBtn->setAutoExclusive(true);
-        row->addWidget(javaBtn, 0, Qt::AlignVCenter);
-        row->addWidget(bedrockBtn, 0, Qt::AlignVCenter);
         rowHost->setButtons(javaBtn, bedrockBtn);
 
         // 页脚里**整组水平居中**(用户 2026-09-26 最终口径):前后各一个伸缩项,组里的两颗图标
@@ -269,11 +304,21 @@ QWidget *createDownloadPage(QWidget *parent) {
                          [selectEdition]() { selectEdition(QStringLiteral("bedrock")); });
         leftLay->addWidget(foot, 0);
 
-        /* 折叠时**把页脚藏起来**:它比折叠后的轨道(48)宽得多,留着就会把这一列撑到 247 宽,
-         * 折起来以后右边空一大片(用户 2026-09-22 晚:「下载页侧2栏收回来就不要靠[右]了,
-         * 跟原生一样靠回最左边」)。展开时再放回来 —— 与 qf 的折叠语义一致:折叠只留图标轨道。 */
-        QObject::connect(inner, &NavPanel::collapsedChanged, foot,
-                         [foot](bool collapsed) { foot->setVisible(!collapsed); });
+        /* 页脚的两种版面(用户 2026-09-27 点名):
+         *   展开(侧栏 322)= 原来那张排版:咖啡杯 |(竖直分隔线)| 基岩版标题 LOGO,页脚内边距 12;
+         *   折叠(轨道 48)  = 咖啡杯照常**放下**(15x20 的小图),基岩那条 7:1 的宽幅 LOGO
+         *                    **竖起来**(尺寸不变:还是 20 高、139 长,只是整条竖着),它下面那条
+         *                    accent 指示条跟着转成竖的;两枚图标上下摞,页脚内边距收到 4
+         *                    —— 4 + 30 + 4 = 38 < 48,折叠轨道里放得下,这一列也不会被撑宽。
+         * 以前这里是把整个页脚**藏起来**(那会让折叠态看不到版本形态);现在折叠态自己有一套版面。 */
+        auto applyCollapsed = [foot, rowHost, javaBtn, bedrockBtn, fl](bool collapsed) {
+            rowHost->setStacked(collapsed);
+            bedrockBtn->setVertical(collapsed);
+            fl->setContentsMargins(collapsed ? QMargins(4, 8, 4, 8) : QMargins(12, 8, 12, 8));
+            foot->setVisible(true);
+        };
+        applyCollapsed(inner->collapsed());
+        QObject::connect(inner, &NavPanel::collapsedChanged, foot, applyCollapsed);
     }
     QVBoxLayout *rightLay = page->beginSideLayout(leftCol); // 右列:标题 + 副标题 + 内容
 

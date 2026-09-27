@@ -8,6 +8,7 @@
 
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QEvent>
 #include <QDesktopServices>
 #include <QFont>
 #include <QGuiApplication>
@@ -17,6 +18,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
+
+#include <cstdio>
 
 #include "account.h"
 #include "fluent_theme.h"
@@ -77,8 +80,46 @@ AuthLoginDialog::~AuthLoginDialog() {
 AuthLoginDialog *AuthLoginDialog::open(QWidget *parent) {
     auto *dialog = new AuthLoginDialog(parent);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
+    /* **模态**:登录窗开着的时候,启动器主窗收不到输入(用户 2026-09-27:
+     * 「登录的弹窗,就整那个老死人问题,就左上角搁那悬着」—— 以前既不模态、又摆到屏幕左上角
+     * (0,0),看着就是"单独旋出去的一个窗")。
+     * 用**窗口级**模态(Qt::WindowModal):主窗与它上面的一切收不到输入,托盘菜单照常用。
+     * 不用 setModal(true):那等于应用级模态(ApplicationModal),会把别的顶层窗一起锁住 ——
+     * 而"这一层只是贴在启动器窗口上的一层"这件事,窗口级模态说得正好。 */
+    dialog->setWindowModality(Qt::WindowModal);
+    dialog->centerOnParent();
     dialog->show();
     return dialog;
+}
+
+void AuthLoginDialog::centerOnParent() {
+    QWidget *host = parentWidget() != nullptr ? parentWidget()->window() : nullptr;
+    if (host == nullptr)
+        return;
+    // 主窗**自己那块几何**的全局坐标 + 尺寸:遮罩正好盖满主窗,里面的卡片自然居中
+    const QRect frame(host->mapToGlobal(QPoint(0, 0)), host->size());
+    setGeometry(frame);
+    if (!m_centerReported) {
+        m_centerReported = true;
+        // 客观读数(不是推测):两边的**中心**必须是同一个点
+        std::fprintf(stderr,
+                     "[sxcl-ui] 登录窗居中:主窗 (%d,%d %dx%d) 中心 (%d,%d) | 登录窗 (%d,%d %dx%d) "
+                     "中心 (%d,%d) | 中心差 (%d,%d)\n",
+                     frame.x(), frame.y(), frame.width(), frame.height(),
+                     frame.x() + frame.width() / 2, frame.y() + frame.height() / 2, x(), y(),
+                     width(), height(), x() + width() / 2, y() + height() / 2,
+                     qAbs((x() + width() / 2) - (frame.x() + frame.width() / 2)),
+                     qAbs((y() + height() / 2) - (frame.y() + frame.height() / 2)));
+    }
+}
+
+bool AuthLoginDialog::eventFilter(QObject *watched, QEvent *event) {
+    QWidget *host = parentWidget() != nullptr ? parentWidget()->window() : nullptr;
+    if (host != nullptr && watched == host &&
+        (event->type() == QEvent::Move || event->type() == QEvent::Resize)) {
+        centerOnParent(); // 主窗一动/一改尺寸,这一层跟着贴回去(它本来就是贴在主窗上的一层)
+    }
+    return MessageBoxBase::eventFilter(watched, event);
 }
 
 void AuthLoginDialog::buildUi() {
