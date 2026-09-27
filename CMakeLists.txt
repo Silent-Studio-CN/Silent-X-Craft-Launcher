@@ -385,3 +385,39 @@ endif()
   endif()
   message(STATUS "libqf:PYQFTO_MULTIMEDIA=OFF / PYQFTO_BUILD_DEMO=OFF(不链 Qt6::Multimedia,不铺 multimedia/ 插件)")
 endif()
+
+# ── 版本选择页排序/分组 + 启动页重写(用户 2026-09-27,子代理 verfix)────────────────
+#
+# 为什么挂在**根** CMakeLists 而不是 src/ui/CMakeLists.txt:后者当时正有**别人的未提交改动**
+# (账户/皮肤那条线在往 SXCL_UI_SOURCES 里加文件),按路径提交时两边会互相牵连。这里用
+# target_sources 追加到已经建好的 sxcl_ui_core 上,效果一模一样,而且与那份改动互不干扰。
+if(SXCL_BUILD_UI AND TARGET sxcl_ui_core)
+  target_sources(sxcl_ui_core PRIVATE
+    #   版本号的解析/比较 + 排序分组(纯函数;单测直接调它,不需要窗口)
+    src/ui/workers/version_order.cpp     src/ui/workers/version_order.h
+    #   「修复」:真的把缺的文件补上(版本文件按清单取回 / 依赖库与客户端 jar 按下载清单补)
+    src/ui/workers/repair_worker.cpp     src/ui/workers/repair_worker.h
+    #   启动页的小贴士表 + 状态人话(用户点名:下面换成轮播小贴士,不要给用户看代码)
+    src/ui/launch_tips.cpp               src/ui/launch_tips.h
+  )
+endif()
+
+if(SXCL_BUILD_UI AND SXCL_BUILD_TESTS AND TARGET sxcl_ui_core)
+  # 排序/分组 + 修复 + 启动页那三件事的**单测与真控件验收**(用户 2026-09-27 点名要的验收):
+  #   排序断言(前 5 与后 5 的版本号)、错误版分组在末尾且组内有序、
+  #   「修复」存在且**点下去真的补全**(本地 HTTP 夹具,不联网)、
+  #   启动页 dump 里不含命令行/Java 版本/游戏输出控件、小贴士会切换(两次 dump 不同)。
+  add_executable(sxcl_ui_version_fix_test "${CMAKE_SOURCE_DIR}/tests/ui_version_fix_test.cpp")
+  target_link_libraries(sxcl_ui_version_fix_test PRIVATE sxcl_ui_core Qt6::Network)
+  sxcl_warnings(sxcl_ui_version_fix_test)
+  sxcl_deploy_qt(sxcl_ui_version_fix_test)
+  get_target_property(_sxcl_vf_qt_core Qt6::Core IMPORTED_LOCATION_RELEASE)
+  if(NOT _sxcl_vf_qt_core)
+    get_target_property(_sxcl_vf_qt_core Qt6::Core IMPORTED_LOCATION)
+  endif()
+  get_filename_component(_sxcl_vf_qt_bin "${_sxcl_vf_qt_core}" DIRECTORY)
+  add_test(NAME sxcl_ui_version_fix_test COMMAND sxcl_ui_version_fix_test -platform offscreen)
+  set_tests_properties(sxcl_ui_version_fix_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sxcl_vf_qt_bin}")
+endif()

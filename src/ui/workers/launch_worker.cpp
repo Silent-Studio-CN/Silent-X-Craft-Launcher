@@ -70,6 +70,26 @@ struct CompleteOpts {
 };
 
 void buildCompleteOpts(const QString &settingsFile, CompleteOpts *out, LaunchWorker *owner) {
+    /* 下载参数只有一份(uiDownloadEngineOpts):启动前补全、安装、版本修复共用它 ——
+     * 这里只补上"实时读数"这座桥(补全进度要回界面)。 */
+    out->ready = uiDownloadEngineOpts(settingsFile, &out->opts, out->cacheFile,
+                                      sizeof(out->cacheFile), &out->preferMirror,
+                                      &out->assetsLevel, &out->skipFileCheck);
+    out->progress.owner = owner;
+    out->opts.on_progress = &LaunchWorker::cbCompleteProgress;
+    out->opts.userdata = &out->progress;
+}
+} // namespace
+
+int uiDownloadEngineOpts(const QString &settingsFile, sxcl_engine_opts *opts, char *cacheBuf,
+                         size_t cacheCapacity, int *preferMirror, int *assetsLevel,
+                         int *skipFileCheck) {
+    if (opts == nullptr)
+        return 0;
+    std::memset(opts, 0, sizeof(*opts));
+    if (cacheBuf != nullptr && cacheCapacity > 0)
+        cacheBuf[0] = '\0';
+
     sxcl_settings_download dl;
     std::memset(&dl, 0, sizeof(dl));
     const QByteArray settingsUtf8 = settingsFile.toUtf8();
@@ -82,47 +102,47 @@ void buildCompleteOpts(const QString &settingsFile, CompleteOpts *out, LaunchWor
                SXCL_SETTINGS_OK) {
         path = cfg;
     }
-    int assetsLevel = 1;  /* 默认:PCL 口径 —— 启动前只比大小,不逐个算 SHA-1 */
-    int skipFileCheck = 0; /* 默认关:该比对就比对 */
+    int assets = 1;  /* 默认:PCL 口径 —— 启动前只比大小,不逐个算 SHA-1 */
+    int skipCheck = 0; /* 默认关:该比对就比对 */
     if (path != nullptr) {
         if (sxcl_settings *settings = sxcl_settings_open(path)) {
             sxcl_settings_resolve_download(settings, &dl);
             // launch.complete_assets:0 = 不补资源 / 1 = 只比大小(默认)/ 2 = 强校验。
             // 设置页还没放这个开关(见 docs/24 的 P0b 备注),先支持手改设置文件。
             const int64_t level = sxcl_settings_get_int(settings, "launch.complete_assets", 1);
-            if (level >= 0 && level <= 2) {
-                assetsLevel = static_cast<int>(level);
-            }
+            if (level >= 0 && level <= 2)
+                assets = static_cast<int>(level);
             /* launch.skip_file_check:等价 PCL 的「关闭文件校验」(设置页有开关)。
              * 开了的含义是**存在就算过** —— 坏文件不会被发现,这是用户自己选的取舍。 */
-            skipFileCheck = sxcl_settings_get_bool(settings, "launch.skip_file_check", 0) != 0 ? 1 : 0;
+            skipCheck = sxcl_settings_get_bool(settings, "launch.skip_file_check", 0) != 0 ? 1 : 0;
             sxcl_settings_free(settings);
         }
     }
-    out->assetsLevel = assetsLevel;
-    out->skipFileCheck = skipFileCheck;
-    out->opts.workers = dl.workers;
-    out->opts.rate_bps = dl.rate_bps;
-    out->opts.max_conn_per_file = dl.max_conn_per_file;
-    if (dl.cache_dir[0] != '\0' && sxcl_fs_mkdirs(dl.cache_dir) == 0) {
+    if (assetsLevel != nullptr)
+        *assetsLevel = assets;
+    if (skipFileCheck != nullptr)
+        *skipFileCheck = skipCheck;
+    if (preferMirror != nullptr)
+        *preferMirror = (uiDownloadSource() != QLatin1String("mojang")) ? 1 : 0;
+
+    opts->workers = dl.workers;
+    opts->rate_bps = dl.rate_bps;
+    opts->max_conn_per_file = dl.max_conn_per_file;
+    if (cacheBuf != nullptr && cacheCapacity > 0 && dl.cache_dir[0] != '\0' &&
+        sxcl_fs_mkdirs(dl.cache_dir) == 0) {
         // 与安装、命令行前端同口径:<缓存目录>/hashes.txt
-        std::snprintf(out->cacheFile, sizeof(out->cacheFile), "%s/hashes.txt", dl.cache_dir);
-        out->opts.cache_path = out->cacheFile;
+        std::snprintf(cacheBuf, cacheCapacity, "%s/hashes.txt", dl.cache_dir);
+        opts->cache_path = cacheBuf;
     }
-    out->preferMirror = (uiDownloadSource() != QLatin1String("mojang")) ? 1 : 0;
-    /* 实时读数:核心库把它转发给调用方给的那个 on_progress(manifest.c 的 fetch_on_progress),
-     * userdata 就是这座桥 —— 见 CompleteProgressBridge 的说明。 */
-    out->progress.owner = owner;
-    out->opts.on_progress = &LaunchWorker::cbCompleteProgress;
-    out->opts.userdata = &out->progress;
+    int ready = 0;
 #if defined(SXCL_UI_HAVE_QT_TRANSPORT)
     // Qt 后端有线程亲和性,引擎按需**每线程**建一个(engine.h 的说明);这里只给工厂。
     sxcl_transport_qt_bootstrap();
-    out->opts.transport_factory = [](void *) -> sxcl_transport * { return sxcl_transport_qt_create(); };
-    out->ready = 1;
+    opts->transport_factory = [](void *) -> sxcl_transport * { return sxcl_transport_qt_create(); };
+    ready = 1;
 #endif
+    return ready;
 }
-} // namespace
 
 /** 补全进度:引擎的工作线程回调(见 CompleteProgressBridge 的说明)。 */
 void LaunchWorker::cbCompleteProgress(void *userdata, const sxcl_task *task) {

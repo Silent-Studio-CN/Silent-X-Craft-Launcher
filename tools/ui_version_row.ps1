@@ -1,4 +1,4 @@
-﻿# (C) Silent X Craft Launcher -- "version row" acceptance (user 2026-09-26, three points).
+# (C) Silent X Craft Launcher -- "version row" acceptance (user 2026-09-26, three points).
 #
 # What this proves, per run (every number is measured on this machine, nothing is guessed):
 #
@@ -69,7 +69,10 @@ $T_MISS = C @(0x7F3A,0x5C11,0x7248,0x672C)                    # "missing ... ver
 $T_JSON = ' JSON'
 $T_NOFILE = C @(0x7F3A,0x7248,0x672C,0x6587,0x4EF6)           # "missing version file"
 $T_NOPARENT = C @(0x7F3A,0x524D,0x7F6E,0x7248,0x672C)         # "missing parent version"
-$T_GOTO = C @(0x53BB,0x4E0B,0x8F7D)                           # "go download"
+# 2026-09-27: the action word changed from "go download" to "repair" -- the user's words were
+# that the old action just threw the user onto the download page and left them there.  The row
+# now offers repair (0x4FEE 0x590D) and clicking it really completes the missing files in place.
+$T_FIX = C @(0x4FEE,0x590D)                                   # "repair"
 $T_GUESS = C @(0x731C)                                        # "guess"
 $T_REASON_JSON  = $T_MISS + $T_JSON                           # core reason of 314159
 $T_REASON_PARENT = $T_NEED + ' 1.12.2 ' + $T_PARENT           # core reason of 271828
@@ -346,7 +349,9 @@ foreach ($theme in @('dark','light')) {
       $inline = $r.note + $r.action
       if ($r.info -ne '') { Write-Output ('    -> FAIL broken row still writes an info line: "' + $r.info + '"'); $fail++ }
       if ($r.note -eq '' -or $r.action -eq '') { Write-Output '    -> FAIL broken row is missing its sentence or its action'; $fail++ }
-      if ($inline.Length -gt 20) { Write-Output ('    -> FAIL inline text is ' + $inline.Length + ' chars (cap 20): "' + $inline + '"'); $fail++ }
+      # 2026-09-27: the sentence now counts up what is missing ("missing game jar, 1 library"),
+      # so the cap moved 20 -> 34.  It must still be ONE short line (no path / no parentheses).
+      if ($inline.Length -gt 34) { Write-Output ('    -> FAIL inline text is ' + $inline.Length + ' chars (cap 34): "' + $inline + '"'); $fail++ }
       # one sentence = no full stop / no semicolon; and a "hint" must not smuggle in a path,
       # parentheses or jargon punctuation
       foreach ($ch in @('\', '/', '(', ')', (C @(0xFF08)), (C @(0xFF09)), (C @(0x3002)), (C @(0xFF1B)), (C @(0xFF1A)))) {
@@ -531,8 +536,8 @@ foreach ($id in $ids) {
   }
   if ($want -eq 'warn') {
     if ($p.chip -eq '') { Write-Output '    -> FAIL broken painted row has no chip text'; $fail++ }
-    if ($p.chip.Length -gt 20) { Write-Output ('    -> FAIL chip text is ' + $p.chip.Length + ' chars (cap 20): ' + $p.chip); $fail++ }
-    if ($p.chip -notlike ('*' + $T_GOTO + '*')) { Write-Output '    -> FAIL chip does not offer the action'; $fail++ }
+    if ($p.chip.Length -gt 34) { Write-Output ('    -> FAIL chip text is ' + $p.chip.Length + ' chars (cap 34): ' + $p.chip); $fail++ }
+    if ($p.chip -notlike ('*' + $T_FIX + '*')) { Write-Output '    -> FAIL chip does not offer the action'; $fail++ }
     $sel = $selectRows[$id]
     if ($sel -ne $null) {
       $wantChip = $sel.note + ' ' + $T_DOT + ' ' + $sel.action

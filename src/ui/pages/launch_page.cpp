@@ -4,6 +4,27 @@
  * All rights reserved.
  */
 
+// 启动页 —— **2026-09-27 重写**(用户口述)。
+//
+// 用户原话:
+//   「启动页重写:现在上面是启动加版本号,下面一堆东西;改成:上面是"启动什么",下面变成一个加载动画,
+//     命令行、游戏输出、Java 版本全去掉;等待游戏下面的进度条保留,等待游戏也保留,
+//     下面换成一些动态切换的小知识小 tips,不要给用户看代码。」
+//
+// 所以这一页现在**只有四样东西**,从上到下:
+//   ① 启动 <版本号>          —— "启动什么"
+//   ② 一个转圈的加载动画     —— 自绘(LoadingSpinner),它的存在就是"在动,别急"
+//   ③ 一句状态 + 进度条      —— 状态里保留"等待游戏";进度条保留
+//   ④ 小贴士                 —— 从我们自己的表里轮播(launch_tips.h)
+// 再加上底下的三个按钮(取消 / 导出日志 / 返回)。
+//
+// 删掉的东西(**一个都不许回来**):Java 探测结果、最终命令行、游戏输出、阶段行(检测 Java 运行时 /
+// 构建启动命令 / …)、状态徽标("退出码 0")。这些都是给排查的人看的,用户在这一页只想知道
+// "游戏起来了没有"。诊断信息仍然一条不少地进**运行日志**与**错误剪贴板**(pushUiError),
+// 需要的人拿得到 —— 但不再糊在用户脸上。
+//
+// 出问题(启动失败)时只在状态下面多**一句人话原因**(核心库给的),那是必要的,不是技术面板。
+
 #include "page_factory.h"
 
 #include <QAbstractButton>
@@ -14,10 +35,8 @@
 #include <QFont>
 #include <QHBoxLayout>
 #include <QPainter>
-#include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
-#include <QScrollBar>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -29,7 +48,8 @@
 #include "sxcl/logexport.h" // 一键导出日志包(token/uuid/用户名在写盘前就打码)
 
 #include "game_folders.h"   // offlinePlayerName():主页那个离线 ID 输入框存下来的
-#include "main_window.h"     // nextLaunchOffline():主页"离线启动"键的那一次
+#include "launch_tips.h"    // 小贴士表(页面只轮播,不自己编文案)
+#include "main_window.h"    // nextLaunchOffline():主页"离线启动"键的那一次
 #include "dialogs/account.h" // loadAccountSnapshot / accountCanLaunch(现成入口,本页不改账户代码)
 #include "workers/launch_worker.h"
 #include "workers/ui_error.h"
@@ -57,65 +77,78 @@ void applyButtonFont(QPushButton *button) {
     QFont font = button->font();
     font.setPixelSize(14);
     font.setWeight(QFont::Normal);
-    button->setFont(font);
     button->setFixedHeight(32);
 }
 
-// ───────────────── 阶段指示点(launch_page.py:452-488 LaunchIndicator)────────────────
+/** 小贴士多久换一条。4.5 秒:够读完一句,又不至于盯着同一句发呆。
+ *  顺序**固定**(表里的顺序),不随机 —— 随机的表验收没法复现,截图也没法比对。 */
+constexpr int kTipIntervalMs = 4500;
 
-// 12x12 实心圆点,四态四色。颜色是 Python 里的字面量(不是主题令牌),逐字照抄:
-//   DONE QColor(82,196,26) / ACTIVE QColor(0,120,212) / FAILED QColor(255,77,79)
-//   PENDING QColor(200,200,200)
-class LaunchIndicator : public QWidget {
+// ───────────────── 加载动画(用户点名:"下面变成一个加载动画")────────────────
+
+/** 一圈底环 + 一段弧在转。自绘、纯 Qt,不引任何图标资源。
+ *  objectName 是 #sxclLaunchSpinner,验收 dump 按它认这个动画(并且在两次 dump 之间看它转没转)。 */
+class LoadingSpinner : public QWidget {
 public:
-    enum State { Done = 0, Active = 1, Pending = 2, Failed = 3 };
-
-    explicit LaunchIndicator(QWidget *parent = nullptr) : QWidget(parent) {
-        setFixedSize(12, 12); // :462
+    explicit LoadingSpinner(QWidget *parent = nullptr) : QWidget(parent) {
+        setObjectName(QStringLiteral("sxclLaunchSpinner"));
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setFixedSize(kSide, kSide);
+        m_timer = new QTimer(this);
+        m_timer->setObjectName(QStringLiteral("sxclLaunchSpinnerTimer"));
+        m_timer->setInterval(40); // 25 帧/秒:足够顺,又不烧 CPU
+        connect(m_timer, &QTimer::timeout, this, [this] {
+            m_angle = (m_angle + 12) % 360;
+            update();
+        });
+        m_timer->start();
     }
 
-    void setState(State state) { // :465-467
-        m_state = state;
-        update();
+    /** 转 / 停(游戏退出了还转圈,就像在骗用户"还在忙")。 */
+    void setSpinning(bool spinning) {
+        if (spinning)
+            m_timer->start();
+        else
+            m_timer->stop();
     }
 
-    State state() const { return m_state; }
+    int angle() const { return m_angle; }
 
 protected:
-    void paintEvent(QPaintEvent *) override { // :469-488
+    void paintEvent(QPaintEvent *) override {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
-        const QRect r = rect().adjusted(1, 1, -1, -1); // :472
-        switch (m_state) {
-            case Done:
-                painter.setBrush(QColor(82, 196, 26)); // :474 green
-                break;
-            case Active:
-                painter.setBrush(QColor(0, 120, 212)); // :478 blue
-                break;
-            case Failed:
-                painter.setBrush(QColor(255, 77, 79)); // :482 red
-                break;
-            case Pending:
-            default:
-                painter.setBrush(QColor(200, 200, 200)); // :486 gray
-                break;
-        }
-        painter.setPen(Qt::NoPen);
-        painter.drawEllipse(r);
+        const qreal side = qMin(width(), height()) - 6.0;
+        const QRectF box((width() - side) / 2.0, (height() - side) / 2.0, side, side);
+        const QColor accent = FluentTheme::instance().tokens().accent;
+        QPen track(accent);
+        track.setWidthF(3.0);
+        QColor faint = accent;
+        faint.setAlpha(48);
+        track.setColor(faint);
+        painter.setPen(track);
+        painter.drawArc(box, 0, 360 * 16);
+        QPen arc(accent);
+        arc.setWidthF(3.0);
+        arc.setCapStyle(Qt::RoundCap);
+        painter.setPen(arc);
+        // 负角度 = 顺时针;画一段 100 度的弧,角度每帧 +12 度
+        painter.drawArc(box, int(-m_angle * 16), int(-100 * 16));
     }
 
 private:
-    State m_state = Pending; // :463 self._state = self.PENDING
+    static constexpr int kSide = 44; // 逻辑像素
+    QTimer *m_timer = nullptr;
+    int m_angle = 0;
 };
 
-// ───────────────── 页面本体(launch_page.py:494-679)────────────────
+// ───────────────── 页面本体 ────────────────
 
 class LaunchProgressPage : public ScrollArea {
 public:
     LaunchProgressPage(const VersionRef &version, QWidget *parent)
         : ScrollArea(parent), m_versionId(version.id) {
-        // ---- BasePage(src/app/common/base_page.py:41-60)----
+        // ---- BasePage ----
         setObjectName(QStringLiteral("LaunchProgressPage"));
         setWidgetResizable(true);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -133,206 +166,129 @@ public:
         m_vBox->setSpacing(16);
         m_vBox->setAlignment(Qt::AlignTop);
 
-        m_vBox->addWidget(new TitleLabel(QStringLiteral("启动 %1").arg(m_versionId), m_view));
-        auto *subtitle = new SubtitleLabel(QString(), m_view);
-        subtitle->hide();                                    // :503 self.subtitleLabel.hide()
-        m_vBox->addWidget(subtitle);
+        // ① 启动什么(用户原话:"上面是'启动什么'")
+        auto *title = new TitleLabel(QStringLiteral("启动 %1").arg(m_versionId), m_view);
+        title->setObjectName(QStringLiteral("sxclLaunchTitle"));
+        m_vBox->addWidget(title);
 
-        buildContent();                                      // :508
+        buildContent();
 
-        applyThemeStyles();                                  // :509-510 on_theme_changed(...)
-
-        // 任务页的键:与 main_window.cpp:450-459 登记时用的完全一致
+        // 任务页的键:与 main_window.cpp 登记时用的完全一致
         m_taskKey = QStringLiteral("launch_") + m_versionId;
 
-        // :511 self._start_launch() —— 真的启动(工作线程,主线程不阻塞)。
-        // 用 0ms 单发而不是直接调:等事件循环转起来、页面已经能画之后再起,
-        // 这样第一个 phase_changed 回来时界面已经就位。
+        // 真的启动(工作线程,主线程不阻塞)。用 0ms 单发而不是直接调:等事件循环转起来、
+        // 页面已经能画之后再起,这样第一个 phase_changed 回来时界面已经就位。
         QTimer::singleShot(0, this, [this] { startLaunch(); });
     }
 
 private:
-    void styleProgress(const QString &state) { // :513-519
+    void applyThemeStyles() {
         const ThemeTokens &tokens = FluentTheme::instance().tokens();
-        const QString color = state == QLatin1String("failed") ? tokens.danger.name()
-                              : state == QLatin1String("done") ? tokens.success.name()
-                                                               : tokens.accent.name();
+        const QString color = m_barState == QLatin1String("failed") ? tokens.danger.name()
+                              : m_barState == QLatin1String("done") ? tokens.success.name()
+                                                                    : tokens.accent.name();
         m_progressBar->setStyleSheet(
             QStringLiteral("QProgressBar { border: none; background: %1; border-radius: 2px; }"
                            "QProgressBar::chunk { background: %2; border-radius: 2px; }")
                 .arg(FluentTheme::instance().tokenText(QStringLiteral("track")), color));
+        const QColor secondary = tokens.textSecondary;
+        m_tipLabel->setTextColor(secondary, secondary);
+        m_noteLabel->setTextColor(m_barState == QLatin1String("failed") ? tokens.danger
+                                                                        : secondary,
+                                  m_barState == QLatin1String("failed") ? tokens.danger
+                                                                        : secondary);
     }
 
-    QString badgeColor() const { // :521-524
-        const ThemeTokens &tokens = FluentTheme::instance().tokens();
-        if (m_barState == QLatin1String("done"))
-            return tokens.success.name();
-        if (m_barState == QLatin1String("failed"))
-            return tokens.danger.name();
-        if (m_barState == QLatin1String("running"))
-            return tokens.accent.name();
-        return tokens.textSecondary.name();
-    }
+    void buildContent() {
+        auto *card = new CardWidget(m_view);
+        card->setObjectName(QStringLiteral("sxclLaunchCard"));
+        card->setStyleSheet(QStringLiteral("CardWidget { border-radius: 8px; }"));
+        auto *layout = new QVBoxLayout(card);
+        layout->setContentsMargins(28, 24, 28, 24);
+        layout->setSpacing(14);
 
-    void applyThemeStyles() { // :526-530
-        styleProgress(m_barState);
-        styleMonoView(); // 阶段 7 新增的两个等宽框(命令行/日志)也走同一套令牌
-        m_statusBadge->setStyleSheet(QStringLiteral("color: %1; font-weight: 500;")
-                                         .arg(badgeColor()));
-        m_logOutput->setStyleSheet(
-            QStringLiteral("color: %1;").arg(FluentTheme::instance().tokenText(
-                QStringLiteral("textTertiary"))));
-    }
+        // ② 加载动画(居中)
+        m_spinner = new LoadingSpinner(card);
+        layout->addWidget(m_spinner, 0, Qt::AlignHCenter);
 
-    void buildContent() { // :532-598
-        auto *card = new CardWidget(m_view);                 // :533
-        card->setStyleSheet(QStringLiteral("CardWidget { border-radius: 8px; }")); // :534
-        auto *layout = new QVBoxLayout(card);                // :535
-        layout->setContentsMargins(28, 20, 28, 20);          // :536
-        layout->setSpacing(12);                              // :537
+        // ③ 一句状态 + 进度条
+        m_phaseLabel = new StrongBodyLabel(QStringLiteral("正在准备游戏…"), card);
+        m_phaseLabel->setObjectName(QStringLiteral("sxclLaunchPhase"));
+        m_phaseLabel->setAlignment(Qt::AlignHCenter);
+        layout->addWidget(m_phaseLabel);
 
-        // ── 标题行(:539-546)──
-        auto *titleRow = new QHBoxLayout();
-        m_phaseLabel = new StrongBodyLabel(QStringLiteral("准备启动"), card); // :541
-        titleRow->addWidget(m_phaseLabel);
-        titleRow->addStretch(1);
-        m_statusBadge = new BodyLabel(QStringLiteral("准备中"), card);      // :544
-        titleRow->addWidget(m_statusBadge);
-        layout->addLayout(titleRow);
-
-        // ── 进度条(:548-554)──
-        m_progressBar = new QProgressBar(card);              // :549
+        m_progressBar = new QProgressBar(card);
+        m_progressBar->setObjectName(QStringLiteral("sxclLaunchProgress"));
         m_progressBar->setRange(0, 100);
         m_progressBar->setValue(0);
         m_progressBar->setFixedHeight(4);
         m_progressBar->setTextVisible(false);
         layout->addWidget(m_progressBar);
 
-        // ── 阶段列表(:556-576)──
-        QStringList phases;                                  // :557-563
-        phases << QStringLiteral("检测 Java 运行时") << QStringLiteral("构建启动命令")
-               << QStringLiteral("启动游戏进程")
-               // :561 wait_window_phase:supports_window_detection() 在 Windows 上为真,
-               // 否则退化成"等待游戏启动"(src/core/platform.py)
-#ifdef Q_OS_WIN
-               << QStringLiteral("等待游戏窗口")
-#else
-               << QStringLiteral("等待游戏启动")
-#endif
-               << QStringLiteral("运行完成");
+        /* 出问题时多这一句人话(核心库给的完整原因)。平时**一个字都不显示** ——
+         * 它不是技术面板,是"为什么没起来"。 */
+        m_noteLabel = new BodyLabel(QString(), card);
+        m_noteLabel->setObjectName(QStringLiteral("sxclLaunchNote"));
+        m_noteLabel->setWordWrap(true);
+        m_noteLabel->setAlignment(Qt::AlignHCenter);
+        m_noteLabel->setVisible(false);
+        layout->addWidget(m_noteLabel);
 
-        for (const QString &name : phases) {                 // :566-576
-            auto *row = new QHBoxLayout();
-            row->setSpacing(8);                              // :568
-            auto *dot = new LaunchIndicator(card);
-            row->addWidget(dot);
-            auto *label = new BodyLabel(name, card);
-            // :572 setTextColor(text_tertiary, text_disabled):深色主题下用 text_disabled
-            label->setTextColor(FluentTheme::instance().tokens().textTertiary,
-                                FluentTheme::instance().tokens().textDisabled);
-            row->addWidget(label);
-            row->addStretch(1);
-            layout->addLayout(row);
-            m_phaseWidgets.append({label, dot});
-        }
+        // ④ 小贴士(轮播;从我们自己的表里取)
+        m_tipLabel = new BodyLabel(QString(), card);
+        m_tipLabel->setObjectName(QStringLiteral("sxclLaunchTip"));
+        m_tipLabel->setWordWrap(true);
+        m_tipLabel->setAlignment(Qt::AlignHCenter);
+        layout->addWidget(m_tipLabel);
 
-        // ── 日志输出(:578-583)──
-        m_logOutput = new BodyLabel(QString(), card);        // :579
-        m_logOutput->setWordWrap(true);
-        m_logOutput->setTextColor(FluentTheme::instance().tokens().textTertiary,
-                                  FluentTheme::instance().tokens().textTertiary);
-        m_logOutput->setFixedHeight(40);
-        layout->addWidget(m_logOutput);
+        m_vBox->addWidget(card);
 
-        // ── 阶段 7 新增:执行证据(Java 探测 / 最终命令行 / 游戏输出)──
-        //
-        // 这三块是**用户点名要看**的事实。它们不在 Python 参考图里 —— 参考图抓的是
-        // "还没接线、worker 未起"的初始态;这一页现在真的会启动,所以必须交代:
-        // 用哪个 Java、将要执行的完整命令行(accessToken 打码)、游戏每一行输出归到哪一类。
-        // 几何/配色仍走同一套令牌,不引入新的视觉语言。
-        m_javaLabel = new BodyLabel(QStringLiteral("Java:检测中…"), card);
-        m_javaLabel->setWordWrap(true);
-        m_javaLabel->setStyleSheet(QStringLiteral("font-size: 12px;"));
-        layout->addWidget(m_javaLabel);
-
-        layout->addWidget(makeSectionTitle(
-            QStringLiteral("最终命令行（accessToken / 用户名 / UUID 已打码）"), card));
-        m_commandView = makeMonoView(card, 132);
-        layout->addWidget(m_commandView);
-
-        layout->addWidget(makeSectionTitle(QStringLiteral("游戏输出（按核心库日志归类）"), card));
-        m_logView = makeMonoView(card, 168);
-        /* 游戏一启动就会**刷屏**(Forge/模组几百上千行),以前每来一行就 appendPlainText
-         * 并滚到底 —— UI 线程被这些重绘活活压住,Windows 直接给窗口打上"未响应"。
-         * 现在**攒着按帧刷**(见 onLogLine / flushLogLines),并且给视图一个块数上限,
-         * 让它不会无限长大。用户 2026-09-22 晚点名:"一启动游戏 SXCL 直接未响应。注意做异步" */
-        m_logView->setMaximumBlockCount(6000);
-        m_logFlush = new QTimer(this);
-        m_logFlush->setInterval(120); // 每秒最多刷 8 次
-        connect(m_logFlush, &QTimer::timeout, this, [this] { flushLogLines(); });
-        layout->addWidget(m_logView);
-
-        m_vBox->addWidget(card);                             // :585 add_content(card)
-
-        // ── 按钮(:587-598)──
+        // ── 按钮 ──
         auto *btnLayout = new QHBoxLayout();
-        m_cancelButton = new PushButton(QStringLiteral("取消"), m_view);   // :589
+        m_cancelButton = new PushButton(QStringLiteral("取消"), m_view);
         applyButtonFont(m_cancelButton);
         connect(m_cancelButton, &QAbstractButton::clicked, this, [this] { onCancel(); });
         btnLayout->addWidget(m_cancelButton);
         // 「导出日志」:把启动器日志 + 游戏 latest.log + crash-reports 打成一个 zip。
         // 为什么放在启动页:用户遇到问题时人就在这一页(刚崩完),不该再去翻设置找入口。
+        // (包里的 token/uuid/玩家名由核心库在写盘前打码)
         m_exportButton = new PushButton(QStringLiteral("导出日志"), m_view);
         applyButtonFont(m_exportButton);
         connect(m_exportButton, &QAbstractButton::clicked, this, [this] { onExportLogs(); });
         btnLayout->addWidget(m_exportButton);
         btnLayout->addStretch(1);
-        m_backButton = new PrimaryPushButton(QStringLiteral("返回"), m_view); // :593
+        m_backButton = new PrimaryPushButton(QStringLiteral("返回"), m_view);
         applyButtonFont(m_backButton);
-        m_backButton->setEnabled(false);                                      // :594
+        m_backButton->setEnabled(false);
         connect(m_backButton, &QAbstractButton::clicked, this, [this] { onBack(); });
         btnLayout->addWidget(m_backButton);
-        m_vBox->addLayout(btnLayout);                        // :597
-        m_vBox->addStretch(1);                               // :598
+        m_vBox->addLayout(btnLayout);
+        m_vBox->addStretch(1);
+
+        // 小贴士轮播:第一条立刻显示,之后每 kTipIntervalMs 换下一条
+        m_tips = launchTips();
+        m_tipTimer = new QTimer(this);
+        m_tipTimer->setObjectName(QStringLiteral("sxclLaunchTipTimer"));
+        m_tipTimer->setInterval(kTipIntervalMs);
+        connect(m_tipTimer, &QTimer::timeout, this, [this] { advanceTip(); });
+        showTip(0);
+        m_tipTimer->start();
+
+        applyThemeStyles();
     }
 
-    // ═══════════════ 阶段 7:启动接线(工作线程 + 信号回填)═══════════════
-
-    static StrongBodyLabel *makeSectionTitle(const QString &text, QWidget *host) {
-        auto *label = new StrongBodyLabel(text, host);
-        label->setStyleSheet(QStringLiteral("font-size: 13px;"));
-        QFont font = label->font();
-        font.setPixelSize(13);
-        font.setWeight(QFont::DemiBold);
-        label->setFont(font);
-        return label;
+    // ── 小贴士 ──
+    void showTip(int index) {
+        if (m_tips.isEmpty())
+            return;
+        m_tipIndex = ((index % m_tips.size()) + m_tips.size()) % m_tips.size();
+        m_tipLabel->setText(m_tips.at(m_tipIndex));
     }
 
-    // 只读的等宽文本框:命令行与日志都要"原样、可选中、可滚动",用富文本标签会吃掉空格。
-    QPlainTextEdit *makeMonoView(QWidget *host, int height) {
-        auto *view = new QPlainTextEdit(host);
-        view->setReadOnly(true);
-        view->setFixedHeight(height);
-        view->setLineWrapMode(QPlainTextEdit::NoWrap);
-        QFont mono = view->font();
-        mono.setFamilies({QStringLiteral("Cascadia Mono"), QStringLiteral("Consolas"),
-                          QStringLiteral("DejaVu Sans Mono"), mono.family()});
-        mono.setPixelSize(12);
-        view->setFont(mono);
-        return view;
-    }
+    /** 换下一条(顺次循环)。验收要"两次 dump 不一样",所以顺序必须确定。 */
+    void advanceTip() { showTip(m_tipIndex + 1); }
 
-    void styleMonoView() { // 主题切换时重刷(颜色全部走令牌,不写字面量)
-        const ThemeTokens &tokens = FluentTheme::instance().tokens();
-        const QString qss =
-            QStringLiteral("QPlainTextEdit { background: %1; color: %2;"
-                           " border: 1px solid %3; border-radius: 6px; padding: 6px; }")
-                .arg(tokens.inputBg.name(), tokens.text.name(), tokens.inputBorder.name());
-        if (m_commandView != nullptr)
-            m_commandView->setStyleSheet(qss);
-        if (m_logView != nullptr)
-            m_logView->setStyleSheet(qss);
-    }
+    // ═══════════════ 启动接线(工作线程 + 信号回填)═══════════════
 
     QObject *tasksPage() const {
         QWidget *host = window();
@@ -361,9 +317,8 @@ private:
 
     /** 游戏**正常退出**之后:把启动页收掉、回到主页(用户 2026-09-23 点名)。
      *
-     *  原话:「游戏清完之后不要卡在墙页,启动页直接关闭,回到主屏幕就是主页的选择版本」。
-     *  为什么要留 1.6 秒:那一句"游戏已退出"的 InfoBar 与退出码得让人**看得见**,
-     *  然后才收页 —— 立刻跳走会让人以为"点了一下什么都没发生"。
+     *  为什么要留 1.6 秒:得让人看见"游戏退了"这件事,然后才收页 ——
+     *  立刻跳走会让人以为"点了一下什么都没发生"。
      *  只有**成功**这一支才自动收:失败/取消要停在页上,原因得让人看清楚(那是要动手的)。
      *  还会再确认一次"这页眼下真的在前台" —— 用户要是自己先切走了,就别把页面从他手上抢走。 */
     void scheduleReturnHome() {
@@ -395,7 +350,20 @@ private:
         uiTrace(QStringLiteral("task | %1 -> %2()").arg(m_taskKey, QString::fromLatin1(method)));
     }
 
-    // :511 self._start_launch() —— 真的启动。**立刻返回**,主线程不阻塞。
+    /** 状态 + 进度(页面里**唯一**改这两样的地方,免得各处各写一句)。 */
+    void setStatus(const QString &text, const QString &state, int percent) {
+        m_barState = state;
+        m_phaseLabel->setText(text);
+        m_progressBar->setValue(percent);
+        applyThemeStyles();
+    }
+
+    void showNote(const QString &text) {
+        m_noteLabel->setText(text);
+        m_noteLabel->setVisible(!text.isEmpty());
+    }
+
+    // 真的启动。**立刻返回**,主线程不阻塞。
     void startLaunch() {
         if (m_worker != nullptr || m_finished)
             return;
@@ -423,17 +391,11 @@ private:
         // ── 身份分两条路(判据与 home_page 的原逻辑一致)──
         //
         // A) 已登录账户可用 -> **调用现成入口** startAccountLaunch(dialogs/account.cpp)。
-        //    为什么必须走它:账户快照 AccountSnapshot **故意不带 access_token**
-        //    (account.h:38-55 只有 hasMcToken/mcExpired,uuid/玩家名,**没有令牌**)——
-        //    令牌由账户模块自己从加密存储读出来直接交给核心库启动层,不经过界面。
-        //    所以正版身份不是"本页要不要传令牌",而是"本页根本拿不到令牌",
-        //    这也正是"别改账户代码、只调现成入口"的由来。
-        //    本页在交给它之前先跑一遍**只准备**(dry_run)的 LaunchWorker:
-        //    Java 探测结果、最终命令行、natives/目录检查因此照样能看到(命令行是离线形态,
-        //    页面会写明"正版启动时令牌由账户模块注入")。
+        //    账户快照 AccountSnapshot **故意不带 access_token**,令牌由账户模块自己从加密存储
+        //    读出来直接交给核心库启动层,不经过界面 —— 所以本页根本拿不到令牌,也就无从泄漏。
+        //    本页在交给它之前先跑一遍**只准备**(dry_run)的 LaunchWorker,把该准备的都准备好。
         //
-        // B) 没有可用账户 -> 本页的 LaunchWorker 走完整流程(dry_run=0):
-        //    Java 探测 -> 最终命令行 -> 真起进程 -> stdout/stderr 归类 -> 退出码。
+        // B) 没有可用账户 -> 本页的 LaunchWorker 走完整流程(dry_run=0)。
         //    离线身份 = --offline <名字>(SXCL_UI_OFFLINE_NAME,默认 "Player")。
         const AccountSnapshot account = loadAccountSnapshot();
         // 主页那个"离线启动"键会把它置起来:这一次**强制离线**,哪怕账户可用也不用
@@ -443,8 +405,6 @@ private:
         if (mainWindow != nullptr)
             mainWindow->setNextLaunchOffline(false);
         m_accountLaunch = !forceOffline && accountCanLaunch(account);
-        // 离线 ID:主页那个输入框存下来的(launch.offline_name,**状态保留**);
-        // 环境变量仍是取证/验收通路上的覆盖项(老行为不变)。
         const QString envOffline = qEnvironmentVariable("SXCL_UI_OFFLINE_NAME");
         const QString offlineId = !envOffline.isEmpty() ? envOffline : offlinePlayerName();
         m_identityText = m_accountLaunch
@@ -476,6 +436,7 @@ private:
                 });
         connect(m_worker, &LaunchWorker::javaInfo, this,
                 [this](const QString &path, int major, const QString &version, int is64) {
+                    // Java 探测结果**不再上界面**(用户点名去掉);它照样进运行日志与任务卡明细
                     onJavaInfo(path, major, version, is64);
                 });
         connect(m_worker, &LaunchWorker::commandLine, this,
@@ -490,49 +451,38 @@ private:
                 [this](const QString &text, const QString &kind, int severity, int isStderr) {
                     onLogLine(text, kind, severity, isStderr);
                 });
-        // 进程真的起来了:PID 立刻显示出来(不等进程结束),并且能**单独结束它**
+        // 进程真的起来了:PID 立刻记下来(不等进程结束),并且能**单独结束它**
         connect(m_worker, &LaunchWorker::processStarted, this,
                 [this](qint64 pid) { onProcessStarted(pid); });
         connect(m_worker, &LaunchWorker::finished, this,
-                [this](bool ok, bool cancelled, bool dryRun, int exitCode, int timedOut,
-                       int killed, const QString &conclusion, const QString &message,
-                       const QString &detail) {
+                [this](bool ok, bool cancelled, bool dryRun, int exitCode, int timedOut, int killed,
+                       const QString &conclusion, const QString &message, const QString &detail) {
                     onFinished(ok, cancelled, dryRun, exitCode, timedOut, killed, conclusion,
                                message, detail);
                 });
         callTaskState("setTaskRunning");
+        setStatus(QStringLiteral("正在准备游戏…"), QStringLiteral("running"), 0);
+        showNote(QString());
         updateTaskCard(0, QStringLiteral("启动中"), m_identityText);
         m_worker->start(); // 起线程后立刻返回
     }
 
-    void onPhaseChanged(int index, int total, const QString &name) { // :608-626
-        if (index > 0 && index - 1 < m_phaseWidgets.size()) {
-            PhaseRow &prev = m_phaseWidgets[index - 1];
-            prev.dot->setState(LaunchIndicator::Done);
-            prev.label->setTextColor(FluentTheme::instance().tokens().success,
-                                     FluentTheme::instance().tokens().success);
-        }
-        if (index >= 0 && index < m_phaseWidgets.size()) {
-            PhaseRow &cur = m_phaseWidgets[index];
-            cur.dot->setState(LaunchIndicator::Active);
-            cur.label->setTextColor(FluentTheme::instance().tokens().accent,
-                                    FluentTheme::instance().tokens().accent);
-            m_phaseLabel->setText(name);
-        }
+    void onPhaseChanged(int index, int total, const QString &name) {
         const int percent = total > 0 ? int((double(index) / double(total)) * 100.0) : 0;
-        m_progressBar->setValue(percent);
-        m_barState = QStringLiteral("running");
-        m_statusBadge->setText(QStringLiteral("进行中"));
-        applyThemeStyles();
+        setStatus(launchPhaseText(index), QStringLiteral("running"), percent);
         updateTaskCard(percent, QStringLiteral("%1%").arg(percent), name);
     }
 
-    /** 补全文件的实时读数:写进那张任务卡(状态 + 详情),不抢阶段行(阶段行归核心的 5 段)。
+    /** 补全文件的实时读数:推进度条 + 写任务卡(阶段行已经不在这一页上了)。
      *  取消中就不再刷了 —— 用户已经点过取消,继续报"正在补 xxx"只会让人以为没理他。 */
     void onCompleteProgress(int finished, int failed, const QString &label, qint64 done,
                             qint64 total) {
         if (m_worker == nullptr || m_worker->cancelRequested()) {
             return;
+        }
+        if (!m_finished && total > 0) {
+            // 准备阶段里进度条跟**真实字节**走(比"第几个阶段"实在得多)
+            m_progressBar->setValue(int(double(done) * 100.0 / double(total)));
         }
         QString detail = QStringLiteral("正在补全文件:%1 件已落定").arg(finished);
         if (failed > 0) {
@@ -547,94 +497,39 @@ private:
         updateTaskCard(m_progressBar->value(), QStringLiteral("补全文件中"), detail);
     }
 
+    /** Java 探测结果:**只进日志与任务卡明细**,界面上一处都不显示(用户点名去掉"Java 版本")。 */
     void onJavaInfo(const QString &path, int major, const QString &version, int is64) {
         if (path.isEmpty()) {
-            m_javaLabel->setText(QStringLiteral("Java:没探测到可用的 Java(核心库没给路径)"));
+            SXCL_LOG_I("ui", "启动页:核心库没探测到可用的 Java");
             return;
         }
-        QString text = QStringLiteral("Java:%1").arg(QDir::toNativeSeparators(path));
-        if (!version.isEmpty())
-            text += QStringLiteral("（Java %1）").arg(version);
-        else if (major > 0)
-            text += QStringLiteral("（Java %1）").arg(major);
-        else
-            text += QStringLiteral("（版本未知）");
-        if (is64 == 1)
-            text += QStringLiteral(" · 64 位");
-        else if (is64 == 0)
-            text += QStringLiteral(" · 32 位");
-        m_javaLabel->setText(text);
+        SXCL_LOG_I("ui", "启动页:选中 Java %s(major=%d version=%s%s)", path.toUtf8().constData(),
+                   major, version.toUtf8().constData(),
+                   is64 == 1 ? " 64 位" : (is64 == 0 ? " 32 位" : " 位数未知"));
     }
 
-    // 最终命令行:**核心库自己打的**(driver.c:360-378),accessToken 已换成 ***。
-    // 本页只负责显示,不自己拼一份 —— 自己拼的迟早与核心库漂移。
+    /** 最终命令行(**核心库自己打的、accessToken 已打码**):只落日志,不上界面。 */
     void onCommandLine(const QStringList &lines) {
-        if (lines.isEmpty()) {
-            m_commandView->setPlainText(
-                QStringLiteral("(核心库没有回传命令行 —— 这一般意味着准备阶段就没通过)"));
-            return;
-        }
-        m_commandView->setPlainText(lines.join(QLatin1Char('\n')));
-        m_commandView->verticalScrollBar()->setValue(0);
+        m_commandLineCount = lines.size();
+        for (const QString &line : lines)
+            SXCL_LOG_I("ui", "启动页 argv: %s", line.toUtf8().constData());
+        if (lines.isEmpty())
+            SXCL_LOG_I("ui", "启动页:核心库没有回传命令行(准备阶段没通过)");
     }
 
-    // 一行游戏输出:带核心库的归类标签(logscan),错误行也记下来给失败态用。
+    // 一行游戏输出:不带界面负担,只为失败态记住"第一条问题行"。
     void onLogLine(const QString &text, const QString &kind, int severity, int isStderr) {
-        const QString tag = logKindTag(kind);
-        const QString stream = isStderr != 0 ? QStringLiteral("err") : QStringLiteral("out");
-        QString line = QStringLiteral("[%1][%2]%3 %4")
-                           .arg(stream, tag,
-                                severity >= 2 ? QStringLiteral("[!]") : QString(),
-                                text);
-        m_logPending.append(line);
-        // 刷屏太猛时只留最近的:界面不是日志文件(完整日志在 logs/ 里,有导出入口)
-        if (m_logPending.size() > 4000) {
-            const int drop = m_logPending.size() - 4000;
-            m_logPending.remove(0, drop);
-            m_logDropped += drop;
-        }
-        if (!m_logFlush->isActive())
-            m_logFlush->start();
+        Q_UNUSED(isStderr)
         m_logLineCount += 1;
         if (severity >= 2 || kind == QLatin1String("crash"))
             m_lastProblemLine = text;
     }
 
-    /** 把攒下的日志一次性贴上去(定时器驱动)。 */
-    void flushLogLines() {
-        if (!m_logPending.isEmpty()) {
-            QString batch = m_logPending.join(QLatin1Char('\n'));
-            m_logPending.clear();
-            if (m_logDropped > 0) {
-                batch.prepend(QStringLiteral("……（刷屏太快，省略了 %1 行；完整日志见「更多 → 日志」）\n")
-                                  .arg(m_logDropped));
-                m_logDropped = 0;
-            }
-            m_logView->appendPlainText(batch);
-            m_logView->verticalScrollBar()->setValue(m_logView->verticalScrollBar()->maximum());
-        }
-        if (m_logPending.isEmpty())
-            m_logFlush->stop();
-    }
-
-    // 核心库的稳定英文键 -> 中文短标签(logscan.c:637-651 是键的唯一来源)
-    static QString logKindTag(const QString &kind) {
-        if (kind == QLatin1String("graphics")) return QStringLiteral("图形");
-        if (kind == QLatin1String("vulkan_fallback")) return QStringLiteral("Vulkan回退");
-        if (kind == QLatin1String("java_version")) return QStringLiteral("Java版本");
-        if (kind == QLatin1String("mod_loader")) return QStringLiteral("模组/加载器");
-        if (kind == QLatin1String("missing")) return QStringLiteral("缺东西");
-        if (kind == QLatin1String("account_net")) return QStringLiteral("账户/网络");
-        if (kind == QLatin1String("crash")) return QStringLiteral("崩溃");
-        if (kind == QLatin1String("exit_ok")) return QStringLiteral("正常退出");
-        return QStringLiteral("其它");
-    }
-
     void onFinished(bool ok, bool cancelled, bool dryRun, int exitCode, int timedOut, int killed,
-                    const QString &conclusion, const QString &message,
-                    const QString &detail) { // :639-665
+                    const QString &conclusion, const QString &message, const QString &detail) {
         Q_UNUSED(timedOut)
         Q_UNUSED(killed)
+        Q_UNUSED(exitCode) // 退出码不再往界面上摆(用户点名去掉技术信息);它在日志与错误详情里
         // 账户路径的第一段(只准备)成功了 -> 接着交给现成入口 startAccountLaunch。
         // forceDryRun 时**不**交接:用户明确只想要"准备",不该真起进程。
         if (ok && dryRun && m_accountLaunch && !m_forceDryRun && !m_accountHandedOff) {
@@ -649,18 +544,9 @@ private:
 
         if (ok && dryRun) {
             // 只准备不起进程(= CLI 的 --dry-run):没有退出码可言,准备成功就是成功
-            for (const PhaseRow &row : m_phaseWidgets) {
-                row.dot->setState(LaunchIndicator::Done);
-                row.label->setTextColor(FluentTheme::instance().tokens().success,
-                                        FluentTheme::instance().tokens().success);
-            }
-            m_barState = QStringLiteral("done");
-            applyThemeStyles();
-            m_progressBar->setValue(100);
-            m_phaseLabel->setText(QStringLiteral("准备完成（未起进程）"));
-            m_statusBadge->setText(QStringLiteral("已准备"));
-            m_logOutput->setText(detail.left(80));
-            m_logView->appendPlainText(QStringLiteral("[info] %1").arg(message));
+            m_spinner->setSpinning(false);
+            setStatus(QStringLiteral("准备完成（未起进程）"), QStringLiteral("done"), 100);
+            showNote(QString());
             callTaskState("setTaskDone");
             InfoBar::push(InfoBar::Type::Success, QStringLiteral("启动准备完成"), message, this,
                           4000);
@@ -668,18 +554,9 @@ private:
         }
 
         if (ok) {
-            for (const PhaseRow &row : m_phaseWidgets) {
-                row.dot->setState(LaunchIndicator::Done);
-                row.label->setTextColor(FluentTheme::instance().tokens().success,
-                                        FluentTheme::instance().tokens().success);
-            }
-            m_barState = QStringLiteral("done");
-            applyThemeStyles();
-            m_progressBar->setValue(100);
-            m_phaseLabel->setText(QStringLiteral("游戏已退出"));
-            m_statusBadge->setText(QStringLiteral("退出码 0"));
-            m_logOutput->setText(QStringLiteral("退出码 0 | %1").arg(detail).left(80));
-            m_logView->appendPlainText(QStringLiteral("[info] 游戏已退出(退出码 0)"));
+            m_spinner->setSpinning(false);
+            setStatus(QStringLiteral("游戏已退出"), QStringLiteral("done"), 100);
+            showNote(QString());
             callTaskState("setTaskDone");
             InfoBar::push(InfoBar::Type::Success, QStringLiteral("游戏已退出"), message, this,
                           4000);
@@ -687,48 +564,22 @@ private:
             return;
         }
 
-        m_barState = QStringLiteral("failed");
-        applyThemeStyles();
         if (cancelled) {
-            m_statusBadge->setText(QStringLiteral("已取消"));
-            m_statusBadge->setStyleSheet(
-                QStringLiteral("color: %1; font-weight: 500;")
-                    .arg(FluentTheme::instance().tokenText(QStringLiteral("warning"))));
-            m_phaseLabel->setText(QStringLiteral("已取消"));
-            m_logView->appendPlainText(QStringLiteral("[warn] %1 | %2").arg(message, detail));
-            m_logOutput->setText(message.left(80));
+            m_spinner->setSpinning(false);
+            setStatus(QStringLiteral("已取消"), QStringLiteral("failed"), m_progressBar->value());
+            showNote(QString());
             callTaskState("setTaskFailed");
             updateTaskCard(100, QStringLiteral("已取消"), detail);
             InfoBar::push(InfoBar::Type::Warning, QStringLiteral("已取消"), message, this, 4000);
             return;
         }
 
-        // 失败:当前阶段标红,并把**核心库的真实原因**摆出来(不是"失败"两个字)
-        for (const PhaseRow &row : m_phaseWidgets) {
-            if (row.dot->state() == LaunchIndicator::Active) {
-                row.dot->setState(LaunchIndicator::Failed);
-                row.label->setTextColor(FluentTheme::instance().tokens().danger,
-                                        FluentTheme::instance().tokens().danger);
-                break;
-            }
-        }
-        m_statusBadge->setText(QStringLiteral("失败"));
-        m_statusBadge->setStyleSheet(QStringLiteral("color: %1; font-weight: 500;")
-                                         .arg(FluentTheme::instance().tokenText(
-                                             QStringLiteral("danger"))));
-        m_phaseLabel->setText(message.left(40));
-        m_logOutput->setText(message.left(80));
-        m_logView->appendPlainText(
-            QStringLiteral("[error] 退出码 %1 · 结论 %2\n[error] %3\n[error] %4")
-                .arg(exitCode)
-                .arg(conclusion)
-                .arg(message, detail));
-        if (!m_lastProblemLine.isEmpty())
-            m_logView->appendPlainText(QStringLiteral("[error] 日志里的第一条问题:%1")
-                                           .arg(m_lastProblemLine.left(200)));
+        // 失败:摆出**核心库的真实原因**(不是"失败"两个字)+ 一条统一错误出口(完整上下文进剪贴板)
+        m_spinner->setSpinning(false);
+        setStatus(QStringLiteral("启动没成功"), QStringLiteral("failed"), m_progressBar->value());
+        showNote(message);
         callTaskState("setTaskFailed");
         updateTaskCard(m_progressBar->value(), QStringLiteral("失败"), message);
-        // 统一错误出口(与下载进度页同一个):完整上下文进剪贴板
         UiErrorContext ctx;
         ctx.page = QStringLiteral("启动页 / launch_%1").arg(m_versionId);
         ctx.action = QStringLiteral("启动 %1(%2)").arg(m_versionId, m_identityText);
@@ -739,29 +590,10 @@ private:
     }
 
     // 交给现成的"已登录账户启动"入口(dialogs/account.cpp 的 startAccountLaunch)。
-    // **本页不碰令牌**:账户模块自己从加密存储读出来、直接交给核心库启动层
-    // (account.h:128-131 写明"sxcl 的启动层负责不打印")。
+    // **本页不碰令牌**:账户模块自己从加密存储读出来、直接交给核心库启动层。
     void handOffToAccountLaunch() {
-        for (int i = 0; i < m_phaseWidgets.size(); ++i) { // 0/1 已完成,2 交给账户入口
-            PhaseRow &row = m_phaseWidgets[i];
-            if (i < 2) {
-                row.dot->setState(LaunchIndicator::Done);
-                row.label->setTextColor(FluentTheme::instance().tokens().success,
-                                        FluentTheme::instance().tokens().success);
-            } else if (i == 2) {
-                row.dot->setState(LaunchIndicator::Active);
-                row.label->setTextColor(FluentTheme::instance().tokens().accent,
-                                        FluentTheme::instance().tokens().accent);
-            }
-        }
-        m_barState = QStringLiteral("running");
-        applyThemeStyles();
-        m_progressBar->setValue(40);
-        m_phaseLabel->setText(QStringLiteral("启动游戏进程（正版身份）"));
-        m_statusBadge->setText(QStringLiteral("正版启动中"));
-        m_logView->appendPlainText(QStringLiteral(
-            "[info] 准备完成。正版身份交给账户入口执行:access_token 由账户模块从加密存储读取后"
-            "直接交给核心库启动层,不经过启动页(所以上面命令行是离线形态,已打码)。"));
+        setStatus(QStringLiteral("正在启动游戏…"), QStringLiteral("running"), 40);
+        m_spinner->setSpinning(true);
         updateTaskCard(40, QStringLiteral("正版启动中"), m_identityText);
 
         if (AccountLaunchTask *task =
@@ -776,17 +608,14 @@ private:
         m_finished = true;
         m_cancelButton->setEnabled(false);
         m_backButton->setEnabled(true);
-        m_barState = QStringLiteral("failed");
-        applyThemeStyles();
-        m_phaseLabel->setText(QStringLiteral("正版启动入口拒绝启动"));
-        m_statusBadge->setText(QStringLiteral("失败"));
-        m_logView->appendPlainText(
-            QStringLiteral("[error] startAccountLaunch 返回空(参数不合法:目录/版本/Java 路径)"));
+        m_spinner->setSpinning(false);
+        setStatus(QStringLiteral("启动没成功"), QStringLiteral("failed"), m_progressBar->value());
+        showNote(QStringLiteral("这次没能开始启动，请返回后重新试一次。"));
         callTaskState("setTaskFailed");
         UiErrorContext ctx;
         ctx.page = QStringLiteral("启动页 / launch_%1").arg(m_versionId);
         ctx.action = QStringLiteral("用已登录账户启动 %1").arg(m_versionId);
-        ctx.reason = QStringLiteral("startAccountLaunch 返回空(参数不合法:游戏目录/版本名/Java 路径)");
+        ctx.reason = QStringLiteral("账户启动入口拒绝了这次参数");
         ctx.title = QStringLiteral("启动失败");
         pushUiError(this, ctx, 10000);
     }
@@ -796,34 +625,17 @@ private:
         m_finished = true;
         m_cancelButton->setEnabled(false);
         m_backButton->setEnabled(true);
-        m_barState = ok ? QStringLiteral("done") : QStringLiteral("failed");
-        applyThemeStyles();
+        m_spinner->setSpinning(false);
         if (ok) {
-            for (const PhaseRow &row : m_phaseWidgets) {
-                row.dot->setState(LaunchIndicator::Done);
-                row.label->setTextColor(FluentTheme::instance().tokens().success,
-                                        FluentTheme::instance().tokens().success);
-            }
-            m_progressBar->setValue(100);
-            m_phaseLabel->setText(QStringLiteral("游戏已退出"));
-            m_statusBadge->setText(QStringLiteral("退出码 0"));
-            m_logView->appendPlainText(QStringLiteral("[info] %1 · %2").arg(title, detail));
+            setStatus(QStringLiteral("游戏已退出"), QStringLiteral("done"), 100);
+            showNote(QString());
             callTaskState("setTaskDone");
             InfoBar::push(InfoBar::Type::Success, title, detail, this, 5000);
             scheduleReturnHome(); // 正版那一路同理:退了就回主页
             return;
         }
-        for (const PhaseRow &row : m_phaseWidgets) {
-            if (row.dot->state() == LaunchIndicator::Active) {
-                row.dot->setState(LaunchIndicator::Failed);
-                row.label->setTextColor(FluentTheme::instance().tokens().danger,
-                                        FluentTheme::instance().tokens().danger);
-                break;
-            }
-        }
-        m_phaseLabel->setText(title.left(40));
-        m_statusBadge->setText(QStringLiteral("失败"));
-        m_logView->appendPlainText(QStringLiteral("[error] %1 · %2").arg(title, detail));
+        setStatus(QStringLiteral("启动没成功"), QStringLiteral("failed"), m_progressBar->value());
+        showNote(title);
         callTaskState("setTaskFailed");
         updateTaskCard(m_progressBar->value(), QStringLiteral("失败"), title);
         UiErrorContext ctx;
@@ -835,15 +647,12 @@ private:
         pushUiError(this, ctx, 10000);
     }
 
-    // 进程起来了(on_started -> LaunchWorker::processStarted)。
-    // 这一步的意义:在此之前界面只能"猜"进程到底起没起来 —— 现在有 PID 可显示、
-    // 可核对、可**单独结束**(启动器自己不受影响)。
+    /** 进程起来了(on_started):界面只把状态改成"等待游戏…" —— PID 这类东西留给日志与任务卡。
+     *  游戏真的在跑的时候,转圈动画**停下**(状态行已经说明在等什么了)。 */
     void onProcessStarted(qint64 pid) {
         m_gamePid = pid;
-        m_phaseLabel->setText(QStringLiteral("等待游戏窗口"));
-        m_statusBadge->setText(QStringLiteral("运行中 · PID %1").arg(pid));
-        m_logView->appendPlainText(
-            QStringLiteral("[info] 游戏进程已启动：PID %1（独立进程；结束游戏不会退出启动器）").arg(pid));
+        setStatus(QStringLiteral("等待游戏…"), QStringLiteral("running"), m_progressBar->value());
+        SXCL_LOG_I("ui", "启动页:游戏进程已启动 PID=%lld", (long long)pid);
         uiTrace(QStringLiteral("launch | 界面收到 pid=%1").arg(pid));
         updateTaskCard(m_progressBar->value(), QStringLiteral("运行中"),
                        QStringLiteral("PID %1").arg(pid));
@@ -860,15 +669,9 @@ private:
     void showNeedInstall() {
         m_finished = true;
         m_needInstall = true;
-        m_phaseLabel->setText(QStringLiteral("这个版本还没安装"));
-        m_statusBadge->setText(QStringLiteral("未安装"));
-        m_barState = QStringLiteral("failed");
-        applyThemeStyles();
-        m_logView->appendPlainText(
-            QStringLiteral("[info] 找不到 %1 。版本列表只是**可下载清单**,装好之后才能启动。")
-                .arg(QDir::toNativeSeparators(
-                    QDir(uiGameDirectory())
-                        .filePath(QStringLiteral("versions/%1/%1.json").arg(m_versionId)))));
+        m_spinner->setSpinning(false);
+        setStatus(QStringLiteral("这个版本还没安装"), QStringLiteral("failed"), 0);
+        showNote(QStringLiteral("版本列表只是可下载清单，装好之后才能启动。"));
         callTaskState("setTaskFailed");
         updateTaskCard(0, QStringLiteral("未安装"), QStringLiteral("先下载安装这个版本"));
         if (m_cancelButton != nullptr) {
@@ -882,7 +685,7 @@ private:
                       this, 8000);
     }
 
-    void onCancel() { // :667-671
+    void onCancel() {
         if (m_needInstall) {
             // "去下载并安装":把版本 id 交给下载配置页(它再让用户挑加载器)
             if (QMetaObject::invokeMethod(window(), "switchToDownloadConfig", Qt::DirectConnection,
@@ -936,22 +739,20 @@ private:
                                        .arg(QString::fromUtf8(res.out_path))
                                        .arg(res.files)
                                        .arg(res.zip_bytes);
-            SXCL_LOG_I("ui", "日志已导出:%s(文件 %d 个,zip %lld 字节,跳过 %d)",
-                       res.out_path, res.files, res.zip_bytes, res.skipped);
-            m_logView->appendPlainText(QStringLiteral("[info] 日志已导出:%1").arg(detail));
+            SXCL_LOG_I("ui", "日志已导出:%s(文件 %d 个,zip %lld 字节,跳过 %d)", res.out_path,
+                       res.files, res.zip_bytes, res.skipped);
             InfoBar::push(InfoBar::Type::Success, QStringLiteral("日志已导出"), detail, this, 6000);
         } else {
             const QString why =
                 QString::fromUtf8(err[0] != '\0' ? err : "导出失败(核心库没给原因)");
             SXCL_LOG_E("ui", "日志导出失败:%s", why.toUtf8().constData());
-            m_logView->appendPlainText(QStringLiteral("[error] 日志导出失败:%1").arg(why));
             InfoBar::push(InfoBar::Type::Error, QStringLiteral("导出失败"), why, this, 8000);
         }
     }
 
-    void onBack() { autoClose(); } // :673-674
+    void onBack() { autoClose(); }
 
-    void autoClose() { // :676-679
+    void autoClose() {
         // Python: window.go_back_to_versions()(launch_page.py 里调的就是这个,
         // 不是 go_back_from_launch —— 后者是主窗口对外留的入口)
         if (QMetaObject::invokeMethod(window(), "goBackToVersions", Qt::DirectConnection))
@@ -960,38 +761,27 @@ private:
                                   Q_ARG(QString, QStringLiteral("versions")));
     }
 
-    struct PhaseRow {
-        BodyLabel *label = nullptr;
-        LaunchIndicator *dot = nullptr;
-    };
-
     QString m_versionId;
-    QString m_barState = QStringLiteral("running"); // :506
+    QString m_barState = QStringLiteral("running");
     QWidget *m_view = nullptr;
     QVBoxLayout *m_vBox = nullptr;
+    LoadingSpinner *m_spinner = nullptr;
     StrongBodyLabel *m_phaseLabel = nullptr;
-    BodyLabel *m_statusBadge = nullptr;
+    BodyLabel *m_noteLabel = nullptr;   // 出错时那一句人话(平时藏着)
+    BodyLabel *m_tipLabel = nullptr;    // 轮播的小贴士
     QProgressBar *m_progressBar = nullptr;
-    BodyLabel *m_logOutput = nullptr;
     PushButton *m_cancelButton = nullptr;
     PushButton *m_exportButton = nullptr; // 导出日志包(打码由核心库做)
     PrimaryPushButton *m_backButton = nullptr;
-    QVector<PhaseRow> m_phaseWidgets = {};
+    QTimer *m_tipTimer = nullptr;
+    QStringList m_tips;
+    int m_tipIndex = 0;
 
-    // ── 阶段 7 新增:执行证据的三个控件 ──
-    BodyLabel *m_javaLabel = nullptr;          // Java 探测结果
-    QPlainTextEdit *m_commandView = nullptr;   // 最终命令行(核心库打码后的)
-    QPlainTextEdit *m_logView = nullptr;       // stdout/stderr(带核心库归类标签)
-    /* 日志按帧刷(见 flushLogLines):游戏刷屏时 UI 线程必须还能喘气 */
-    QTimer *m_logFlush = nullptr;
-    QStringList m_logPending;
-    int m_logDropped = 0;
-
-    // ── 阶段 7 新增:执行侧 ──
     LaunchWorker *m_worker = nullptr;     // 工作线程外壳(this 的子对象,析构时会 join)
     QString m_taskKey;                    // 任务页的键("launch_<版本名>")
-    QString m_identityText;               // 本次用什么身份(显示 + 任务卡明细)
+    QString m_identityText;               // 本次用什么身份(只进任务卡明细)
     QString m_lastProblemLine;            // 日志里第一条错误行(失败态兜底)
+    int m_commandLineCount = 0;           // 核心库回传的命令行行数(只记数,不上界面)
     bool m_finished = false;              // 终态已定
     bool m_needInstall = false;           // 停在"未安装"态(取消键改语义为"去下载并安装")
     bool m_accountLaunch = false;         // 走的是"已登录账户"那条路

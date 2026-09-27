@@ -13,13 +13,23 @@
 #include <atomic>
 #include <cstdint>
 
-extern "C" {
-struct sxcl_task; /* 只在两个静态回调的签名里用到(engine.h) */
-}
+#include "sxcl/engine.h" /* sxcl_engine_opts / sxcl_task:下载口径的唯一来源(见 uiDownloadEngineOpts) */
 
 class QThread;
 
 namespace sxcl::ui {
+
+/** 下载引擎参数(安装 / 启动前"补全文件" / 版本修复 —— **同一份口径**,只此一处)。
+ *
+ * 为什么单独抽出来:用户点「修复」补文件时用的下载参数,必须与"启动前补全"、安装**逐项一致**
+ * (workers / 限速 / 分片 / 哈希缓存 / 下载源)—— 抄第二份,迟早是"修复走官方、启动走镜像"
+ * 这种没法解释的差别。取值来源:设置文件 > 默认。
+ *
+ * cacheBuf 由调用方持有(必须活得比 opts 长):opts->cache_path 指向它。
+ * 返回 1 = 这台机器上有可用的传输后端(能下载);0 = 没有(调用方应退化成"只报告")。 */
+int uiDownloadEngineOpts(const QString &settingsFile, sxcl_engine_opts *opts, char *cacheBuf,
+                         size_t cacheCapacity, int *preferMirror, int *assetsLevel,
+                         int *skipFileCheck);
 
 // 一次启动请求(界面侧算好;身份字段与 CLI 的 --account 完全同义,见 tools/sxcl-dl/main.c:898-921)
 struct LaunchRequest {

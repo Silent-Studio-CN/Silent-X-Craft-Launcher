@@ -24,6 +24,16 @@
 //   * 自适应：图标用流式布局自动换行、卡片文字换行/省略，横向滚动条一律关掉
 //     （只有"版本列表"这一栏允许竖向滚动 —— 那是列表本身，用户也认可"必须的除外"）。
 //
+// **2026-09-27 第三轮(用户口述,本文件同时改了排序与动作)**:
+//   「关于版本选择,按照 MC 的版本号排,哪个是最新版哪个就放最前面。这个什么逻辑,你自己写。」
+//   「错误版不参与大小排序,错误版自己单列一个,错误版在下面按再按照版本号排序。」
+//   「这个版本识别,说什么去下载,那破坏的、已经残缺的版本,缺什么东西你给我统计出来;
+//     然后把"去下载"改成"修复" —— 整个去下载跳到下载页儿,后面儿啥也没有了,你给用户当傻逼呢。」
+//   落到代码上就三件事(判据都在别处,**本文件只负责画**):
+//     * 排序与分组:workers/version_order(正常按 MC 版本号新到旧;残缺/错误的单独一组垫底);
+//     * 「缺什么」的统计:workers/instance_scan 的 InstalledInstance::missing(数与下载清单同源);
+//     * 行内动作「修复」:workers/repair_worker(真的把缺的文件补上,不跳下载页)。
+//
 // "版本 = versions/ 下的文件夹名"这条 PCL 概念由核心库保证：
 //   启动靠目录名（实例名）+ 该目录里任意一份能解析出版本信息的 JSON + JSON 里的库/主类/资源索引，
 //   与"MC 版本号"无关 —— 所以文件夹叫 114514、JSON 里的 id 也叫 114514 照样能跑。
@@ -44,6 +54,9 @@
 #include "workers/bg_task.h"        // 一次性后台任务(阻塞活进工作线程,结果回界面线程)
 #include "workers/ui_error.h"      // 统一错误出口(错误态要能写进剪贴板,不只一行红字)
 #include "workers/instance_scan.h"  // 已安装版本扫描(界面层唯一实现;**只许工作线程调**)
+#include "workers/repair_worker.h"  // 「修复」:真的把缺的文件补上(**只许工作线程调**)
+#include "workers/ui_paths.h"       // uiSettingsFilePath():修复用的下载参数与其它页同一份
+#include "workers/version_order.h"  // 排序与分组(用户 2026-09-27:按 MC 版本号新到旧;错误版单列)
 
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
@@ -69,8 +82,10 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
-#include <cstdio> // 逐行取证(version-row 那一行)
+#include <atomic>
+#include <cstdio> // 逐行取证(version-row / version-group 那两行)
 #include <cstring>
+#include <memory>
 
 #include "sxcl/instance.h"
 
@@ -158,16 +173,24 @@ private:
 class SelectPage : public PageShell {
 public:
     explicit SelectPage(QWidget *parent)
-        : PageShell(QStringLiteral("版本选择"),
-                    QStringLiteral("认的是文件夹名，不是 MC 版本号 · 悬停文件夹可换图标"),
-                    QStringLiteral("sxclPage_select"), parent) {
+        /* 副标题留空(PageShell 会把它藏掉,不占版面):以前这里写着「认的是文件夹名,不是 MC
+         * 版本号」—— 那是**解释实现**的话,而且这一页现在就是按 MC 版本号排的,留着只会让人糊涂。 */
+        : PageShell(QStringLiteral("版本选择"), QString(), QStringLiteral("sxclPage_select"), parent) {
         m_gameDir = resolveGameDirectory();
         m_folders = foldersWithoutProbe(); // 先给一份"不碰磁盘"的表:当前目录 + 用过的历史(探测在工作线程)
         m_scan = new BgTask(this);
         m_probe = new BgTask(this);
+        m_repair = new BgTask(this);
         buildBody();
         rebuildNav(true);
         reloadVersions();
+    }
+
+    /* 页面先走一步时把修复的取消位置起来:工作线程还在下文件的话,让它自己停下 ——
+     * 不让它对着一个已经没有了的页面回填(与 BgTask 的生命周期口径同一条)。 */
+    ~SelectPage() override {
+        if (m_repairCancel)
+            m_repairCancel->store(true);
     }
 
 private:
@@ -190,14 +213,14 @@ private:
         if (gear != nullptr && (w == gear || gear->isAncestorOf(w))) {
             return PageShell::eventFilter(watched, event); // 齿轮自己的点击不进"整行选择"
         }
-        /* 行内那个能动手的动作(「去下载」):点它同样**不进"整行选择"** —— 用户按下的是
+        /* 行内那个能动手的动作(「修复」):点它同样**不进"整行选择"** —— 用户按下的是
          * 那个动作,不是"用这一版启动"(它本来也起不来)。与齿轮同一条规矩。 */
         BodyLabel *action = m_rowActions.value(row, nullptr);
         if (action != nullptr && (w == action || action->isAncestorOf(w))) {
             if (event->type() == QEvent::MouseButtonRelease) {
                 auto *me = static_cast<QMouseEvent *>(event);
                 if (me->button() == Qt::LeftButton) {
-                    openDownload();
+                    repairVersion(m_rowNames.value(row));
                     return true;
                 }
             }
@@ -249,16 +272,86 @@ private:
                       window(), 4000);
     }
 
-    /** 行内那个能动手的动作(「去下载」)。落到下载页 —— 那一页的默认一栏就是
-     *  「Minecraft 版本」列表(下载页构造时 inner->setCurrent("download_mc")),
-     *  用户在那一栏里装好这一版,回来就能启动。**不假装我们替他修好了什么**。 */
-    void openDownload() {
-        if (auto *mw = qobject_cast<MainWindow *>(window()))
-            mw->switchToRoute(QStringLiteral("download"));
-        InfoBar::push(InfoBar::Type::Info, QStringLiteral("去下载"),
-                      QStringLiteral("在「下载 → Minecraft 版本」里装好这一版，回来就能启动"),
-                      window(), 4000);
+    /** 行内那个能动手的动作(「修复」)—— **真的去补文件**,补完这一行自己回到正常那一组。
+     *
+     *  用户 2026-09-27 原话:「把"去下载"改成"修复" —— 整个去下载跳到下载页儿,后面儿啥也没有了,
+     *  你给用户当傻逼呢。」所以这里**绝不** switchToRoute("download") 把用户丢走:
+     *  点下去 = 起一个工作线程(workers/repair_worker)把这一个版本缺的版本文件 / 依赖库 /
+     *  客户端 jar 按清单一件件补上,补完**重新扫一遍这一列**(修好的行自然从"有问题"那组回到上面)。
+     *
+     *  一次只修一个:同一时刻两个修复打架时,"修好没有"就没法如实告诉用户。 */
+    void repairVersion(const QString &name) {
+        if (name.isEmpty())
+            return;
+        if (m_repair->running()) {
+            InfoBar::push(InfoBar::Type::Info, QStringLiteral("正在修复"),
+                          QStringLiteral("等这一个修完，再修下一个。"), window(), 3000);
+            return;
+        }
+        m_repairingLabel = actionLabelFor(name);
+        if (m_repairingLabel != nullptr)
+            m_repairingLabel->setText(QStringLiteral("修复中…"));
+        m_repairingName = name;
+        InfoBar::push(InfoBar::Type::Info, QStringLiteral("正在修复"),
+                      QStringLiteral("正在把「%1」缺的文件补上…").arg(name), window(), 3000);
+        const QString gameDir = m_gameDir;
+        const QString settings = uiSettingsFilePath();
+        /* 取消位用 shared_ptr 值捕获:页面先走一步(析构)也不会让工作线程踩到已经没了的对象。 */
+        std::shared_ptr<std::atomic<bool>> cancel = m_repairCancel;
+        m_repair->start(QStringLiteral("repair"),
+                        [this, gameDir, name, settings, cancel] {
+                            RepairReport report;
+                            QString error;
+                            const bool ok = repairInstance(gameDir, name, settings, cancel.get(),
+                                                           &report, &error);
+                            m_repairReport = report;
+                            m_repairError = error;
+                            /* 逐次取证(stderr):补了几个、还缺什么、为什么 —— 验收按这一行判"真修了没有" */
+                            std::fprintf(stderr,
+                                         "[sxcl-ui] repair: id=%s ok=%d json=%d downloaded=%d "
+                                         "skipped=%d failed=%d bytes=%lld still=\"%s\" "
+                                         "error=\"%s\"\n",
+                                         name.toUtf8().constData(), ok ? 1 : 0,
+                                         report.fetchedVersionJson ? 1 : 0, report.filesDownloaded,
+                                         report.filesSkipped, report.filesFailed,
+                                         (long long)report.bytesDone,
+                                         report.still.join(QStringLiteral("、")).toUtf8().constData(),
+                                         error.toUtf8().constData());
+                        },
+                        [this, name] { onRepairDone(name); });
     }
+
+    /** 找一个版本名对应的行内动作标签(修复时要把它改成"修复中…")。 */
+    BodyLabel *actionLabelFor(const QString &name) const {
+        for (auto it = m_rowNames.constBegin(); it != m_rowNames.constEnd(); ++it) {
+            if (it.value() == name)
+                return m_rowActions.value(it.key(), nullptr);
+        }
+        return nullptr;
+    }
+
+    /** 修完了:照实说补了多少、还缺什么,然后**重新扫一遍这一列** ——
+     *  "修好没有"只认扫描结果,不认修复过程自己报的账。 */
+    void onRepairDone(const QString &name) {
+        m_repairingLabel = nullptr;
+        const RepairReport report = m_repairReport;
+        const QString error = m_repairError;
+        if (report.still.isEmpty()) {
+            QString detail = QStringLiteral("「%1」已经补齐，可以启动了").arg(name);
+            if (report.filesDownloaded > 0)
+                detail += QStringLiteral("（补了 %1 个文件）").arg(report.filesDownloaded);
+            InfoBar::push(InfoBar::Type::Success, QStringLiteral("修好了"), detail, window(), 6000);
+        } else {
+            InfoBar::push(InfoBar::Type::Warning, QStringLiteral("还没修好"),
+                          QStringLiteral("「%1」还缺：%2%3")
+                              .arg(name, report.still.join(QStringLiteral("、")),
+                                   error.isEmpty() ? QString()
+                                                   : QStringLiteral("（%1）").arg(error)),
+                          window(), 9000);
+        }
+        reloadVersions();
+    }
+
     // ── 骨架：侧 2 栏(NavPanel) + 右内容(版本列表 / 图标选择) ──
     void buildBody() {
         // 侧 2 栏的容器：NavPanel 每次重建（换文件夹/换图标都要重排图标），放容器里好替换。
@@ -528,7 +621,9 @@ private:
                       [this] { fillVersions(); });
     }
 
-    // 界面线程:把工作线程扫到的结果画成行(每行的判据/文案与从前逐字一致)
+    // 界面线程:把工作线程扫到的结果画成行。
+    // **顺序与分组**由 workers/version_order 说了算(用户 2026-09-27):
+    //   能启动的按 MC 版本号从新到旧;残缺/错误的**单独一组放到最下面**,组内同样从新到旧。
     void fillVersions() {
         clearVersionRows();
         m_rowNames.clear();
@@ -536,142 +631,33 @@ private:
         m_rowActions.clear();
         m_rowMarks.clear();
         const QString shownName = shortName();
-        const QString saved = selectedVersionName();
-        const QColor secondary = pageTokenColor("textSecondary");
         int shown = 0;
         if (m_scanError.isEmpty()) {
-            for (const InstalledInstance &inst : m_scanned) {
-                auto *card = new CardWidget(m_listLay->parentWidget());
-                card->setMinimumHeight(62);
-                card->setCursor(Qt::PointingHandCursor);
-                auto *rowLay = new QHBoxLayout(card);
-                rowLay->setContentsMargins(20, 8, 16, 8);
-                rowLay->setSpacing(12);
-
-                /* 每一行要显示什么(图标状态 / 信息行 / 一句话 / 动作 / tooltip)——
-                 * **唯一一份口径**在 versionRowInfo()(workers/instance_scan.cpp),
-                 * 版本页那一列用的是同一个函数。两页从此不会各说各话。 */
-                const VersionRowInfo row = versionRowInfo(inst, m_gameDir);
-
-                /* 行首那颗状态图标:能正常启动 = 草方块,不能启动 = 我们自绘的红色警告符。
-                 * 以前这一列没有图标,"不能启动"只是在行尾挂一个小三角 —— 一屏看下来
-                 * 分不出哪一行能用(用户 2026-09-26 点名要 PCL 那种"最前面一个图标位",
-                 * 但**不许**跟 PCL 一样用红石块)。 */
-                auto *stateIcon = new VersionStateIcon(row.state, card);
-                rowLay->addWidget(stateIcon, 0, Qt::AlignVCenter);
-
-                auto *text = new QVBoxLayout();
-                text->setSpacing(2);
-                const QString name = inst.id;
-                const bool isCurrent = (name == saved);
-                /* 当前版本**不再加文字后缀**(用户 2026-09-26:不许再写一句"当前是什么")——
-                 * 它只由下面那条左侧强调色指示条表达。 */
-                auto *title = new BodyLabel(name, card);
-                {
-                    QFont font = title->font();
-                    font.setPixelSize(15);
-                    font.setWeight(QFont::DemiBold);
-                    title->setFont(font);
-                }
-                /* 长版本名**省略**而不是把卡片撑宽（自适应：横向滚动条一律不出）。
-                 * 起不来的那一行把 tooltip 给**同一份详情**（名字 + 完整原因 + 位置）——
-                 * 标题是最常被悬停的地方，只写个名字的话，详细原因就还是"看不到"。 */
-                title->setToolTip(inst.launchable ? name : row.tip);
-                text->addWidget(title);
-
-                /* 小字那一行:**能启动的**只报"这是什么版本";**不能启动的**只报
-                 * 一句话 + 一个能动手的动作。以前这里把所有原因倒在一行里
-                 * ("原版 · 无自己的 jar · 不能启动：需要安装 1.12.2 作为前置版本"),
-                 * 读着像报错(用户 2026-09-26 点名)。完整原因与路径在整行的 tooltip 里。 */
-                if (inst.launchable) {
-                    /* 没有版本信息可写时**照样摆一个空标签**:每一行都保持"名字在上、小字在
-                     * 下"的两行结构 —— 否则那一行的名字会在卡片里垂直居中,与旁边几行错开
-                     * (实测 424242 那行标题拿到 46px 高,其余行是 22px)。空标签不写一个字,
-                     * 既没有"未知"也没有"猜"。 */
-                    auto *detail = new BodyLabel(row.info, card);
-                    detail->setObjectName(QStringLiteral("sxclVersionRowInfo"));
-                    detail->setWordWrap(true);
-                    detail->setTextColor(secondary, secondary);
-                    text->addWidget(detail);
-                } else {
-                    auto *line = new QWidget(card);
-                    line->setObjectName(QStringLiteral("sxclVersionRowNoteRow"));
-                    auto *lineLay = new QHBoxLayout(line);
-                    lineLay->setContentsMargins(0, 0, 0, 0);
-                    lineLay->setSpacing(8);
-                    auto *note = new BodyLabel(row.note, line);
-                    note->setObjectName(QStringLiteral("sxclVersionRowNote"));
-                    note->setTextColor(secondary, secondary);
-                    /* 动作是**能点的**:强调色 + 手型光标(与"悬停出齿轮"同一套语言,
-                     * 不额外加一个按钮 —— 一屏全是按钮是用户早就否掉的东西)。 */
-                    auto *action = new BodyLabel(row.action, line);
-                    action->setObjectName(QStringLiteral("sxclVersionRowAction"));
-                    action->setTextColor(FluentTheme::instance().tokens().accent,
-                                         FluentTheme::instance().tokens().accent);
-                    action->setCursor(Qt::PointingHandCursor);
-                    lineLay->addWidget(note, 0, Qt::AlignVCenter);
-                    lineLay->addWidget(action, 0, Qt::AlignVCenter);
-                    lineLay->addStretch(1);
-                    text->addWidget(line);
-                    m_rowActions.insert(card, action);
-                }
-                rowLay->addLayout(text, 1);
-
-                if (isCurrent) {
-                    /* 当前版本:**只**留左侧那条强调色指示条(文字标签整条删掉 —— 用户原话
-                     * 「用得着你告诉用户当前是什么」)。几何在 eventFilter 的 Resize 分支里给,
-                     * 这里先按卡片的初始高度放一个位置,免得第一帧闪一下没有条。 */
-                    auto *mark = new CurrentVersionMark(card);
-                    mark->setGeometry(kMarkX, kMarkInset, mark->width(),
-                                      qMax(0, card->minimumHeight() - 2 * kMarkInset));
-                    mark->raise();
-                    m_rowMarks.insert(card, mark);
-                }
-                /* 悬停出现的**齿轮**(用户 2026-09-23:「改为单击版本就选择,悬停显示齿轮,进入版本设置」)。
-                 * 以前这里是常显的「用这个」按钮:一屏全是按钮,而且它左边那颗图标在深浅主题下显示异常。
-                 * 现在 整行单击 = 选它;齿轮 = 进版本管理页改它的设置。 */
-                auto *gear = new NavToolButton(QStringLiteral("Setting"), card);
-                gear->setToolTip(QStringLiteral("版本设置(%1)").arg(name));
-                gear->setObjectName(QStringLiteral("versionRowGear"));
-                gear->setVisible(false);
-                rowLay->addWidget(gear, 0, Qt::AlignVCenter);
-                m_rowGears.insert(card, gear);
-                QObject::connect(gear, &NavToolButton::clicked, this,
-                                 [this, name](bool) { openVersionSettings(name); });
-
-                card->setCursor(Qt::PointingHandCursor);
-                /* 整行的 tooltip = 展示口径给的那一份:能启动的就是"点一下就用它启动",
-                 * 不能启动的 = 版本名 + **完整原因** + 它在哪个目录(用户 2026-09-26:
-                 * 「详细原因与路径放 tooltip」)。行内只留一句话,这里才是给要看的人看的。 */
-                card->setToolTip(row.tip);
-                m_rowNames.insert(card, name);
-                card->installEventFilter(this);
-                const QList<QWidget *> kids = card->findChildren<QWidget *>();
-                for (QWidget *kid : kids) {
-                    kid->installEventFilter(this);
-                }
-
-                m_listLay->addWidget(card);
-                ++shown;
-
-                /* 逐行取证(stderr):验收脚本按它比对改前/改后的行内文案、图标状态,
-                 * 以及"这个版本号是从哪个字段认出来的"。**只写事实,不改任何状态**
-                 * (与各页 logState 同一类通路)。tip 里的换行压成 " | ",免得破行。 */
-                QString tipOneLine = row.tip;
-                tipOneLine.replace(QLatin1Char('\n'), QStringLiteral(" | "));
+            const VersionDisplay display = orderInstancesForDisplay(m_scanned);
+            int order = 0;
+            for (const InstalledInstance &inst : display.healthy)
+                addVersionRow(inst, order++, QStringLiteral("normal"));
+            if (!display.broken.isEmpty()) {
+                /* 组标题:**一句话**(用户 2026-09-27:「组标题一句话(不许写实现细节)」)——
+                 * 它只说"下面这些跟上面不是一回事、而且能修",具体缺什么写在每一行里。 */
+                const QString title = QStringLiteral("下面这 %1 个版本有问题，点「修复」就能补齐")
+                                          .arg(display.broken.size());
+                auto *groupTitle = new BodyLabel(title, m_listLay->parentWidget());
+                groupTitle->setObjectName(QStringLiteral("sxclVersionGroupTitle"));
+                groupTitle->setWordWrap(true);
+                const QColor hint = pageTokenColor("textSecondary");
+                groupTitle->setTextColor(hint, hint);
+                QFont groupFont = groupTitle->font();
+                groupFont.setPixelSize(13);
+                groupTitle->setFont(groupFont);
+                m_listLay->addWidget(groupTitle);
                 std::fprintf(stderr,
-                             "[sxcl-ui] version-row select: id=%s state=%s launchable=%d "
-                             "problem=%s base=\"%s\" baseFrom=%s coreReliable=%d info=\"%s\" "
-                             "note=\"%s\" action=\"%s\" path=\"%s\" tip=\"%s\"\n",
-                             name.toUtf8().constData(), row.state.toUtf8().constData(),
-                             inst.launchable ? 1 : 0,
-                             sxcl_instance_problem_id(
-                                 static_cast<sxcl_instance_problem>(inst.problemCode)),
-                             row.base.toUtf8().constData(), row.baseFrom.toUtf8().constData(),
-                             row.coreReliable ? 1 : 0, row.info.toUtf8().constData(),
-                             row.note.toUtf8().constData(), row.action.toUtf8().constData(),
-                             row.path.toUtf8().constData(), tipOneLine.toUtf8().constData());
+                             "[sxcl-ui] version-group select: broken=%d title=\"%s\"\n",
+                             int(display.broken.size()), title.toUtf8().constData());
             }
+            for (const InstalledInstance &inst : display.broken)
+                addVersionRow(inst, order++, QStringLiteral("broken"));
+            shown = display.healthy.size() + display.broken.size();
         } else {
             /* 扫不动 = 错误态:照实说原因 + 给能点的重试(不是只写一行红字) */
             m_listHint->setText(QStringLiteral("「%1」读不出来：%2").arg(shownName, m_scanError));
@@ -697,6 +683,143 @@ private:
         }
     }
 
+    /** 画一行。order = 它在整列里的位置(0 起),group = "normal" / "broken" ——
+     *  这两个只给取证用:验收按它们断言"排序对不对、错误版在不在最后"。 */
+    void addVersionRow(const InstalledInstance &inst, int order, const QString &group) {
+        const QString saved = selectedVersionName();
+        const QColor secondary = pageTokenColor("textSecondary");
+        auto *card = new CardWidget(m_listLay->parentWidget());
+        card->setMinimumHeight(62);
+        card->setCursor(Qt::PointingHandCursor);
+        auto *rowLay = new QHBoxLayout(card);
+        rowLay->setContentsMargins(20, 8, 16, 8);
+        rowLay->setSpacing(12);
+
+        /* 每一行要显示什么(图标状态 / 信息行 / 一句话 / 动作 / tooltip)——
+         * **唯一一份口径**在 versionRowInfo()(workers/instance_scan.cpp),
+         * 版本页那一列用的是同一个函数。两页从此不会各说各话。 */
+        const VersionRowInfo row = versionRowInfo(inst, m_gameDir);
+
+        /* 行首那颗状态图标:能正常启动 = 草方块,不能启动 = 我们自绘的红色警告符。
+         * 以前这一列没有图标,"不能启动"只是在行尾挂一个小三角 —— 一屏看下来
+         * 分不出哪一行能用(用户 2026-09-26 点名要 PCL 那种"最前面一个图标位",
+         * 但**不许**跟 PCL 一样用红石块)。 */
+        auto *stateIcon = new VersionStateIcon(row.state, card);
+        rowLay->addWidget(stateIcon, 0, Qt::AlignVCenter);
+
+        auto *text = new QVBoxLayout();
+        text->setSpacing(2);
+        const QString name = inst.id;
+        const bool isCurrent = (name == saved);
+        /* 当前版本**不再加文字后缀**(用户 2026-09-26:不许再写一句"当前是什么")——
+         * 它只由下面那条左侧强调色指示条表达。 */
+        auto *title = new BodyLabel(name, card);
+        {
+            QFont font = title->font();
+            font.setPixelSize(15);
+            font.setWeight(QFont::DemiBold);
+            title->setFont(font);
+        }
+        /* 长版本名**省略**而不是把卡片撑宽（自适应：横向滚动条一律不出）。
+         * 起不来的那一行把 tooltip 给**同一份详情**（名字 + 完整原因 + 位置）——
+         * 标题是最常被悬停的地方，只写个名字的话，详细原因就还是"看不到"。 */
+        title->setToolTip(inst.launchable ? name : row.tip);
+        text->addWidget(title);
+
+        /* 小字那一行:**能启动的**只报"这是什么版本";**不能启动的**只报
+         * 一句话 + 一个能动手的动作。以前这里把所有原因倒在一行里
+         * ("原版 · 无自己的 jar · 不能启动：需要安装 1.12.2 作为前置版本"),
+         * 读着像报错(用户 2026-09-26 点名)。完整原因与路径在整行的 tooltip 里。 */
+        if (inst.launchable) {
+            /* 没有版本信息可写时**照样摆一个空标签**:每一行都保持"名字在上、小字在
+             * 下"的两行结构 —— 否则那一行的名字会在卡片里垂直居中,与旁边几行错开
+             * (实测 424242 那行标题拿到 46px 高,其余行是 22px)。空标签不写一个字,
+             * 既没有"未知"也没有"猜"。 */
+            auto *detail = new BodyLabel(row.info, card);
+            detail->setObjectName(QStringLiteral("sxclVersionRowInfo"));
+            detail->setWordWrap(true);
+            detail->setTextColor(secondary, secondary);
+            text->addWidget(detail);
+        } else {
+            auto *line = new QWidget(card);
+            line->setObjectName(QStringLiteral("sxclVersionRowNoteRow"));
+            auto *lineLay = new QHBoxLayout(line);
+            lineLay->setContentsMargins(0, 0, 0, 0);
+            lineLay->setSpacing(8);
+            auto *note = new BodyLabel(row.note, line);
+            note->setObjectName(QStringLiteral("sxclVersionRowNote"));
+            note->setTextColor(secondary, secondary);
+            /* 动作是**能点的**:强调色 + 手型光标(与"悬停出齿轮"同一套语言,
+             * 不额外加一个按钮 —— 一屏全是按钮是用户早就否掉的东西)。 */
+            auto *action = new BodyLabel(row.action, line);
+            action->setObjectName(QStringLiteral("sxclVersionRowAction"));
+            action->setTextColor(FluentTheme::instance().tokens().accent,
+                                 FluentTheme::instance().tokens().accent);
+            action->setCursor(Qt::PointingHandCursor);
+            lineLay->addWidget(note, 0, Qt::AlignVCenter);
+            lineLay->addWidget(action, 0, Qt::AlignVCenter);
+            lineLay->addStretch(1);
+            text->addWidget(line);
+            m_rowActions.insert(card, action);
+        }
+        rowLay->addLayout(text, 1);
+
+        if (isCurrent) {
+            /* 当前版本:**只**留左侧那条强调色指示条(文字标签整条删掉 —— 用户原话
+             * 「用得着你告诉用户当前是什么」)。几何在 eventFilter 的 Resize 分支里给,
+             * 这里先按卡片的初始高度放一个位置,免得第一帧闪一下没有条。 */
+            auto *mark = new CurrentVersionMark(card);
+            mark->setGeometry(kMarkX, kMarkInset, mark->width(),
+                              qMax(0, card->minimumHeight() - 2 * kMarkInset));
+            mark->raise();
+            m_rowMarks.insert(card, mark);
+        }
+        /* 悬停出现的**齿轮**(用户 2026-09-23:「改为单击版本就选择,悬停显示齿轮,进入版本设置」)。
+         * 以前这里是常显的「用这个」按钮:一屏全是按钮,而且它左边那颗图标在深浅主题下显示异常。
+         * 现在 整行单击 = 选它;齿轮 = 进版本管理页改它的设置。 */
+        auto *gear = new NavToolButton(QStringLiteral("Setting"), card);
+        gear->setToolTip(QStringLiteral("版本设置(%1)").arg(name));
+        gear->setObjectName(QStringLiteral("versionRowGear"));
+        gear->setVisible(false);
+        rowLay->addWidget(gear, 0, Qt::AlignVCenter);
+        m_rowGears.insert(card, gear);
+        QObject::connect(gear, &NavToolButton::clicked, this,
+                         [this, name](bool) { openVersionSettings(name); });
+
+        card->setCursor(Qt::PointingHandCursor);
+        /* 整行的 tooltip = 展示口径给的那一份:能启动的就是"点一下就用它启动",
+         * 不能启动的 = 版本名 + **完整原因** + 它在哪个目录(用户 2026-09-26:
+         * 「详细原因与路径放 tooltip」)。行内只留一句话,这里才是给要看的人看的。 */
+        card->setToolTip(row.tip);
+        m_rowNames.insert(card, name);
+        card->installEventFilter(this);
+        const QList<QWidget *> kids = card->findChildren<QWidget *>();
+        for (QWidget *kid : kids) {
+            kid->installEventFilter(this);
+        }
+
+        m_listLay->addWidget(card);
+
+        /* 逐行取证(stderr):验收脚本按它比对改前/改后的行内文案、图标状态,
+         * 以及"这个版本号是从哪个字段认出来的"。**只写事实,不改任何状态**
+         * (与各页 logState 同一类通路)。tip 里的换行压成 " | ",免得破行。 */
+        QString tipOneLine = row.tip;
+        tipOneLine.replace(QLatin1Char('\n'), QStringLiteral(" | "));
+        std::fprintf(stderr,
+                     "[sxcl-ui] version-row select: id=%s state=%s launchable=%d "
+                     "problem=%s base=\"%s\" baseFrom=%s coreReliable=%d info=\"%s\" "
+                     "note=\"%s\" action=\"%s\" path=\"%s\" tip=\"%s\" group=%s order=%d\n",
+                     name.toUtf8().constData(), row.state.toUtf8().constData(),
+                     inst.launchable ? 1 : 0,
+                     sxcl_instance_problem_id(
+                         static_cast<sxcl_instance_problem>(inst.problemCode)),
+                     row.base.toUtf8().constData(), row.baseFrom.toUtf8().constData(),
+                     row.coreReliable ? 1 : 0, row.info.toUtf8().constData(),
+                     row.note.toUtf8().constData(), row.action.toUtf8().constData(),
+                     row.path.toUtf8().constData(), tipOneLine.toUtf8().constData(),
+                     group.toUtf8().constData(), order);
+    }
+
     void choose(const QString &name) {
         setSelectedVersionName(name); // game.selected_version：关掉重开也记得
         InfoBar::push(InfoBar::Type::Success, QStringLiteral("已切换当前版本"),
@@ -709,6 +832,14 @@ private:
     QString m_gameDir;
     BgTask *m_scan = nullptr;   // 已安装版本扫描(工作线程)
     BgTask *m_probe = nullptr;  // 游戏文件夹探测(工作线程)
+    /* 「修复」那一个后台任务(用户 2026-09-27:行内动作点下去真的补文件)。
+     * 取消位单独用 shared_ptr:页面析构时置位,工作线程不会踩到已经没了的对象。 */
+    BgTask *m_repair = nullptr;
+    std::shared_ptr<std::atomic<bool>> m_repairCancel = std::make_shared<std::atomic<bool>>(false);
+    RepairReport m_repairReport;           // 工作线程写、界面线程读(队列投递保证先后)
+    QString m_repairError;
+    BodyLabel *m_repairingLabel = nullptr; // 正在修的那一行的动作标签(改写成"修复中…")
+    QString m_repairingName;
     QVector<InstalledInstance> m_scanned; // 工作线程写、界面线程读(队列投递保证先后)
     QString m_scanError;
     QVector<GameFolder> m_folders;        // 当前用于建侧栏的文件夹表
@@ -721,7 +852,7 @@ private:
     QWidget *m_lastActionAnchor = nullptr; // 弹窗要锚在用户点的那颗齿轮上
     QHash<QWidget *, QString> m_rowNames;  // 行 -> 版本名(整行单击用)
     QHash<QWidget *, NavToolButton *> m_rowGears; // 行 -> 那颗悬停齿轮
-    QHash<QWidget *, BodyLabel *> m_rowActions; // 行 -> 行内那个能动手的动作(「去下载」)
+    QHash<QWidget *, BodyLabel *> m_rowActions; // 行 -> 行内那个能动手的动作(「修复」)
     QHash<QWidget *, CurrentVersionMark *> m_rowMarks; // 行 -> 当前版本那条强调色指示条(只有当前版本有)
     QStackedWidget *m_stack = nullptr;
     QVBoxLayout *m_listLay = nullptr;

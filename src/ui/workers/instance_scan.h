@@ -16,6 +16,7 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 #include <QVariantList>
 #include <QVector>
 
@@ -30,6 +31,20 @@ struct InstalledInstance {
     bool hasJar = true;
     bool hasJson = true;   // 有没有可用(可解析)的版本 JSON(核心库 has_json)
     int problemCode = 0;
+    /* ── 「到底缺什么」的统计(用户 2026-09-27)──
+     *
+     * 用户原话:「说什么去下载,那破坏的、已经残缺的版本,缺什么东西你给我统计出来」。
+     * 以前行内只有核心库那一句笼统的"缺版本文件 / 缺游戏本体文件",用户看不出到底少了什么、
+     * 少多少 —— 这里把事实一件件数出来,界面照着写一句话(完整清单在 tooltip 里)。
+     *
+     * 口径与下载器**完全同一份**:用 sxcl_version_plan_build 把这个版本的版本 JSON 展开成
+     * "它需要哪些文件"的清单,再逐个看目标路径在不在磁盘上 —— 不是自己另写一套"缺什么"的判据
+     * (那套判据迟早与真正补文件的那一遍走岔)。有继承(inheritsFrom)时父版本那一层也一并数。
+     *
+     * 只在**不能启动**的实例上算(见 instance_scan.cpp):能启动的版本不缺东西,
+     * 为它们把几百个依赖库挨个 stat 一遍纯属白烧 IO。 */
+    QStringList missing;      // **完整短语**:如 "缺游戏本体文件" / "缺依赖库 12 个" / "版本文件坏了"
+    int missingLibraries = 0; // 缺多少个依赖库(0 = 不缺)
     QString baseVersion;   // 它继承的原版(核心库给;baseReliable=0 时别当权威显示)
     bool baseReliable = false;
     QString jsonId;        // 版本 JSON 里写的 id(可能和目录名不同 —— 那正是 id 冲突那条判据)
@@ -47,8 +62,10 @@ struct InstalledInstance {
  * 三条硬口径(逐条对应用户 2026-09-26 的原话):
  *   1) 状态图标只有两个:能启动 = 草方块(grass),不能启动 = 我们自己画的警告符(warn)。
  *      **不用 emoji**,也**不用 PCL 的红石块**(用户:"显得有点太雷同了")。
- *   2) 行内只放**一句话 + 一个动作**:问题一句话(note)、动作词(action = "去下载"),
- *      完整原因(reason)与路径(path)只进 tooltip(tip)—— 主界面上不倒报错。
+ *   2) 行内只放**一句话 + 一个动作**:问题一句话(note,把"缺什么"数出来)、
+ *      动作词(action = "修复" —— 用户 2026-09-27 点名:"把'去下载'改成'修复'",
+ *      点了真的去补文件,而不是把用户丢到下载页),完整原因(reason)与路径(path)只进
+ *      tooltip(tip)—— 主界面上不倒报错。
  *   3) 猜出来的版本号**一个字都不写**(base 空、info 里也就不出现"原版 x"):
  *      只有**版本文件里写着的**才认(核心库 base_reliable,字段顺序见
  *      instance.c:920-984:clientVersion -> patches[game].version -> inheritsFrom ->
@@ -69,6 +86,16 @@ struct VersionRowInfo {
 
 /** 把一个实例算成一行要显示的东西(纯函数,不碰磁盘;两页共用)。 */
 VersionRowInfo versionRowInfo(const InstalledInstance &inst, const QString &gameDir);
+
+/** 这个实例"写着自己是哪个 MC 版本"的那个号(核心库 base_reliable 优先,其次 JSON 自己写的 id)。
+ *  空串 = 认不出来 —— **不猜、不写**。版本选择页的排序与"原版 x"那行小字共用这一份判据。 */
+QString recognizedBaseVersion(const InstalledInstance &inst);
+
+/** 把这个实例**到底缺哪些文件**数出来(填 item->missing / item->missingLibraries)。
+ *  判据是 sxcl_version_plan_build 展开出来的文件清单 + 磁盘上在不在(与补文件那一遍同一份口径)。
+ *  **阻塞**(每个依赖库一次 stat),只许在 worker(BgTask/工作线程)里调;
+ *  且只对**不能启动**的实例调 —— 能启动的版本不缺东西,不值得为它扫几百个文件。 */
+void fillInstanceMissingFacts(InstalledInstance *item, const QString &gameDir);
 
 /** 扫 <gameDir>/versions。**阻塞**;失败时填 errorOut 并返回空表。
  *  (调用方自己决定空表是"没装版本"还是"扫不出来" —— 看 errorOut 是不是空。) */
