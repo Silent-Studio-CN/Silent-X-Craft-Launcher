@@ -22,6 +22,8 @@
 #include "game_folders.h"
 #include "page_shell.h"
 
+#include "../workers/bg_task.h"        // 一次性后台任务(实例扫描是磁盘活,只许工作线程)
+#include "../workers/instance_scan.h"  // 单个实例扫描 + **版本行那份展示口径**(versionRowInfo)
 #include "../workers/mods_worker.h"
 #include "../workers/ui_paths.h"
 
@@ -55,6 +57,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -103,6 +106,7 @@ public:
     ModsPane(QWidget *parent, bool shaders) : QWidget(parent), m_shaders(shaders) {
         build();
         reloadSettings();
+        m_versionTask = new BgTask(this); // 上下文那一行的实例扫描(见 reloadContext)
         reloadContext();
     }
 
@@ -116,6 +120,9 @@ private:
         lay->setSpacing(8);
 
         m_context = new BodyLabel(QString(), this);
+        /* 稳定的 objectName:验收 dump 按它认"上下文那一行",直接读它的文字断言
+         * "认不出时一个字都不写"(不用只信我们自己打的 trace)。 */
+        m_context->setObjectName(QStringLiteral("modsContextLine"));
         m_context->setWordWrap(true);
         const QColor secondary = pageTokenColor("textSecondary");
         m_context->setTextColor(secondary, secondary);
@@ -310,21 +317,64 @@ private:
     }
 
     // ─────────────────────────── 上下文 ───────────────────────────
+    /* 这一行的"原版 x"**只认版本文件里写着的**(与版本行共用一份口径:instance_scan.h 的
+     * versionRowInfo / 核心库 base_reliable)。以前是 `m_instance.section('-', 0, 0)`
+     * —— 从**实例名**里抠一段当版本号,属于"猜的当事实写"(用户 2026-09-26 点名),
+     * 而且那份读盘还压在界面线程上。现在:
+     *   * 取数走 BgTask(mods-instance-version)在**工作线程**里调核心库单个实例扫描
+     *     (instance_scan.h 的 scanInstalledInstance —— 它只许工作线程调);
+     *   * 认不出就**一个字都不写**(m_mc 空 -> 那一栏不出现"原版"),也**不再拿它去筛版本**
+     *     (筛版本交给服务端 facets 里的加载器,猜出来的版本号不许当筛选条件);
+     *   * 结果回来才回填这一行 —— 界面线程一个字节都不等。 */
     void reloadContext() {
         m_gameDir = uiGameDirectory();
         m_instance = selectedVersionName();
         const QString tag = versionLoaderTag(m_gameDir, m_instance);
         m_loader = tag.isEmpty() ? QString() : tag.toLower();
-        /* 实例名常是 <mc>-<loader>-<版本>(如 1.20.1-fabric-0.15.11)——取头一段当游戏版本。
-         * 版本隔离之后"实例名 = 版本目录名",PCL 口径下它本来就可以随便叫,
-         * 所以这里**只做一次很保守的猜测**,猜不出来就不筛版本(交给 facets 里的加载器兜着)。 */
-        m_mc = m_instance;
-        if (m_mc.contains(QLatin1Char('-'))) {
-            const QString head = m_mc.section(QLatin1Char('-'), 0, 0);
-            if (head.startsWith(QLatin1String("1.")) || head.startsWith(QLatin1String("2."))) {
-                m_mc = head;
-            }
-        }
+        // 换实例 / 换目录:先把上一份结论清掉,免得拿旧结论去筛新实例
+        m_versionScanned = false;
+        m_versionFound = false;
+        m_versionRow = VersionRowInfo();
+        m_versionError.clear();
+        m_mc.clear();
+        applyContextText(); // 先把"当前实例 / 加载器 / 隔离"画出来(不等磁盘)
+        startVersionScan();
+    }
+
+    /** 起一次实例扫描(磁盘活,**工作线程**)。期间又换过版本的话,这一趟回来会发现自己是旧的,
+     *  自己再排一次 —— 不这样做的话 BgTask"已在跑就忽略"会让新实例永远等不到结论。 */
+    void startVersionScan() {
+        if (m_versionTask == nullptr)
+            return;
+        if (m_instance.isEmpty())
+            return; // 还没选版本:不扫,也不写版本号
+        if (m_versionTask->running())
+            return;
+        const QString id = m_instance;
+        const QString gameDir = m_gameDir;
+        m_versionTask->start(QStringLiteral("mods-instance-version"),
+                             [this, id, gameDir] {
+                                 InstalledInstance inst;
+                                 QString err;
+                                 m_versionFound = scanInstalledInstance(gameDir, id, &inst, &err);
+                                 m_versionError = err;
+                                 m_versionRow = m_versionFound ? versionRowInfo(inst, gameDir)
+                                                               : VersionRowInfo();
+                             },
+                             [this, id] {
+                                 if (id != m_instance) {
+                                     startVersionScan(); // 期间换过版本:这一趟作废,重扫
+                                     return;
+                                 }
+                                 m_versionScanned = true;
+                                 // **只认版本文件里的**;认不出就是空 —— 什么都不写
+                                 m_mc = m_versionRow.base;
+                                 applyContextText();
+                             });
+    }
+
+    /** 拼出上下文那一行(有版本才写"原版 x"),并打一行取证。 */
+    void applyContextText() {
         /* 用户 2026-09-26(文字纪律):「能推断出来的信息一个字都不写」。
          * 这一行原来还写 "· 版本隔离已开（装进实例自己的目录）· 源 Modrinth":
          *   * 源 —— 上面那个滑块本身就是答案(Modrinth / CurseForge 两个选项就在眼前),删;
@@ -342,6 +392,25 @@ private:
         bits << (versionIsolationOn() ? QStringLiteral("版本隔离：开") : QStringLiteral("版本隔离：关"));
         m_currentText = bits.join(QStringLiteral(" · "));
         m_context->setText(m_currentText);
+        printContextTrace();
+    }
+
+    /* 逐行取证(stderr):这一行到底写了什么、那个版本号是从**哪个字段**认出来的、
+     * 以及"猜没猜过实例名"。验收脚本按它断言"认不出时一个字都不写"。
+     * baseFrom 的取值与版本行同一套:core:inheritsFrom / core:json-other / json:id / none。 */
+    void printContextTrace() const {
+        // 还没扫完时 baseFrom 是空串:打成 pending,与"扫完了但认不出"(none)区分开
+        const QByteArray from = m_versionRow.baseFrom.isEmpty()
+                                    ? QByteArray("pending")
+                                    : m_versionRow.baseFrom.toUtf8();
+        std::fprintf(stderr,
+                     "[sxcl-ui] mods-context: instance=%s scanned=%d found=%d base=\"%s\" "
+                     "baseFrom=%s coreReliable=%d loader=%s text=\"%s\" err=\"%s\"\n",
+                     m_instance.toUtf8().constData(), m_versionScanned ? 1 : 0,
+                     m_versionFound ? 1 : 0, m_versionRow.base.toUtf8().constData(),
+                     from.constData(),
+                     m_versionRow.coreReliable ? 1 : 0, m_loader.toUtf8().constData(),
+                     m_currentText.toUtf8().constData(), m_versionError.toUtf8().constData());
     }
 
     /** 这一栏实际拿去做筛选、挑文件的加载器：光影那一栏换加载器自己的 slug（见上）。 */
@@ -726,8 +795,13 @@ private:
     QString m_cfKey;
     QString m_gameDir;
     QString m_instance;
-    QString m_mc;
+    QString m_mc;      // 拿去筛版本的**原版版本号**:只认版本文件里的,认不出就是空(=不筛)
     QString m_loader;
+    BgTask *m_versionTask = nullptr; // 实例扫描(磁盘活,**只许工作线程**)
+    VersionRowInfo m_versionRow;     // 工作线程写、界面线程读(队列投递保证先后)
+    bool m_versionScanned = false;   // 这一趟扫完了吗(取证行里区分 pending 与"扫过但认不出")
+    bool m_versionFound = false;     // 目录里真有这个实例吗
+    QString m_versionError;          // 扫不动时的人话(也进取证行)
     QString m_currentText;
     QString m_projectTitle;
     QString m_deps;

@@ -18,6 +18,40 @@
 
 namespace sxcl::ui {
 
+namespace {
+
+/** 核心库那条记录 -> 界面层的 InstalledInstance(装箱只写这一处:列表扫描与单个扫描共用)。 */
+InstalledInstance instanceFromCore(const sxcl_instance &inst) {
+    InstalledInstance item;
+    item.id = QString::fromUtf8(inst.id);
+    item.type = QString::fromUtf8(inst.version_type[0] != 0 ? inst.version_type : "release");
+    item.summary = QString::fromUtf8(inst.summary);
+    item.problem = QString::fromUtf8(inst.problem);
+    item.launchable = inst.launchable != 0;
+    item.hasJar = inst.has_jar != 0;
+    item.hasJson = inst.has_json != 0;
+    item.problemCode = inst.problem_code;
+    item.baseVersion = QString::fromUtf8(inst.base_version);
+    item.baseReliable = inst.base_reliable != 0;
+    // 展示口径(versionRowInfo)要用的几件事实:JSON 自己写的 id / 继承关系 / 缺哪个前置
+    item.jsonId = QString::fromUtf8(inst.json_id);
+    item.inheritsFrom = QString::fromUtf8(inst.inherits_from);
+    item.missingParent = QString::fromUtf8(inst.missing_parent);
+    item.jsonPath = QString::fromUtf8(inst.json_path);
+    for (size_t k = 0; k < inst.loader_count; ++k) {
+        const sxcl_instance_loader &ld = inst.loaders[k];
+        // 内层是 QStringList{kind_id, version} —— 与模型/委托的约定一致
+        // (委托用 item.toStringList() 读它;写成 QVariantList 会让加载器小标签**静默消失**)
+        item.loaders.append(QStringList{
+            QString::fromUtf8(sxcl_instance_kind_id(ld.kind)),
+            QString::fromUtf8(ld.version),
+        });
+    }
+    return item;
+}
+
+} // namespace
+
 QVector<InstalledInstance> scanInstalledInstances(const QString &gameDir, QString *errorOut) {
     QVector<InstalledInstance> out;
     if (errorOut != nullptr)
@@ -39,37 +73,37 @@ QVector<InstalledInstance> scanInstalledInstances(const QString &gameDir, QStrin
         return out;
     }
     out.reserve(static_cast<int>(list.count));
-    for (size_t i = 0; i < list.count; ++i) {
-        const sxcl_instance &inst = list.items[i];
-        InstalledInstance item;
-        item.id = QString::fromUtf8(inst.id);
-        item.type = QString::fromUtf8(inst.version_type[0] != '\0' ? inst.version_type : "release");
-        item.summary = QString::fromUtf8(inst.summary);
-        item.problem = QString::fromUtf8(inst.problem);
-        item.launchable = inst.launchable != 0;
-        item.hasJar = inst.has_jar != 0;
-        item.hasJson = inst.has_json != 0;
-        item.problemCode = inst.problem_code;
-        item.baseVersion = QString::fromUtf8(inst.base_version);
-        item.baseReliable = inst.base_reliable != 0;
-        // 展示口径(versionRowInfo)要用的几件事实:JSON 自己写的 id / 继承关系 / 缺哪个前置
-        item.jsonId = QString::fromUtf8(inst.json_id);
-        item.inheritsFrom = QString::fromUtf8(inst.inherits_from);
-        item.missingParent = QString::fromUtf8(inst.missing_parent);
-        item.jsonPath = QString::fromUtf8(inst.json_path);
-        for (size_t k = 0; k < inst.loader_count; ++k) {
-            const sxcl_instance_loader &ld = inst.loaders[k];
-            // 内层是 QStringList{kind_id, version} —— 与模型/委托的约定一致
-            // (委托用 item.toStringList() 读它;写成 QVariantList 会让加载器小标签**静默消失**)
-            item.loaders.append(QStringList{
-                QString::fromUtf8(sxcl_instance_kind_id(ld.kind)),
-                QString::fromUtf8(ld.version),
-            });
-        }
-        out.append(item);
-    }
+    for (size_t i = 0; i < list.count; ++i)
+        out.append(instanceFromCore(list.items[i]));
     sxcl_instance_list_free(&list);
     return out;
+}
+
+bool scanInstalledInstance(const QString &gameDir, const QString &id, InstalledInstance *out,
+                           QString *errorOut) {
+    if (out == nullptr)
+        return false;
+    *out = InstalledInstance();
+    if (errorOut != nullptr)
+        errorOut->clear();
+    if (gameDir.isEmpty() || id.isEmpty()) {
+        if (errorOut != nullptr)
+            *errorOut = QStringLiteral("还没选版本（或游戏目录为空）");
+        return false;
+    }
+    sxcl_instance inst;
+    std::memset(&inst, 0, sizeof(inst));
+    char err[SXCL_INSTANCE_ERROR_MAX];
+    err[0] = '\0';
+    const int rc = sxcl_instance_scan_one(gameDir.toUtf8().constData(), id.toUtf8().constData(),
+                                          &inst, err, sizeof(err));
+    if (rc != SXCL_INSTANCE_OK) {
+        if (errorOut != nullptr)
+            *errorOut = QString::fromUtf8(err[0] != '\0' ? err : "这个实例读不出来");
+        return false;
+    }
+    *out = instanceFromCore(inst); // 与列表扫描**同一份**装箱
+    return true;
 }
 
 // ── 版本行的展示口径(唯一一份;理由逐条写在 instance_scan.h)───────────────────

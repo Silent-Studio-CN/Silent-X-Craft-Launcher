@@ -74,4 +74,11 @@ VersionRowInfo versionRowInfo(const InstalledInstance &inst, const QString &game
  *  (调用方自己决定空表是"没装版本"还是"扫不出来" —— 看 errorOut 是不是空。) */
 QVector<InstalledInstance> scanInstalledInstances(const QString &gameDir, QString *errorOut);
 
+/** 只扫**一个**实例(核心库 sxcl_instance_scan_one 的包装)。为什么不用整棵列表扫描:
+ *  模组页只关心"当前选中的那一版",为一个版本号把整个 versions/ 扫一遍不划算
+ *  (几十上百个实例时是几百毫秒的磁盘活)。返回 false 时 errorOut 里给人话。
+ *  **与 scanInstalledInstances 同一条纪律:只许在 worker(BgTask/工作线程)里调。** */
+bool scanInstalledInstance(const QString &gameDir, const QString &id, InstalledInstance *out,
+                           QString *errorOut);
+
 } // namespace sxcl::ui
