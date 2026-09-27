@@ -34,6 +34,7 @@
 
 #include "../elided_label.h" // 单行标签：装不下就省略号（结果行的名字/介绍都用它）
 #include "flow_layout.h" // 筛选区：放不下就换行，控件保证完整显示（docs/25 总则）
+#include "mod_detail_page.h" // 点一行进去的那一页（介绍全文 + 一个「安装」动作）
 #include "fluent_theme.h"
 #include "libqf.h"
 
@@ -873,6 +874,7 @@ private:
         }
         m_phase = Idle;
         if (!ok) {
+            endInstallWait(); // 「安装」这一趟到这儿就结束了（失败如实说）
             setBusy(false, QStringLiteral("查不到：%1").arg(error));
             return;
         }
@@ -889,6 +891,7 @@ private:
                                                                   files.data(), files.size(), &count,
                                                                   err, sizeof(err));
             if (prc != 0) {
+                endInstallWait();
                 InfoBar::push(InfoBar::Type::Warning, QStringLiteral("取版本失败"),
                               QString::fromUtf8(err), this, 6000);
                 return;
@@ -896,14 +899,19 @@ private:
             sxcl_mod_file picked;
             std::memset(&picked, 0, sizeof(picked));
             const QByteArray pickLoader = loaderFor(m_fetchSource);
-            if (count > 0 &&
-                sxcl_mods_pick_file(files.data(), count, m_mc.toUtf8().constData(),
-                                    pickLoader.constData(), &picked) != 0) {
+            const int pickRc =
+                count > 0 ? sxcl_mods_pick_file(files.data(), count, m_mc.toUtf8().constData(),
+                                                pickLoader.constData(), &picked)
+                          : -1;
+            std::fprintf(stderr, "[sxcl-ui] mods-install: versions count=%d pick=%d file=\"%s\"\n",
+                         (int)count, pickRc, picked.filename);
+            if (count > 0 && pickRc != 0) {
                 /* 挑不出**唯一**那个（好几个文件都说得过去）:不摆一排按钮，改成"点一项 = 我要它"。 */
                 showFileChoices(files, count);
                 return;
             }
             if (count == 0) {
+                endInstallWait();
                 InfoBar::push(InfoBar::Type::Warning, QStringLiteral("没有能用的文件"),
                               QStringLiteral("「%1」里没有匹配这个实例（版本 %2 / 加载器 %3）的文件 —— "
                                              "**不自动换加载器**，要么换个包，要么装对应加载器的版本。")
@@ -917,47 +925,86 @@ private:
         }
     }
 
-    /** 一个包里"好几个文件都说得过去"时：**点一项 = 我要它**（不是一排按钮）。 */
+    /** 点结果行 = **进详情页**（用户 2026-09-27：「介绍信息强制只有一行，后面的用 3 个点代替，
+     *  单击进去可以看模组详细信息」）。
+     *  详情页由**这一栏**创建并持有：只有它知道眼前是哪个实例、该装进 mods 还是 shaderpacks；
+     *  外壳（main_window）只负责把这一页摆到眼前（与三个临时页同一套"会话页"机制）。 */
+    void openDetail(const ModsHitRow &row) {
+        if (m_detail == nullptr) {
+            m_detail = new ModDetailPage(this);
+            m_detail->setInstallHandler([this] {
+                if (!m_detailRow.id.isEmpty()) {
+                    install(m_detailRow);
+                }
+            });
+            m_detail->setFilePickHandler([this](const sxcl_mod_file &file) { startDownload(file); });
+            m_detail->setBackHandler([this] {
+                /* 「返回」= 回下载页（模组那一栏还在原地，列表一行都没动）——走产品换页入口。 */
+                QWidget *shell = window();
+                if (shell != nullptr) {
+                    QMetaObject::invokeMethod(shell, "switchToRoute", Qt::DirectConnection,
+                                              Q_ARG(QString, QStringLiteral("download")));
+                }
+            });
+        }
+        m_detailRow = row;
+        m_detail->setItem(row);
+        if (m_detail->iconLabel() != nullptr && !row.iconUrl.isEmpty()) {
+            /* 同一条缓存/工作线程：列表里已经下过的话这里直接命中；拉不到就一直空着。 */
+            startIcon(row.iconUrl, row.source + QLatin1Char('-') + row.id, m_detail->iconLabel(),
+                      kModDetailIconSide);
+        }
+        /* 点的是哪一条（取证行）：点完眼前是详情页，但"哪一条"只有这条日志说了算。 */
+        std::fprintf(stderr, "[sxcl-ui] mods-detail-open: id=%s source=%s title=\"%s\"\n",
+                     row.id.toUtf8().constData(), row.source.toUtf8().constData(),
+                     row.title.toUtf8().constData());
+        QWidget *shell = window();
+        if (shell == nullptr) {
+            std::fprintf(stderr, "[sxcl-ui] mods-detail: 找不到外壳窗口（页面没摆上去）\n");
+            return;
+        }
+        const QString key = m_shaders ? QStringLiteral("mods_detail_shader")
+                                      : QStringLiteral("mods_detail");
+        if (!QMetaObject::invokeMethod(shell, "showModDetail", Qt::DirectConnection,
+                                       Q_ARG(QWidget *, m_detail), Q_ARG(QString, key))) {
+            std::fprintf(stderr, "[sxcl-ui] mods-detail: 外壳没有 showModDetail（换页被丢掉）\n");
+        }
+    }
+
+    /** 一个包里"好几个文件都说得过去"时：**点一项 = 我要它**（不是一排按钮）。
+     *  这些可选项摆在**详情页**里（用户点的就是详情页里那个「安装」，挑也得在他眼前挑）。 */
     void showFileChoices(const std::vector<sxcl_mod_file> &files, size_t count) {
-        clearResults();
-        auto *hint = new BodyLabel(QStringLiteral("这个包有好几个版本，点一个："), m_list->parentWidget());
-        hint->setWordWrap(true);
-        m_list->addWidget(hint);
-        const QColor secondary = pageTokenColor("textSecondary");
-        for (size_t i = 0; i < count; ++i) {
-            const sxcl_mod_file copy = files[i];
-            auto *card = new CardWidget(m_list->parentWidget());
-            card->setObjectName(QStringLiteral("modsFileChoiceCard")); // 验收钩子按它点
-            card->setCursor(Qt::PointingHandCursor);
-            card->setMinimumHeight(48);
-            auto *lay = new QHBoxLayout(card);
-            lay->setContentsMargins(16, 8, 16, 8);
-            QString meta = QString::fromUtf8(copy.game_versions);
-            if (meta.size() > 72) {
-                meta = meta.left(72) + QStringLiteral("…");
-            }
-            auto *text = new BodyLabel(QStringLiteral("%1 · %2 · %3")
-                                           .arg(QString::fromUtf8(copy.filename), meta,
-                                                QString::fromUtf8(copy.loaders)),
-                                       card);
-            text->setTextColor(secondary, secondary);
-            text->setWordWrap(true);
-            lay->addWidget(text, 1);
-            QObject::connect(card, &CardWidget::clicked, this, [this, copy] { startDownload(copy); });
-            m_list->addWidget(card);
+        if (m_detail == nullptr) {
+            std::fprintf(stderr, "[sxcl-ui] mods-detail: 没有详情页可摆可选项\n");
+            return;
+        }
+        m_detail->setInstalling(false); // 轮到他挑了：按钮不锁着
+        m_detail->setFileChoices(files, count);
+    }
+
+    /** 「安装」这一趟结束（成功/失败/要他自己挑）——把详情页那个按钮放开。 */
+    void endInstallWait() {
+        if (m_detail != nullptr) {
+            m_detail->setInstalling(false);
         }
     }
 
     void startDownload(const sxcl_mod_file &picked) {
         const char *kind = m_shaders ? "shaderpacks" : "mods";
+        /* 从"可选项里点了一项"进来的也要把按钮锁上（同一个出口 endInstallWait 放开）。 */
+        if (m_detail != nullptr) {
+            m_detail->setInstalling(true);
+        }
         char dir[1200];
         if (sxcl_mods_dir(m_gameDir.toUtf8().constData(), m_instance.toUtf8().constData(), kind,
                           versionIsolationOn() ? 1 : 0, dir, sizeof(dir)) != 0) {
+            endInstallWait();
             InfoBar::push(InfoBar::Type::Warning, QStringLiteral("路径太长"),
                           QStringLiteral("模组目录拼不出来"), this, 5000);
             return;
         }
         if (sxcl_fs_mkdirs(dir) != 0) {
+            endInstallWait();
             InfoBar::push(InfoBar::Type::Warning, QStringLiteral("目录建不了"),
                           QString::fromUtf8(dir), this, 6000);
             return;
@@ -985,6 +1032,8 @@ private:
         req.sha1 = QString::fromUtf8(picked.sha1);
         req.size = picked.size;
         req.settingsFile = uiSettingsFilePath();
+        std::fprintf(stderr, "[sxcl-ui] mods-install: download file=\"%s\" size=%lld dest=\"%s\"\n",
+                     picked.filename, (long long)picked.size, dest.toUtf8().constData());
         m_phase = Downloading;
         setBusy(true, QStringLiteral("正在下 %1 …（官方 sha1 有就强校验）")
                           .arg(QString::fromUtf8(picked.filename)));
@@ -995,6 +1044,9 @@ private:
         const int run = m_run;
         QObject::connect(worker, &ModsWorker::finished, this,
                          [this, dest, run](bool ok, const QString &error, const QString &, qint64 bytes) {
+                             std::fprintf(stderr, "[sxcl-ui] mods-install: done ok=%d bytes=%lld\n",
+                                          ok ? 1 : 0, (long long)bytes);
+                             endInstallWait(); // 装完了（成功失败都算）:详情页那个按钮放开
                              const bool current = (run == m_run);
                              if (current) {
                                  m_worker = nullptr;
@@ -1027,22 +1079,36 @@ private:
         worker->start();
     }
 
+    /** 详情页里那**一个**「安装」动作：按当前实例的版本 + 加载器挑最合适的文件装下去
+     *  （用户 2026-09-27 的口径："点击代表我要它"落在这一步）。 */
     void install(const ModsHitRow &row) {
         m_projectTitle = row.title.isEmpty() ? row.slug : row.title;
         /* 用**这一条自己的** source:合并列表里两个源的条目混在一起,不能按"当前勾选/上一个源"去解析。 */
         const QString src = modsSourceValid(row.source) ? row.source : QStringLiteral("modrinth");
         const QByteArray loader = loaderFor(src);
+        /* 取证行:点「安装」这一刻按的是**眼前这个实例**的版本 + 加载器（不是列表的筛选条件）。 */
+        std::fprintf(stderr,
+                     "[sxcl-ui] mods-install: start id=%s source=%s instance_version=%s loader=%s\n",
+                     row.id.toUtf8().constData(), src.toUtf8().constData(),
+                     m_mc.isEmpty() ? "all" : m_mc.toUtf8().constData(),
+                     loader.isEmpty() ? "all" : loader.constData());
+        /* 这一趟在跑的时候详情页那个按钮锁住（"正在装…"）——放开的每个出口见 endInstallWait。 */
+        if (m_detail != nullptr) {
+            m_detail->setInstalling(true);
+        }
         char url[1200];
         if (src == QLatin1String("curseforge")) {
             bool numeric = false;
             const qlonglong id = row.id.toLongLong(&numeric);
             if (!numeric || id <= 0) {
+                endInstallWait();
                 InfoBar::push(InfoBar::Type::Warning, QStringLiteral("工程 id 拿不到"),
                               QStringLiteral("这一条没有可用的数字 id（%1）").arg(row.id), this, 5000);
                 return;
             }
             if (sxcl_mods_curseforge_versions_url(id, m_mc.toUtf8().constData(), loader.constData(),
                                                   url, sizeof(url)) != 0) {
+                endInstallWait();
                 InfoBar::push(InfoBar::Type::Warning, QStringLiteral("条件太长"),
                               QStringLiteral("文件列表 URL 拼不出来"), this, 5000);
                 return;
@@ -1050,6 +1116,7 @@ private:
         } else if (sxcl_mods_modrinth_versions_url(row.id.toUtf8().constData(),
                                                    m_mc.toUtf8().constData(), loader.constData(), url,
                                                    sizeof(url)) != 1) {
+            endInstallWait();
             InfoBar::push(InfoBar::Type::Warning, QStringLiteral("工程 id 拿不到"),
                           QStringLiteral("这一条没有可用的 id"), this, 5000);
             return;
@@ -1066,7 +1133,7 @@ private:
      *    ① 名字 + 右侧来源   ② 开发商 + 版本范围（"1.20 – 1.21.4"）
      *    ③ 只占一行的介绍（超出就省略号）④ 留空
      *  行高**固定**（同一套字号量出来的数，每张卡一样高）；logo 是固定方块，不许撑高行；
-     *  行上**一个按钮都没有**：点整行 = 我要它（这条口径不变）。 */
+     *  行上**一个按钮都没有**：点这一行 = **进详情页**（用户最新口径；装是详情页里那一个「安装」动作）。 */
     void showResults(const QVector<ModsHitRow> &rows) {
         if (rows.isEmpty()) {
             auto *empty = new BodyLabel(QStringLiteral("没找到。换个关键词再试。"),
@@ -1192,21 +1259,23 @@ private:
 
             rowLay->addLayout(textCol, 1);
 
-            /* 整行可点 = "我要它"（用户 2026-09-27：「都做成他妈选项卡没有按钮，点击就是代表我要点它。
-             * 那鼠标左键是给你干啥的？没有按钮不能干活儿了，是不是？」）。
+            /* 整行可点（用户 2026-09-27：「都做成他妈选项卡没有按钮，点击就是代表我要点它」）——
+             * 但**点一下的落点**后来定了：「介绍只有一行 + 省略号，单击进去可以看模组详细信息」，
+             * 所以点行 = **进详情页**（装是详情页里那**一个**「安装」动作）。
              * 用 CardWidget 自带的 clicked + hover/pressed 背景过渡(120ms) + 手型光标 ——
              * 小白一眼就知道整块能点。行上**一个按钮都没有**。 */
             card->setObjectName(QStringLiteral("modsResultCard"));
             card->setCursor(Qt::PointingHandCursor);
             const ModsHitRow copy = row; /* 值拷贝:卡片被清掉后回调还要用 */
-            QObject::connect(card, &CardWidget::clicked, this, [this, copy] { install(copy); });
+            QObject::connect(card, &CardWidget::clicked, this, [this, copy] { openDetail(copy); });
             m_list->addWidget(card);
         }
     }
 
     /** 取一张图标（工作线程下到 <数据根>/icons/<id>.png，命中缓存就不再下）。
-     *  target 用 QPointer 兜着:卡片可能已经被 clearResults() 删掉了。 */
-    void startIcon(const QString &url, const QString &id, QLabel *target) {
+     *  target 用 QPointer 兜着:卡片可能已经被 clearResults() 删掉了。
+     *  side = 目标方块的边长（列表 48 / 详情页 96）—— 同一份缓存，按格子大小缩。 */
+    void startIcon(const QString &url, const QString &id, QLabel *target, int side = kIconSide) {
         if (url.isEmpty() || id.isEmpty() || target == nullptr) {
             return;
         }
@@ -1218,7 +1287,7 @@ private:
         safe.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9._-]")), QStringLiteral("_"));
         const QString path = dir + QLatin1Char('/') + safe + QStringLiteral(".png");
         if (QFile::exists(path)) {
-            setIconFromFile(path, target);
+            setIconFromFile(path, target, side);
             return;
         }
         ModsWorker::Request req;
@@ -1229,22 +1298,21 @@ private:
         auto *worker = new ModsWorker(req, this);
         const QPointer<QLabel> guard(target);
         QObject::connect(worker, &ModsWorker::finished, this,
-                         [guard, path](bool ok, const QString &, const QString &, qint64) {
+                         [guard, path, side](bool ok, const QString &, const QString &, qint64) {
                              if (ok && !guard.isNull()) {
-                                 setIconFromFile(path, guard.data());
+                                 setIconFromFile(path, guard.data(), side);
                              }
                          });
         worker->start();
     }
 
-    static void setIconFromFile(const QString &path, QLabel *target) {
+    static void setIconFromFile(const QString &path, QLabel *target, int side = kIconSide) {
         QPixmap pm(path);
         if (pm.isNull() || target == nullptr) {
             return; // 解不开的图 = 什么都不画（不拿占位图冒充）
         }
         /* **按比例缩进固定方块**：不拉伸、不裁切，也绝不让图片决定行高。 */
-        target->setPixmap(pm.scaled(kIconSide, kIconSide, Qt::KeepAspectRatio,
-                                    Qt::SmoothTransformation));
+        target->setPixmap(pm.scaled(side, side, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     }
 
     bool m_shaders = false;
@@ -1285,6 +1353,8 @@ private:
     QString m_autoInstance;                    // 上一次默认榜用的实例（换实例要重拉）
     int m_run = 0;                             // 这一趟请求链的编号（旧的回来就丢掉）
     QByteArray m_lastSort;                     // 这一趟的排序（"downloads" / "relevance"），取证行用
+    ModDetailPage *m_detail = nullptr;         // 点一行进去的详情页（这一栏创建并持有，外壳只负责摆）
+    ModsHitRow m_detailRow;                    // 详情页眼前是哪一条（「安装」按它装）
     QHash<QString, QCheckBox *> m_sourceBoxes; // "modrinth" / "curseforge" -> 那个勾选框
     QVBoxLayout *m_list = nullptr;
     ModsWorker *m_worker = nullptr;

@@ -85,6 +85,11 @@ public:
     // 主页在 switchToLaunch 之前设置,启动页真正开始时读一次并立刻清掉(不粘住)。
     void setNextLaunchOffline(bool offline) { m_nextLaunchOffline = offline; }
     bool nextLaunchOffline() const { return m_nextLaunchOffline; }
+    /* 模组详情页(用户 2026-09-27:「单击进去可以看模组详细信息」):模组页那一栏点一行,
+     * 把**它自己建好并持有**的详情页交上来 —— 与三个临时页同一套"会话页"机制(挂在内容栈里,
+     * 导航不选中它)。页面由模组页创建(那条数据在它手上),外壳只负责摆到眼前。
+     * 必须是 Q_INVOKABLE:页面按名字调(与 switchToRoute 同一个口径,页面不 include 本头)。 */
+    Q_INVOKABLE void showModDetail(QWidget *page, const QString &key);
     // 临时页自己的"返回"入口:回**版本列表页**并结束会话(main_window.py:266-277)
     Q_INVOKABLE void goBackToVersions();
     Q_INVOKABLE void goBackFromLaunch();

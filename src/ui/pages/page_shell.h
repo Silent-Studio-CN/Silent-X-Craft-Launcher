@@ -80,6 +80,13 @@ public:
     }
 
     QWidget *view() const { return m_view; }
+    /* 标题/副标题的**改写**(模组详情页要按点进来的那条改名字与来源;同一个页面复用,不重建)。
+     * 副标题空 = 不占版面(与构造期同一条口径)。 */
+    void setTitleText(const QString &text) { m_title->setText(text); }
+    void setSubtitleText(const QString &text) {
+        m_subtitle->setText(text);
+        m_subtitle->setVisible(!text.isEmpty());
+    }
     void addContent(QWidget *w) { m_box->addWidget(w); }      // :62-63
     void addStretch() { m_box->addStretch(1); }               // :65-66
     // 把整块内容一次装进一个横向容器(下载页那种"左栏 + 右内容区"用得上)

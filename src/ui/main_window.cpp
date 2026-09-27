@@ -991,6 +991,19 @@ void MainWindow::addOrUpdateTask(const QString &taskId, const QString &title,
                               Q_ARG(QString, status), Q_ARG(QString, QString()));
 }
 
+void MainWindow::showModDetail(QWidget *page, const QString &key) {
+    if (page == nullptr) {
+        return;
+    }
+    /* 取证:换页前后各一条事实 —— 用户眼前从"下载(模组栏)"变成"模组详情页",
+     * 验收脚本按这一行断言"点结果行 -> route/page 变成详情页"(不是自己 setCurrentIndex)。 */
+    std::fprintf(stderr, "[sxcl-ui] mods-detail: route=%s page=%s key=%s\n",
+                 currentRouteKey().toUtf8().constData(), page->objectName().toUtf8().constData(),
+                 key.toUtf8().constData());
+    registerSessionPage(key, page);
+    showTempPage(page, key);
+}
+
 void MainWindow::switchToDownloadConfig(const QString &versionId) { // :188-199
     const QString key = QStringLiteral("download_config_") + versionId;
     QWidget *page = m_pages.value(key, nullptr);

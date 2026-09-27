@@ -36,6 +36,9 @@ set(SXCL_UI_SOURCES
   pages/versions_select_page.cpp
   #   mods_page.cpp  下载 → 拼图/太阳(MOD/光影,docs/22 的 A1;网络全在工作线程)
   pages/mods_page.cpp
+  #   mod_detail_page.* 结果行点一下进的**详情页**(用户 2026-09-27:介绍一行 + 省略号,
+  #                     单击进去看详细信息;装是这一页里那**一个**「安装」动作)
+  pages/mod_detail_page.cpp pages/mod_detail_page.h
   # 启动器**自己**崩了要留现场(用户报"切主题色直接崩"时我们手上什么都没有,见 crash_handler.h)
   crash_handler.cpp        crash_handler.h
   #   tokens.*  令牌表(颜色唯一来源;外壳与每个控件都从这里**现取**)

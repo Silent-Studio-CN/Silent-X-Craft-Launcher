@@ -104,7 +104,7 @@ Set-Content -Path $ini -Value ('game.default_dir=' + $game) -Encoding utf8
 Add-Content -Path $ini -Value 'game.selected_version=114514'
 Add-Content -Path $ini -Value 'general.version_isolation=1'
 
-function Invoke-Mods([string]$tag, [int]$waitMs, [string]$query = '', [string]$install = '') {
+function Invoke-Mods([string]$tag, [int]$waitMs, [string]$query = '', [string]$install = '', [string]$row = '') {
   $env:SXCL_UI_SETTINGS = $ini
   $env:SXCL_UI_GAME_DIR = $game
   $env:SXCL_UI_ROUTE = 'download'
@@ -118,6 +118,12 @@ function Invoke-Mods([string]$tag, [int]$waitMs, [string]$query = '', [string]$i
   Remove-Item Env:SXCL_UI_MODS_QUERY -ErrorAction SilentlyContinue
   Remove-Item Env:SXCL_UI_MODS_VERSION -ErrorAction SilentlyContinue
   Remove-Item Env:SXCL_UI_MODS_INSTALL -ErrorAction SilentlyContinue
+  Remove-Item Env:SXCL_UI_MODS_ROW -ErrorAction SilentlyContinue
+  if ($row -ne '') {
+    # click the Nth result row -> the detail page (no install)
+    $env:SXCL_UI_MODS_ROW = $row
+    $env:SXCL_UI_MODS_ROW_DELAY = '16000'
+  }
   if ($query -ne '') {
     $env:SXCL_UI_MODS_QUERY = $query
     # the default chart may still be in flight (CF official has to time out before the mirror
@@ -311,6 +317,11 @@ $descAll = @($lines | Where-Object { $_ -match '#modsRowDesc \(' -and $_ -notmat
 $elided = @($descAll | Where-Object { (LabelText $_) -like ('*' + $ell) })
 Write-Output ('  descriptions shown: ' + $descAll.Count + ', ending in an ellipsis: ' + $elided.Count)
 Ok ($elided.Count -gt 0) 'a description that does not fit is elided with an ellipsis'
+# keep one list-row description line: the detail page's full text is compared against it later
+# (both are cut by the dump's own 80-char print limit, so compare the raw text= widths)
+$sampleRowDescLine = ''
+if ($descAll.Count -gt 0) { $sampleRowDescLine = $descAll[0] }
+$sampleRowDesc = LabelText $sampleRowDescLine
 $units = @($lines | Where-Object { $_ -match '#modsRowStats \(' -and $_ -notmatch ' hidden' -and ($_ -match (C @(0x4EBF)) -or $_ -match (C @(0x4E07))) })
 Write-Output ('  rows whose count uses a unit: ' + $units.Count)
 Ok ($units.Count -gt 0) 'the top-downloaded chart shows unit-ised counts (万 / 亿)'
@@ -334,14 +345,94 @@ Ok ($techHits.Count -eq 0) ('no URL / key / http code in the visible rows (' + $
 foreach ($h in ($techHits | Select-Object -First 3)) { Write-Output ('    ' + $h) }
 
 Write-Output ''
-Write-Output '== E: clicking a row installs it (the whole row is the click target) =='
-$lineInst = Invoke-Mods 'install' 42000 '' '1'
+Write-Output '== E: clicking a row opens the DETAIL page (the row itself is the click target) =='
+# user 2026-09-27: "the description is forced to one line, the rest is three dots; a single click
+# opens the mod details" -- so a click no longer installs: it lands on the detail page, whose ONE
+# install action does the work.  This run does both steps through the real widgets.
+$lineDetail = Invoke-Mods 'rowclick' 24000 '' '' '1'
+$detailTrace = Get-One $lineDetail 'mods-detail: route=(\S+) page=(\S+) key=(\S+)'
+if ($detailTrace -ne $null) {
+  Write-Output ('  trace: route=' + $detailTrace[1] + ' page=' + $detailTrace[2] + ' key=' + $detailTrace[3])
+  Ok ($detailTrace[2] -match 'ModDetailPage') 'route/page evidence: the shell switched to the MOD DETAIL page'
+} else { Ok $false 'no mods-detail route/page line' }
+$detailOpen = Get-One $lineDetail 'mods-detail-open: id=(\S+) source=(\S+) title="([^"]*)"'
+Ok ($detailOpen -ne $null) 'the detail page opened for the row that was clicked'
+if ($detailOpen -ne $null) { Write-Output ('  opened: id=' + $detailOpen[1] + ' source=' + $detailOpen[2] + ' title="' + $detailOpen[3] + '"') }
+$clickedLine = Get-One $lineDetail ([regex]::Escape((C @(0x5DF2,0x70B9,0x7B2C))) + ' (\d+) ' + (C @(0x5F20,0x7ED3,0x679C,0x5361)))
+Ok ($clickedLine -ne $null) 'the acceptance hook clicked the ROW itself'
+$pageLine = Find-Visible $lineDetail '#ModDetailPage \('
+Ok ($pageLine -ne '') 'the current page in the dump IS the detail page (#ModDetailPage)'
+$listLine = Find-Visible $lineDetail '#modsResultCard \('
+Ok ($listLine -eq '') 'the result list is no longer the page on screen'
+
+Write-Output ''
+Write-Output '== F: what the detail page shows (full description, one install action) =='
+$iconLine = Find-Visible $lineDetail '#modsDetailIcon \('
+$gIcon2 = Geometry $iconLine
+Ok ($iconLine -ne '' -and $gIcon2[2] -eq $gIcon2[3] -and $gIcon2[2] -gt 48) ('the detail logo is a bigger fixed square (' + $gIcon2[2] + 'x' + $gIcon2[3] + ')')
+$descLine = Find-Visible $lineDetail '#modsDetailDescription \('
+$detailText = LabelText $descLine
+Write-Output ('  description on the detail page (' + $detailText.Length + ' chars printed): "' + $detailText.Substring(0, [Math]::Min(70, $detailText.Length)) + '..."')
+Ok ($descLine -ne '' -and $detailText.Length -gt 40) ('the FULL description is on the page (' + $detailText.Length + ' printed chars)')
+Ok ($descLine -notmatch 'CUT-W' -and $descLine -notmatch 'CUT-H') 'nothing is cut: the full text wraps instead'
+# The list row is the one with the three dots: its label physically holds the elided string, while
+# the detail page holds the whole thing (both printed strings are cut at the dump's 80-char limit,
+# so the honest comparison is how WIDE the label text is).
+$mDet = [regex]::Match($descLine, 'text=(\d+)x(\d+)')
+$mRow = [regex]::Match($sampleRowDescLine, 'text=(\d+)x(\d+)')
+Write-Output ('  text width: list row=' + $mRow.Groups[1].Value + 'px  detail page=' + $mDet.Groups[1].Value + 'px')
+Ok ($mDet.Success -and $mRow.Success -and [int]$mDet.Groups[1].Value -gt [int]$mRow.Groups[1].Value) 'the detail page text is physically longer than the list line (the full string is there)'
+Ok ($detailText.Length -ge $sampleRowDesc.Length) ('and its printed prefix is at least as long (' + $detailText.Length + ' >= ' + $sampleRowDesc.Length + ')')
+$buttons = @($lineDetail | Where-Object { $_ -match '#modsDetailInstallButton \(' -and $_ -notmatch ' hidden' })
+Ok ($buttons.Count -eq 1) ('exactly ONE install action on the detail page (' + $buttons.Count + ')')
+$detailButtons = @($lineDetail | Where-Object { $_ -match 'PushButton\b' -and $_ -notmatch ' hidden' })
+Write-Output ('  buttons anywhere on the detail page: ' + $detailButtons.Count)
+Ok ($detailButtons.Count -eq 1) 'and it is the only button on the page (the back entry is a word, not a button)'
+$metaAuthor = Get-One $lineDetail '#modsDetailAuthor \(\d+,\d+ \d+x\d+\) "([^"]*)"'
+$metaVers = Get-One $lineDetail '#modsDetailVersions \(\d+,\d+ \d+x\d+\) "([^"]*)"'
+$metaDl = Get-One $lineDetail '#modsDetailDownloads \(\d+,\d+ \d+x\d+\) "([^"]*)"'
+$metaUpd = Get-One $lineDetail '#modsDetailUpdated \(\d+,\d+ \d+x\d+\) "([^"]*)"'
+$metaSrc = Get-One $lineDetail '#modsDetailSource \(\d+,\d+ \d+x\d+\) "([^"]*)"'
+if ($metaAuthor -ne $null -and $metaVers -ne $null -and $metaDl -ne $null -and $metaUpd -ne $null) {
+  Write-Output ('  meta: source="' + $metaSrc[1] + '" author="' + $metaAuthor[1] + '" versions="' + $metaVers[1] + '" downloads="' + $metaDl[1] + '" updated="' + $metaUpd[1] + '"')
+}
+Ok ($metaSrc -ne $null -and $metaSrc[1].Length -gt 0) 'the source is written out (not only a colour)'
+Ok ($metaAuthor -ne $null -and $metaAuthor[1].Length -gt 0) 'the developer is on the page'
+Ok ($metaVers -ne $null -and $metaVers[1] -match '\d+\.\d+') 'the version range is on the page'
+Ok ($metaDl -ne $null -and $metaDl[1] -match '(万|亿|\d)' + (C @(0x6B21,0x4E0B,0x8F7D))) 'the download count is on the page (with its unit)'
+Ok ($metaUpd -ne $null -and ($metaUpd[1] -match (C @(0x5929,0x524D)) -or $metaUpd[1] -match (C @(0x5C0F,0x65F6,0x524D)) -or $metaUpd[1] -match (C @(0x5206,0x949F,0x524D)))) 'the update time is on the page (relative)'
+$backLine = Find-Visible $lineDetail '#modsDetailBack \('
+Ok ($backLine -ne '' -and $backLine -notmatch 'PushButton') 'the way back is a clickable word, not another button'
+
+Write-Output ''
+Write-Output '== G: the detail page install action really puts the jar in the instance folder =='
+# the engine can take half a minute for a 2 MB jar on this machine, so leave room for the whole
+# download (the dump at the end must show the finished state, and the jar must be complete)
+$lineInst = Invoke-Mods 'install' 72000 '' '1'
 $installed = @(Get-ChildItem -Path (Join-Path $game 'versions\114514\mods') -Filter *.jar -ErrorAction SilentlyContinue)
 Write-Output ('  files in <game>\versions\114514\mods: ' + (($installed | ForEach-Object { $_.Name + ' (' + $_.Length + ' bytes)' }) -join ', '))
-Ok ($installed.Count -ge 1) 'the first row of the DEFAULT chart installed into the instance folder'
+Ok ($installed.Count -ge 1) 'the detail page install action put a jar into the instance folder'
 Ok (@(Get-ChildItem -Path (Join-Path $game 'mods') -Filter *.jar -ErrorAction SilentlyContinue).Count -eq 0) 'nothing landed in the shared <game>\mods'
-$clickedLine = Get-One $lineInst ([regex]::Escape((C @(0x5DF2,0x70B9,0x7B2C))) + ' (\d+) ' + (C @(0x5F20,0x7ED3,0x679C,0x5361)))
-Ok ($clickedLine -ne $null) 'the acceptance hook clicked the ROW itself'
+$installClicked = Get-One $lineInst ((C @(0x8BE6,0x60C5,0x9875,0x5DF2,0x70B9)))
+Ok ($installClicked -ne $null) 'the acceptance hook clicked the install action ON THE DETAIL PAGE'
+# the install itself says which version/loader it used (the INSTANCE's, not the filter's) and where it went
+$insStart = Get-One $lineInst 'mods-install: start id=(\S+) source=(\S+) instance_version=(\S+) loader=(\S+)'
+if ($insStart -ne $null) {
+  Write-Output ('  install: id=' + $insStart[1] + ' source=' + $insStart[2] + ' instance_version=' + $insStart[3] + ' loader=' + $insStart[4])
+  Ok ($insStart[3] -eq '1.20.1') 'the install used the INSTANCE version (1.20.1), not the list filter'
+} else { Ok $false 'no mods-install start line' }
+$insFile = Get-One $lineInst 'mods-install: download file="([^"]*)" size=(\d+) dest="([^"]*)"'
+if ($insFile -ne $null) {
+  Write-Output ('  download: ' + $insFile[1] + ' (' + $insFile[2] + ' bytes) -> ' + $insFile[3])
+  Ok ($insFile[3] -match 'versions/114514/mods/') 'the destination is the version-isolated instance folder'
+} else { Ok $false 'no mods-install download line' }
+$insDone = Get-One $lineInst 'mods-install: done ok=(\d+) bytes=(\d+)'
+if ($insDone -ne $null) {
+  Write-Output ('  done: ok=' + $insDone[1] + ' bytes=' + $insDone[2])
+  Ok ($insDone[1] -eq '1' -and [int]$insDone[2] -gt 0) 'the install really finished (ok=1, bytes > 0)'
+} else { Ok $false 'no mods-install done line' }
+$instDesc = Find-Visible $lineInst '#modsDetailDescription \('
+Ok ($instDesc -ne '') 'the full description was still dumped before/while the install ran'
 
 Write-Output ''
 Write-Output ('  product files: ' + $work)

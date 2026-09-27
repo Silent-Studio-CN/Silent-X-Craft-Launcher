@@ -1336,39 +1336,78 @@ sxcl::ui::MainWindow window;
         });
     }
 
+    // 验收通路:点模组页第 N 张结果卡(SXCL_UI_MODS_ROW=N,1 起;0/不设 = 不点)。
+    //   用户 2026-09-27 的口径:「介绍强制只有一行,后面的用 3 个点代替,**单击进去**可以看模组详细信息」
+    //   —— 点整行 = 进**详情页**（不是直接装）。走产品路径:点真卡片的 clicked。
+    //   延时可用 SXCL_UI_MODS_ROW_DELAY 调(默认 7s;结果是异步回来的)。
+    auto clickResultCard = [&window](int index, const char *note) {
+        QList<QWidget *> visible;
+        const QList<QWidget *> cards =
+            window.findChildren<QWidget *>(QStringLiteral("modsResultCard"));
+        const QList<QWidget *> fileCards =
+            window.findChildren<QWidget *>(QStringLiteral("modsFileChoiceCard"));
+        for (QWidget *candidate : cards) {
+            if (candidate->isVisible()) {
+                visible.append(candidate);
+            }
+        }
+        for (QWidget *candidate : fileCards) {
+            if (candidate->isVisible()) {
+                visible.append(candidate);
+            }
+        }
+        if (visible.size() < index) {
+            std::fprintf(stderr, "[sxcl-ui] 第 %d 张结果卡不存在(当前可见 %d 张)\n", index,
+                         static_cast<int>(visible.size()));
+            return false;
+        }
+        QMetaObject::invokeMethod(visible.at(index - 1), "clicked", Qt::DirectConnection);
+        std::fprintf(stderr, "[sxcl-ui] 模组页已点第 %d 张结果卡(%s)\n", index, note);
+        return true;
+    };
+    const int rowIndex = qEnvironmentVariableIntValue("SXCL_UI_MODS_ROW");
+    if (rowIndex > 0) {
+        const int rowDelay = qEnvironmentVariableIntValue("SXCL_UI_MODS_ROW_DELAY");
+        QTimer::singleShot(rowDelay > 0 ? rowDelay : 7000, &app,
+                           [clickResultCard, rowIndex]() { clickResultCard(rowIndex, "进详情页"); });
+    }
+
     // 验收通路:点模组页第 N 个「装」(SXCL_UI_MODS_INSTALL=N,1 起;0/不设 = 不点)。
-    //   搜索结果是异步回来的,所以这一步**排在搜索之后**(默认等 7s,可用
-    //   SXCL_UI_MODS_INSTALL_DELAY 调);点的是卡片上真的那个按钮。
+    //   装的动作**在详情页里**(用户 2026-09-27:「详情页里放一个明显的安装动作」),所以这一条是两步:
+    //   先点那一行(进详情页),再点详情页上那**一个**「安装」键 —— 两步都走产品路径的真控件。
     const int installIndex = qEnvironmentVariableIntValue("SXCL_UI_MODS_INSTALL");
     if (installIndex > 0) {
         const int installDelay = qEnvironmentVariableIntValue("SXCL_UI_MODS_INSTALL_DELAY");
-        QTimer::singleShot(installDelay > 0 ? installDelay : 7000, &app, [&window, installIndex]() {
-            /* 行上**没有按钮**了（用户 2026-09-27：「都做成选项卡没有按钮，点击就是代表我要点它」）：
-             * 点整张卡 = 我要它。这里就点真的那一张卡的 clicked（走与鼠标点击同一条接线）。 */
-            QList<QWidget *> visible;
-            const QList<QWidget *> cards =
-                window.findChildren<QWidget *>(QStringLiteral("modsResultCard"));
-            const QList<QWidget *> fileCards =
-                window.findChildren<QWidget *>(QStringLiteral("modsFileChoiceCard"));
-            for (QWidget *candidate : cards) {
-                if (candidate->isVisible()) {
-                    visible.append(candidate);
-                }
-            }
-            for (QWidget *candidate : fileCards) {
-                if (candidate->isVisible()) {
-                    visible.append(candidate);
-                }
-            }
-            if (visible.size() < installIndex) {
-                std::fprintf(stderr, "[sxcl-ui] 第 %d 张结果卡不存在(当前可见 %d 张)\n", installIndex,
-                             static_cast<int>(visible.size()));
-                return;
-            }
-            QMetaObject::invokeMethod(visible.at(installIndex - 1), "clicked", Qt::DirectConnection);
-            std::fprintf(stderr, "[sxcl-ui] 模组页已点第 %d 张结果卡(行上无按钮,点整行=我要它)\n",
-                         installIndex);
-        });
+        QTimer::singleShot(installDelay > 0 ? installDelay : 7000, &app,
+                           [&window, clickResultCard, installIndex]() {
+                               if (!clickResultCard(installIndex, "进详情页,再点详情页的「安装」")) {
+                                   return;
+                               }
+                               /* 详情页是刚摆上去的:等它落地再点它的「安装」(可用
+                                * SXCL_UI_MODS_DETAIL_DELAY 调,默认 600ms)。 */
+                               const int detailDelay =
+                                   qEnvironmentVariableIntValue("SXCL_UI_MODS_DETAIL_DELAY");
+                               QTimer::singleShot(detailDelay > 0 ? detailDelay : 600, &window,
+                                                  [&window]() {
+                                   QAbstractButton *btn = nullptr;
+                                   const QList<QAbstractButton *> all = window.findChildren<QAbstractButton *>(
+                                       QStringLiteral("modsDetailInstallButton"));
+                                   for (QAbstractButton *candidate : all) {
+                                       if (candidate->isVisible()) {
+                                           btn = candidate;
+                                           break;
+                                       }
+                                   }
+                                   if (btn == nullptr) {
+                                       std::fprintf(stderr,
+                                                    "[sxcl-ui] 详情页的「安装」键不存在(详情页没打开?)\n");
+                                       return;
+                                   }
+                                   btn->click();
+                                   std::fprintf(stderr,
+                                                "[sxcl-ui] 详情页已点「安装」(modsDetailInstallButton)\n");
+                               });
+                           });
     }
 
     // 验收通路:从**主页点「启动」**(SXCL_UI_LAUNCH=1)。
