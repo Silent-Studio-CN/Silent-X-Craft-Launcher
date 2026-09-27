@@ -145,6 +145,26 @@ int sxcl_mods_pick_file(const sxcl_mod_file *files, size_t count, const char *ga
 int sxcl_mods_dir(const char *game_dir, const char *instance, const char *kind, int isolated,
                   char *out, size_t out_len);
 
+/** CurseForge 的**镜像兜底**（PCL 同款：ModDownload.vb 的 DlSourceModGet 域名替换）。
+ *
+ * 官方 v1 API **不带 key 一律 403**，而镜像 mod.mcimirror.top 同路径可直接查
+ * （实测 2026-09-27：镜像 search / files 都回真实 JSON）。所以没有 key 的构建也能查 CF ——
+ * 走镜像；有内置 key 时官方优先、镜像兜底。（Modrinth **不改写**：我们直连就通，绕镜像只是更慢。）
+ *
+ * 改写规则（只认这几个主机，其余**原样**）：
+ *   api.curseforge.com                     ->  <mirror>/curseforge
+ *   edge / mediafilez / media.forgecdn.net ->  <mirror>            （路径原样保留）
+ *
+ * 返回：1 = 改写成功（out 里是镜像 URL）；0 = 这条不用改写（out 里是原 URL，原文照抄）；
+ *      -1 = 参数错或缓冲不够。
+ *
+ * 注意：镜像请求**不带** x-api-key —— key 只走官方那一路的请求头，任何情况下都不进 URL。 */
+int sxcl_mods_mirror_url(const char *url, char *out, size_t out_len);
+
+/** 镜像根（默认 "https://mod.mcimirror.top"；末尾多余的斜杠在拼 URL 时会被去掉）。
+ *  环境变量 SXCL_MODS_MIRROR 可覆盖：自建镜像、以及验收时把镜像指到黑洞用。 */
+const char *sxcl_mods_mirror_base(void);
+
 #ifdef __cplusplus
 }
 #endif

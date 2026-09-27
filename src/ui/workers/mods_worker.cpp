@@ -149,8 +149,22 @@ void ModsWorker::run() {
     const QByteArray url = m_request.url.toUtf8();
     const QByteArray dest = m_request.dest.toUtf8();
     const QByteArray sha1 = m_request.sha1.toUtf8();
+    /* 候选地址：QByteArray 的存储必须在引擎 run 期间一直有效（都是本函数的局部量）。 */
+    std::vector<QByteArray> alt;
+    alt.reserve((size_t)m_request.altUrls.size());
+    for (const QString &one : m_request.altUrls) {
+        alt.push_back(one.toUtf8());
+    }
+    std::vector<const char *> altPtrs;
+    altPtrs.reserve(alt.size());
+    for (const QByteArray &one : alt) {
+        altPtrs.push_back(one.constData());
+    }
     task.dest = dest.constData();
     task.urls[0] = url.constData();
+    for (size_t i = 0; i < altPtrs.size() && i + 1 < 4; ++i) {
+        task.urls[i + 1] = altPtrs[i];
+    }
     task.algo = SXCL_HASH_SHA1;
     task.sha1 = sha1.isEmpty() ? nullptr : sha1.constData();
     task.size = m_request.size;

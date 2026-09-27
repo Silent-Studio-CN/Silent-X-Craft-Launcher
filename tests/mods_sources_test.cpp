@@ -92,8 +92,8 @@ int main(int argc, char **argv) {
           QStringLiteral("落盘串固定长相：modrinth,curseforge"));
     check(parseModsSources(formatModsSources(all)) == all,
           QStringLiteral("落盘 -> 读回 一致"));
-    check(modsSourcesFromStored(nullptr) == QStringList{QStringLiteral("modrinth")},
-          QStringLiteral("从来没写过这个键 = 默认勾 Modrinth"));
+    check(modsSourcesFromStored(nullptr) == modsAllSources(),
+          QStringLiteral("从来没写过这个键 = 默认两个源都勾上（勾选框只表达不想用哪个）"));
     check(modsSourcesFromStored("").isEmpty(),
           QStringLiteral("写过但是空 = 一个都不勾（不偷偷改回默认）"));
     check(modsSourcesFromStored("curseforge") == QStringList{QStringLiteral("curseforge")},

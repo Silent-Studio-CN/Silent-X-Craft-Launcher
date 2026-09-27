@@ -36,7 +36,7 @@ QStringList parseModsSources(const QString &stored);
 /** 勾选列表 -> 落盘串（"modrinth,curseforge"；一个都没勾 = 空串）。 */
 QString formatModsSources(const QStringList &sources);
 /** 设置文件里读到的原样值 -> 勾选列表：
- *   * nullptr（**从来没写过这个键**）-> 默认勾 Modrinth（老用户与全新安装同一套）；
+ *   * nullptr（**从来没写过这个键**）-> 默认**两个源都勾上**（勾选框只表达"不想用哪个"，不表达偏好）；
  *   * 写过但解析不出（含显式空串 = 用户把两个都取消了）-> 一个都不勾，**不偷偷改回默认**。 */
 QStringList modsSourcesFromStored(const char *storedOrNull);
 

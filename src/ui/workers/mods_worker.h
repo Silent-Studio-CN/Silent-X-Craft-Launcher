@@ -28,7 +28,10 @@ public:
 
     struct Request {
         Op op = FetchText;
-        QString url;          // FetchText / DownloadFile 的地址
+        QString url;          // FetchText / DownloadFile 的地址（下载时 = 第一候选，官方/镜像都行）
+        // 下载的**其余候选**（引擎 task.urls[]，NULL 结尾，最多 4 条）：前一条不通它会自己换下一条。
+        // CurseForge 的文件直链就是这么用的：镜像在前、直连在后（直连实测 404，镜像才通）。
+        QStringList altUrls;
         QString dest;         // DownloadFile 落到哪
         QString sha1;         // 可空:官方摘要(有就强校验)
         qint64 size = 0;      // 0 = 不知道

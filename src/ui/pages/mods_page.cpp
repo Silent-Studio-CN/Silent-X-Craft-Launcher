@@ -121,6 +121,14 @@ public:
 private:
     enum Phase { Idle, Searching, LoadingVersions, Downloading };
 
+    /** 一次请求的候选：url + 它属于哪个源 + 走的是哪条路。
+     *  （声明必须放在第一个用到它的成员函数**之前** —— 参数类型不参与"类内延迟解析"。） */
+    struct PendingFetch {
+        QString url;
+        QString source;
+        QString via; // "mirror" / "official" / "direct"
+    };
+
     // ─────────────────────────── 搭界面 ───────────────────────────
     void build() {
         auto *lay = new QVBoxLayout(this);
@@ -206,10 +214,10 @@ private:
      *  用户 2026-09-26 点名「不要让用户自己填写」，所以界面上没有任何填 key 的入口。 */
     static QString compiledCfKey() { return QString::fromUtf8(SXCL_CURSEFORGE_API_KEY).trimmed(); }
 
-    /** 这一源在这个构建里能不能搜：CurseForge 要内置 key（Modrinth 免 key）。 */
-    static bool sourceUsable(const QString &source) {
-        return source != QLatin1String("curseforge") || !compiledCfKey().isEmpty();
-    }
+    /** 这一源能不能搜：**两个都能**。CurseForge 没有内置 key 时走**镜像**（PCL 同款，
+     *  镜像这条路不要 key），所以不再"没有 key 就把勾选框置灰"；真连不上时由那一次请求如实报失败。
+     *  内置 key 仍然保留：有 key 就自动升级成"官方优先 + 镜像兜底"。 */
+    static bool sourceUsable(const QString &source) { return modsSourceValid(source); }
 
     void reloadSettings() {
         QStringList picked;
@@ -256,8 +264,8 @@ private:
         return out;
     }
 
-    /** 勾选框的可用性：这个构建没有内置 key 的源**可见但点不动**（tooltip 一句话），
-     *  而不是摆一个输入框让用户去申请 key。 */
+    /** 勾选框的可用性：现在两个源都点得动（CF 有镜像兜底，不需要 key）。
+     *  这里保留"用不了的源就取消勾选"的兜底逻辑，目前不会触发 —— 界面上也没有任何填 key 的入口。 */
     void refreshSourceBoxes() {
         for (const QString &source : modsAllSources()) {
             QCheckBox *box = m_sourceBoxes.value(source);
@@ -266,8 +274,7 @@ private:
             }
             const bool usable = sourceUsable(source);
             box->setEnabled(usable);
-            box->setToolTip(usable ? QString()
-                                   : QStringLiteral("这个构建没有内置这一源的密钥，暂时搜不了"));
+            box->setToolTip(QString());
             if (!usable && box->isChecked()) {
                 QSignalBlocker blocker(box); // 我们替它取消,不算用户改勾选(不重复落盘)
                 box->setChecked(false);
@@ -459,9 +466,10 @@ private:
          * 光影那一栏钉 "shader"。CF 那边走 classId（6 / 6552），同一个 project_type 进去。 */
         const QByteArray type = QByteArrayLiteral("mod");
         const QByteArray shaderType = QByteArrayLiteral("shader");
+        m_fallback.clear();
         for (const QString &source : m_sources) {
             if (!sourceUsable(source)) {
-                continue; // 没有内置 key 的源:不发注定失败的请求(那个勾选框也点不动)
+                continue;
             }
             const QByteArray loader = loaderFor(source);
             sxcl_mods_query q;
@@ -480,7 +488,7 @@ private:
                               QStringLiteral("搜索条件拼不成 URL，换个短点的关键词"), this, 4000);
                 return;
             }
-            m_pending.append(PendingFetch{QString::fromUtf8(url), source});
+            enqueueCandidates(source, QString::fromUtf8(url));
             m_requested << source;
         }
         clearResults();
@@ -500,14 +508,51 @@ private:
         startNextFetch();
     }
 
-    /** 队列里下一个源（一次只飞一个请求：界面层的 worker 槽只有一个，串行也最省事）。 */
+    /** 这一源可以试的候选，按先后（PCL 同款"逐条试、谁先返回 JSON 用谁"）：
+     *   * CurseForge -> **官方优先**（带内置 key，key 只进 x-api-key 头），**官方失败才转镜像兜底**；
+     *     没有内置 key 时官方那一次必 403，照样先试官方、失败再兜底 —— 用户不需要知道也不需要配；
+     *   * Modrinth -> 直连，一条。 */
+    QVector<PendingFetch> candidatesFor(const QString &source, const QString &officialUrl) const {
+        QVector<PendingFetch> out;
+        if (source != QLatin1String("curseforge")) {
+            out.append(PendingFetch{officialUrl, source, QStringLiteral("direct")});
+            return out;
+        }
+        char mirrored[1400];
+        mirrored[0] = '\0';
+        const bool haveMirror =
+            sxcl_mods_mirror_url(officialUrl.toUtf8().constData(), mirrored, sizeof(mirrored)) == 1;
+        /* **官方优先、镜像兜底**（用户 2026-09-27 的口径）。没有内置 key 时官方那一次会 403 ——
+         * 顺序照旧（拿到 key 之前它是唯一"官方"的路），失败后自动转镜像，用户什么都不用管。 */
+        out.append(PendingFetch{officialUrl, source, QStringLiteral("official")});
+        (void)haveMirror;
+        if (haveMirror) {
+            out.append(PendingFetch{QString::fromUtf8(mirrored), source, QStringLiteral("mirror")});
+        }
+        if (out.isEmpty()) {
+            /* 理论上不会走到(官方 URL 一定认得出来):仍发官方那一条,让失败如实报出来 */
+            out.append(PendingFetch{officialUrl, source, QStringLiteral("official")});
+        }
+        return out;
+    }
+
+    /** 把一个源的候选排进队列：第一条马上发，其余留作兜底（失败才接着试）。 */
+    void enqueueCandidates(const QString &source, const QString &officialUrl) {
+        const QVector<PendingFetch> cands = candidatesFor(source, officialUrl);
+        m_pending.append(cands.first());
+        for (int i = 1; i < cands.size(); ++i) {
+            m_fallback[source].append(cands.at(i));
+        }
+    }
+
+    /** 队列里下一个请求（一次只飞一个：界面层的 worker 槽只有一个，串行也最省事）。 */
     void startNextFetch() {
         if (m_pending.isEmpty()) {
             finishSearch();
             return;
         }
         const PendingFetch job = m_pending.takeFirst();
-        startFetch(job.url, job.source);
+        startFetch(job);
     }
 
     /** 队列清空：把**合并后**的列表摆出来，并打一行取证（每个被请求过的源各多少条，0 也写出来）。 */
@@ -525,18 +570,21 @@ private:
                                                      : QStringLiteral("根目录")));
     }
 
-    void startFetch(const QString &url, const QString &source) {
-        m_fetchSource = source;
-        /* 取证行:这一轮真的往哪个源发了请求(验收脚本按它断言"勾了两个源就发两个请求")。 */
-        std::fprintf(stderr, "[sxcl-ui] mods-fetch: source=%s url=%s\n",
-                     source.toUtf8().constData(), url.toUtf8().constData());
+    void startFetch(const PendingFetch &job) {
+        m_fetchSource = job.source;
+        m_fetchVia = job.via;
+        /* 取证行:这一轮真的往哪个源、**哪条路**发了请求(验收脚本按它断言
+         * "两个源都发了""镜像兜底真的兜上了")。 */
+        std::fprintf(stderr, "[sxcl-ui] mods-fetch: source=%s via=%s url=%s\n",
+                     job.source.toUtf8().constData(), job.via.toUtf8().constData(),
+                     job.url.toUtf8().constData());
         ModsWorker::Request req;
         req.op = ModsWorker::FetchText;
-        req.url = url;
+        req.url = job.url;
         req.settingsFile = uiSettingsFilePath();
-        if (source == QLatin1String("curseforge")) {
-            /* key 放在**请求头**里:x-api-key(编译期内置,见 sxcl/mods_key.h)。绝不进 URL ——
-             * URL 会进日志/错误消息/历史。 */
+        if (job.source == QLatin1String("curseforge") && job.via == QLatin1String("official")) {
+            /* key 只走**官方**那一路的请求头(x-api-key,编译期内置,见 sxcl/mods_key.h)；
+             * 镜像请求不带它。任何情况下 key 都不进 URL —— URL 会进日志/错误消息/历史。 */
             req.headers << QStringLiteral("Accept: application/json");
             req.headers << QStringLiteral("x-api-key: %1").arg(compiledCfKey());
         }
@@ -553,6 +601,27 @@ private:
     void onFetchDone(bool ok, const QString &error, const QString &text) {
         const Phase phase = m_phase;
         const bool cf = (m_fetchSource == QLatin1String("curseforge"));
+        if (!ok) {
+            /* 这一源还有候选就接着试（官方优先 + 镜像兜底 / 没 key 时只有镜像）——
+             * 逐条试、谁先返回 JSON 用谁。**不换源**：绝不拿 Modrinth 的结果顶 CF。 */
+            const QVector<PendingFetch> rest = m_fallback.value(m_fetchSource);
+            if (!rest.isEmpty()) {
+                const PendingFetch nextJob = rest.first();
+                QVector<PendingFetch> tail = rest;
+                tail.removeFirst();
+                m_fallback.insert(m_fetchSource, tail);
+                m_pending.prepend(nextJob);
+                std::fprintf(stderr, "[sxcl-ui] mods-fetch-retry: source=%s next=%s\n",
+                             m_fetchSource.toUtf8().constData(), nextJob.via.toUtf8().constData());
+                startNextFetch();
+                return;
+            }
+            std::fprintf(stderr, "[sxcl-ui] mods-fetch-failed: source=%s via=%s err=\"%s\"\n",
+                         m_fetchSource.toUtf8().constData(), m_fetchVia.toUtf8().constData(),
+                         error.toUtf8().constData());
+        } else {
+            m_fallback.remove(m_fetchSource); // 这一源已经拿到结果,不再试兜底
+        }
         if (phase == Searching) {
             /* 搜索是**队列**驱动的:一个源失败/为空不影响另一个源 —— 这一源这一轮就是 0 条,
              * 如实写 0,绝不拿另一个源的结果顶上来冒充它。 */
@@ -643,7 +712,20 @@ private:
         m_deps = QString::fromUtf8(picked.required_deps);
         ModsWorker::Request req;
         req.op = ModsWorker::DownloadFile;
+        /* CurseForge 的文件链接：**官方在前、镜像兜底**（与查询同一条口径：官方在前镜像在后）。
+         * 实测这条官方直链目前回 404，引擎自己换到镜像那一条（302 -> forgecdn，206 续传）。
+         * Modrinth 直连，不动。 */
         req.url = QString::fromUtf8(picked.url);
+        if (m_installSource == QLatin1String("curseforge")) {
+            char mirrored[1400];
+            const QString direct = QString::fromUtf8(picked.url);
+            if (sxcl_mods_mirror_url(direct.toUtf8().constData(), mirrored, sizeof(mirrored)) == 1) {
+                const QString viaMirror = QString::fromUtf8(mirrored);
+                if (viaMirror != direct) {
+                    req.altUrls << viaMirror;
+                }
+            }
+        }
         req.dest = dest;
         req.sha1 = QString::fromUtf8(picked.sha1);
         req.size = picked.size;
@@ -709,9 +791,13 @@ private:
                           QStringLiteral("这一条没有可用的 id"), this, 5000);
             return;
         }
+        m_installSource = src;
         m_phase = LoadingVersions;
+        m_pending.clear();
+        m_fallback.clear();
+        enqueueCandidates(src, QString::fromUtf8(url)); // 文件列表也走同一条兜底
         setBusy(true, QStringLiteral("正在取「%1」的版本列表…").arg(m_projectTitle));
-        startFetch(QString::fromUtf8(url), src);
+        startNextFetch();
     }
 
     /** 把**合并后**的结果摆出来:两个源的条目在同一份列表里,按源分段(段序固定),
@@ -842,16 +928,15 @@ private:
     bool m_shaders = false;
     Phase m_phase = Idle;
     /** 一次搜索要跑的几个请求(勾了几个源就有几个),**串行**发:worker 槽只有一个。 */
-    struct PendingFetch {
-        QString url;
-        QString source;
-    };
     QStringList m_sources;            // 勾上的源(固定顺序,与勾选先后无关)
     QStringList m_requested;          // 这一轮真发过请求的源(计数与取证都用它)
     QVector<PendingFetch> m_pending;  // 还没发的请求
+    QHash<QString, QVector<PendingFetch>> m_fallback; // 源 -> 还没试的候选(失败才接着试)
     QVector<ModsHitRow> m_rows;       // 合并后的结果(界面只认这一份)
     bool m_busy = false;              // 有没有活正在跑(搜索/取版本/下载)
     QString m_fetchSource;
+    QString m_fetchVia;               // 当前这一次走的是哪条路(失败取证用)
+    QString m_installSource;          // 正在装的那条结果属于哪个源(决定下载候选)
     QString m_gameDir;
     QString m_instance;
     QString m_mc;      // 拿去筛版本的**原版版本号**:只认版本文件里的,认不出就是空(=不筛)

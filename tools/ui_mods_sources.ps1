@@ -1,41 +1,46 @@
-# (C) Silent X Craft Launcher -- "mods sources" acceptance (user 2026-09-26).
+# (C) Silent X Craft Launcher -- "mods sources" acceptance (user 2026-09-26 / 2026-09-27).
 #
-# What the user asked for, verbatim:
-#   "mod download: the two circles must be CHECK OPTIONS, not 'search a mod and pick from the two
-#    below it' -- copy the idea; about the CurseForge key, I will give it to you later, do NOT let
-#    the user type it in."
+# The user's rules, verbatim:
+#   2026-09-26: "the two circles must be CHECK OPTIONS, not 'search a mod and pick from the two
+#               below it' ... about the CurseForge key, I will give it to you later, do NOT let
+#               the user type it in."
+#   2026-09-27: "by default we use the fallback key too ... mainly the two OFFICIAL sources, and
+#               only then the mirror ... the check boxes are there so the user can EXCLUDE a
+#               source he does not want -- that is a subjective choice, never a way to configure
+#               CurseForge."
 #
-# So this script proves, per run (every number is measured here, nothing is guessed):
+# What this proves, per run (every number is measured on this machine, nothing is guessed):
 #
-# TIER 1 -- the default build (no CurseForge key compiled in):
-#   1) both sources are real CHECK BOXES in the widget tree, not a single-choice pivot:
-#      #modsSourceModrinth / #modsSourceCurseForge; the dump prints their real checked state
-#      (main.cpp prints " checked" / " unchecked" for checkable buttons -- not our own claim)
-#   2) with no key compiled in, CurseForge is DISABLED (visible but un-clickable) and Modrinth
-#      can be ticked; the product hook SXCL_UI_MODS_SOURCES clicks the REAL widgets
-#   3) there is NO key input anywhere: no #modsCfKeyEdit widget and no "API key" wording in the dump
-#   4) the search still runs, every result row carries its OWN source tag (#modsSourceTag), and the
-#      page says which sources it requested / which one it skipped and why (mods-sources trace)
-#   5) the ticked set is persisted as a list in the settings file (mods.source) and survives a restart
+#  A) the two source check boxes are an EXCLUSION switch only:
+#     - one run with a fresh settings file: BOTH are ticked by default, and NEITHER is disabled
+#       (a greyed-out box would make a beginner think he has to configure something)
+#     - one run where the hook unticks one of them: only that source is requested
+#     - the ticked set is persisted as a list in the settings file and survives a restart
+#  B) the ORDER is "official first, mirror as the fallback" and it is reproducible from the trace:
+#       mods-fetch: source=curseforge via=official url=https://api.curseforge.com/...
+#       mods-fetch-retry: source=curseforge next=mirror
+#       mods-fetch: source=curseforge via=mirror  url=https://mod.mcimirror.top/curseforge/...
+#     The first official attempt really happens (HTTP 403 on a build without a key, which is what
+#     this machine has) and the page still ends up with CurseForge rows -- nothing is faked from
+#     Modrinth, and both sources keep their own tags in the merged list.
+#  C) no CurseForge key input / wording exists anywhere in the product:
+#     - the mods page has no key widget (it was deleted)
+#     - the settings page has no key card either (source-level grep + a settings-route dump)
+#  D) when BOTH paths fail (official 403 + mirror pointed at a black hole through
+#     SXCL_MODS_MIRROR=http://127.0.0.1:9, the acceptance-only override of the mirror root)
+#     the page reports the failure and shows CurseForge 0 -- Modrinth rows are never relabelled.
 #
-# TIER 2 -- a temporary build with a DUMMY key, to prove the "both sources" path really fires:
-#   6) with a key compiled in, CurseForge becomes checkable and BOTH boxes are checked at once
-#   7) both sources are really requested (one mods-fetch trace line per source) and the merged
-#      result line lists both sources with their own counts -- a source with no data stays 0,
-#      nothing is faked from the other source
-#   The build is restored (key removed) at the end, even if an assertion fails.
-#
-# That the merged LIST can hold rows of BOTH sources at once (two blocks, each row keeping its own
-# source, never merged across sources) is proved without network by the unit test
-# tests/mods_sources_test.cpp (ctest name: sxcl_mods_sources_test).
+# The core "official URL -> mirror URL" rewrite has its own offline unit test:
+# tests/mods_test.c test_mirror_url() (ctest: sxcl_mods_test).
 #
 # ASCII-only on purpose (Windows PowerShell 5.1 parses .ps1 as ANSI unless it has a BOM).
 $ErrorActionPreference = 'Continue'
 
 foreach ($v in @('SXCL_UI_ROUTE','SXCL_UI_NAV','SXCL_UI_THEME','SXCL_UI_DUMP','SXCL_UI_DUMP_DEPTH',
-                 'SXCL_UI_MODS_QUERY','SXCL_UI_MODS_SOURCES','SXCL_UI_MODS_SOURCES_DELAY',
-                 'SXCL_UI_MODS_INSTALL','SXCL_UI_SETTINGS','SXCL_UI_GAME_DIR','SXCL_UI_WINDOW',
-                 'SXCL_UI_SHOT','SXCL_UI_SHOT_DELAY','SXCL_UI2')) {
+                 'SXCL_UI_MODS_QUERY','SXCL_UI_MODS_QUERY_DELAY','SXCL_UI_MODS_SOURCES',
+                 'SXCL_UI_MODS_SOURCES_DELAY','SXCL_UI_MODS_INSTALL','SXCL_UI_SETTINGS',
+                 'SXCL_UI_GAME_DIR','SXCL_UI_WINDOW','SXCL_UI_SHOT','SXCL_UI_SHOT_DELAY',
+                 'SXCL_MODS_MIRROR','SXCL_UI2')) {
   Remove-Item ('Env:' + $v) -ErrorAction SilentlyContinue
 }
 
@@ -70,53 +75,23 @@ $j = @{ id='acceptance'; mainClass='net.minecraft.client.main.Main'; type='relea
 Set-Content -Path (Join-Path $work 'mc\versions\acceptance\acceptance.json') -Value ($j | ConvertTo-Json -Depth 5) -Encoding utf8
 $ini = Join-Path $work 'mods.ini'
 
-function Reset-Ini {
+function Reset-Ini([switch]$WithoutSources) {
   Set-Content -Path $ini -Value ('game.default_dir=' + (Join-Path $work 'mc')) -Encoding utf8
   Add-Content -Path $ini -Value 'game.selected_version=acceptance'
+  if (-not $WithoutSources) { }
 }
 
-function Invoke-Mods([string]$tag, [string]$sources, [string]$query, [int]$waitMs) {
-  $env:SXCL_UI_SETTINGS = $ini
-  $env:SXCL_UI_GAME_DIR = (Join-Path $work 'mc')
-  $env:SXCL_UI_ROUTE = 'download'
-  $env:SXCL_UI_NAV = 'download_mod'
-  $env:SXCL_UI_THEME = 'dark'
-  $env:SXCL_UI_WINDOW = '1100x900'
-  $env:SXCL_UI_DUMP = '1'
-  $env:SXCL_UI_DUMP_DEPTH = '16'
-  $env:SXCL_UI_MODS_SOURCES_DELAY = '400'
-  # the tick hook has to finish before the search hook fires (it waits for the widgets to be born)
-  $env:SXCL_UI_MODS_QUERY_DELAY = '2500'
-  $env:SXCL_UI_SHOT_DELAY = [string]$waitMs
-  $shot = Join-Path $work ('shot_' + $tag + '.png')
-  Remove-Item $shot -ErrorAction SilentlyContinue
-  $env:SXCL_UI_SHOT = $shot
-  if ($sources -ne '') { $env:SXCL_UI_MODS_SOURCES = $sources }
-  else { Remove-Item Env:SXCL_UI_MODS_SOURCES -ErrorAction SilentlyContinue }
-  if ($query -ne '') { $env:SXCL_UI_MODS_QUERY = $query }
-  else { Remove-Item Env:SXCL_UI_MODS_QUERY -ErrorAction SilentlyContinue }
-  $out = Join-Path $work ('run_' + $tag + '.txt')
-  $err = $out + '.err'
-  Remove-Item $out,$err -ErrorAction SilentlyContinue
-  Start-Process -FilePath $exe -RedirectStandardOutput $out -RedirectStandardError $err -Wait | Out-Null
-  return @{
-    lines = @(Get-Content $out -Encoding utf8 -ErrorAction SilentlyContinue) + @(Get-Content $err -Encoding utf8 -ErrorAction SilentlyContinue)
-    shot  = $shot
-    tag   = $tag
-  }
-}
-
-function Get-One($lines, [string]$pattern) {
-  foreach ($line in $lines) { if ($line -match $pattern) { return $Matches } }
-  return $null
-}
-# NOTE: PowerShell unrolls a 1-element array on return, so Get-All must return ",$hits";
-# otherwise the caller gets the hashtable itself and .Count becomes its key count (a real bug
-# this script hit: 1 fetch was reported as 2).
+# NOTE: a PowerShell function that returns an array unrolls it -- Get-All must return ",$hits",
+# otherwise the caller gets the hashtable itself and .Count is its key count (a real bug this
+# script hit: one fetch was reported as two).
 function Get-All($lines, [string]$pattern) {
   $hits = @()
   foreach ($line in $lines) { if ($line -match $pattern) { $hits += ,$Matches } }
   return ,$hits
+}
+function Get-One($lines, [string]$pattern) {
+  foreach ($line in $lines) { if ($line -match $pattern) { return $Matches } }
+  return $null
 }
 function Get-Last($lines, [string]$pattern) {
   $found = $null
@@ -139,186 +114,253 @@ function Get-StoredValue([string]$key) {
   return $null
 }
 
+function Invoke-Mods([string]$tag, [string]$sources, [string]$query, [int]$waitMs, [string]$route = 'download', [string]$mirror = '') {
+  $env:SXCL_UI_SETTINGS = $ini
+  $env:SXCL_UI_GAME_DIR = (Join-Path $work 'mc')
+  $env:SXCL_UI_ROUTE = $route
+  $env:SXCL_UI_THEME = 'dark'
+  $env:SXCL_UI_WINDOW = '1100x900'
+  $env:SXCL_UI_DUMP = '1'
+  $env:SXCL_UI_DUMP_DEPTH = '18'
+  $env:SXCL_UI_MODS_SOURCES_DELAY = '400'
+  # the tick hook has to finish before the search hook fires (it waits for the widgets to be born)
+  $env:SXCL_UI_MODS_QUERY_DELAY = '2500'
+  $env:SXCL_UI_SHOT_DELAY = [string]$waitMs
+  $shot = Join-Path $work ('shot_' + $tag + '.png')
+  Remove-Item $shot -ErrorAction SilentlyContinue
+  $env:SXCL_UI_SHOT = $shot
+  if ($route -eq 'download') { $env:SXCL_UI_NAV = 'download_mod' }
+  else { Remove-Item Env:SXCL_UI_NAV -ErrorAction SilentlyContinue }
+  if ($sources -ne '') { $env:SXCL_UI_MODS_SOURCES = $sources }
+  else { Remove-Item Env:SXCL_UI_MODS_SOURCES -ErrorAction SilentlyContinue }
+  if ($query -ne '') { $env:SXCL_UI_MODS_QUERY = $query }
+  else { Remove-Item Env:SXCL_UI_MODS_QUERY -ErrorAction SilentlyContinue }
+  if ($mirror -ne '') { $env:SXCL_MODS_MIRROR = $mirror }
+  else { Remove-Item Env:SXCL_MODS_MIRROR -ErrorAction SilentlyContinue }
+  $out = Join-Path $work ('run_' + $tag + '.txt')
+  $err = $out + '.err'
+  Remove-Item $out,$err -ErrorAction SilentlyContinue
+  Start-Process -FilePath $exe -RedirectStandardOutput $out -RedirectStandardError $err -Wait | Out-Null
+  return @{
+    lines = @(Get-Content $out -Encoding utf8 -ErrorAction SilentlyContinue) + @(Get-Content $err -Encoding utf8 -ErrorAction SilentlyContinue)
+    shot  = $shot
+    tag   = $tag
+  }
+}
+
 # =====================================================================================
-# TIER 1, run 1: no key compiled in; tick Modrinth only, run a real search
+# RUN 1: fresh settings file, no hook -> BOTH sources ticked by default, neither disabled
 # =====================================================================================
 Write-Output ''
-Write-Output '== tier 1 / run 1: default build (no CurseForge key), tick modrinth, search =='
+Write-Output '== run 1: default state (fresh settings) -> both sources ticked, neither disabled =='
 Remove-Item $ini -ErrorAction SilentlyContinue
 Reset-Ini
-$r1 = Invoke-Mods 't1a' 'modrinth' 'jei' 11000
+$r1 = Invoke-Mods 'r1_default' '' '' 4500
 $lines1 = $r1.lines
-
-$pick = Get-One $lines1 'mods-source-pick: want=(\S+) modrinth=(\S+) curseforge=(\S+)'
-Ok ($pick -ne $null) 'the source picking hook ran (it clicks the real check boxes)'
-if ($pick -ne $null) {
-  Write-Output ('  trace: want=' + $pick[1] + ' modrinth=' + $pick[2] + ' curseforge=' + $pick[3])
-  Ok ($pick[2] -eq 'checked') 'modrinth ticked through the real widget'
-  Ok ($pick[3] -eq 'disabled') 'with no key compiled in, curseforge is visible but disabled (cannot be ticked)'
+$mLine1 = Find-Visible $lines1 '#modsSourceModrinth \('
+$cLine1 = Find-Visible $lines1 '#modsSourceCurseForge \('
+Write-Output ('  dump modrinth  : ' + $mLine1.Trim())
+Write-Output ('  dump curseforge: ' + $cLine1.Trim())
+Ok ($mLine1 -match ' checked') 'by default Modrinth is ticked'
+Ok ($cLine1 -match ' checked') 'by default CurseForge is ticked too (both on, the user unticks what he does not want)'
+Ok ($mLine1 -notmatch ' disabled') 'the Modrinth box is usable (never greyed out)'
+Ok ($cLine1 -notmatch ' disabled') 'the CurseForge box is usable WITHOUT any key (never greyed out)'
+$srcState = Get-Last $lines1 'mods-sources-state: picked=(\S*) searchable=(\S*) skipped=(\S*)'
+if ($srcState -ne $null) {
+  Write-Output ('  trace: picked=' + $srcState[1] + ' searchable=' + $srcState[2] + ' skipped=' + $srcState[3])
+  Ok ($srcState[1] -eq 'modrinth,curseforge') 'the picked set is both sources'
 }
-
-$boxM = @($lines1 | Where-Object { $_ -match '#modsSourceModrinth \(' -and $_ -notmatch ' hidden' })
-$boxC = @($lines1 | Where-Object { $_ -match '#modsSourceCurseForge \(' -and $_ -notmatch ' hidden' })
-Ok ($boxM.Count -ge 1 -and $boxC.Count -ge 1) ('both source check boxes are in the widget tree (modrinth=' + $boxM.Count + ' curseforge=' + $boxC.Count + ')')
-$mLine = Find-Visible $lines1 '#modsSourceModrinth \('
-$cLine = Find-Visible $lines1 '#modsSourceCurseForge \('
-Write-Output ('  dump modrinth  : ' + $mLine.Trim())
-Write-Output ('  dump curseforge: ' + $cLine.Trim())
-Ok ($mLine -match ' checked') 'dump says modrinth is checked (real state, not our own claim)'
-Ok ($cLine -match ' disabled') 'dump says curseforge is disabled'
-Ok ($cLine -notmatch ' checked') 'dump says curseforge is NOT checked'
-
-$keyWidgets = @($lines1 | Where-Object { $_ -match '#modsCfKeyEdit' })
-Ok ($keyWidgets.Count -eq 0) ('there is no CurseForge key input widget anywhere (' + $keyWidgets.Count + ' found)')
-$keyText = @($lines1 | Where-Object { $_ -match 'API [Kk]ey' -or $_ -match 'x-api-key' })
-Ok ($keyText.Count -eq 0) ('the dump never asks the user for a key (' + $keyText.Count + ' lines mention one)')
-
-$src = Get-Last $lines1 'mods-sources: picked=(\S*) searchable=(\S*) skipped=(\S*)'
-Ok ($src -ne $null) 'the page reports which sources it picked / searches / skips'
-if ($src -ne $null) {
-  Write-Output ('  trace: picked=' + $src[1] + ' searchable=' + $src[2] + ' skipped=' + $src[3])
-  Ok ($src[1] -eq 'modrinth') 'picked set is the ticked one (modrinth)'
-  Ok ($src[3] -like 'curseforge:*') 'the skipped source is named together with the reason'
-}
-$fetches = Get-All $lines1 'mods-fetch: source=(\S+)'
-Ok ($fetches.Count -eq 1 -and $fetches[0][1] -eq 'modrinth') ('exactly one fetch, and it is modrinth (' + $fetches.Count + ' fetches)')
-
-$merge = Get-One $lines1 'mods-merged: sources=(\S*) rows=(\d+) perSource="([^"]*)"'
-Ok ($merge -ne $null) 'the page reports the merged result line'
-if ($merge -ne $null) {
-  Write-Output ('  trace: sources=' + $merge[1] + ' rows=' + $merge[2] + ' perSource="' + $merge[3] + '"')
-  Ok ([int]$merge[2] -gt 0) ('the search really returned rows (' + $merge[2] + ')')
-  Ok ($merge[3] -match '^Modrinth \d+$') 'per-source counts only list the source that was searched'
-}
-$tags = @($lines1 | Where-Object { $_ -match '#modsSourceTag \(' -and $_ -notmatch ' hidden' })
-Ok ($tags.Count -ge 1) ('every result card carries its own source tag (' + $tags.Count + ' tags)')
-$badTags = @($lines1 | Where-Object { $_ -match '#modsSourceTag \(' -and $_ -notmatch ' hidden' -and $_ -notmatch 'Modrinth' })
-Ok ($badTags.Count -eq 0) ('no row claims a source it does not come from (' + $badTags.Count + ' mismatches)')
-
-$stored = Get-StoredValue 'mods.source'
-Write-Output ('  persisted mods.source = "' + $stored + '" (still unwritten: the default is not a user choice)')
+$stored1 = Get-StoredValue 'mods.source'
+Ok ($stored1 -eq $null) ('nothing was written yet: the default is not a user choice (mods.source=' + $stored1 + ')')
 
 # =====================================================================================
-# TIER 1, run 2: untick everything through the real widget -> the EMPTY set is persisted,
-#               and the search button goes dead (nothing to search)
+# RUN 2: the user excludes CurseForge -> only Modrinth is requested
 # =====================================================================================
 Write-Output ''
-Write-Output '== tier 1 / run 2: hook wants no known source -> modrinth gets unticked, the empty set is persisted =='
-$r2 = Invoke-Mods 't1b' 'none' '' 5000
+Write-Output '== run 2: user unticks CurseForge -> only the remaining source is searched =='
+$r2 = Invoke-Mods 'r2_exclude_cf' 'modrinth' 'jei' 13000
 $lines2 = $r2.lines
 $pick2 = Get-One $lines2 'mods-source-pick: want=(\S+) modrinth=(\S+) curseforge=(\S+)'
-Ok ($pick2 -ne $null) 'the hook ran on run 2'
+Ok ($pick2 -ne $null) 'the source picking hook ran (it clicks the real check boxes)'
 if ($pick2 -ne $null) {
   Write-Output ('  trace: want=' + $pick2[1] + ' modrinth=' + $pick2[2] + ' curseforge=' + $pick2[3])
-  Ok ($pick2[2] -eq 'unchecked') 'modrinth can be unticked through the real widget (a check box, not a pivot)'
+  Ok ($pick2[2] -eq 'checked' -and $pick2[3] -eq 'unchecked') 'the unticked source is really unticked (and it stayed enabled)'
 }
-$mLine2 = Find-Visible $lines2 '#modsSourceModrinth \('
-Write-Output ('  dump modrinth  : ' + $mLine2.Trim())
-Ok ($mLine2 -notmatch ' checked') 'the dump agrees: no source is ticked now'
-$goLine2 = Find-Visible $lines2 '#modsSearchButton \('
-Write-Output ('  dump search btn: ' + $goLine2.Trim())
-Ok ($goLine2 -match ' disabled') 'with no source ticked the search button is dead (no "pick a source first" wording needed)'
+$cLine2 = Find-Visible $lines2 '#modsSourceCurseForge \('
+Ok ($cLine2 -notmatch ' disabled') 'even unticked, the box is not greyed out'
+$f2 = Get-All $lines2 'mods-fetch: source=(\S+) via=(\S+)'
+$seen2 = @()
+foreach ($f in $f2) { $seen2 += $f[1] }
+Write-Output ('  fetches: ' + ($seen2 -join ', '))
+Ok ($seen2.Count -eq 1 -and $seen2[0] -eq 'modrinth') ('exactly one fetch, and it is the ticked source (' + $seen2.Count + ')')
+$m2 = Get-Last $lines2 'mods-merged: sources=(\S*) rows=(\d+) perSource="([^"]*)"'
+if ($m2 -ne $null) {
+  Write-Output ('  trace: sources=' + $m2[1] + ' rows=' + $m2[2] + ' perSource="' + $m2[3] + '"')
+  Ok ([int]$m2[2] -gt 0) ('the search really returned rows (' + $m2[2] + ')')
+  Ok ($m2[3] -match '^Modrinth \d+$') 'per-source counts list only the source that was searched'
+} else { Ok $false 'the merged result line is missing' }
+$tags2 = @($lines2 | Where-Object { $_ -match '#modsSourceTag \(' -and $_ -notmatch ' hidden' })
+Ok ($tags2.Count -ge 1) ('every result card carries its own source tag (' + $tags2.Count + ')')
+$badTags2 = @($lines2 | Where-Object { $_ -match '#modsSourceTag \(' -and $_ -notmatch ' hidden' -and $_ -notmatch 'Modrinth' })
+Ok ($badTags2.Count -eq 0) ('no row claims a source it does not come from (' + $badTags2.Count + ')')
 $stored2 = Get-StoredValue 'mods.source'
-Ok ($stored2 -eq '') ('the empty set is persisted as such (mods.source=, got "' + $stored2 + '")')
+Ok ($stored2 -eq 'modrinth') ('the choice is persisted as a list: mods.source=' + $stored2)
 
 # =====================================================================================
-# TIER 1, run 3: restart with the empty set on disk -> it must NOT fall back to the default
+# RUN 3: both sources -> official first, mirror as the fallback, both sets of rows
 # =====================================================================================
 Write-Output ''
-Write-Output '== tier 1 / run 3: restart -> an explicitly empty set stays empty (no silent default) =='
-$r3 = Invoke-Mods 't1c' '' '' 4000
-$mLine3 = Find-Visible $r3.lines '#modsSourceModrinth \('
-Write-Output ('  dump modrinth  : ' + $mLine3.Trim())
-Ok ($mLine3 -notmatch ' checked') 'a written empty set reads back as "nothing ticked" (the default only applies when the key was never written)'
+Write-Output '== run 3: both sources ticked -> official first, mirror fallback, merged list has both =='
+$r3 = Invoke-Mods 'r3_both' 'modrinth,curseforge' 'jei' 20000
+$lines3 = $r3.lines
+$f3 = Get-All $lines3 'mods-fetch: source=(\S+) via=(\S+) url=(\S+)'
+foreach ($f in $f3) { Write-Output ('  fetch: source=' + $f[1] + ' via=' + $f[2] + ' url=' + $f[3]) }
+$cfFirst = $null
+foreach ($f in $f3) { if ($f[1] -eq 'curseforge' -and $cfFirst -eq $null) { $cfFirst = $f } }
+Ok ($cfFirst -ne $null) 'CurseForge was really requested'
+if ($cfFirst -ne $null) {
+  Ok ($cfFirst[2] -eq 'official') 'the FIRST CurseForge attempt goes to the official host'
+  Ok ($cfFirst[3] -match 'api\.curseforge\.com') '  and that URL is api.curseforge.com'
+}
+$retry = Get-One $lines3 'mods-fetch-retry: source=(\S+) next=(\S+)'
+Ok ($retry -ne $null) 'the page switched routes after the official attempt failed (fallback)'
+if ($retry -ne $null) {
+  Write-Output ('  trace: retry source=' + $retry[1] + ' next=' + $retry[2])
+  Ok ($retry[2] -eq 'mirror') 'the fallback is the mirror'
+}
+$cfMirror = $null
+foreach ($f in $f3) { if ($f[1] -eq 'curseforge' -and $f[2] -eq 'mirror') { $cfMirror = $f } }
+Ok ($cfMirror -ne $null) 'a mirror request for CurseForge really happened'
+if ($cfMirror -ne $null) {
+  Ok ($cfMirror[3] -match 'mod\.mcimirror\.top/curseforge') '  and it points at the mirror, same path'
+}
+$m3 = Get-Last $lines3 'mods-merged: sources=(\S*) rows=(\d+) perSource="([^"]*)"'
+if ($m3 -ne $null) {
+  Write-Output ('  trace: sources=' + $m3[1] + ' rows=' + $m3[2] + ' perSource="' + $m3[3] + '"')
+  Ok ($m3[1] -match 'modrinth' -and $m3[1] -match 'curseforge') 'both sources are in the merged result'
+  $cfCount = [int](([regex]::Match($m3[3], 'CurseForge (\d+)')).Groups[1].Value)
+  Ok ($cfCount -gt 0) ('CurseForge rows came through the fallback (' + $cfCount + ' rows)')
+} else { Ok $false 'the merged result line is missing' }
+$tags3cf = @($lines3 | Where-Object { $_ -match '#modsSourceTag \(' -and $_ -notmatch ' hidden' -and $_ -match 'CurseForge' })
+$tags3m = @($lines3 | Where-Object { $_ -match '#modsSourceTag \(' -and $_ -notmatch ' hidden' -and $_ -match 'Modrinth' })
+Write-Output ('  tags: Modrinth=' + $tags3m.Count + ' CurseForge=' + $tags3cf.Count)
+Ok ($tags3cf.Count -gt 0 -and $tags3m.Count -gt 0) 'both sources really put cards on screen, each with its own tag'
+$stored3 = Get-StoredValue 'mods.source'
+Ok ($stored3 -eq 'modrinth,curseforge') ('both ticked sources are persisted as a list (mods.source=' + $stored3 + ')')
 
 # =====================================================================================
-# TIER 1, run 4: the SETTINGS page must not ask for a CurseForge key either
-#               (the card went away together with the settings key it used to write)
+# RUN 4: the user unticks BOTH -> nothing to search, empty set persisted
 # =====================================================================================
 Write-Output ''
-Write-Output '== tier 1 / run 4: settings page carries no CurseForge key card =='
+Write-Output '== run 4: user unticks everything -> the search button goes dead, the empty set is persisted =='
+$r4 = Invoke-Mods 'r4_none' 'none' '' 5000
+$lines4 = $r4.lines
+$pick4 = Get-One $lines4 'mods-source-pick: want=(\S+) modrinth=(\S+) curseforge=(\S+)'
+if ($pick4 -ne $null) {
+  Write-Output ('  trace: want=' + $pick4[1] + ' modrinth=' + $pick4[2] + ' curseforge=' + $pick4[3])
+  Ok ($pick4[2] -eq 'unchecked' -and $pick4[3] -eq 'unchecked') 'both boxes can be unticked through the real widgets'
+}
+$goLine4 = Find-Visible $lines4 '#modsSearchButton \('
+Write-Output ('  dump search btn: ' + $goLine4.Trim())
+Ok ($goLine4 -match ' disabled') 'with no source ticked the search button is dead (no "pick a source first" wording needed)'
+$stored4 = Get-StoredValue 'mods.source'
+Ok ($stored4 -eq '') ('the empty set is persisted as such (mods.source=, got "' + $stored4 + '")')
+
+# =====================================================================================
+# RUN 5: restart with the empty set on disk -> it must NOT fall back to the default
+# =====================================================================================
+Write-Output ''
+Write-Output '== run 5: restart -> an explicitly empty set stays empty (the default only applies to a missing key) =='
+$r5 = Invoke-Mods 'r5_restart' '' '' 4000
+$mLine5 = Find-Visible $r5.lines '#modsSourceModrinth \('
+Write-Output ('  dump modrinth  : ' + $mLine5.Trim())
+Ok ($mLine5 -notmatch ' checked') 'a written empty set reads back as "nothing ticked"'
+
+# =====================================================================================
+# RUN 6: the SETTINGS page must not offer a CurseForge key either
+# =====================================================================================
+Write-Output ''
+Write-Output '== run 6: settings page carries no CurseForge key card =='
 $srcFile = Join-Path $root 'src\ui\pages\settings_page.cpp'
 # NOTE: the settings key is matched **with its quotes** (a live reference is always a C string
 # literal). The source file keeps a comment that explains WHY the card was deleted, and that
 # comment names the old setting key on purpose -- matching the bare token would flag that comment.
 $srcHits = @(Select-String -Path $srcFile -Pattern 'curseForgeKeyEdit|curseForgeKeySave|CurseForgeKeyCard|kKeyCfApiKey|"mods\.curseforge_api_key"' -ErrorAction SilentlyContinue)
 Ok ($srcHits.Count -eq 0) ('settings_page.cpp has no CF key card / key constant left (' + $srcHits.Count + ' hits)')
-
-$env:SXCL_UI_SETTINGS = $ini
-$env:SXCL_UI_GAME_DIR = (Join-Path $work 'mc')
-$env:SXCL_UI_ROUTE = 'settings'
-$env:SXCL_UI_THEME = 'dark'
-$env:SXCL_UI_WINDOW = '1100x750'
-$env:SXCL_UI_DUMP = '1'
-$env:SXCL_UI_DUMP_DEPTH = '18'
-$env:SXCL_UI_SHOT = (Join-Path $work 'shot_settings.png')
-$env:SXCL_UI_SHOT_DELAY = '4000'
-Remove-Item Env:SXCL_UI_NAV -ErrorAction SilentlyContinue
-Remove-Item Env:SXCL_UI_MODS_QUERY -ErrorAction SilentlyContinue
-Remove-Item Env:SXCL_UI_MODS_SOURCES -ErrorAction SilentlyContinue
-$outS = Join-Path $work 'run_settings.txt'
-$errS = $outS + '.err'
-Remove-Item $outS,$errS -ErrorAction SilentlyContinue
-Start-Process -FilePath $exe -RedirectStandardOutput $outS -RedirectStandardError $errS -Wait | Out-Null
-$linesS = @(Get-Content $outS -Encoding utf8 -ErrorAction SilentlyContinue) + @(Get-Content $errS -Encoding utf8 -ErrorAction SilentlyContinue)
-Ok ((@($linesS | Where-Object { $_ -match 'ScrollArea #SettingsPage \(' }).Count) -ge 1) 'the settings page really rendered (the dump has #SettingsPage)'
-$keyWidgetsS = @($linesS | Where-Object { $_ -match 'curseForgeKeyEdit|curseForgeKeySave' })
-Ok ($keyWidgetsS.Count -eq 0) ('no key input / save widget anywhere on the settings page (' + $keyWidgetsS.Count + ' found)')
-$keyWordsS = @($linesS | Where-Object { $_ -match 'API [Kk]ey|console\.curseforge\.com|' + (C @(0x7C98,0x8D34)) + ' key' })
-Ok ($keyWordsS.Count -eq 0) ('nothing on the settings page asks the user for a key (' + $keyWordsS.Count + ' lines)')
-$dlGroupS = @($linesS | Where-Object { $_ -match (C @(0x4E0B,0x8F7D,0x8BBE,0x7F6E)) })
-Ok ($dlGroupS.Count -ge 1) 'the download settings group is still there (only the key card was removed)'
+$r6 = Invoke-Mods 'r6_settings' '' '' 4000 'settings'
+$lines6 = $r6.lines
+Ok ((@($lines6 | Where-Object { $_ -match 'ScrollArea #SettingsPage \(' }).Count) -ge 1) 'the settings page really rendered (the dump has #SettingsPage)'
+$keyWidgets6 = @($lines6 | Where-Object { $_ -match 'curseForgeKeyEdit|curseForgeKeySave' })
+Ok ($keyWidgets6.Count -eq 0) ('no key input / save widget anywhere on the settings page (' + $keyWidgets6.Count + ')')
+$keyWords6 = @($lines6 | Where-Object { $_ -match 'API [Kk]ey|console\.curseforge\.com|' + (C @(0x7C98,0x8D34)) + ' key' })
+Ok ($keyWords6.Count -eq 0) ('nothing on the settings page asks the user for a key (' + $keyWords6.Count + ' lines)')
+$dlGroup6 = @($lines6 | Where-Object { $_ -match (C @(0x4E0B,0x8F7D,0x8BBE,0x7F6E)) })
+Ok ($dlGroup6.Count -ge 1) 'the download settings group is still there (only the key card was removed)'
+$keyWordsMods = @($lines3 | Where-Object { $_ -match 'API [Kk]ey|x-api-key|' + (C @(0x955C,0x50CF)) + '|' + (C @(0x5BC6,0x94A5)) })
+Ok ($keyWordsMods.Count -eq 0) ('the mods page never mentions a key or a mirror (' + $keyWordsMods.Count + ' lines)')
 
 # =====================================================================================
-# TIER 2: temporary build with a dummy key -> both sources at once
+# RUN 7: both routes dead -> honest failure (official 403 + mirror pointed at a black hole)
 # =====================================================================================
 Write-Output ''
-Write-Output '== tier 2: temporary build with a dummy key -> both sources ticked and both requested =='
+Write-Output '== run 7: mirror unreachable and no key -> CurseForge reports the failure, nothing is faked =='
+$r7 = Invoke-Mods 'r7_blackhole' 'modrinth,curseforge' 'jei' 22000 'download' 'http://127.0.0.1:9'
+$lines7 = $r7.lines
+$f7 = Get-All $lines7 'mods-fetch: source=(\S+) via=(\S+) url=(\S+)'
+foreach ($f in $f7) { Write-Output ('  fetch: source=' + $f[1] + ' via=' + $f[2] + ' url=' + $f[3]) }
+$bh = $null
+foreach ($f in $f7) { if ($f[1] -eq 'curseforge' -and $f[2] -eq 'mirror') { $bh = $f } }
+Ok ($bh -ne $null -and $bh[3] -match '127\.0\.0\.1:9') 'the mirror attempt really went to the black hole (SXCL_MODS_MIRROR override)'
+$failed7 = Get-One $lines7 'mods-fetch-failed: source=(\S+) via=(\S+)'
+Ok ($failed7 -ne $null -and $failed7[1] -eq 'curseforge') 'CurseForge is reported as failed after both routes'
+$m7 = Get-Last $lines7 'mods-merged: sources=(\S*) rows=(\d+) perSource="([^"]*)"'
+if ($m7 -ne $null) {
+  Write-Output ('  trace: sources=' + $m7[1] + ' rows=' + $m7[2] + ' perSource="' + $m7[3] + '"')
+  $cf7 = [int](([regex]::Match($m7[3], 'CurseForge (\d+)')).Groups[1].Value)
+  $mr7 = [int](([regex]::Match($m7[3], 'Modrinth (\d+)')).Groups[1].Value)
+  Ok ($cf7 -eq 0) ('CurseForge contributes 0 rows (' + $cf7 + ')')
+  Ok ($mr7 -gt 0) ('the other source still works (' + $mr7 + ' rows)')
+} else { Ok $false 'the merged result line is missing in the black-hole run' }
+$tags7cf = @($lines7 | Where-Object { $_ -match '#modsSourceTag \(' -and $_ -notmatch ' hidden' -and $_ -match 'CurseForge' })
+Ok ($tags7cf.Count -eq 0) ('no Modrinth row was relabelled as CurseForge (' + $tags7cf.Count + ' CurseForge tags)')
+
+# =====================================================================================
+# RUN 8 (tier 2): a build that HAS a key -> official is used first with that key
+# =====================================================================================
+Write-Output ''
+Write-Output '== run 8: temporary build with a key -> official attempt carries the key, mirror still backs it up =='
 $build = Join-Path $root 'build-ui'
 $dummy = 'sxcl-acceptance-dummy-key'
 try {
   & cmake -S $root -B $build ('-DSXCL_CURSEFORGE_API_KEY=' + $dummy) 2>&1 | Out-Null
-  & cmake --build $build --config Release --target sxcl-ui 2>&1 | Select-Object -Last 4 | ForEach-Object { Write-Output ('  build: ' + $_) }
-  $r3 = Invoke-Mods 't2' 'modrinth,curseforge' 'jei' 14000
-  $lines3 = $r3.lines
-  $pick3 = Get-One $lines3 'mods-source-pick: want=(\S+) modrinth=(\S+) curseforge=(\S+)'
-  Ok ($pick3 -ne $null) 'the hook ran on the keyed build'
-  if ($pick3 -ne $null) {
-    Write-Output ('  trace: want=' + $pick3[1] + ' modrinth=' + $pick3[2] + ' curseforge=' + $pick3[3])
-    Ok ($pick3[2] -eq 'checked' -and $pick3[3] -eq 'checked') 'BOTH sources are ticked at the same time (check boxes, not a pivot)'
-  }
-  $src3 = Get-One $lines3 'mods-sources: picked=(\S*) searchable=(\S*) skipped=(\S*)'
-  if ($src3 -ne $null) {
-    Write-Output ('  trace: picked=' + $src3[1] + ' searchable=' + $src3[2] + ' skipped=' + $src3[3])
-    Ok (($src3[1] -match 'modrinth') -and ($src3[1] -match 'curseforge')) 'both ticked sources are in the picked set'
-    Ok ($src3[3] -eq 'none') 'nothing is skipped when a key is compiled in'
-  } else { Ok $false 'the page reports picked / searchable / skipped on the keyed build' }
-  $f3 = Get-All $lines3 'mods-fetch: source=(\S+)'
-  $seen = @()
-  foreach ($f in $f3) { $seen += $f[1] }
-  Write-Output ('  fetches: ' + ($seen -join ', '))
-  Ok (($seen -contains 'modrinth') -and ($seen -contains 'curseforge')) 'both sources are really requested (one fetch each)'
-  $m3 = Get-Last $lines3 'mods-merged: sources=(\S*) rows=(\d+) perSource="([^"]*)"'
-  if ($m3 -ne $null) {
-    Write-Output ('  trace: sources=' + $m3[1] + ' rows=' + $m3[2] + ' perSource="' + $m3[3] + '"')
-    Ok (($m3[3] -match 'Modrinth \d+') -and ($m3[3] -match 'CurseForge \d+')) 'the merged line lists both sources with their own counts'
-  } else { Ok $false 'the merged result line names both sources' }
-  $stored3 = Get-StoredValue 'mods.source'
-  Write-Output ('  persisted mods.source = "' + $stored3 + '"')
-  Ok ($stored3 -eq 'modrinth,curseforge') 'both ticked sources are persisted as a LIST (modrinth,curseforge)'
+  & cmake --build $build --config Release --target sxcl-ui 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Output ('  build: ' + $_) }
+  $r8 = Invoke-Mods 'r8_keyed' 'modrinth,curseforge' 'jei' 22000
+  $lines8 = $r8.lines
+  $f8 = Get-All $lines8 'mods-fetch: source=(\S+) via=(\S+) url=(\S+)'
+  foreach ($f in $f8) { Write-Output ('  fetch: source=' + $f[1] + ' via=' + $f[2] + ' url=' + $f[3]) }
+  $first8 = $null
+  foreach ($f in $f8) { if ($f[1] -eq 'curseforge' -and $first8 -eq $null) { $first8 = $f } }
+  Ok ($first8 -ne $null -and $first8[2] -eq 'official') 'with a key compiled in the official route is still tried first'
+  $retry8 = Get-One $lines8 'mods-fetch-retry: source=(\S+) next=(\S+)'
+  Ok ($retry8 -ne $null -and $retry8[2] -eq 'mirror') 'a rejected key falls back to the mirror instead of failing the source'
+  $m8 = Get-Last $lines8 'mods-merged: sources=(\S*) rows=(\d+) perSource="([^"]*)"'
+  if ($m8 -ne $null) {
+    Write-Output ('  trace: sources=' + $m8[1] + ' rows=' + $m8[2] + ' perSource="' + $m8[3] + '"')
+    $cf8 = [int](([regex]::Match($m8[3], 'CurseForge (\d+)')).Groups[1].Value)
+    Ok ($cf8 -gt 0) ('CurseForge rows still arrive through the fallback (' + $cf8 + ' rows)')
+  } else { Ok $false 'the merged result line is missing on the keyed build' }
 } finally {
   Write-Output '  restoring the build (removing the dummy key)'
   & cmake -S $root -B $build '-DSXCL_CURSEFORGE_API_KEY=' 2>&1 | Out-Null
   & cmake --build $build --config Release --target sxcl-ui 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Output ('  build: ' + $_) }
 }
-$r4 = Invoke-Mods 't1d' '' '' 5000
-$cLine4 = Find-Visible $r4.lines '#modsSourceCurseForge \('
-$mLine4 = Find-Visible $r4.lines '#modsSourceModrinth \('
-Write-Output ('  dump modrinth  : ' + $mLine4.Trim())
-Write-Output ('  dump curseforge: ' + $cLine4.Trim())
-Ok ($cLine4 -match ' disabled') 'after restoring the build, curseforge is disabled again (no dummy key left behind)'
-Ok ($cLine4 -notmatch ' checked') 'the persisted curseforge tick is dropped in a build that cannot search it'
-Ok ($mLine4 -match ' checked') 'the other persisted tick (modrinth) is read back from mods.source'
+$r9 = Invoke-Mods 'r9_after_restore' '' '' 4500
+$cLine9 = Find-Visible $r9.lines '#modsSourceCurseForge \('
+$mLine9 = Find-Visible $r9.lines '#modsSourceModrinth \('
+Write-Output ('  dump modrinth  : ' + $mLine9.Trim())
+Write-Output ('  dump curseforge: ' + $cLine9.Trim())
+Ok ($cLine9 -match ' checked') 'after restoring the build both persisted ticks come back'
+Ok ($cLine9 -notmatch ' disabled') 'and the CurseForge box is still usable without a key (no dummy key left behind)'
 
 Write-Output ''
 Write-Output ('  product files: ' + $work)

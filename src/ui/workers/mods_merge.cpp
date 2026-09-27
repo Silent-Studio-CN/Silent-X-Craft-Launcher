@@ -76,7 +76,9 @@ QString formatModsSources(const QStringList &sources) {
 
 QStringList modsSourcesFromStored(const char *storedOrNull) {
     if (storedOrNull == nullptr) {
-        return QStringList{QStringLiteral("modrinth")}; // 从来没写过这个键 = 默认这一源
+        /* 从来没写过这个键 = **两个源都勾上**。勾选框的语义只有一个：用户**不想用哪个就取消勾选**；
+         * 默认全给上（用户 2026-09-27：「默认两个都勾上」「是排除用户不想用的」）。 */
+        return modsAllSources();
     }
     return parseModsSources(fromC(storedOrNull));
 }

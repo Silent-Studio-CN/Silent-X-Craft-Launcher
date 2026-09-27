@@ -16,6 +16,9 @@
 
 #include "sxcl/json.h"
 
+/* 镜像兜底的默认根（与 PCL 同一个社区镜像；可用环境变量 SXCL_MODS_MIRROR 覆盖）。 */
+#define SXCL_MIRROR_DEFAULT "https://mod.mcimirror.top"
+
 /* ── 小工具 ── */
 
 static void copy_cap(char *dst, size_t cap, const char *src)
@@ -37,6 +40,29 @@ static void set_err(char *err, size_t err_len, const char *text)
     if (err != NULL && err_len > 0) {
         copy_cap(err, err_len, text);
     }
+}
+
+/* host 是 host_len 长的切片(可能后面紧跟 '/' 或结束),拿它跟一个字面量比(不分大小写)。 */
+static int host_equal_ci(const char *host, size_t host_len, const char *want)
+{
+    size_t i;
+    if (host == NULL || want == NULL || strlen(want) != host_len) {
+        return 0;
+    }
+    for (i = 0; i < host_len; ++i) {
+        char x = host[i];
+        char y = want[i];
+        if (x >= 'A' && x <= 'Z') {
+            x = (char)(x - 'A' + 'a');
+        }
+        if (y >= 'A' && y <= 'Z') {
+            y = (char)(y - 'A' + 'a');
+        }
+        if (x != y) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int str_equal_ci(const char *a, const char *b)
@@ -568,11 +594,26 @@ int sxcl_mods_curseforge_search_url(const sxcl_mods_query *q, char *out, size_t 
     if (q->game_version != NULL && q->game_version[0] != '\0') {
         url_escape(q->game_version, game, sizeof(game));
     }
+    /* "不筛"的那两维**根本不带参数**。官方 API 认 modLoaderType=0(Any) 和空的 gameVersion，
+     * 但社区镜像把 modLoaderType=0 当成"筛一个不存在的加载器"，于是回 0 条
+     * （实测 2026-09-27：同一个查询带 modLoaderType=0 -> {"data":[],"pagination":{...0}}，
+     * 去掉它 -> 200 KB 真实数据；gameVersion=1.20.1 镜像认，gameVersion=（空）不认）。
+     * 空参数本来也没有语义，去掉对官方与镜像两边都是更干净的口径。 */
+    char game_part[160];
+    game_part[0] = '\0';
+    if (game[0] != '\0') {
+        (void)snprintf(game_part, sizeof(game_part), "&gameVersion=%s", game);
+    }
+    char loader_part[48];
+    loader_part[0] = '\0';
+    if (loader_type > 0) {
+        (void)snprintf(loader_part, sizeof(loader_part), "&modLoaderType=%d", loader_type);
+    }
     /* index 0 = 按相关度（与 Modrinth 的 relevance 对齐）；sortOrder 只对其它 index 有意义 */
     const int n = snprintf(out, out_len,
                            "https://api.curseforge.com/v1/mods/search?gameId=432&index=%d"
-                           "&pageSize=%d&searchFilter=%s&classId=%d&gameVersion=%s&modLoaderType=%d",
-                           offset, limit, text, class_id, game, loader_type);
+                           "&pageSize=%d&searchFilter=%s&classId=%d%s%s",
+                           offset, limit, text, class_id, game_part, loader_part);
     return (n < 0 || (size_t)n >= out_len) ? -1 : 0;
 }
 
@@ -673,10 +714,21 @@ int sxcl_mods_curseforge_versions_url(int64_t mod_id, const char *game_version,
     if (game_version != NULL && game_version[0] != '\0') {
         url_escape(game_version, game, sizeof(game));
     }
+    /* 与搜索那条同一个口径："不筛"的那两维不带参数（镜像对 modLoaderType=0 会回空表）。 */
+    const int loader_type = sxcl_mods_curseforge_loader_type(loader_slug);
+    char game_part[160];
+    game_part[0] = '\0';
+    if (game[0] != '\0') {
+        (void)snprintf(game_part, sizeof(game_part), "&gameVersion=%s", game);
+    }
+    char loader_part[48];
+    loader_part[0] = '\0';
+    if (loader_type > 0) {
+        (void)snprintf(loader_part, sizeof(loader_part), "&modLoaderType=%d", loader_type);
+    }
     const int n = snprintf(out, out_len,
-                           "https://api.curseforge.com/v1/mods/%lld/files?gameVersion=%s"
-                           "&modLoaderType=%d&pageSize=50",
-                           (long long)mod_id, game, sxcl_mods_curseforge_loader_type(loader_slug));
+                           "https://api.curseforge.com/v1/mods/%lld/files?pageSize=50%s%s",
+                           (long long)mod_id, game_part, loader_part);
     return (n < 0 || (size_t)n >= out_len) ? -1 : 0;
 }
 
@@ -780,6 +832,77 @@ int sxcl_mods_dir(const char *game_dir, const char *instance, const char *kind, 
         w = snprintf(out, out_len, "%s%s%s", game_dir, sep, leaf);
     }
     return (w < 0 || (size_t)w >= out_len) ? -1 : 0;
+}
+
+/* ── 镜像兜底（PCL 同款：把官方域换成社区镜像域，路径原样保留）── */
+
+const char *sxcl_mods_mirror_base(void)
+{
+    const char *env = getenv("SXCL_MODS_MIRROR");
+    if (env != NULL && env[0] != '\0') {
+        return env;
+    }
+    return SXCL_MIRROR_DEFAULT;
+}
+
+/* a + b + c 拼进 out；放不下返回 -1（同时把 out 清空）。 */
+static int join_url(char *out, size_t out_len, const char *a, const char *b, const char *c)
+{
+    const size_t need = strlen(a) + strlen(b) + strlen(c) + 1;
+    if (out == NULL || out_len == 0 || need > out_len) {
+        if (out != NULL && out_len > 0) {
+            out[0] = '\0';
+        }
+        return -1;
+    }
+    (void)snprintf(out, out_len, "%s%s%s", a, b, c);
+    return 1;
+}
+
+int sxcl_mods_mirror_url(const char *url, char *out, size_t out_len)
+{
+    const char *sep = NULL;
+    const char *host = NULL;
+    const char *path = NULL;
+    size_t host_len = 0;
+    char base[256];
+    size_t base_len = 0;
+
+    if (url == NULL || out == NULL || out_len == 0) {
+        return -1;
+    }
+    sep = strstr(url, "://");
+    if (sep == NULL) {
+        copy_cap(out, out_len, url); /* 不是绝对 URL:原样带回去,不改 */
+        return 0;
+    }
+    host = sep + 3;
+    path = strchr(host, '/');
+    host_len = path != NULL ? (size_t)(path - host) : strlen(host);
+    if (path == NULL) {
+        path = "";
+    }
+
+    copy_cap(base, sizeof(base), sxcl_mods_mirror_base());
+    base_len = strlen(base);
+    while (base_len > 0 && base[base_len - 1] == '/') {
+        base[--base_len] = '\0'; /* 末尾斜杠去掉,免得拼出 // */
+    }
+    if (base_len == 0) {
+        copy_cap(out, out_len, url);
+        return 0;
+    }
+
+    if (host_equal_ci(host, host_len, "api.curseforge.com")) {
+        return join_url(out, out_len, base, "/curseforge", path);
+    }
+    if (host_equal_ci(host, host_len, "edge.forgecdn.net") ||
+        host_equal_ci(host, host_len, "mediafilez.forgecdn.net") ||
+        host_equal_ci(host, host_len, "media.forgecdn.net")) {
+        return join_url(out, out_len, base, "", path);
+    }
+    copy_cap(out, out_len, url); /* 其它主机(含 Modrinth):原样 */
+    return 0;
 }
 
 #ifdef __cplusplus

@@ -12,6 +12,7 @@
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif
 #include <stdio.h>
+#include <stdlib.h> /* _putenv_s / setenv:镜像根那条环境变量覆盖要在这里试一次 */
 #include <string.h>
 
 #include "sxcl/mods.h"
@@ -285,7 +286,20 @@ static void test_curseforge(void) {
     check(strstr(url, "classId=6") != NULL, "  classId 在");
     check(strstr(url, "gameVersion=1.20.1") != NULL, "  游戏版本在");
     check(strstr(url, "modLoaderType=1") != NULL, "  Forge 的 modLoaderType 在");
+    /* 不筛的那两维**不带参数**：镜像把 modLoaderType=0 当"筛一个不存在的加载器"，回 0 条 */
+    check(strstr(url, "modLoaderType=0") == NULL, "  不筛加载器时不带 modLoaderType=0");
     check(strstr(url, "key") == NULL, "  **key 绝不进 URL**(走请求头)");
+    {
+        /* 这一条是给社区镜像的:空的 gameVersion= 会被镜像当成"筛一个空版本",回 0 条 */
+        sxcl_mods_query bare;
+        memset(&bare, 0, sizeof(bare));
+        bare.text = "jei";
+        char url_bare[1024];
+        check_int(sxcl_mods_curseforge_search_url(&bare, url_bare, sizeof(url_bare)), 0,
+                  "CF:不带版本/加载器也拼得出来");
+        check(strstr(url_bare, "gameVersion=") == NULL, "  没有游戏版本时不带空的 gameVersion");
+        check(strstr(url_bare, "modLoaderType=") == NULL, "  没有加载器时不带 modLoaderType=0");
+    }
 
     sxcl_mod_page page;
     char err[160];
@@ -347,6 +361,10 @@ static void test_curseforge_files(void) {
     check(strstr(url, "/v1/mods/238222/files?") != NULL, "  路径对");
     check(strstr(url, "gameVersion=1.20.1") != NULL, "  游戏版本在");
     check(strstr(url, "modLoaderType=1") != NULL, "  Forge 的枚举在");
+    check_int(sxcl_mods_curseforge_versions_url(238222, NULL, NULL, url, sizeof(url)), 0,
+              "两条筛选都不给时 URL 仍拼得出来(只是不带那两个参数)");
+    check(strstr(url, "modLoaderType=0") == NULL, "  不筛加载器时不带 modLoaderType=0");
+    check(strstr(url, "gameVersion=") == NULL, "  没有游戏版本时不带空的 gameVersion");
     check_int(sxcl_mods_curseforge_versions_url(0, NULL, NULL, url, sizeof(url)), -1,
               "没有 id = 参数错");
 
@@ -384,6 +402,88 @@ static void test_curseforge_files(void) {
     check_str(picked.filename, "many.jar", "  挑对了");
 }
 
+/* ── 镜像兜底：官方 URL -> 镜像 URL（PCL 同款域名替换；纯函数，不联网）── */
+static void test_mirror_url(void) {
+    char out[512];
+    char want[512];
+    const char *base = sxcl_mods_mirror_base();
+    check(base != NULL && base[0] != '\0', "镜像根非空");
+    {
+        const size_t n = strlen(base);
+        check(n > 7 && base[n - 1] != '/', "  镜像根不带末尾斜杠(默认值)");
+    }
+
+    /* 1) 官方 CF API:域换掉,路径与查询原样 */
+    check_int(sxcl_mods_mirror_url("https://api.curseforge.com/v1/mods/search?gameId=432&classId=6",
+                                   out, sizeof(out)),
+              1, "CF 搜索 URL 改写成功");
+    snprintf(want, sizeof(want), "%s/curseforge/v1/mods/search?gameId=432&classId=6", base);
+    check_str(out, want, "  api.curseforge.com -> <mirror>/curseforge，路径+查询原样");
+
+    check_int(sxcl_mods_mirror_url("https://api.curseforge.com/v1/mods/238222/files?gameVersion=1.20.1",
+                                   out, sizeof(out)),
+              1, "CF 文件列表 URL 改写成功");
+    snprintf(want, sizeof(want), "%s/curseforge/v1/mods/238222/files?gameVersion=1.20.1", base);
+    check_str(out, want, "  文件列表路径原样");
+
+    /* 2) forgecdn 三个域:都换成镜像根,路径原样(下载链接就靠这条) */
+    check_int(sxcl_mods_mirror_url("https://edge.forgecdn.net/files/4321/2/jei.jar", out, sizeof(out)), 1,
+              "edge.forgecdn.net 改写成功");
+    snprintf(want, sizeof(want), "%s/files/4321/2/jei.jar", base);
+    check_str(out, want, "  edge -> <mirror>，路径原样");
+    check_int(sxcl_mods_mirror_url("https://mediafilez.forgecdn.net/files/4321/2/jei.jar", out,
+                                   sizeof(out)),
+              1, "mediafilez.forgecdn.net 改写成功");
+    check_str(out, want, "  mediafilez -> <mirror>，路径原样");
+    check_int(sxcl_mods_mirror_url("https://media.forgecdn.net/files/9/8/x.jar?token=abc", out,
+                                   sizeof(out)),
+              1, "media.forgecdn.net 改写成功");
+    snprintf(want, sizeof(want), "%s/files/9/8/x.jar?token=abc", base);
+    check_str(out, want, "  media -> <mirror>，查询串也原样");
+
+    /* 3) Modrinth **不动**:我们直连就通,绕镜像只会更慢 */
+    check_int(sxcl_mods_mirror_url("https://api.modrinth.com/v2/search?query=jei", out, sizeof(out)), 0,
+              "Modrinth API 不改写");
+    check_str(out, "https://api.modrinth.com/v2/search?query=jei", "  原样带回去");
+    check_int(sxcl_mods_mirror_url("https://cdn.modrinth.com/data/AANobbMI/icon.png", out, sizeof(out)),
+              0, "Modrinth CDN 不改写");
+
+    /* 4) 认不出的主机 / 不是绝对 URL:原样,绝不乱改 */
+    check_int(sxcl_mods_mirror_url("https://example.com/api.curseforge.com/x", out, sizeof(out)), 0,
+              "别的主机不改写(host 只认主机那一段)");
+    check_str(out, "https://example.com/api.curseforge.com/x", "  原样");
+    check_int(sxcl_mods_mirror_url("api.curseforge.com/v1/x", out, sizeof(out)), 0, "没有 scheme 的串不改写");
+    check_str(out, "api.curseforge.com/v1/x", "  原样");
+    check_int(sxcl_mods_mirror_url("https://api.curseforge.com:443/v1/x", out, sizeof(out)), 0,
+              "带端口的主机不认(我们的 URL 生成器不带端口)");
+
+    /* 5) 缓冲不够:返回 -1 且 out 清空(绝不留半截 URL) */
+    out[0] = 'x';
+    check_int(sxcl_mods_mirror_url("https://api.curseforge.com/v1/mods/search", out, 8), -1,
+              "缓冲不够 = -1");
+    check_str(out, "", "  out 被清空");
+
+    /* 6) SXCL_MODS_MIRROR 覆盖:自建镜像 / 验收把镜像指到黑洞都靠它；末尾斜杠要去掉 */
+#if defined(_MSC_VER)
+    (void)_putenv_s("SXCL_MODS_MIRROR", "https://mirror.example/");
+#else
+    (void)setenv("SXCL_MODS_MIRROR", "https://mirror.example/", 1);
+#endif
+    check_int(sxcl_mods_mirror_url("https://api.curseforge.com/v1/x", out, sizeof(out)), 1,
+              "覆盖后仍然改写");
+    check_str(out, "https://mirror.example/curseforge/v1/x", "  覆盖生效且没有双斜杠");
+    /* 镜像不可用(黑洞)在实现里就是"改写成一个连不上的主机",这里只验改写本身 */
+    check_int(sxcl_mods_mirror_url("https://edge.forgecdn.net/files/1/x.jar", out, sizeof(out)), 1,
+              "覆盖后 forgecdn 也改写");
+    check_str(out, "https://mirror.example/files/1/x.jar", "  路径原样");
+#if defined(_MSC_VER)
+    (void)_putenv_s("SXCL_MODS_MIRROR", "");
+#else
+    (void)unsetenv("SXCL_MODS_MIRROR");
+#endif
+    check_str(sxcl_mods_mirror_base(), base, "清掉环境变量后回到默认镜像根");
+}
+
 int main(void) {
     test_search_url();
     test_search_parse();
@@ -392,6 +492,7 @@ int main(void) {
     test_mods_dir();
     test_curseforge();
     test_curseforge_files();
+    test_mirror_url();
     printf("mods 测试: 通过 %d 项, 失败 %d 项\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

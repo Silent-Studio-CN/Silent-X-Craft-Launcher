@@ -2658,8 +2658,9 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
             return usage();
         }
     }
-    /* CurseForge 是**第二个源**:官方 API 必须带 x-api-key(用户自己申请)。
-     * 没配 key 就**如实不查** —— 不假装有结果、也不偷偷退回 Modrinth 冒充双源。 */
+    /* CurseForge 是**第二个源**：官方 API 要 x-api-key，**没有 key 就走镜像**（PCL 同款域名替换：
+     * 官方 v1 不带 key 一律 403，镜像同路径直接回真实 JSON，而且镜像不要 key）。
+     * 有 key 时官方优先、镜像兜底。**绝不**退回 Modrinth 冒充 CF 的结果。 */
     const int want_cf = source != NULL && _stricmp(source, "curseforge") == 0;
     if (want_cf) {
         char key_buf[256];
@@ -2668,14 +2669,6 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
             if (mods_key_fallback(key_buf, sizeof(key_buf)) == 0) {
                 key = key_buf;
             }
-        }
-        if (key == NULL || key[0] == '\0') {
-            fprintf(stderr,
-                    "CurseForge 需要 API key：这个构建没有内置 key"
-                    "（见 include/sxcl/mods_key.h，构建时 -DSXCL_CURSEFORGE_API_KEY=...），"
-                    "也可以用 --key <KEY> 临时给一份。\n"
-                    "没配 key 就不查这一源 —— 我们不会假装有结果。\n");
-            return 2;
         }
         char cf_url[1200];
         sxcl_mods_query q;
@@ -2697,12 +2690,33 @@ static int cmd_mods(int argc, char **argv, const cli_opts *o) {
                 return 2;
             }
         }
-        printf("请求(带 x-api-key 头,key 不进 URL): %s\n", cf_url);
+        /* 走哪条：没有 key -> 镜像（不要 key）；有 key -> 官方，失败再退镜像。
+         * key 只进**官方**那一次的请求头，任何情况下都不进 URL。 */
+        char mirror_url[1400];
+        const int have_mirror = sxcl_mods_mirror_url(cf_url, mirror_url, sizeof(mirror_url)) == 1;
+        const int no_key = (key == NULL || key[0] == '\0');
+        if (no_key && !have_mirror) {
+            fprintf(stderr, "CurseForge 需要 API key（这个构建没有内置 key，见 include/sxcl/mods_key.h）\n"
+                            "而且这条 URL 改不成镜像 —— 不查这一源，也不会假装有结果。\n");
+            return 2;
+        }
+        const char *use_url = no_key ? mirror_url : cf_url;
+        const char *use_key = no_key ? NULL : key;
+        printf("请求(%s,key 不进 URL): %s\n", no_key ? "走镜像,不带 key" : "带 x-api-key 头", use_url);
         fflush(stdout);
         char *text_body = NULL;
         char herr[256];
         herr[0] = '\0';
-        if (mods_fetch_with_key(cf_url, key, &text_body, herr, sizeof(herr)) != 0 || text_body == NULL) {
+        int frc = mods_fetch_with_key(use_url, use_key, &text_body, herr, sizeof(herr));
+        if ((frc != 0 || text_body == NULL) && !no_key && have_mirror) {
+            /* 官方优先 + 镜像兜底（与界面同一条口径） */
+            fprintf(stderr, "官方这条路失败(%s),改走镜像…\n", herr[0] ? herr : "(没有说明)");
+            free(text_body);
+            text_body = NULL;
+            herr[0] = '\0';
+            frc = mods_fetch_with_key(mirror_url, NULL, &text_body, herr, sizeof(herr));
+        }
+        if (frc != 0 || text_body == NULL) {
             fprintf(stderr, "取 CurseForge 失败: %s\n", herr[0] ? herr : "(没有说明)");
             free(text_body);
             return 1;
