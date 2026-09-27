@@ -38,7 +38,8 @@
 #if defined(_MSC_VER)
 #pragma warning(push, 0) // libqf 的头在 /W4 下不是零警告,整体静音(见 libqf.h 的说明)
 #endif
-#include "../ui_icons.h"              // 自绘 svg 小图标（警示三角）
+#include "../ui_icons.h"              // 自绘 svg 小图标(警告符/叉号)+ 版本行的状态图标
+#include <QShowEvent>                     // 逐行取证:这一份实例真的上屏时再打坐标
 #include "fluent/fluent_controls.h"      // PushButton / InfoBar
 #include "fluent/fluent_input.h"         // SearchLineEdit
 #include "fluent/fluent_labels.h"        // TitleLabel / SubtitleLabel / BodyLabel
@@ -164,7 +165,8 @@ public:
         RowRole = Qt::UserRole, // Python: Qt.UserRole(= 该行的 GameVersion)
         InstalledRole = Qt::UserRole + 1,
         LoadersRole = Qt::UserRole + 2, // QVariantList<QStringList{kind, version}>
-        ProblemRole = Qt::UserRole + 3,
+        ProblemRole = Qt::UserRole + 3, // 装过但起不来时的**一句话**(不是核心库那段完整原因)
+        StateRole = Qt::UserRole + 4,   // 行首状态图标 id:"grass" / "warn" / 空 = 这行没装过
     };
 
     explicit VersionListModel(QObject *parent = nullptr) : QAbstractListModel(parent) {}
@@ -191,6 +193,12 @@ public:
         if (!m_items.isEmpty())
             emit dataChanged(index(0, 0), index(int(m_items.size()) - 1, 0), {ProblemRole});
     }
+    void setStates(const QHash<QString, QString> &mapping) {
+        m_states = mapping;
+        if (!m_items.isEmpty())
+            emit dataChanged(index(0, 0), index(int(m_items.size()) - 1, 0), {StateRole});
+    }
+    void setDetails(const QHash<QString, QString> &mapping) { m_details = mapping; }
 
     int rowCount(const QModelIndex &parent = QModelIndex()) const override {
         return parent.isValid() ? 0 : int(m_items.size());
@@ -211,9 +219,17 @@ public:
             return m_loaders.value(v.id);
         case ProblemRole:
             return m_problems.value(v.id);
-        case Qt::ToolTipRole:
-            // 同样不评判"装没装过"（用户点名）；只报这一行是什么版本。
+        case StateRole:
+            return m_states.value(v.id);
+        case Qt::ToolTipRole: {
+            /* 装过但起不来的行:tooltip = 版本名 + **完整原因** + 它在哪个目录
+             * (用户 2026-09-26:「详细原因与路径放 tooltip」)—— 行内那点地方只放一句话。 */
+            const QString detail = m_details.value(v.id);
+            if (!detail.isEmpty())
+                return detail;
+            // 其余行不评判"装没装过"（用户点名）；只报这一行是什么版本。
             return QStringLiteral("%1\n%2 | %3").arg(v.id, v.type, v.releaseLabel());
+        }
         default:
             return {};
         }
@@ -222,6 +238,8 @@ public:
     const GameVersion &versionAt(int row) const { return m_items.at(row); }
     QVariantList loadersAt(int row) const { return m_loaders.value(m_items.at(row).id); }
     QString problemAt(int row) const { return m_problems.value(m_items.at(row).id); }
+    QString stateAt(int row) const { return m_states.value(m_items.at(row).id); }
+    QString detailAt(int row) const { return m_details.value(m_items.at(row).id); }
     bool installedAt(int row) const { return m_installed.contains(m_items.at(row).id); }
     const QVector<GameVersion> &items() const { return m_items; }
 
@@ -229,7 +247,9 @@ private:
     QVector<GameVersion> m_items;
     QSet<QString> m_installed;
     QHash<QString, QVariantList> m_loaders;
-    QHash<QString, QString> m_problems;
+    QHash<QString, QString> m_problems; // id -> 行内那一句话(含动作词)
+    QHash<QString, QString> m_states;   // id -> 行首图标状态
+    QHash<QString, QString> m_details;  // id -> tooltip 全文(完整原因 + 路径)
 };
 
 // ──────────────────────────────────────────────────────────────── 行自绘
@@ -244,6 +264,11 @@ public:
         SRV_W = 96,
         GAP = 8,
         MARGIN = 16,
+        // 行首那个状态图标位(用户 2026-09-26):ICON = 边长,ICON_LEFT = 原来文字的左距
+        // (图标就长在文字该在的位置上),ICON_GAP = 图标与版本名之间的呼吸。
+        ICON = 20,
+        ICON_LEFT = 16,
+        ICON_GAP = 10,
     };
 
     explicit VersionRowDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
@@ -277,7 +302,22 @@ public:
             tokenColor(hovered ? QStringLiteral("hoverStrong") : QStringLiteral("hover")));
         painter->drawRoundedRect(rect, 6, 6);
 
-        const int left = rect.left() + 16;
+        /* 行首**状态图标位**(用户 2026-09-26:「PCL…用左侧放一个红石块来展示,但咱们也这样
+         * 显得有点太雷同了…你自己画图标…正常版本能启动的用草方块」):
+         *   装过且能启动 -> 草方块;装过但起不来 -> 我们自绘的红色警告符;
+         *   **没装过的行不画** —— 它还没有"能不能启动"可言。但这一列**宽度恒定**,
+         *   免得同一列里文字起点忽左忽右。 */
+        const int iconLeft = rect.left() + ICON_LEFT;
+        const QString state = model->stateAt(index.row());
+        if (!state.isEmpty()) {
+            const QPixmap statePixmap = uiVersionStatePixmap(state.toLatin1().constData(), ICON);
+            if (!statePixmap.isNull()) {
+                painter->drawPixmap(
+                    QRect(iconLeft, rect.top() + (rect.height() - ICON) / 2, ICON, ICON),
+                    statePixmap);
+            }
+        }
+        const int left = iconLeft + ICON + ICON_GAP;
         QFont font = painter->font();
         font.setBold(true);
         painter->setFont(font);
@@ -324,12 +364,14 @@ public:
                 chipX += width + 6;
             }
 
-            // 不能启动的原因直接贴在行里(缺前置/JSON 坏),别等用户点启动才报错。
-            // 警示三角是**自绘 svg**(用户点名:黄色感叹号 emoji 换掉),与文字一起居中排在 chip 里。
+            /* 装过但起不来:chip 里只放**一句话 + 动作**(展示口径 versionRowInfo 给的),
+             * 不再把核心库那段完整原因倒进行里 —— 用户 2026-09-26:「那行小字把原因全倒出来,
+             * 读着像报错」。完整原因与路径在整行的 tooltip 里(Qt::ToolTipRole)。
+             * 这颗 chip 以前还带一颗自绘警示三角:行首已经有**同一套**状态图标了,
+             * 同一个状态标两遍就是噪音,这里删掉(三角本身留在键位页/多人页那些地方用)。 */
             if (!problem.isEmpty()) {
                 const QString text = problem;
-                const int iconSide = 14;
-                const int width = metrics.horizontalAdvance(text) + iconSide + 22;
+                const int width = metrics.horizontalAdvance(text) + 20;
                 if (chipX + width <= rect.right() - 8) {
                     const QRect chip(chipX, rect.top() + (rect.height() - 20) / 2, width, 20);
                     const QColor color = t.danger;
@@ -338,17 +380,8 @@ public:
                     painter->setPen(QPen(color, 1));
                     painter->setBrush(fill);
                     painter->drawRoundedRect(chip, 4, 4);
-                    const QPixmap warn = uiWarningPixmap(iconSide, color);
-                    if (!warn.isNull()) {
-                        const QRect iconRect(chip.left() + 6,
-                                             chip.top() + (chip.height() - iconSide) / 2, iconSide,
-                                             iconSide);
-                        painter->drawPixmap(iconRect, warn);
-                    }
                     painter->setPen(color);
-                    painter->drawText(QRect(chip.left() + iconSide + 10, chip.top(),
-                                            chip.width() - iconSide - 14, chip.height()),
-                                      Qt::AlignVCenter | Qt::AlignLeft, text);
+                    painter->drawText(chip, Qt::AlignCenter, text);
                 }
             }
             painter->setBrush(Qt::NoBrush);
@@ -1036,6 +1069,7 @@ private:
         refreshInstalled();
         m_model->setVersions(versions, m_installed);
         setStatusText();
+        scheduleRowEvidence(); // 行首图标是自绘的:坐标与状态由这一页自己报(见上)
     }
 
     // versions_page.py:412-451:已安装集合 + 加载器小标签 + problem 提示。
@@ -1044,17 +1078,87 @@ private:
         m_installed.clear();
         m_loaders.clear();
         m_problems.clear();
+        m_states.clear();
+        m_details.clear();
+        const QString gameDir = gameDirectory();
         for (const InstalledInstance &inst : m_instances) {
             m_installed.insert(inst.id);
             if (!inst.loaders.isEmpty())
                 m_loaders.insert(inst.id, inst.loaders);
-            if (!inst.problem.isEmpty())
-                m_problems.insert(inst.id, inst.problem);
+            /* 行首图标状态 / 行内那一句话 / tooltip 全文 —— 全部来自**同一个**展示口径
+             * (workers/instance_scan.h 的 VersionRowInfo,与版本选择页共用)。
+             * 以前这里塞进 chip 的是核心库那段**完整原因**("需要安装 1.12.2 作为前置版本"),
+             * 31 个字压在 20px 高的 chip 里,读着像报错(用户 2026-09-26 点名)。
+             * 现在 chip 只有"一句话 · 动作",完整原因与路径进 tooltip。 */
+            const VersionRowInfo row = versionRowInfo(inst, gameDir);
+            if (!row.note.isEmpty())
+                m_problems.insert(inst.id, QStringLiteral("%1 · %2").arg(row.note, row.action));
+            m_states.insert(inst.id, row.state);
+            if (!inst.launchable && !row.tip.isEmpty())
+                m_details.insert(inst.id, row.tip);
         }
         m_model->setLoaders(m_loaders);
         m_model->setProblems(m_problems);
+        m_model->setStates(m_states);
+        m_model->setDetails(m_details);
     }
 
+    /* 逐行取证(stderr):这一列的行首图标是**自绘**的(控件树里没有它),所以坐标由这一页
+     * 自己报 —— 报的是**窗口坐标**下的图标槽矩形,验收脚本拿它去截图上数像素。
+     * 只在"这一份实例真的在屏幕上"时打(下载页里还嵌着同一份,藏着的那份不该混进来)。
+     * 与版本选择页那一行同一个格式(前缀 version-row page),只写事实、不改任何状态。 */
+    void printRowEvidence() {
+        if (m_model == nullptr || m_list == nullptr)
+            return;
+        QWidget *win = m_list->window();
+        if (win == nullptr)
+            return;
+        const QVector<GameVersion> &items = m_model->items();
+        const QPoint origin = m_list->viewport()->mapTo(win, QPoint(0, 0));
+        for (int i = 0; i < items.size(); ++i) {
+            const QString state = m_model->stateAt(i);
+            if (state.isEmpty())
+                continue; // 没装过的行:这一列留白,没有状态可报
+            const QRect rowRect = m_list->visualRect(m_model->index(i, 0)).adjusted(0, 2, 0, -2);
+            if (rowRect.isEmpty())
+                continue;
+            const int icon = VersionRowDelegate::ICON; // 与委托同一个常量,不写第二遍
+            const QRect slot(origin.x() + rowRect.left() + VersionRowDelegate::ICON_LEFT,
+                             origin.y() + rowRect.top() + (rowRect.height() - icon) / 2, icon,
+                             icon);
+            QString chip = m_model->problemAt(i);
+            QString tip = m_model->detailAt(i);
+            chip.replace(QLatin1Char('\n'), QStringLiteral(" | "));
+            tip.replace(QLatin1Char('\n'), QStringLiteral(" | "));
+            std::fprintf(stderr,
+                         "[sxcl-ui] version-row page: id=%s state=%s iconRect=%d,%d,%dx%d "
+                         "chip=\"%s\" tip=\"%s\" vis=%d win=%dx%d\n",
+                         items.at(i).id.toUtf8().constData(), state.toUtf8().constData(),
+                         slot.x(), slot.y(), slot.width(), slot.height(),
+                         chip.toUtf8().constData(), tip.toUtf8().constData(),
+                         (m_list->isVisible() && win->isVisible()) ? 1 : 0, win->width(),
+                         win->height());
+        }
+    }
+
+    /** 排一次取证(界面线程,下一拍打):showVersions 之后与这一份实例上屏时各排一次。 */
+    void scheduleRowEvidence() {
+        if (m_evidencePending)
+            return;
+        m_evidencePending = true;
+        QTimer::singleShot(0, this, [this] {
+            m_evidencePending = false;
+            printRowEvidence();
+        });
+    }
+
+protected:
+    void showEvent(QShowEvent *event) override {
+        QWidget::showEvent(event);
+        scheduleRowEvidence(); // 上屏那一刻的行矩形才是可量的
+    }
+
+private:
     // versions_page.py:453-464:状态栏那行"已安装几个 + 各加载器各几个"
     // (加载器汇总要 instance.h 的 loader 列表,见文件头 TODO;现在恒为空串,与
     //  Python 在没有加载器时的行为一致)
@@ -1148,7 +1252,10 @@ private:
     QVector<GameVersion> m_filtered;
     QSet<QString> m_installed;
     QHash<QString, QVariantList> m_loaders;
-    QHash<QString, QString> m_problems;
+    QHash<QString, QString> m_problems; // id -> chip 里那一句话(含动作词)
+    QHash<QString, QString> m_states;   // id -> 行首图标状态("grass"/"warn")
+    QHash<QString, QString> m_details;  // id -> tooltip 全文(完整原因 + 路径)
+    bool m_evidencePending = false;     // 取证行只排一次(见 scheduleRowEvidence)
     QVector<InstalledInstance> m_instances;
     QVBoxLayout *m_box = nullptr; // 这一格自己的竖布局(页边距 0;留白由外面那层给)
 };

@@ -16,7 +16,6 @@
 #include <QPixmap>
 #include <QAbstractButton> // 验收钩子:点模组页的搜索按钮(可能是 PrimaryPushButton)
 #include "crash_handler.h"   // 启动器自己的崩溃取证(未处理异常 -> logs/crashes/)
-#include "ui2/ui2.h"         // 新界面(0.2.0 起的重写;SXCL_UI2=1 切换)
 #include "sxcl/console.h"    // 控制台切 UTF-8(否则中文 stderr 在 936 下全是乱码)
 #include <QColorDialog>  // 验收钩子:SXCL_UI_ACCENT_APPLY 要在真对话框里"挑一个颜色"
 #include <QMouseEvent>   // 验收钩子:取色块靠 mouseReleaseEvent 开对话框,得真发一对鼠标事件
@@ -408,29 +407,7 @@ static void sxclRailsProbeTick(SxclRailsProbe *st) {
 } // namespace
 
 int main(int argc, char *argv[]) {
-    /* 新界面(docs/27)开关:**第一件事**就分流 —— 它自带 QApplication,
-     * 所以不能等老界面把日志/QApplication 都建好再切(走新界面时老界面一行不跑)。
-     * 三条入口都认(用户 2026-09-26 踩过第一条:PowerShell 里 `set SXCL_UI2=1` 设的是
-     * PowerShell 变量、不是环境变量,所以 exe 根本没看到):
-     *   --ui2                命令行参数(任何 shell 都行)
-     *   SXCL_UI2=1/true/on   环境变量(PowerShell 用 $env:SXCL_UI2=1)
-     *   SXCL_UI2=0/false/空  仍然是老界面 */
-    bool useUi2 = false;
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i] != nullptr && qstrcmp(argv[i], "--ui2") == 0) {
-            useUi2 = true;
-        }
-    }
-    const QString ui2Env = qEnvironmentVariable("SXCL_UI2").trimmed();
-    if (!ui2Env.isEmpty() && ui2Env != QLatin1String("0") &&
-        ui2Env.compare(QLatin1String("false"), Qt::CaseInsensitive) != 0) {
-        useUi2 = true;
-    }
-    if (useUi2) {
-        std::fprintf(stderr, "[sxcl-ui] 走新界面(ui2 骨架,docs/27)\n");
-        return sxcl::ui2::run(argc, argv);
-    }
-
+    
     // 控制台按 UTF-8 解释我们的字节(不设的话中文在 936 代码页下糊成"鐣岄潰灏辩华")
     const int consoleCpBefore = sxcl_console_set_utf8();
 

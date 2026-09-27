@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"
-     fill="none" stroke="#000000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-  <!-- 切换账号:两段反向弧形箭头 —— 单色线稿,按主题令牌现染 -->
-  <path d="M20.2 12a8.2 8.2 0 0 1-14 5.8"/>
-  <path d="M3.8 12a8.2 8.2 0 0 1 14-5.8"/>
-  <path d="M18.4 2.6v4h-4"/>
-  <path d="M5.6 21.4v-4h4"/>
-</svg>

@@ -1,3 +1,4 @@
+（2026-09-26 更新：新界面 docs/27 已由用户决定取消，本目录只剩老界面在用的 cross.svg 与 warning.svg；前述其它图标与它们对应的新界面代码已一并删除。）
 # assets/icons/ui/* —— 新界面(ui2, docs/27 M2)用到的图标
 
 这里的图标有两条纪律(与 `assets/icons/edition/NOTICE.md` 同一条):

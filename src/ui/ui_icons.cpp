@@ -9,6 +9,7 @@
 #include "ui_icons.h"
 
 #include "fluent_theme.h"
+#include "sxcl_icons.h"      // 草方块(assets/icons/blocks/Grass.png)与方块素材同一份取图
 
 #include <QDir>
 #include <QFile>
@@ -122,6 +123,33 @@ QIcon uiWarningIcon(int size) {
     // 主题警告色（跟随明暗主题；画的时候取，主题一换图标就换）
     const QColor warning = FluentTheme::instance().tokens().warning;
     return QIcon(uiWarningPixmap(size, warning));
+}
+
+// ── 版本行的状态标记（理由见 ui_icons.h 的说明）────────────────────────────
+//
+// 草方块走 SxclIcons（assets/icons/blocks/Grass.png，64x64 PNG，按 DPR 缩放到逻辑尺寸）；
+// 警告符走 assets/icons/ui/version_warn.svg（我们手写的，currentColor 现染成 danger 令牌）。
+namespace version_state {
+const char *const kGrass = "grass";
+const char *const kWarn = "warn";
+} // namespace version_state
+
+QPixmap uiVersionStatePixmap(const char *state, int size) {
+    if (state == nullptr || size <= 0)
+        return QPixmap();
+    if (qstrcmp(state, version_state::kGrass) == 0)
+        return SxclIcons::instance().blockPixmap(QStringLiteral("vanilla"), size);
+    if (qstrcmp(state, version_state::kWarn) == 0) {
+        // danger 令牌 = 红（浅色主题 #C42B1C、深色主题 #FF99A4 一类；以主题表为准）
+        const QColor danger = FluentTheme::instance().tokens().danger;
+        return uiSvgPixmap(uiSvgBytes(QStringLiteral("version_warn.svg"), danger), size);
+    }
+    return QPixmap();
+}
+
+QIcon uiVersionStateIcon(const char *state, int size) {
+    const QPixmap pm = uiVersionStatePixmap(state, size);
+    return pm.isNull() ? QIcon() : QIcon(pm);
 }
 
 } // namespace sxcl::ui

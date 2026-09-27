@@ -37,4 +37,29 @@ QIcon uiCrossIcon(int size, const QColor &color);
  *  按给定高度等比缩放（原图 1937x333 的长条 wordmark）。取不到时返回空图，调用方自己兜底。 */
 QPixmap uiBedrockLogoPixmap(int height);
 
+/** ── 版本行的状态标记（**一套两个状态**，版本页与版本选择页共用）────────────────
+ *
+ * 用户 2026-09-26 原话：「PCL 的采取方式是不正常的版本用左侧放一个红石块来展示，但咱们也
+ * 这样显得有点太雷同了，我推荐的是在不使用 emoji 的情况下使用 SVG，或者你自己画图标：
+ * ……以及正常版本能启动的用草方块。」所以：
+ *   * grass = 草方块（assets/icons/blocks/Grass.png，与 Python 版/PCL 的"原版"同一个方块素材）
+ *   * warn  = **我们自己画的**实心圆角警告三角（assets/icons/ui/version_warn.svg，
+ *             感叹号是 fill-rule="evenodd" 挖出来的洞），颜色取调用方给的令牌（版本行取
+ *             danger = 红）。**不用 emoji，也不用 PCL 的红石块**（"太雷同"那条点名要避开的）。
+ *
+ * 为什么只有两个状态：核心库 sxcl_instance_scan 的判据就是一个布尔 launchable + 一个
+ * problem_code（instance.c:1413-1427），没有"能启动但有隐患"的第三态；硬造一个黄色警告符
+ * 去标"能正常启动"的版本只是噪音（详见最终报告）。 */
+namespace version_state {
+/** 能正常启动（草方块）。 */
+extern const char *const kGrass;
+/** 不能启动（红色警告符）。 */
+extern const char *const kWarn;
+} // namespace version_state
+
+/** 状态标记位图（size = 逻辑像素）。state 取 version_state 那两个 id 之一；认不出返回空图。 */
+QPixmap uiVersionStatePixmap(const char *state, int size);
+/** 同上，给要 QIcon 的场合用。颜色在**调用时**按当前主题令牌现取（切主题跟着变）。 */
+QIcon uiVersionStateIcon(const char *state, int size);
+
 } // namespace sxcl::ui

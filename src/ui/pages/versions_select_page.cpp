@@ -35,6 +35,7 @@
 
 #include "../folder_icons.h"
 #include "../nav.h"
+#include "../ui_icons.h"   // 版本行的状态图标(草方块 / 我们自绘的红色警告符)
 
 #include "fluent_theme.h"
 #include "libqf.h"
@@ -68,6 +69,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <cstdio> // 逐行取证(version-row 那一行)
 #include <cstring>
 
 #include "sxcl/instance.h"
@@ -121,6 +123,38 @@ private:
     static constexpr qreal kMarkRadius = 1.5;
 };
 
+/* 每一行最前面那颗**状态图标**(用户 2026-09-26:「PCL 用红石块…咱们也这样显得太雷同了,
+ * 我推荐…你自己画图标:…以及正常版本能启动的用草方块」)——
+ * 能正常启动 = 草方块,不能启动 = 我们自己画的红色警告符(见 ui_icons.h 的 version_state)。
+ * **只有图标、没有文字**:一句话在右边那行小字里,完整原因与路径在这一行的 tooltip 里。
+ * objectName 带上状态(#sxclVersionStateIcon_grass / #sxclVersionStateIcon_warn):
+ * 验收 dump 按它认图标位,也顺手把"这一行是哪种状态"写进 dump,不用靠颜色猜。 */
+class VersionStateIcon : public QWidget {
+public:
+    VersionStateIcon(const QString &state, QWidget *parent)
+        : QWidget(parent), m_state(state),
+          m_pixmap(uiVersionStatePixmap(state.toLatin1().constData(), kSide)) {
+        setObjectName(QStringLiteral("sxclVersionStateIcon_") + state);
+        setAttribute(Qt::WA_TransparentForMouseEvents); // 点它 = 点这一行
+        setFixedSize(kSide, kSide);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        if (m_pixmap.isNull())
+            return; // 取不到图就**什么都不画**(不拿一个色块冒充图标)
+        /* pixmap 是按 DPR 放大过的(20 逻辑 = 30 物理 @dpr1.5),塞进 20x20 逻辑矩形
+         * 正好 1:1 落在屏幕上,不重采样。 */
+        QPainter painter(this);
+        painter.drawPixmap(QRect(0, 0, kSide, kSide), m_pixmap);
+    }
+
+private:
+    static constexpr int kSide = 20; // 逻辑像素;与卡片左边距 20 一起决定文字起点
+    QString m_state;
+    QPixmap m_pixmap;
+};
+
 class SelectPage : public PageShell {
 public:
     explicit SelectPage(QWidget *parent)
@@ -155,6 +189,19 @@ private:
         NavToolButton *gear = m_rowGears.value(row, nullptr);
         if (gear != nullptr && (w == gear || gear->isAncestorOf(w))) {
             return PageShell::eventFilter(watched, event); // 齿轮自己的点击不进"整行选择"
+        }
+        /* 行内那个能动手的动作(「去下载」):点它同样**不进"整行选择"** —— 用户按下的是
+         * 那个动作,不是"用这一版启动"(它本来也起不来)。与齿轮同一条规矩。 */
+        BodyLabel *action = m_rowActions.value(row, nullptr);
+        if (action != nullptr && (w == action || action->isAncestorOf(w))) {
+            if (event->type() == QEvent::MouseButtonRelease) {
+                auto *me = static_cast<QMouseEvent *>(event);
+                if (me->button() == Qt::LeftButton) {
+                    openDownload();
+                    return true;
+                }
+            }
+            return PageShell::eventFilter(watched, event);
         }
         switch (event->type()) {
         case QEvent::Resize:
@@ -202,6 +249,16 @@ private:
                       window(), 4000);
     }
 
+    /** 行内那个能动手的动作(「去下载」)。落到下载页 —— 那一页的默认一栏就是
+     *  「Minecraft 版本」列表(下载页构造时 inner->setCurrent("download_mc")),
+     *  用户在那一栏里装好这一版,回来就能启动。**不假装我们替他修好了什么**。 */
+    void openDownload() {
+        if (auto *mw = qobject_cast<MainWindow *>(window()))
+            mw->switchToRoute(QStringLiteral("download"));
+        InfoBar::push(InfoBar::Type::Info, QStringLiteral("去下载"),
+                      QStringLiteral("在「下载 → Minecraft 版本」里装好这一版，回来就能启动"),
+                      window(), 4000);
+    }
     // ── 骨架：侧 2 栏(NavPanel) + 右内容(版本列表 / 图标选择) ──
     void buildBody() {
         // 侧 2 栏的容器：NavPanel 每次重建（换文件夹/换图标都要重排图标），放容器里好替换。
@@ -461,6 +518,7 @@ private:
         clearVersionRows();
         m_rowNames.clear();
         m_rowGears.clear();
+        m_rowActions.clear();
         m_retry->setVisible(false);
         m_listHint->setText(QStringLiteral("正在读取「%1」里的已安装版本…").arg(shortName()));
         if (m_scan->running())
@@ -475,6 +533,7 @@ private:
         clearVersionRows();
         m_rowNames.clear();
         m_rowGears.clear();
+        m_rowActions.clear();
         m_rowMarks.clear();
         const QString shownName = shortName();
         const QString saved = selectedVersionName();
@@ -488,6 +547,18 @@ private:
                 auto *rowLay = new QHBoxLayout(card);
                 rowLay->setContentsMargins(20, 8, 16, 8);
                 rowLay->setSpacing(12);
+
+                /* 每一行要显示什么(图标状态 / 信息行 / 一句话 / 动作 / tooltip)——
+                 * **唯一一份口径**在 versionRowInfo()(workers/instance_scan.cpp),
+                 * 版本页那一列用的是同一个函数。两页从此不会各说各话。 */
+                const VersionRowInfo row = versionRowInfo(inst, m_gameDir);
+
+                /* 行首那颗状态图标:能正常启动 = 草方块,不能启动 = 我们自绘的红色警告符。
+                 * 以前这一列没有图标,"不能启动"只是在行尾挂一个小三角 —— 一屏看下来
+                 * 分不出哪一行能用(用户 2026-09-26 点名要 PCL 那种"最前面一个图标位",
+                 * 但**不许**跟 PCL 一样用红石块)。 */
+                auto *stateIcon = new VersionStateIcon(row.state, card);
+                rowLay->addWidget(stateIcon, 0, Qt::AlignVCenter);
 
                 auto *text = new QVBoxLayout();
                 text->setSpacing(2);
@@ -506,33 +577,41 @@ private:
                 title->setToolTip(name);
                 text->addWidget(title);
 
-                QStringList bits;
-                if (!inst.summary.isEmpty())
-                    bits << inst.summary;
-                // 只在**确信**时才说原版是哪个：以前会显示"原版 1.12.2(猜的)"，
-                // 用户 2026-09-22 晚点名嫌它难看（"我真没绷住"）——猜的就别写出来。
-                if (!inst.baseVersion.isEmpty() && inst.baseReliable)
-                    bits << QStringLiteral("原版 %1").arg(inst.baseVersion);
-                bits << (inst.hasJar ? QStringLiteral("有 jar") : QStringLiteral("无自己的 jar"));
-                if (!inst.launchable)
-                    bits << QStringLiteral("不能启动：%1")
-                                .arg(inst.problem.isEmpty()
-                                         ? QString::fromUtf8(sxcl_instance_problem_default_text(
-                                               static_cast<sxcl_instance_problem>(inst.problemCode)))
-                                         : inst.problem);
-                auto *detail = new BodyLabel(bits.join(QStringLiteral(" · ")), card);
-                detail->setWordWrap(true);
-                detail->setTextColor(secondary, secondary);
-                text->addWidget(detail);
-                rowLay->addLayout(text, 1);
-
-                if (!inst.launchable) {
-                    // 警示三角是**自绘 svg**(用户点名:不要 emoji),颜色跟随主题
-                    auto *bad = new InfoIconWidget(InfoBarIcon::Warning, card);
-                    bad->setFixedSize(16, 16);
-                    bad->setToolTip(QStringLiteral("这一份还不能启动（原因见左边那行小字）"));
-                    rowLay->addWidget(bad, 0, Qt::AlignVCenter);
+                /* 小字那一行:**能启动的**只报"这是什么版本";**不能启动的**只报
+                 * 一句话 + 一个能动手的动作。以前这里把所有原因倒在一行里
+                 * ("原版 · 无自己的 jar · 不能启动：需要安装 1.12.2 作为前置版本"),
+                 * 读着像报错(用户 2026-09-26 点名)。完整原因与路径在整行的 tooltip 里。 */
+                if (inst.launchable) {
+                    if (!row.info.isEmpty()) {
+                        auto *detail = new BodyLabel(row.info, card);
+                        detail->setObjectName(QStringLiteral("sxclVersionRowInfo"));
+                        detail->setWordWrap(true);
+                        detail->setTextColor(secondary, secondary);
+                        text->addWidget(detail);
+                    }
+                } else {
+                    auto *line = new QWidget(card);
+                    line->setObjectName(QStringLiteral("sxclVersionRowNoteRow"));
+                    auto *lineLay = new QHBoxLayout(line);
+                    lineLay->setContentsMargins(0, 0, 0, 0);
+                    lineLay->setSpacing(8);
+                    auto *note = new BodyLabel(row.note, line);
+                    note->setObjectName(QStringLiteral("sxclVersionRowNote"));
+                    note->setTextColor(secondary, secondary);
+                    /* 动作是**能点的**:强调色 + 手型光标(与"悬停出齿轮"同一套语言,
+                     * 不额外加一个按钮 —— 一屏全是按钮是用户早就否掉的东西)。 */
+                    auto *action = new BodyLabel(row.action, line);
+                    action->setObjectName(QStringLiteral("sxclVersionRowAction"));
+                    action->setTextColor(FluentTheme::instance().tokens().accent,
+                                         FluentTheme::instance().tokens().accent);
+                    action->setCursor(Qt::PointingHandCursor);
+                    lineLay->addWidget(note, 0, Qt::AlignVCenter);
+                    lineLay->addWidget(action, 0, Qt::AlignVCenter);
+                    lineLay->addStretch(1);
+                    text->addWidget(line);
+                    m_rowActions.insert(card, action);
                 }
+                rowLay->addLayout(text, 1);
 
                 if (isCurrent) {
                     /* 当前版本:**只**留左侧那条强调色指示条(文字标签整条删掉 —— 用户原话
@@ -557,7 +636,10 @@ private:
                                  [this, name](bool) { openVersionSettings(name); });
 
                 card->setCursor(Qt::PointingHandCursor);
-                card->setToolTip(QStringLiteral("点一下就用它启动(%1)").arg(name));
+                /* 整行的 tooltip = 展示口径给的那一份:能启动的就是"点一下就用它启动",
+                 * 不能启动的 = 版本名 + **完整原因** + 它在哪个目录(用户 2026-09-26:
+                 * 「详细原因与路径放 tooltip」)。行内只留一句话,这里才是给要看的人看的。 */
+                card->setToolTip(row.tip);
                 m_rowNames.insert(card, name);
                 card->installEventFilter(this);
                 const QList<QWidget *> kids = card->findChildren<QWidget *>();
@@ -567,6 +649,24 @@ private:
 
                 m_listLay->addWidget(card);
                 ++shown;
+
+                /* 逐行取证(stderr):验收脚本按它比对改前/改后的行内文案、图标状态,
+                 * 以及"这个版本号是从哪个字段认出来的"。**只写事实,不改任何状态**
+                 * (与各页 logState 同一类通路)。tip 里的换行压成 " | ",免得破行。 */
+                QString tipOneLine = row.tip;
+                tipOneLine.replace(QLatin1Char('\n'), QStringLiteral(" | "));
+                std::fprintf(stderr,
+                             "[sxcl-ui] version-row select: id=%s state=%s launchable=%d "
+                             "problem=%s base=\"%s\" baseFrom=%s coreReliable=%d info=\"%s\" "
+                             "note=\"%s\" action=\"%s\" path=\"%s\" tip=\"%s\"\n",
+                             name.toUtf8().constData(), row.state.toUtf8().constData(),
+                             inst.launchable ? 1 : 0,
+                             sxcl_instance_problem_id(
+                                 static_cast<sxcl_instance_problem>(inst.problemCode)),
+                             row.base.toUtf8().constData(), row.baseFrom.toUtf8().constData(),
+                             row.coreReliable ? 1 : 0, row.info.toUtf8().constData(),
+                             row.note.toUtf8().constData(), row.action.toUtf8().constData(),
+                             row.path.toUtf8().constData(), tipOneLine.toUtf8().constData());
             }
         } else {
             /* 扫不动 = 错误态:照实说原因 + 给能点的重试(不是只写一行红字) */
@@ -617,6 +717,7 @@ private:
     QWidget *m_lastActionAnchor = nullptr; // 弹窗要锚在用户点的那颗齿轮上
     QHash<QWidget *, QString> m_rowNames;  // 行 -> 版本名(整行单击用)
     QHash<QWidget *, NavToolButton *> m_rowGears; // 行 -> 那颗悬停齿轮
+    QHash<QWidget *, BodyLabel *> m_rowActions; // 行 -> 行内那个能动手的动作(「去下载」)
     QHash<QWidget *, CurrentVersionMark *> m_rowMarks; // 行 -> 当前版本那条强调色指示条(只有当前版本有)
     QStackedWidget *m_stack = nullptr;
     QVBoxLayout *m_listLay = nullptr;
