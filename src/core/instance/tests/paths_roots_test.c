@@ -114,6 +114,8 @@ static void build_fixture(void)
     /* CurseForge:Instances(首字母大写) */
     put(FIXTURE_ROOT "/home/curseforge/minecraft/Instances/Pack/minecraft/versions/1.18.2/"
                      "1.18.2.json", "{}");
+    /* 空壳目录(有目录、没有任何判据文件):"marks 全 0"这条断言用 */
+    (void)sxcl_fs_mkdirs(FIXTURE_ROOT "/shell/.minecraft");
     /* 用户目录下的 .minecraft:
      *   Windows —— 它只是"又一个位置",做成空壳(存在但没有 versions/),用来验证
      *              "存在就列出来,哪怕一个版本都没有";
@@ -380,7 +382,9 @@ static void test_marks(void)
                                                           "MyPack/minecraft");
     check((marks_priv & SXCL_PATHS_MARK_LIBRARIES) != 0, "marks:Prism 实例有 libraries/");
 
-    check_int(sxcl_paths_marks(FIXTURE_ROOT "/home/.minecraft"), 0, "marks:空壳目录没有任何判据");
+    /* 空壳目录用**独立**的一份夹具:Linux/macOS 上 ~/.minecraft 就是官方目录(有内容),
+     * 拿它当"空壳"只在 Windows 上成立。 */
+    check_int(sxcl_paths_marks(FIXTURE_ROOT "/shell/.minecraft"), 0, "marks:空壳目录没有任何判据");
     check_int(sxcl_paths_marks(NULL), 0, "marks:NULL 返回 0");
 
     check_int(sxcl_paths_marks_text(marks_cfg, 3, text, sizeof(text)), SXCL_PATHS_OK,
