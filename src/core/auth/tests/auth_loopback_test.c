@@ -127,13 +127,21 @@ static int t_read_response(t_sock_t s, char *buf, size_t cap)
     if (s == T_BAD_SOCK || buf == NULL || cap == 0) {
         return -1;
     }
-    const int n = (int)recv(s, buf, (int)(cap - 1u), 0);
-    if (n <= 0) {
-        buf[0] = '\0';
-        return -1;
+    /* **读到 EOF 为止**:服务端把头和正文分两次 send(macOS 上实测会被拆成两个
+     * TCP 段),一次 recv 只能拿到第一段 —— 于是一条"正文里有 登录成功"的断言会在
+     * macOS 上偶发失败。响应带 Connection: close,服务端发完就关,所以"recv 返回 0"
+     * 就是读全了。这里按字节流收到完,不做"一次读全"的平台假设。 */
+    size_t total = 0;
+    while (total + 1u < cap) {
+        const int n = (int)recv(s, buf + total, (int)(cap - 1u - total), 0);
+        if (n > 0) {
+            total += (size_t)n;
+            continue;
+        }
+        break; /* 0 = 服务端关了连接(读全);<0 = 出错,把已读到的留下 */
     }
-    buf[n] = '\0';
-    return n;
+    buf[total] = '\0';
+    return (total > 0) ? (int)total : -1;
 }
 
 static void test_start_and_redirect_uri(void)
