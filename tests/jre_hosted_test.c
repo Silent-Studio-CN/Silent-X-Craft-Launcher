@@ -1089,7 +1089,6 @@ static void test_shim_dir_layouts(void)
     /* 三种布局的根(都建在 _jre_tmp/shim 下) */
     static const char *const kJreImage = "_jre_tmp/shim/jreimg";   /* ①Termux JRE 镜像:lib/aarch64 */
     static const char *const kJdk8 = "_jre_tmp/shim/jdk8";         /* ②真 JDK8:jre/ + bin/javac */
-    static const char *const kJre17 = "_jre_tmp/shim/jre17";       /* ③jre17+ :lib/ */
     char rel[SXCL_ANDROID_JRE_PATH_MAX];
     char err[256];
     char native_dir[SXCL_ANDROID_JRE_PATH_MAX];
