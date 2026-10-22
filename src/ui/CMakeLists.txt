@@ -156,6 +156,20 @@ if(WIN32 AND SXCL_UI_WINDOWS_GUI)
   set_target_properties(sxcl-ui PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 target_link_libraries(sxcl-ui PRIVATE sxcl_ui_core sxcl)
+
+# ---- 应用图标 ----
+# 窗口/任务栏图标:品牌图编进可执行文件(qt_add_resources),运行时用 ":/brand/sxcl_logo.png" 取,
+# 不依赖运行目录,打包后也一样。四平台通用。
+if(EXISTS "${CMAKE_SOURCE_DIR}/assets/brand/sxcl_logo.png")
+  qt_add_resources(sxcl-ui "sxcl_brand"
+    PREFIX "/brand"
+    BASE "${CMAKE_SOURCE_DIR}/assets/brand"
+    FILES "${CMAKE_SOURCE_DIR}/assets/brand/sxcl_logo.png")
+endif()
+# 可执行文件图标(资源管理器/任务栏/快捷方式读的是 PE 里的图标资源,不是窗口图标)。
+if(WIN32)
+  target_sources(sxcl-ui PRIVATE app_icon.rc)
+endif()
 # 界面程序需要 platforms/tls 插件才能起窗:用 windeployqt 把 Qt 运行时铺到 exe 同目录
 # (用户反馈"总是提示找不到 Qt*.dll" —— 不能靠 PATH,产物必须自带)
 sxcl_deploy_qt_full(sxcl-ui)

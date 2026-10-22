@@ -1,0 +1,3 @@
+// SXCL 的可执行文件图标(资源管理器 / 任务栏 / 快捷方式都读它)。
+// 生成脚本在仓库里没有留存:源图 assets/brand/sxcl_logo.png → assets/brand/sxcl.ico(多尺寸)。
+IDI_ICON1 ICON "sxcl.ico"

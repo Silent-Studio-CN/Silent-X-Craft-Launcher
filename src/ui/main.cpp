@@ -574,6 +574,9 @@ int main(int argc, char *argv[]) {
     QApplication::setStyle(QStringLiteral("Fusion"));
     QApplication::setApplicationName(QStringLiteral("Silent X Craft Launcher"));
     QApplication::setOrganizationName(QStringLiteral("SilentStudio"));
+    /* 应用图标(窗口图标 / 任务栏 / 程序坞都认它)。图标文件由 qt_add_resources 编进可执行文件,
+     * 走 ":/brand/sxcl_logo.png" —— 不依赖运行目录,打包后也一样。 */
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/brand/sxcl_logo.png")));
 
     // 图标:PCL 抽出的矢量图,语义映射见 icon_registry.cpp 的表(依据 index.tsv)
     sxcl::ui::IconRegistry &icons = sxcl::ui::IconRegistry::instance();
