@@ -597,6 +597,10 @@ int main(int argc, char **argv)
     /* "架构不符"的那份放在 **PATH** 上:ProgramFiles 扫描根只有 Windows 有,
      * 放在那里的话 macOS/Linux 上根本扫不到,用例就成了摆设。 */
     put_elf(FIXTURE_ROOT "/p_arm/" JAVA_EXE, FOREIGN_ELF_MACHINE);
+#if !defined(_WIN32)
+    /* POSIX 上"能执行"要真有 x 位,否则体检会先说"没有执行位",根本走不到架构判定 */
+    (void)chmod(FIXTURE_ROOT "/p_arm/" JAVA_EXE, 0755);
+#endif
     /* PATH 上的三份:不是 JRE / 起不来 / 压根不存在 */
     {
         char exe[512];
