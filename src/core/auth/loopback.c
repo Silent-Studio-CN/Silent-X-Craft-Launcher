@@ -42,6 +42,32 @@ struct sxcl_auth_loopback {
     char redirect_uri[SXCL_AUTH_URL_MAX];
 };
 
+/* ── 回包不能把进程带走 ──
+ * 浏览器/测试客户端可能在页面送到之前就把连接关了(用户关了标签页、点了取消、或者
+ * 只是发完请求就走)。那时 send() 会触发 SIGPIPE —— POSIX 上**默认动作是杀掉进程**,
+ * 也就是说"用户手快关掉页面"能直接把启动器干掉。Linux/BSD 的 send 有 MSG_NOSIGNAL;
+ * macOS 没有这个标志,等价物是 accept 之后设 SO_NOSIGPIPE。两条都做,平台各自生效。 */
+#if defined(MSG_NOSIGNAL)
+#  define SXCL_SEND_FLAGS MSG_NOSIGNAL
+#else
+#  define SXCL_SEND_FLAGS 0
+#endif
+
+static void send_all(sxcl_sock_t c, const char *data, int len)
+{
+    int sent = 0;
+    if (c == SXCL_BAD_SOCK || data == NULL || len <= 0) {
+        return;
+    }
+    while (sent < len) {
+        const int n = (int)send(c, data + sent, len - sent, SXCL_SEND_FLAGS);
+        if (n <= 0) {
+            return; /* 对端关了/写失败:页面送不到就算了,**绝不能把启动器带崩** */
+        }
+        sent += n;
+    }
+}
+
 static int net_boot(void)
 {
 #if defined(_WIN32)
@@ -214,8 +240,8 @@ static void send_page(sxcl_sock_t c, const char *title, const char *detail, int 
                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
                    "Content-Length: %d\r\nConnection: close\r\n\r\n",
                    blen);
-    (void)send(c, head, (int)strlen(head), 0);
-    (void)send(c, body, blen, 0);
+    send_all(c, head, (int)strlen(head));
+    send_all(c, body, blen);
 }
 
 int sxcl_auth_loopback_wait(sxcl_auth_loopback *lb, const char *expect_state,
@@ -265,6 +291,12 @@ int sxcl_auth_loopback_wait(sxcl_auth_loopback *lb, const char *expect_state,
         if (c == SXCL_BAD_SOCK) {
             continue;
         }
+#if defined(SO_NOSIGPIPE)
+        {
+            int on = 1;
+            (void)setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &on, (socklen_t)sizeof(on));
+        }
+#endif
         /* 读请求(只要请求行;浏览器可能分几次发,循环读到 \r\n 或缓冲满) */
         char req[4096];
         size_t used = 0;
@@ -299,7 +331,7 @@ int sxcl_auth_loopback_wait(sxcl_auth_loopback *lb, const char *expect_state,
         if (path_len != 9u || strncmp(target, "/callback", 9u) != 0) {
             /* 浏览器会顺手要 /favicon.ico:给个空 404 别打扰用户 */
             const char *notfound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            (void)send(c, notfound, (int)strlen(notfound), 0);
+            send_all(c, notfound, (int)strlen(notfound));
             sxcl_sock_close(c);
             continue;
         }
