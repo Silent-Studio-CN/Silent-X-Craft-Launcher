@@ -8,9 +8,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_WIN32)
+#  include <sys/stat.h> /* chmod:POSIX 上"能执行"要真的有 x 位 */
+#endif
+
 #include "sxcl/fs.h"
 #include "sxcl/json.h"
 #include "sxcl/launch.h"
+
+/* 真机上 Java 可执行文件的名字是平台相关的:Windows 是 java.exe,其它平台是 java。
+ * 夹具必须按本机名字落盘,否则 inspect 在 macOS/Linux 上永远找不到 <home>/bin/java。 */
+#if defined(_WIN32)
+#  define HOST_JAVA_EXE "java.exe"
+#else
+#  define HOST_JAVA_EXE "java"
+#endif
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -218,7 +230,7 @@ static void test_java_version_text(void) {
             (void)sxcl_file_write_at(fixture, kReleaseJdk21, strlen(kReleaseJdk21), 0);
             (void)sxcl_file_close(fixture);
         }
-        fixture = sxcl_file_open_write("build/_launch_tmp/jdk-21/bin/java.exe", -1);
+        fixture = sxcl_file_open_write("build/_launch_tmp/jdk-21/bin/" HOST_JAVA_EXE, -1);
         if (fixture) {
             (void)sxcl_file_write_at(fixture, "not a real exe", 14, 0);
             (void)sxcl_file_close(fixture);
@@ -236,12 +248,19 @@ static void test_java_version_text(void) {
             (void)sxcl_file_write_at(af, "#!/bin/sh\n", 9, 0);
             (void)sxcl_file_close(af);
         }
+#if !defined(_WIN32)
+        /* 安卓体检按 **真机语义** 判:文件在、可读、还必须有执行位(没有 x 就是
+         * "文件在,但没有执行位")。Windows 没有执行位概念,所以只在 POSIX 上补;
+         * 不补的话 macOS 上这份夹具会被如实判成不可执行 —— 那是夹具的错,不是代码的错。 */
+        (void)chmod("build/_launch_tmp/androidjre/runtime/jre21/bin/java", 0755);
+        (void)chmod("build/_launch_tmp/jdk-21/bin/" HOST_JAVA_EXE, 0755);
+#endif
 
         memset(&info, 0, sizeof(info));
         check(sxcl_java_inspect("build/_launch_tmp/jdk-21", &info) == 0, "inspect(JAVA_HOME 目录)");
         check_int(info.major, 21, "inspect: 版本来自 release");
         check_int(info.is_jre, 1, "inspect: bin/javac 不在 -> 判成 JRE(硬证据优先于文本)");
-        check(strstr(info.path, "java.exe") != NULL, "inspect: 补出 java 可执行文件路径");
+        check(strstr(info.path, HOST_JAVA_EXE) != NULL, "inspect: 补出 java 可执行文件路径");
         check_int(sxcl_java_inspect("build/_launch_tmp/不存在", &info), -1, "inspect 不存在的路径失败");
     } else {
         printf("  [--] 建不了 build/_launch_tmp,跳过真实文件用例\n");
