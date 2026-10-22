@@ -12,7 +12,7 @@ if (-not (Test-Path $exe)) { Write-Output "NO-CUT: FAIL (exe not found)"; exit 1
 $ini = Join-Path $work 'settings.ini'
 Set-Content -Path $ini -Value 'game.default_dir=' -Encoding utf8
 $routes = @('home','download','team','multiplayer','more','settings','select','versions')
-$sizes  = @('900x600','1100x750')
+$sizes  = @('900x600','1100x750','1280x800')
 $bad = 0
 $total = 0
 foreach ($size in $sizes) {
