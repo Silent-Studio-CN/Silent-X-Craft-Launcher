@@ -311,7 +311,7 @@ QWidget *createDownloadPage(QWidget *parent) {
          *                    accent 指示条跟着转成竖的;两枚图标上下摞,页脚内边距收到 4
          *                    —— 4 + 30 + 4 = 38 < 48,折叠轨道里放得下,这一列也不会被撑宽。
          * 以前这里是把整个页脚**藏起来**(那会让折叠态看不到版本形态);现在折叠态自己有一套版面。 */
-        auto applyCollapsed = [foot, rowHost, javaBtn, bedrockBtn, fl](bool collapsed) {
+        auto applyCollapsed = [foot, rowHost, bedrockBtn, fl](bool collapsed) {
             rowHost->setStacked(collapsed);
             bedrockBtn->setVertical(collapsed);
             fl->setContentsMargins(collapsed ? QMargins(4, 8, 4, 8) : QMargins(12, 8, 12, 8));
