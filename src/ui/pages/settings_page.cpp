@@ -1526,8 +1526,10 @@ private:
     static void progressTrampoline(void *ud, const sxcl_java_runtime_progress *progress) {
         if (ud == nullptr || progress == nullptr)
             return;
+        /* message 是数组:取地址恒为真(Clang -Wpointer-bool-conversion 直接挂),要判首字符。 */
         static_cast<JavaSettingCard *>(ud)->postProgress(
-            QString::fromUtf8(progress->message ? progress->message : ""), progress->percent);
+            QString::fromUtf8(progress->message[0] != '\0' ? progress->message : ""),
+            progress->percent);
     }
     static int cancelTrampoline(void *ud) {
         return (ud != nullptr && static_cast<JavaSettingCard *>(ud)->cancelRequested()) ? 1 : 0;
