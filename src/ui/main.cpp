@@ -1073,7 +1073,7 @@ sxcl::ui::MainWindow window;
                          accentApply.toUtf8().constData());
             /* 对话框是**模态**(QColorDialog::getColor 自己跑嵌套事件循环),所以这个定时器
              * 是在对话框开着的时候才到点的 —— 正好用来"替用户挑一个颜色再确定"。 */
-            QTimer::singleShot(1200, &app, [&app, accentApply]() {
+            QTimer::singleShot(1200, &app, [accentApply]() {
                 QWidget *modal = QApplication::activeModalWidget();
                 std::fprintf(stderr, "[sxcl-ui] ACCENT: 模态窗口=%s\n",
                              modal != nullptr ? modal->metaObject()->className() : "(没有)");
