@@ -22,6 +22,17 @@
 
 #define FIXTURE_ROOT "sxcl_java_finder_fixture"
 
+/* "架构不符"的夹具必须跟着**本机**架构走:在 x64 上摆 arm64 的 ELF,在 arm64 上摆 x64 的。
+ * 以前固定摆 arm64 —— 到了 arm64 的 Mac 上它反倒成了"本机架构",这条用例就名存实亡
+ * (而且真的会去执行它,报的是"跑不起来"而不是"架构不符")。 */
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+#  define FOREIGN_ELF_MACHINE 0x3Eu /* e_machine = x86-64 */
+#  define FOREIGN_ARCH_TEXT "x64"
+#else
+#  define FOREIGN_ELF_MACHINE 0xB7u /* e_machine = aarch64 */
+#  define FOREIGN_ARCH_TEXT "arm64"
+#endif
+
 #if defined(_WIN32)
 #  define HOST_OS SXCL_JAVA_OS_WINDOWS
 #  define JAVA_EXE "java.exe"
@@ -170,6 +181,22 @@ static void put_pe(const char *path, unsigned int machine)
     put_bytes(path, pe, sizeof(pe));
 }
 
+/** 一段合法 Mach-O 头:magic(64 位小端 0xFEEDFACF)+ cputype。 */
+static void put_macho(const char *path, unsigned int cputype)
+{
+    unsigned char hdr[64];
+    (void)memset(hdr, 0, sizeof(hdr));
+    hdr[0] = 0xCF; /* 0xFEEDFACF 的小端写法 */
+    hdr[1] = 0xFA;
+    hdr[2] = 0xED;
+    hdr[3] = 0xFE;
+    hdr[4] = (unsigned char)(cputype & 0xFFu);
+    hdr[5] = (unsigned char)((cputype >> 8) & 0xFFu);
+    hdr[6] = (unsigned char)((cputype >> 16) & 0xFFu);
+    hdr[7] = (unsigned char)((cputype >> 24) & 0xFFu);
+    put_bytes(path, hdr, sizeof(hdr));
+}
+
 /* ══════════════════ 1) java -version 文本解析(多厂商多版本) ══════════════════ */
 
 typedef struct version_case {
@@ -273,6 +300,11 @@ static void test_binary_arch(void)
     put_pe(FIXTURE_ROOT "/bin/pe_x64.exe", 0x8664);
     put_pe(FIXTURE_ROOT "/bin/pe_x86.exe", 0x014C);
     put_pe(FIXTURE_ROOT "/bin/pe_arm64.exe", 0xAA64);
+    /* Mach-O:magic 是 arm64/x64 **共用**的,架构只由 cputype 决定 —— 这里两种都钉住,
+     * 免得再退回"看见 0xFEEDFACF 就当 x64"的老 bug(arm64 的 Mac 上全盘误判)。 */
+    put_macho(FIXTURE_ROOT "/bin/macho_arm64", 0x0100000Cu);
+    put_macho(FIXTURE_ROOT "/bin/macho_x64", 0x01000007u);
+    put_macho(FIXTURE_ROOT "/bin/macho_ppc", 0x00000012u);
     put_text(FIXTURE_ROOT "/bin/plain.txt", "this is not an executable at all\n");
 
     check_int(sxcl_java_binary_arch(FIXTURE_ROOT "/bin/elf_x64", arch, sizeof(arch)), 0,
@@ -296,6 +328,14 @@ static void test_binary_arch(void)
     check_int(sxcl_java_binary_arch(FIXTURE_ROOT "/bin/pe_arm64.exe", arch, sizeof(arch)), 0,
               "arch:PE arm64 认得");
     check_str(arch, "arm64", "arch:PE arm64 归一化");
+    check_int(sxcl_java_binary_arch(FIXTURE_ROOT "/bin/macho_arm64", arch, sizeof(arch)), 0,
+              "arch:Mach-O(小端 64 位)认得");
+    check_str(arch, "arm64", "arch:Mach-O cputype=ARM64 -> arm64(而不是按 magic 猜 x64)");
+    check_int(sxcl_java_binary_arch(FIXTURE_ROOT "/bin/macho_x64", arch, sizeof(arch)), 0,
+              "arch:Mach-O x86_64 认得");
+    check_str(arch, "x64", "arch:Mach-O cputype=X86_64 -> x64");
+    check_int(sxcl_java_binary_arch(FIXTURE_ROOT "/bin/macho_ppc", arch, sizeof(arch)), -1,
+              "arch:Mach-O 的 ppc -> -1(认不出就不判)");
     check_int(sxcl_java_binary_arch(FIXTURE_ROOT "/bin/elf_riscv", arch, sizeof(arch)), -1,
               "arch:不认识的机器码 -> -1(不猜)");
     check_str(arch, "", "arch:认不出时输出为空");
@@ -381,7 +421,7 @@ static void test_detect(void)
     /* PATH 候选在三个平台都成立(候选表按 PATH 的每一项拼 <dir>/java),所以
      * "不是 JRE" 与 "起不来" 这两种结论放这里,Windows/Linux/macOS 都能验。 */
     env.path = FIXTURE_ROOT "/p_notjre" PATH_SEP FIXTURE_ROOT "/p_silent" PATH_SEP
-               FIXTURE_ROOT "/pathdir";
+               FIXTURE_ROOT "/pathdir" PATH_SEP FIXTURE_ROOT "/p_arm";
 
     check(sxcl_java_detect(&env, HOST_OS, 8000, &all) > 0, "detect:至少要有条目(不可用的也算)");
     check(all.usable >= 1, "detect:至少 1 条可用(JAVA_HOME 那份)");
@@ -431,19 +471,15 @@ static void test_detect(void)
         }
     }
 
-    /* 架构不符:arm64 的 ELF 摆在 x64 机器上 */
+    /* 架构不符:另一族的 ELF 摆在本机上(夹具按本机架构反着选,见 FOREIGN_ELF_MACHINE) */
     {
-        const sxcl_java_installation *arm = find_install(&all, "armjdk");
+        const sxcl_java_installation *arm = find_install(&all, "p_arm");
+        check(arm != NULL, "detect:架构不符的候选也被列出来(不静默丢弃)");
         if (arm != NULL) {
-#if defined(_M_X64) || defined(__x86_64__)
             check_int(arm->verdict, SXCL_JAVA_RUN_ARCH_MISMATCH, "detect:判定为架构不符");
-            check_contains(arm->reason, "arm64", "detect:架构不符的原因里带实际机器码");
+            check_contains(arm->reason, FOREIGN_ARCH_TEXT,
+                           "detect:架构不符的原因里带实际机器码");
             check_int(arm->executed, 0, "detect:架构不符的**不去执行**(免得白等一个失败进程)");
-#else
-            check(arm->verdict != SXCL_JAVA_RUN_MISSING, "detect:arm64 候选在本机被如实分类");
-#endif
-        } else {
-            check(0, "detect:armjdk 候选应该被列出来");
         }
     }
 
@@ -558,8 +594,9 @@ int main(int argc, char **argv)
     make_home(FIXTURE_ROOT "/jdk21", fake);
     make_home(FIXTURE_ROOT "/okhome", fake);
     make_home(FIXTURE_ROOT "/pf/Java/jdk17", fake);
-    make_home(FIXTURE_ROOT "/pf/Java/armjdk", fake);
-    put_elf(FIXTURE_ROOT "/pf/Java/armjdk/bin/" JAVA_EXE, 0xB7);
+    /* "架构不符"的那份放在 **PATH** 上:ProgramFiles 扫描根只有 Windows 有,
+     * 放在那里的话 macOS/Linux 上根本扫不到,用例就成了摆设。 */
+    put_elf(FIXTURE_ROOT "/p_arm/" JAVA_EXE, FOREIGN_ELF_MACHINE);
     /* PATH 上的三份:不是 JRE / 起不来 / 压根不存在 */
     {
         char exe[512];
