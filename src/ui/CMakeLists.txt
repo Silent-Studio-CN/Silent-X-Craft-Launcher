@@ -230,3 +230,14 @@ if(SXCL_BUILD_TESTS)
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_sxcl_qt_bin}")
 endif()
+
+# -- 第三方头文件的告警 --
+# libqf 的头在 Clang 下会带出两类告警(未使用形参 / 缺 override)。它是外部依赖,
+# 不为了它去改人家源码 -- 只在我们自己的两个目标上关掉这两条(MSVC 用 /W4 不受影响)。
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  foreach(_t sxcl_ui_core sxcl-ui)
+    if(TARGET ${_t})
+      target_compile_options(${_t} PRIVATE -Wno-unused-parameter -Wno-inconsistent-missing-override)
+    endif()
+  endforeach()
+endif()
