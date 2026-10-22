@@ -270,6 +270,15 @@ else()
   target_sources(sxcl PRIVATE src/platform/platform_posix.c src/platform/process_posix.c)
   find_package(Threads REQUIRED)
   target_link_libraries(sxcl PUBLIC Threads::Threads)
+
+if(APPLE)
+  # macOS 的 iconv 在独立的 libiconv 里(Linux/glibc 自带;Windows 走 Win32 的转换 API)。
+  # 不加这一条,链接时会报 _iconv / _iconv_open / _iconv_close 未定义。
+  find_library(SXCL_ICONV_LIBRARY iconv)
+  if(SXCL_ICONV_LIBRARY)
+    target_link_libraries(sxcl PUBLIC ${SXCL_ICONV_LIBRARY})
+  endif()
+endif()
 endif()
 
 # ---- 传输后端(可选,缺依赖不报错、只是不编译) ----
