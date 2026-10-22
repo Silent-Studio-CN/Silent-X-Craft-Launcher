@@ -205,7 +205,10 @@ function(sxcl_warnings target)
     else()
       # -Wno-comment:注释里写 <game>/crash-reports/*.txt、assets/icons/*.svg 这类路径时,
       # Clang/GCC 会把里面的 "/*" 当成嵌套注释起点报错(-Werror 下真挂)。那是散文,不是缺陷。
-      target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-comment)
+      # -Wno-overlength-strings:测试夹具里嵌了超长字符串(几十 KB 的 JSON 原文),
+      # ISO C99 只保证 4095 字符,Clang 在 -Wpedantic 下按错误报;那不是移植性问题。
+      target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror
+                             -Wno-comment -Wno-overlength-strings)
     endif()
   endif()
 endfunction()
