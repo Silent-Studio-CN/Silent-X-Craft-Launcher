@@ -631,7 +631,24 @@ static void test_manifest_sha1(void)
     /* 造一份 manifest.sha1 是错的 all.json:清单本身必须过校验,不能"不看 sha1 硬上" */
     char bad_all[8192];
     snprintf(bad_all, sizeof(bad_all), "%s", g_all_json);
-    char *pos = strstr(bad_all, "\"sha1\": \"");
+    /* 要改的是**本机平台那一段**的 sha1:安装读的是 sxcl_java_runtime_platform_key(),
+     * 不是"文件里第一段"。以前的夹具只有 windows-x64 一段,恰好就是第一段;现在
+     * all.json 里多了本机平台那一段,macOS/Linux 上改第一段等于没改(清单仍校验通过)。 */
+    char *pos = NULL;
+    {
+        const char *host = sxcl_java_runtime_platform_key();
+        if (host != NULL && host[0] != '\0') {
+            char key[96];
+            (void)snprintf(key, sizeof(key), "\"%s\"", host);
+            char *plat = strstr(bad_all, key);
+            if (plat != NULL) {
+                pos = strstr(plat, "\"sha1\": \"");
+            }
+        }
+    }
+    if (pos == NULL) {
+        pos = strstr(bad_all, "\"sha1\": \"");
+    }
     check(pos != NULL, "夹具里有 sha1 字段");
     if (pos) {
         /* 把第一个 sha1 的第一位数字改掉(位置固定,不会破坏 JSON 结构) */
