@@ -151,7 +151,10 @@ static int controls_equal(const sxcl_keymap_layout *a, const sxcl_keymap_layout 
     return 1;
 }
 
-/* 比较两份文本(忽略 CR:仓库里检出成 CRLF 还是 LF 不该让漂移检查变红)。 */
+#ifdef SXCL_ANDROID_KEYMAPS_DIR
+/* 比较两份文本(忽略 CR:仓库里检出成 CRLF 还是 LF 不该让漂移检查变红)。
+ * 只有安卓构建才打这个漂移检查(唯一调用点在同一个 #ifdef 里),
+ * 其它平台留着就是 Clang 的 -Wunused-function。 */
 static int text_equal_no_cr(const char *a, const char *b)
 {
     while (*a && *b) {
@@ -167,6 +170,7 @@ static int text_equal_no_cr(const char *a, const char *b)
     while (*b == '\r') { ++b; }
     return *a == '\0' && *b == '\0';
 }
+#endif /* SXCL_ANDROID_KEYMAPS_DIR */
 
 /* ── 1) 安卓端 9 套资产 ── */
 
