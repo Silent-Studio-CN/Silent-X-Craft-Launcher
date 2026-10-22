@@ -385,6 +385,9 @@ namespace sxcl::ui {
 
 void installCrashHandler() {}
 void armHangWatchdog() {}
+/* 看门狗本身也只在 Windows 上实现(线程 + minidump);其它平台留空壳,
+ * 否则 main.cpp 一引用就链接不过(实测 macOS:Undefined symbols: installHangWatchdog)。 */
+void installHangWatchdog(int /*thresholdMs*/) {}
 
 } // namespace sxcl::ui
 
