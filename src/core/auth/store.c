@@ -84,7 +84,12 @@ sxcl_auth_store_kind sxcl_auth_store_backend(void)
 #if defined(_WIN32)
     return SXCL_AUTH_STORE_DPAPI;
 #elif defined(__APPLE__)
-    return SXCL_AUTH_STORE_KEYCHAIN;
+    /* macOS 的 Keychain 后端**还没实现**(save/load 里那条分支只会返回
+     * ERR_UNSUPPORTED)。这里必须报"本机实际会用的后端":声称 keychain 而实际存不进去,
+     * 结果是**一次都登录不了**(令牌落不了盘)。所以如实报降级路径 file+key ——
+     * 它在这台机器上是真能用的(0600 文件 + 本机派生密钥 + ChaCha20-Poly1305)。
+     * 等 SecItemAdd/SecItemCopyMatching 那条路实现后,再把这一行改回 KEYCHAIN。 */
+    return SXCL_AUTH_STORE_FILE_KEY;
 #elif defined(__linux__)
     /* libsecret 只在真的能 dlopen 到才算数 —— 不能"声称"用了密钥环 */
     {
