@@ -465,7 +465,6 @@ void markHostWarm(const QString &host) {
 constexpr int kPendingHighWater = 512 * 1024; /* worker 往缓冲里灌到这么多就停手(背压) */
 constexpr int kPendingLowWater = 128 * 1024;  /* 消费者降到这么少就叫 worker 接着灌 */
 constexpr int kReplyBufBytes = 256 * 1024;    /* Qt 侧读缓冲上限 */
-constexpr qint64 kPoolBufferHardCap = 48LL * 1024 * 1024; /* 分类失手时的兜底,绝不无限吃内存 */
 
 enum ReqClass { ReqBulk = 0, ReqQuery = 1, ReqIcon = 2 };
 
