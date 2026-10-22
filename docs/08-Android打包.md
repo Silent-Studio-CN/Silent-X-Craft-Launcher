@@ -621,7 +621,7 @@ $env:SXCL_UI_SHOT   = '<out>\home.png'
 
 桌面零回归(改完实测):`cmake --build build-ui --config Release --target sxcl-ui` **0 error / 0 warning**;
 九页 vs 改动前 **全 0.00%**、五个弹层 **全 0.00%**(home 那 3.18% 经上述一次性迁移后归零;迁移后
-`%APPDATA%\SilentXCraftLauncher\settings.conf` 里确实写入了 `game.default_dir=C:/Users/HiteVision/Desktop/.minecraft`)。
+`%APPDATA%\SilentXCraftLauncher\settings.conf` 里确实写入了 `game.default_dir=C:/Users/user/Desktop/.minecraft`)。
 
 另:libqf(`D:\SilentStudio\PyQf to C`)在 Clang 下有 4 处 MSVC-only 写法,**已按主代理授权直接修好**(语义等价,
 快照在 `PyQf to C\_scratch\snap-2026-09-17T*/`),清单与理由登记在 `PyQf to C\PROGRESS.md` 的
