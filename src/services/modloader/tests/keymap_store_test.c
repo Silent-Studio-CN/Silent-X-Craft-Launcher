@@ -311,6 +311,14 @@ static void test_dir_and_presets(const char *dir_root)
     (void)snprintf(env, sizeof env, "APPDATA=%s", scratch);
     _putenv(env);
     const char *want_tail = "SilentXCraftLauncher\\keymaps";
+#elif defined(__APPLE__)
+    /* macOS 的默认目录是 ~/Library/Application Support/SilentXCraftLauncher(与
+     * keymap_store.c 的 default_root() 和 platform.py 的 darwin 分支一致),**不认**
+     * XDG_CONFIG_HOME。把 HOME 指到测试目录:既验证了默认路径,又保证不往真实用户目录写。 */
+    char scratch[512];
+    (void)snprintf(scratch, sizeof scratch, "%s/default", dir_root);
+    setenv("HOME", scratch, 1);
+    const char *want_tail = "Library/Application Support/SilentXCraftLauncher/keymaps";
 #else
     char scratch[512];
     (void)snprintf(scratch, sizeof scratch, "%s/default", dir_root);
