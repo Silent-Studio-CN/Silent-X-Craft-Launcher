@@ -600,7 +600,9 @@ int sxcl_keymap_store_save(const char *dir, const sxcl_keymap_layout *layout, co
     if (!layout) {
         return SXCL_KEYMAP_ERR_ARG;
     }
-    const char *source = (key && *key) ? key : ((layout->name && *layout->name) ? layout->name : "layout");
+    /* layout->name 是数组:取地址恒为真(Clang -Wpointer-bool-conversion 会挂),要判首字符。 */
+    const char *source =
+        (key && *key) ? key : ((layout->name[0] != '\0') ? layout->name : "layout");
     char safe[SXCL_KEYMAP_STORE_KEY_MAX];
     safe_key(safe, sizeof safe, source);
     if (!safe[0]) {
