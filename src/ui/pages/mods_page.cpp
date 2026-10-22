@@ -248,8 +248,10 @@ private:
             box->setTristate(false); // qf 的 CheckBox 默认三态(那份是给演示用的),这里只要勾/不勾
             box->setFixedHeight(28);
             box->setCursor(Qt::PointingHandCursor);
-            /* 勾选框也**保证自己能完整显示**：自然宽是下限，布局只会把它换行，不会压它。 */
-            box->setMinimumWidth(box->sizeHint().width());
+            /* 勾选框也**保证自己能完整显示**：自然宽是下限，布局只会把它换行，不会压它。
+             * +24 是样式给文字留的边距(指示方块 + 左右 padding)——只按 sizeHint 会给少,
+             * 实测文字会被切掉尾巴("Modrinth" 显示成 "Modrir")。 */
+            box->setMinimumWidth(box->sizeHint().width() + 24);
             box->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
             QObject::connect(box, &QAbstractButton::toggled, this,
                              [this, key] { onSourceToggled(key); });

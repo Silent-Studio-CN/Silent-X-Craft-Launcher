@@ -2564,6 +2564,10 @@ SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
                     return;
                 static bool announced = false;
                 const bool granted = androidHasAllFilesAccess();
+                /* 桌面上 androidHasAllFilesAccess() 恒为 true(没有这回事),照原样走就会在
+                 * Windows 启动时弹一句"已获得共享存储权限" —— 那是安卓的提示。所以这段只在
+                 * 安卓上编译/执行(桌面不留空壳)。 */
+#if defined(Q_OS_ANDROID)
                 if (granted && !announced) {
                     announced = true;
                     // 没配过游戏目录时把刚扫到"确实有版本"的目录落进设置,
@@ -2585,6 +2589,10 @@ SettingsPage::SettingsPage(QWidget *parent) : ScrollArea(parent) {
                                   QStringLiteral("现在可以扫描共享存储上的 .minecraft 了"), window(),
                                   4000);
                 }
+#else
+                Q_UNUSED(granted);
+                Q_UNUSED(announced);
+#endif
                 if (m_gameDirCard)
                     m_gameDirCard->setContent(gameDirectory());
                 if (m_javaCard)
