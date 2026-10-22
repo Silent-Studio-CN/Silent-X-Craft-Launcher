@@ -203,7 +203,9 @@ function(sxcl_warnings target)
     if(MSVC)
       target_compile_options(${target} PRIVATE /W4 /WX)
     else()
-      target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+      # -Wno-comment:注释里写 <game>/crash-reports/*.txt、assets/icons/*.svg 这类路径时,
+      # Clang/GCC 会把里面的 "/*" 当成嵌套注释起点报错(-Werror 下真挂)。那是散文,不是缺陷。
+      target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-comment)
     endif()
   endif()
 endfunction()
