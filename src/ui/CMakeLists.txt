@@ -76,6 +76,8 @@ set(SXCL_UI_SOURCES
   dialogs/account.cpp     dialogs/account.h
   dialogs/auth_dialog.cpp dialogs/auth_dialog.h
   dialogs/auth_replay.c   dialogs/auth_replay.h
+  #   policy_notice.* 启动声明(用户 2026-10-22 指定文案;验收钩子在场时自动跳过)
+  dialogs/policy_notice.cpp dialogs/policy_notice.h
   fluent_theme.cpp   fluent_theme.h
   sxcl_icons.cpp     sxcl_icons.h
   theme_bridge.cpp   theme_bridge.h

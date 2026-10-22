@@ -59,6 +59,7 @@
 // 设置文件路径(uiSettingsPath)与取证用的登录对话框。
 #include "dialogs/account.h"
 #include "dialogs/auth_dialog.h"
+#include "dialogs/policy_notice.h" // 启动声明(用户 2026-10-22 指定文案)
 #include "workers/ui_paths.h" // uiSettingsFilePath / uiGameDirectory / uiGameDirectoryReason(启动清单)
 #include "sxcl/lang.h"     // 语言表(键 -> 文案;.lang 与 Python 版逐字段兼容)
 #include "sxcl/settings.h" // 启动恢复:ui.theme / ui.accent / ui.language(环境变量优先)
@@ -768,6 +769,11 @@ sxcl::ui::MainWindow window;
     if (!route.isEmpty())
         window.switchToRoute(route);
     window.show();
+
+    /* 启动声明(用户 2026-10-22 指定的文案):产品路径上弹一次,窗口级模态、遮罩盖住主窗、卡片居中。
+     * 任何验收钩子在场时自动跳过(否则二十多个验收脚本会全被这个模态框挡在后面);
+     * SXCL_UI_POLICY=1 强制出现、=0 强制不出现(见 dialogs/policy_notice.h)。 */
+    QTimer::singleShot(500, &app, [&window] { sxcl::ui::PolicyNoticeDialog::showFor(&window); });
 
     // 验收通路:自渲染截图(对应 Python 的 widget.grab(),不受其它窗口遮挡)
     //   SXCL_UI_SHOT=<png 路径> 时,窗口显示后抓图并退出
