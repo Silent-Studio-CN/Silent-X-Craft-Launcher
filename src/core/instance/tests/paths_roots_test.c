@@ -26,8 +26,12 @@
 
 #if defined(_WIN32)
 #  define HOST_OS SXCL_PATHS_OS_WINDOWS
+/* 官方启动器目录的来源键:Windows 在 %APPDATA%.minecraft。 */
+#  define OFFICIAL_SOURCE "APPDATA"
 #else
 #  define HOST_OS SXCL_PATHS_OS_LINUX
+/* Linux/macOS 没有 %APPDATA% 那一层:官方目录**就是** ~/.minecraft(来源键 UserHome)。 */
+#  define OFFICIAL_SOURCE "UserHome"
 #endif
 
 static int g_pass = 0;
@@ -110,8 +114,24 @@ static void build_fixture(void)
     /* CurseForge:Instances(首字母大写) */
     put(FIXTURE_ROOT "/home/curseforge/minecraft/Instances/Pack/minecraft/versions/1.18.2/"
                      "1.18.2.json", "{}");
-    /* 用户目录下的 .minecraft:空壳(存在但没有 versions/) */
+    /* 用户目录下的 .minecraft:
+     *   Windows —— 它只是"又一个位置",做成空壳(存在但没有 versions/),用来验证
+     *              "存在就列出来,哪怕一个版本都没有";
+     *   Linux/macOS —— 没有 %APPDATA% 那一层,**官方目录就是 ~/.minecraft**,得放满。 */
+#if defined(_WIN32)
     (void)sxcl_fs_mkdirs(FIXTURE_ROOT "/home/.minecraft");
+#else
+    put(FIXTURE_ROOT "/home/.minecraft/versions/1.19.2/1.19.2.json", "{}");
+    put(FIXTURE_ROOT "/home/.minecraft/assets/indexes/1.19.json", "{}");
+    put(FIXTURE_ROOT "/home/.minecraft/launcher_profiles.json", "{}");
+    /* 桌面 Linux/macOS 的第三方目录在 XDG 数据目录下(Windows 的 %APPDATA% 那套在这
+     * 两台上根本不参与候选表,摆在 /appdata 里等于没摆)。 */
+    put(FIXTURE_ROOT "/data/PrismLauncher/instances/MyPack/minecraft/versions/1.21.4/"
+                     "1.21.4.json", "{}");
+    put(FIXTURE_ROOT "/data/PrismLauncher/instances/MyPack/minecraft/libraries/a.jar", "j");
+    put(FIXTURE_ROOT "/data/curseforge/minecraft/Instances/Pack/minecraft/versions/1.18.2/"
+                     "1.18.2.json", "{}");
+#endif
     /* 已配置目录:3 个版本 */
     put(FIXTURE_ROOT "/configured/versions/1.20.4/1.20.4.json", "{}");
     put(FIXTURE_ROOT "/configured/versions/1.20.4/1.20.4.jar", "jar");
@@ -386,6 +406,10 @@ static void test_detect_ex(void)
     env.app_data = FIXTURE_ROOT "/appdata";
     env.user_home = FIXTURE_ROOT "/home";
     env.program_dir = FIXTURE_ROOT "/prog";
+#if !defined(_WIN32)
+    /* Linux/macOS 的第三方候选来自 XDG 数据目录(没给就回落 ~/.local/share) */
+    env.xdg_data_home = FIXTURE_ROOT "/data";
+#endif
 
     err[0] = '\0';
     check_int(sxcl_paths_detect_ex(&env, HOST_OS, &folders, FIXTURE_ROOT "/configured", err,
@@ -400,37 +424,50 @@ static void test_detect_ex(void)
     check_int(folders.items[0].has_launcher_profiles, 0, "detect_ex:没有 launcher_profiles");
     check_contains(folders.items[0].path, "configured", "detect_ex:路径就是配置的那个");
 
-    /* 便携 > 官方 > 第三方;同优先级再比 score */
+    /* 便携 > 官方 > 第三方;同优先级再比 score。
+     * 官方的来源键按平台分叉(见 OFFICIAL_SOURCE):Windows = %APPDATA%,Linux/macOS = ~/.minecraft。 */
     {
         int idx_portable = -1;
         int idx_official = -1;
         int idx_third = -1;
-        int idx_home = -1;
         for (size_t i = 0; i < folders.count; ++i) {
             if (strcmp(folders.items[i].source, "Portable") == 0 && idx_portable < 0) {
                 idx_portable = (int)i;
             }
-            if (strcmp(folders.items[i].source, "APPDATA") == 0 && idx_official < 0) {
+            if (strcmp(folders.items[i].source, OFFICIAL_SOURCE) == 0 && idx_official < 0) {
                 idx_official = (int)i;
             }
             if ((strcmp(folders.items[i].source, "Prism") == 0 ||
                  strcmp(folders.items[i].source, "CurseForge") == 0) && idx_third < 0) {
                 idx_third = (int)i;
             }
-            if (strcmp(folders.items[i].source, "UserHome") == 0 && idx_home < 0) {
-                idx_home = (int)i;
-            }
         }
         check(idx_portable > 0, "detect_ex:便携目录在列表里");
         check(idx_official > 0, "detect_ex:官方目录在列表里");
         check(idx_third > 0, "detect_ex:容器根展开出来的实例在列表里");
-        check(idx_home > 0, "detect_ex:空壳的用户目录也在列表里(存在就列)");
         check(idx_portable < idx_official, "detect_ex:便携排在官方之前");
         check(idx_official < idx_third, "detect_ex:官方排在第三方之前");
-        check(idx_third < idx_home, "detect_ex:第三方排在空壳用户目录之前");
-        check_int(folders.items[idx_portable].versions, 2, "detect_ex:便携目录 2 个版本");
-        check_int(folders.items[idx_official].has_assets, 1, "detect_ex:官方目录有 assets");
-        check_int(folders.items[idx_official].score, 10 + 5 + 2, "detect_ex:官方目录的 score");
+        /* 下标可能是 -1(上面的断言已经报过了),取值前先兜住,别拿 -1 去索引 */
+        check_int(idx_portable >= 0 ? folders.items[idx_portable].versions : -1, 2,
+                  "detect_ex:便携目录 2 个版本");
+        check_int(idx_official >= 0 ? folders.items[idx_official].has_assets : 0, 1,
+                  "detect_ex:官方目录有 assets");
+        check_int(idx_official >= 0 ? folders.items[idx_official].score : -1, 10 + 5 + 2,
+                  "detect_ex:官方目录的 score");
+#if defined(_WIN32)
+        /* 只有 Windows 才有"另一条空壳的用户目录"(~/.minecraft 存在但没有 versions/)。
+         * Linux/macOS 上 ~/.minecraft 就是官方目录本身,没有这个第二角色。 */
+        {
+            int idx_home = -1;
+            for (size_t i = 0; i < folders.count; ++i) {
+                if (strcmp(folders.items[i].source, "UserHome") == 0 && idx_home < 0) {
+                    idx_home = (int)i;
+                }
+            }
+            check(idx_home > 0, "detect_ex:空壳的用户目录也在列表里(存在就列)");
+            check(idx_third < idx_home, "detect_ex:第三方排在空壳用户目录之前");
+        }
+#endif
     }
 
     /* 择优:已配置永远是答案(哪怕它一个版本都没有) */
