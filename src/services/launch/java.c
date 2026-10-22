@@ -1694,14 +1694,54 @@ int sxcl_java_binary_arch(const char *path, char *out, size_t out_len)
         default: return -1;
         }
     }
-    /* Mach-O:64 位小端(0xFEEDFACF)/ 64 位大端(arm64);universal(fat)认不出 -> -1(不判不符) */
+    /* Mach-O:magic 只说明"位数 + 字节序",**架构在 cputype(head[4..8])**。
+     * 以前按 magic 直接把小端 64 位判成 x64 —— 而 0xFEEDFACF 是 arm64 与 x64 共用的
+     * magic,于是 arm64 的 Mac 上每一份 Java 都被判成 x64(与 0x0100000C 不符),整台机器
+     * 的 JRE 全被"架构不符"拒掉。cputype:0x01000007 = x86_64,0x0100000C = arm64,
+     * 0x0000000C = arm(v7)。universal(fat,0xCAFEBABE/0xBEBAFECA)读不出单片架构 ->
+     * 返回 -1(不判不符),交给"真的跑一次"去裁决。 */
     if (head[0] == 0xCF && head[1] == 0xFA && head[2] == 0xED && head[3] == 0xFE) {
-        copy_str(out, out_len, "x64");
-        return 0;
+        /* 64 位小端 */
+        const unsigned int cpu = (unsigned int)head[4] | ((unsigned int)head[5] << 8) |
+                                 ((unsigned int)head[6] << 16) | ((unsigned int)head[7] << 24);
+        switch (cpu) {
+        case 0x01000007u: copy_str(out, out_len, "x64"); return 0;
+        case 0x0100000Cu: copy_str(out, out_len, "arm64"); return 0;
+        case 0x00000007u: copy_str(out, out_len, "x86"); return 0;
+        case 0x0000000Cu: copy_str(out, out_len, "arm32"); return 0;
+        default: return -1; /* 别的 CPU 类型(ppc 等):认不出就不判 */
+        }
     }
     if (head[0] == 0xFE && head[1] == 0xED && head[2] == 0xFA && head[3] == 0xCF) {
-        copy_str(out, out_len, "arm64");
-        return 0;
+        /* 64 位大端(cputype 也是大端) */
+        const unsigned int cpu = ((unsigned int)head[4] << 24) | ((unsigned int)head[5] << 16) |
+                                 ((unsigned int)head[6] << 8) | (unsigned int)head[7];
+        switch (cpu) {
+        case 0x01000007u: copy_str(out, out_len, "x64"); return 0;
+        case 0x0100000Cu: copy_str(out, out_len, "arm64"); return 0;
+        case 0x00000007u: copy_str(out, out_len, "x86"); return 0;
+        case 0x0000000Cu: copy_str(out, out_len, "arm32"); return 0;
+        default: return -1;
+        }
+    }
+    /* 32 位 Mach-O(0xFEEDFACE):同 64 位,架构在 cputype */
+    if (head[0] == 0xCE && head[1] == 0xFA && head[2] == 0xED && head[3] == 0xFE) {
+        const unsigned int cpu = (unsigned int)head[4] | ((unsigned int)head[5] << 8) |
+                                 ((unsigned int)head[6] << 16) | ((unsigned int)head[7] << 24);
+        switch (cpu) {
+        case 0x00000007u: copy_str(out, out_len, "x86"); return 0;
+        case 0x0000000Cu: copy_str(out, out_len, "arm32"); return 0;
+        default: return -1;
+        }
+    }
+    if (head[0] == 0xFE && head[1] == 0xED && head[2] == 0xFA && head[3] == 0xCE) {
+        const unsigned int cpu = ((unsigned int)head[4] << 24) | ((unsigned int)head[5] << 16) |
+                                 ((unsigned int)head[6] << 8) | (unsigned int)head[7];
+        switch (cpu) {
+        case 0x00000007u: copy_str(out, out_len, "x86"); return 0;
+        case 0x0000000Cu: copy_str(out, out_len, "arm32"); return 0;
+        default: return -1;
+        }
     }
     return -1;
 }
