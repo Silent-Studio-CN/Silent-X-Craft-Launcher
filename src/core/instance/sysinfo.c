@@ -21,6 +21,7 @@
 #  endif
 #  include <windows.h>
 #elif defined(__APPLE__)
+#  include <mach/mach.h>   /* host_statistics64:mach_shim 的"可用内存"只有它有 */
 #  include <sys/sysctl.h>
 #  include <sys/types.h>
 #  include <unistd.h>
@@ -125,9 +126,18 @@ static int sysinfo_platform_memory(uint64_t *total, uint64_t *available)
         return -1;
     }
     *total = memsize;
-    const long pages = sysconf(_SC_AVPHYS_PAGES);
-    const long page_size = sysconf(_SC_PAGE_SIZE);
-    *available = (pages > 0 && page_size > 0) ? ((uint64_t)pages * (uint64_t)page_size) : 0;
+    /* macOS 没有 _SC_AVPHYS_PAGES(那是 Linux 的)。用 Mach 的 vm_statistics64:
+     * 可用 ≈ free + inactive + speculative —— 与"活动监视器"看到的量级一致。 */
+    vm_statistics64_data_t vmstat;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vmstat, &count) ==
+        KERN_SUCCESS) {
+        const uint64_t page = (uint64_t)vm_page_size;
+        *available = ((uint64_t)vmstat.free_count + (uint64_t)vmstat.inactive_count +
+                      (uint64_t)vmstat.speculative_count) * page;
+    } else {
+        *available = 0;
+    }
     return 0;
 }
 
