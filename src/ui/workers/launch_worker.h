@@ -108,6 +108,13 @@ private:
     int onLine(int isStderr, const char *line);
     int onStarted(int64_t pid);
 
+public:
+    /* 补全进度的 C 回调入口:文件级自由函数 buildCompleteOpts() 要拿它的地址。
+     * 私有静态成员对非成员不可见(Clang 直接报 private member),这里开一个公开转发。 */
+    static void completeProgressCallback(void *userdata, const sxcl_task *task) {
+        cbCompleteProgress(userdata, task);
+    }
+
     LaunchRequest m_request;
     std::atomic<bool> m_cancel{false};
     std::atomic<bool> m_running{false};

@@ -76,7 +76,7 @@ void buildCompleteOpts(const QString &settingsFile, CompleteOpts *out, LaunchWor
                                       sizeof(out->cacheFile), &out->preferMirror,
                                       &out->assetsLevel, &out->skipFileCheck);
     out->progress.owner = owner;
-    out->opts.on_progress = &LaunchWorker::cbCompleteProgress;
+    out->opts.on_progress = &LaunchWorker::completeProgressCallback;
     out->opts.userdata = &out->progress;
 }
 } // namespace

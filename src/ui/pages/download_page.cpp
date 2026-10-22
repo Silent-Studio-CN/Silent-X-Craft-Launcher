@@ -86,23 +86,6 @@ QString currentEdition() {
     return edition.isEmpty() ? QStringLiteral("java") : edition;
 }
 
-// 占位卡:MOD / 光影这两栏现在没内容,如实说清楚"这一栏会做什么、什么时候做"。
-CardWidget *buildPlaceholderCard(const QString &title, const QString &body, QWidget *parent) {
-    auto *card = new CardWidget(parent);
-    auto *lay = new QVBoxLayout(card);
-    lay->setContentsMargins(20, 16, 20, 16);
-    lay->setSpacing(6);
-    auto *head = new StrongBodyLabel(title, card);
-    head->setStyleSheet(QStringLiteral("color: %1; font-size: 15px;").arg(pageTokenText("accent")));
-    lay->addWidget(head);
-    auto *text = new BodyLabel(body, card);
-    text->setWordWrap(true);
-    const QColor secondary = pageTokenColor("textSecondary");
-    text->setTextColor(secondary, secondary);
-    lay->addWidget(text);
-    return card;
-}
-
 /* 页脚那两个图标钮的**容器**:两颗图标之间那条竖直分隔线由它自己画。
  *
  * docs/27 §12 第 1 条(线不能是一个控件):拿 1 逻辑像素的控件当线,在 dpr=1.5 的屏幕上会占
