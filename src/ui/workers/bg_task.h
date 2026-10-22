@@ -55,7 +55,6 @@ private:
         std::atomic<bool> cancelled{false};
     };
 
-    QObject *m_owner = nullptr;
     std::shared_ptr<State> m_state;
     QThread *m_thread = nullptr;
 };

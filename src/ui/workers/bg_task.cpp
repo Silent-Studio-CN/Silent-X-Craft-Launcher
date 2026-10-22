@@ -32,7 +32,7 @@ constexpr int kJoinTimeoutMs = 300;
 
 } // namespace
 
-BgTask::BgTask(QObject *owner) : QObject(owner), m_owner(owner) {}
+BgTask::BgTask(QObject *owner) : QObject(owner) {}
 
 BgTask::~BgTask() {
     cancel();
