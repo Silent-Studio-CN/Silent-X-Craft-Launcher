@@ -9,6 +9,8 @@
 
 #include "platform_lock.h"
 
+#include <stdint.h> /* intptr_t(见文件末尾 SXCL_THREAD_RETURN 的说明) */
+
 #if defined(_WIN32)
 typedef HANDLE sxcl_thread_t;
 typedef DWORD(WINAPI *sxcl_thread_fn_t)(LPVOID);
@@ -40,7 +42,9 @@ static __inline void sxcl_thread_sleep_ms(unsigned ms) {
     nanosleep(&ts, NULL);
 }
 #define SXCL_THREAD_FN(name) static void *name(void *arg)
-#define SXCL_THREAD_RETURN(n) return (void *)(n)
+/* 先过一趟 intptr_t 再转 void*:直接把 int 转成指针在 32 位指针和 64 位指针上宽度不同,
+ * Clang(-Werror)在 macOS/Linux 上会报 -Wint-to-void-pointer-cast,MSVC 不报(所以本机看不出来)。 */
+#define SXCL_THREAD_RETURN(n) return (void *)(intptr_t)(n)
 #endif
 
 #endif /* SXCL_INTERNAL_PLATFORM_THREAD_H */
