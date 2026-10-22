@@ -212,7 +212,8 @@ function(sxcl_warnings target)
       if(target MATCHES "_test$")
         # 夹具共享头里有一堆 static 辅助函数,具体某个用例文件不一定全用到;
         # 测试二进制的职责是跑断言,这两条在测试目标上放开(产品目标不动)。
-        target_compile_options(${target} PRIVATE -Wno-unused-function -Wno-unused-variable)
+        target_compile_options(${target} PRIVATE -Wno-unused-function -Wno-unused-variable
+                               -Wno-missing-field-initializers)
       endif()
     endif()
   endif()
