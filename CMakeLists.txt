@@ -209,6 +209,11 @@ function(sxcl_warnings target)
       # ISO C99 只保证 4095 字符,Clang 在 -Wpedantic 下按错误报;那不是移植性问题。
       target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror
                              -Wno-comment -Wno-overlength-strings)
+      if(target MATCHES "_test$")
+        # 夹具共享头里有一堆 static 辅助函数,具体某个用例文件不一定全用到;
+        # 测试二进制的职责是跑断言,这两条在测试目标上放开(产品目标不动)。
+        target_compile_options(${target} PRIVATE -Wno-unused-function -Wno-unused-variable)
+      endif()
     endif()
   endif()
 endfunction()
