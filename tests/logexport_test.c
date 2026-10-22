@@ -204,7 +204,6 @@ int main(void)
     req.log_dir = LOG_DIR;
     check_int(sxcl_logs_export(&req, &res, err, sizeof(err)), 0, "没有游戏目录也能导出");
     check(res.files >= 2, "启动器日志照样进包");
-    check(res.note[0] == '\0' || res.note[0] != '\0', "结果里有 note 字段");
     zip = sxcl_zip_open(FIX "/out/only-launcher.zip");
     check(zip != NULL, "回读第二份 zip");
     sxcl_zip_close(zip);
