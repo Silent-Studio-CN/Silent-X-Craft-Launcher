@@ -230,19 +230,6 @@ static void split_cf_game_versions(const sxcl_json_value *array, char *versions,
     }
 }
 
-/** 数组里有没有这个值（大小写不敏感）。 */
-static int list_has(const sxcl_json_value *array, const char *want)
-{
-    const size_t n = sxcl_json_size(array);
-    for (size_t i = 0; i < n; ++i) {
-        const char *text = sxcl_json_string(sxcl_json_at(array, i));
-        if (text != NULL && str_equal_ci(text, want)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 /** 空格分隔的列表里有没有这个词（大小写不敏感）—— 版本/加载器在 sxcl_mod_file 里就是这么存的。 */
 static int text_list_has(const char *list, const char *want)
 {
