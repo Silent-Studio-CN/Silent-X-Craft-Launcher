@@ -261,46 +261,67 @@ static void build_manifest(void)
 
 /* all.json:本平台四个组件(jre-legacy/gamma/delta/epsilon = Java 8/17/21/25,
  * 与 2026-04 的真实清单同名同大版本)+ 两个必须被排除的 + 另一个平台(测平台选择) */
+/* 一个平台键下面的完整组件表(4 个真组件 + 2 个必须被排除的)。夹具真正要验的是
+ * "挑组件"和"装",两个平台用同一份内容即可。 */
+static int emit_platform_section(char *out, size_t cap, const char *key, const char *sha, int size)
+{
+    return snprintf(out, cap,
+                    "  \"%s\": {\n"
+                    "    \"jre-legacy\": [ { \"manifest\": { \"url\":"
+                    " \"https://piston-meta.mojang.com/v1/legacy.json\", \"sha1\": \"%s\","
+                    " \"size\": %d }, \"version\": { \"name\": \"1.8.0_402\","
+                    " \"released\": \"2024-01-01\" } } ],\n"
+                    "    \"java-runtime-gamma\": [ { \"manifest\": { \"url\":"
+                    " \"https://piston-meta.mojang.com/v1/gamma.json\", \"sha1\": \"%s\","
+                    " \"size\": %d }, \"version\": { \"name\": \"17.0.8\" } } ],\n"
+                    "    \"java-runtime-delta\": [ { \"manifest\": { \"url\":"
+                    " \"https://piston-meta.mojang.com/v1/delta.json\", \"sha1\": \"%s\","
+                    " \"size\": %d }, \"version\": { \"name\": \"21.0.5\" } } ],\n"
+                    "    \"java-runtime-epsilon\": [ { \"manifest\": { \"url\":"
+                    " \"https://piston-meta.mojang.com/v1/epsilon.json\", \"sha1\": \"%s\","
+                    " \"size\": %d }, \"version\": { \"name\": \"25.0.1\" } } ],\n"
+                    "    \"minecraft-java-exe\": [ { \"manifest\": { \"url\":"
+                    " \"https://piston-meta.mojang.com/v1/exe.json\", \"sha1\": \"%s\","
+                    " \"size\": 1 }, \"version\": { \"name\": \"1.0\" } } ],\n"
+                    "    \"java-runtime-gamma-snapshot\": [ { \"manifest\": { \"url\":"
+                    " \"https://piston-meta.mojang.com/v1/snap.json\", \"sha1\": \"%s\","
+                    " \"size\": 1 }, \"version\": { \"name\": \"17.0.9\" } } ]\n"
+                    "  }",
+                    key, sha, size, sha, size, sha, size, sha, size, sha, sha);
+}
+
 static void build_all_json(void)
 {
     char sha_manifest[48];
+    char win_section[2048];
+    char host_section[2048];
     sha1_of(g_manifest, sha_manifest, sizeof(sha_manifest));
     const int size = (int)strlen(g_manifest);
-    snprintf(g_all_json, sizeof(g_all_json),
-             "{\n"
-             "  \"windows-x64\": {\n"
-             "    \"jre-legacy\": [ { \"manifest\": { \"url\": \"https://piston-meta.mojang.com/v1/legacy.json\","
-             " \"sha1\": \"%s\", \"size\": %d }, \"version\": { \"name\": \"1.8.0_402\","
-             " \"released\": \"2024-01-01\" } } ],\n"
-             "    \"java-runtime-gamma\": [ { \"manifest\": { \"url\":"
-             " \"https://piston-meta.mojang.com/v1/gamma.json\", \"sha1\": \"%s\", \"size\": %d },"
-             " \"version\": { \"name\": \"17.0.8\" } } ],\n"
-             "    \"java-runtime-delta\": [ { \"manifest\": { \"url\":"
-             " \"https://piston-meta.mojang.com/v1/delta.json\", \"sha1\": \"%s\", \"size\": %d },"
-             " \"version\": { \"name\": \"21.0.5\" } } ],\n"
-             "    \"java-runtime-epsilon\": [ { \"manifest\": { \"url\":"
-             " \"https://piston-meta.mojang.com/v1/epsilon.json\", \"sha1\": \"%s\", \"size\": %d },"
-             " \"version\": { \"name\": \"25.0.1\" } } ],\n"
-             "    \"minecraft-java-exe\": [ { \"manifest\": { \"url\":"
-             " \"https://piston-meta.mojang.com/v1/exe.json\", \"sha1\": \"%s\", \"size\": 1 },"
-             " \"version\": { \"name\": \"1.0\" } } ],\n"
-             "    \"java-runtime-gamma-snapshot\": [ { \"manifest\": { \"url\":"
-             " \"https://piston-meta.mojang.com/v1/snap.json\", \"sha1\": \"%s\", \"size\": 1 },"
-             " \"version\": { \"name\": \"17.0.9\" } } ]\n"
-             "  },\n"
-             "  \"linux\": {\n"
-             "    \"java-runtime-delta\": [ { \"manifest\": { \"url\":"
-             " \"https://piston-meta.mojang.com/v1/delta.json\", \"sha1\": \"%s\", \"size\": %d },"
-             " \"version\": { \"name\": \"21.0.5\" } } ]\n"
-             "  }\n"
-             "}\n",
-             sha_manifest, size, /* jre-legacy */
-             sha_manifest, size, /* java-runtime-gamma */
-             sha_manifest, size, /* java-runtime-delta */
-             sha_manifest, size, /* java-runtime-epsilon(真实清单里 25 的那一条) */
-             sha_manifest,       /* minecraft-java-exe(必须被排除) */
-             sha_manifest,       /* java-runtime-gamma-snapshot(必须被排除) */
-             sha_manifest, size); /* linux 平台那一条 */
+    /* 本机平台键:安装走的是 sxcl_java_runtime_platform_key(),不是写死的 windows-x64。
+     * 夹具里缺本机平台 -> "挑不出可用的 JRE 组件"(ERR_MANIFEST,stage=query),
+     * 后面每一条安装用例都会跟着塌(macOS/arm64 = mac-os-arm64)。 */
+    const char *host = sxcl_java_runtime_platform_key();
+    host_section[0] = '\0';
+    (void)emit_platform_section(win_section, sizeof(win_section), "windows-x64", sha_manifest, size);
+    if (host != NULL && host[0] != '\0' && strcmp(host, "windows-x64") != 0 &&
+        strcmp(host, "linux") != 0) {
+        char body[1536];
+        const int n = emit_platform_section(body, sizeof(body), host, sha_manifest, size);
+        if (n > 0 && (size_t)n < sizeof(body)) {
+            (void)snprintf(host_section, sizeof(host_section), "%s,\n", body);
+        }
+    }
+    (void)snprintf(g_all_json, sizeof(g_all_json),
+                   "{\n"
+                   "%s,\n"
+                   "%s"
+                   "  \"linux\": {\n"
+                   "    \"java-runtime-delta\": [ { \"manifest\": { \"url\":"
+                   " \"https://piston-meta.mojang.com/v1/delta.json\", \"sha1\": \"%s\","
+                   " \"size\": %d }, \"version\": { \"name\": \"21.0.5\" } } ]\n"
+                   "  }\n"
+                   "}\n",
+                   win_section, host_section, sha_manifest, size);
 }
 
 /* ── 进度回调:记录阶段顺序与百分比单调性 ── */
