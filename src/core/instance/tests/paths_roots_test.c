@@ -4,6 +4,13 @@
  * All rights reserved.
  */
 
+/* 这些是**平台矩阵**夹具:很多段只在安卓/Windows 上编译,其它平台上会有"没有调用者"的
+ * 辅助函数与变量。测试二进制的用途是跑断言,不是被 lint —— 只在本文件关掉这两条。 */
+#if defined(__clang__)
+#  pragma clang diagnostic ignored "-Wunused-function"
+#  pragma clang diagnostic ignored "-Wunused-variable"
+#endif
+
 #if defined(_MSC_VER)
 #  define _CRT_SECURE_NO_WARNINGS 1
 #endif
