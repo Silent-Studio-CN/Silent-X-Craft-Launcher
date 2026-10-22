@@ -362,6 +362,7 @@ int sxcl_auth_session_from_json(const char *json, size_t len, sxcl_auth_session 
  *        + 用户名 + 一份**随机盐**(0600 文件,首次使用时生成)。
  * 盐是真正的熵来源:只拷走令牌文件没用(解不开),把盐也一起拷走才会被解开 ——
  * 这正是"防离线窃取"的边界,文档里写清楚了。 */
+#if defined(__linux__)
 static int read_file_quiet(const char *path, char *out, size_t out_len, size_t *got)
 {
     FILE *fp = sxcl_fs_fopen(path, "rb");
@@ -376,6 +377,7 @@ static int read_file_quiet(const char *path, char *out, size_t out_len, size_t *
     }
     return 0;
 }
+#endif /* __linux__:只有 Linux 会读 /etc/machine-id */
 
 static void machine_material(char *out, size_t out_len)
 {
@@ -695,10 +697,8 @@ static int filekey_open(const char *path, const unsigned char *payload, size_t p
 
 /* ── macOS Keychain / Linux libsecret(编译得到,但本机(Windows)无法实测) ──
  * 这里刻意写得保守:任何失败都返回错误让上层降级,绝不"以为存进去了"。 */
-#if defined(__APPLE__)
-static const char *k_keychain_service = "SilentXCraftLauncher";
-static const char *k_keychain_account = "auth.tokens";
-#endif
+/* macOS Keychain 这条路还没实现(占位常量曾经在这里,Clang 在 macOS 上按未使用变量报错,
+ * 已删)。实现时再连同 libsecret 那条一起补。 */
 
 /* ── 保存 / 读取 ── */
 int sxcl_auth_store_save(const char *path, const sxcl_auth_session *session,

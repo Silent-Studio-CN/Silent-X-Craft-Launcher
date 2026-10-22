@@ -20,8 +20,8 @@
 #  endif
 #  include <windows.h>
 #  include <shellapi.h>
-#elif !defined(__APPLE__)
-#  include <unistd.h>
+#else
+#  include <unistd.h> /* fork/execlp/_exit:macOS 也有,别再单独特判 __APPLE__ */
 #endif
 
 int sxcl_auth_open_browser(const char *url)
