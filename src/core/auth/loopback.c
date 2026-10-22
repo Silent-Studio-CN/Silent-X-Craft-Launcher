@@ -104,7 +104,13 @@ int sxcl_auth_loopback_start(sxcl_auth_loopback **out, char *err, size_t err_len
         sxcl_auth_err(err, err_len, "监听本地端口失败");
         return SXCL_AUTH_ERR_UNSUPPORTED;
     }
+    /* getsockname 要的是 socklen_t*(Linux/macOS),Windows 是 int* —— 直接写 int
+     * 在 Clang 上是 -Wpointer-sign,而 -Werror 下真挂。 */
+#if defined(_WIN32)
     int alen = (int)sizeof(addr);
+#else
+    socklen_t alen = (socklen_t)sizeof(addr);
+#endif
     if (getsockname(s, (struct sockaddr *)&addr, &alen) != 0) {
         sxcl_sock_close(s);
         free(lb);

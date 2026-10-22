@@ -17,6 +17,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_WIN32)
+#  include <sys/stat.h> /* chmod(账户文件权限收紧);MSVC 走 <io.h> 的同名函数 */
+#endif
+
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN

@@ -120,17 +120,6 @@ static void fe_double(fe *r, const fe *a)
     fe_add(r, a, a);
 }
 
-static void fe_mul_small(fe *r, const fe *a, uint32_t k)
-{
-    /* 小整数乘:重复加(只用在 k<=8 的场合,够快也够简单) */
-    fe acc;
-    memset(&acc, 0, sizeof(acc));
-    for (uint32_t i = 0; i < k; ++i) {
-        fe_add(&acc, &acc, a);
-    }
-    *r = acc;
-}
-
 /* ── Montgomery 乘法 ── */
 static uint32_t g_n0inv = 0; /* -p^{-1} mod 2^32 */
 static fe g_r2;              /* R² mod p,R = 2^384 */
