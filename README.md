@@ -1,150 +1,78 @@
-# Silent-X-Craft-Launcher C 版（SXCL-C）
+# Silent X Craft Launcher
 
-SXCL 的 C/C++ 重写工程。本仓库 `main` 是 C 版；Python/PySide6 版保留在 `legacy-python` 分支，
-两版功能对等、数据格式互通（共用 `PCL\Setup.ini`、`launcher_profiles.json`、`sxcl.keymap.v1` 等既有契约）。
+SXCL 是一个第三方的 **Minecraft: Java Edition 启动器**,主要面向 Windows,代码同时面向 macOS、Linux 与 Android。
 
-## 分支与版本
+界面是 Fluent 风格的单窗口应用:左侧导航、右侧内容,窗口可以缩到 900×600 就不再缩小;所有文字都有自己该占的位置,放不下就换行,不会被压扁或裁掉。
 
-| 分支 / 标签 | 内容 |
-| --- | --- |
-| `main` | C/C++ 重写版（本文件所述） |
-| `legacy-python` | Python/PySide6 实现（重写前的最后一版，随时可取回） |
-| `legacy-python-before-c` | 与 `legacy-python` 同一点的标签，防分支误删 |
-| `v0.1.0` | Python 版的历史发布标签 |
+## 功能
 
-取回 Python 版：`git switch legacy-python`（或在 GitHub 上切分支查看）。
+**版本**
+- 浏览与下载全部正式版 / 快照 / 远古版,按版本号从新到旧排列
+- 加载器静默安装:Forge / NeoForge / Fabric / Quilt / OptiFine
+- 已安装版本自动扫描;**残缺版本单独列出并写明缺什么**,点一下就补全(版本文件 / 客户端 jar / 依赖库)
+- 每个版本一张"游戏配置"说明:原版还是 Forge + OptiFine 之类,只写人话
 
-## 为什么重写
+**启动**
+- Java 自动探测(注册表、常见安装目录、官方运行时)与按版本下发运行时
+- 参数拼装、版本隔离、启动日志、崩溃报告与卡死取证(看门狗会在界面卡住时落一份现场)
 
-- 启动器冷启动内存与耗时：Python 版实测常驻 >200 MB、启动数秒；C 版目标常驻 <40 MB、冷启动 <300 ms。
-- 一份源码产出三端：Windows 安装包 / 便携包 / 安卓 APK（Python 版受 PySide6 无 android wheel 限制）。
-- 下载引擎需要精确控制 socket、io_uring/IOCP 与限速节拍，语言层抽象越薄越好。
+**模组与光影**
+- 双源:Modrinth 与 CurseForge,两个都能勾、也都能取消,结果合并成一份列表
+- 中文名(随包一张表,查不到就显示原名,不机器翻译)
+- 版本范围、开发商、下载量(万/亿)、更新时间、来源标记
+- 点一行进详情页看完整介绍,详情页里一个「安装」按当前实例的版本与加载器装最合适的文件
 
-## 三条技术线
+**账户**
+- Microsoft 账号设备码登录(浏览器输 8 位码,窗口自己等)、离线登录
+- 登录后拉皮肤头像,顶栏显示头像与玩家名
 
-| 线 | 语言 | 内容 | 依赖 |
-| --- | --- | --- | --- |
-| `libsxcl` 核心 | C11 | 下载引擎（多连接 Range、`.part` 断点续传、令牌桶限速、流式 SHA-1/SHA-256 校验）、双路线路与熔断、优先级调度、设置与实例存档、版本清单解析、Java 运行时探测 | 仅 OS API + zlib |
-| `sxcl-ui` 界面 | C++17 / Qt 6 Widgets | 直接消费 `D:\SilentStudio\PyQf to C`（qf 的 C/C++ 重写）作为 Fluent 控件层 | libsxcl、libqf |
-| `sxcl-net` 基岩与联机 | Rust（C ABI 导出） | 基岩版本管理、微软 / 离线登录、联机（复用 WebRTC / NetherNet）、协议加解密与解析 | libsxcl |
+**网络**
+- 连接复用、HTTP/2、查询与图标两级缓存、失败快速回退
+- 第二次进同一页面,图标 0 请求
 
-分层规则与 Python 版一致：**core ← services ← ui**，core 不得反向依赖 UI；跨层只经 C ABI 或稳定头文件。
+## 构建
+
+依赖:CMake ≥ 3.24、MSVC(VS 2022 及以上)、Qt 6.11(Widgets / Network / Svg)。
+
+```powershell
+cmake -S . -B build-ui -G "Visual Studio 18 2026" -A x64 `
+      -DCMAKE_PREFIX_PATH=D:/Qt/6.11.2/msvc2022_64 `
+      -DSXCL_BUILD_UI=ON -DSXCL_BUILD_TESTS=ON
+cmake --build build-ui --config Release
+ctest --test-dir build-ui -C Release
+```
+
+纯核心库(命令行)构建可以 `-DSXCL_BUILD_UI=OFF`。产物在 `build-ui/src/ui/Release/`,
+旁边会由 `windeployqt` 铺好运行时;整目录压成 zip 就是便携版。
 
 ## 目录
 
 ```
-include/sxcl/    公共 C 头（唯一对外契约）
-src/core/        下载引擎、限速、校验、线路、设置、缓存
-src/services/    版本清单、模组加载器静默安装、账户、实例管理
-src/ui/          Qt 界面（消费 libqf）
-src/platform/    win32 / linux / android 平台封装
-crates/          Rust：基岩与联机（C ABI）
-docs/            设计与迁移文档
-tests/           单元测试与对拍（与 Python 版逐字段比对）
-tools/           构建、打包（Inno Setup）、资源导出脚本
+include/sxcl/    公共 C 头(对外契约)
+src/core/        下载引擎、限速、校验、设置、缓存、日志与崩溃取证
+src/services/    版本清单、加载器安装、模组与光影、账户、实例管理
+src/ui/          Qt 界面(控件层用 libqf)
+src/net/         Qt 传输后端
+tools/           验收脚本与命令行工具
+tests/           单元与集成测试(ctest)
+docs/            设计与验收文档
+patches/         第三方控件库的补丁存档
 ```
 
-## 构建
+分层:**core ← services ← ui**,core 不反向依赖界面;跨层只走 C ABI 或稳定头文件。
 
-本机（Windows，i5-11320H，无 C/C++ 编译器）不承担编译；C/C++ 编译在编译机 WS2025 上做：
+## 质量
 
-```powershell
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSXCL_BUILD_UI=ON
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-```
-
-UI 需要 Qt 6.11.2（WS2025 已装，含 4 套安卓套件）与 `libqf`；纯核心库构建可 `-DSXCL_BUILD_UI=OFF`。
-
-## 不变量（改代码前先读）
-
-- **本工程不依赖 Python**：构建、测试、打包一律 CMake + MSVC + PowerShell，产物里没有 Python 运行时。
-  `tools/` 下有用 Python 写的**取证/比对脚本**（抓参考图、逐像素比对、批量处理文件头），
-  它们只在开发机上跑、不参与构建与发布；Python/PySide6 版实现保留在 `legacy-python` 分支，
-  只作为**语义与数据格式的参考**，其源码与生成流程不进本仓库。
-- 跨平台代码默认不写平台专有 API；必须写时收敛到 `src/platform/`。
-- 面向用户的行为改动，先在 Python 版确认语义，再在 C 版实现（避免两版分叉），但实现与验证都在 C 侧完成。
-- **文件头只放版权头三行**（C/C++ 用 `/* */`，脚本与 CMake 用 `#`），不要再往文件开头堆大段设计说明 ——
-  开源读者第一眼要看的是代码：
-
-  ```c
-  /*
-   * (C) Silent X Craft Launcher
-   * Copyright by SilentStudio.
-   * All rights reserved.
-   */
-  ```
-
-  为什么这么写、当初踩过什么坑，写进 `docs/`。历史遗留的文件头说明已**原文归档**到
-  `docs/14-源码头注归档.md`（可全文搜索）。批量工具：`tools/strip_file_headers.py`（幂等，保护 shebang 与
-  `#pragma once`）与 `tools/verify_header_strip.py`（独立校验：只删了注释，正文逐行全等）。
-
-## 现状
-
-| 阶段 | 状态 |
-| --- | --- |
-| 0 骨架与工具链 | **已完成**：MSVC 14.51 编过，`ctest` 全绿（限速器 27 项 / 哈希 79 项 / 校验层 / 传输层 14 项） |
-| 1 下载引擎 | **完成**：工作线程池 + 优先级队列 + `.part` 续传（含残片/416 自愈）+ 双路换源 + 全局限速 + 强校验 + 哈希缓存（多连接分片尚未实现） |
-| 2 双路线路与熔断 | 未开始 |
-| 3 元数据层 | **完成**：版本清单、`rules` 平台过滤、`natives` 分类器、资源对象展开（5,147 个按哈希去重） |
-| 4 安装层（Forge/NeoForge/OptiFine 静默安装） | 未开始 |
-| 4 安装层（Forge/NeoForge/OptiFine 静默安装） | **地基就位**：子进程启动与输出捕获（逐行回调/超时/主动终止）、`options.txt` 读写；静默安装本体待搬 |
-| 5 启动层 | **地基就位**：同上（启动游戏、抓日志、渲染后端注入都要它）；参数拼装与 Java 探测待做 |
-| 6 UI（Qt6 + libqf） | 未开始 |
-| 7 基岩与联机（Rust） | 未开始 |
-| 8 打包（Inno / DMG / AppImage / APK） | 未开始 |
-
-## 已验收的行为（真跑，不是"应该能行"）
-
-| 用例 | 证据 |
-| --- | --- |
-| 正常下载 + 限速 | 276,542 B 的版本清单，`--rate 400kb` 下 0.75s 完成，退出码 0 |
-| 摘要故意写错 | 退出码 1，**不留正式文件、`.part` 也删除**（坏文件不会冒充成功） |
-| 首路 404 → 次路 | 自动换到第二候选并成功，退出码 0 |
-| **断点续传** | 限速 50KB/s 下到 52,035 B 时强杀进程；重跑续传完成，产物 SHA-256 与完整下载**逐字节一致** |
-| Range 兑现检查 | 实测 Mojang CDN 在带 `Accept-Encoding: gzip` 时**放弃 Range**（返回 200 全量）。传输层因此对 Range 请求强制 `identity`，引擎另有一层"服务端没兑现就全量重下"的保护 |
-
-## 端到端验收：拉全一个真实的游戏目录
-
-`sxcl-dl version latest <目录>` 一条命令产出**可启动级别**的完整游戏目录，全部按 Mojang 官方哈希强校验：
-
-| 项 | 实测 |
-| --- | --- |
-| 资源对象（assets/objects） | **5,147 个 / 461 MB**，逐个重算 SHA-1 与文件名比对 → **0 不符** |
-| 客户端 jar | 41,483,720 B，与 `downloads.client.sha1` 逐字节一致 |
-| 资源索引 | 与 `assetIndex.sha1` 一致 |
-| 依赖库 | 114 条按规则筛出 74 个，**74/74 哈希通过** |
-| 游戏目录总体积 | **586.8 MB** |
-| 重复运行（哈希缓存生效） | 5,225 个任务全部命中，**0 下载 0 失败，墙钟 3.36 秒** |
-
-## 四平台编译验证（CI 全绿）
-
-| 平台 | 作业 | 状态 |
-| --- | --- | --- |
-| Windows | `windows-msvc`（VS2026，不硬写生成器） | 通过 |
-| Linux | `linux-gcc`（gcc + Ninja） | 通过 |
-| macOS | `macos-universal`（`arm64;x86_64` 通用二进制） | 通过 |
-| Android | `android-arm64`（NDK 交叉编译） | 通过 |
-| Qt 传输后端 | `qt-transport-linux`（install-qt-action） | 通过 |
-
-**CI 一次就抓出 5 个本机 MSVC 完全掩盖的真实缺陷**（值得记住，别删）：
-
-1. `include/sxcl/fs.h` 用了 `size_t` 却没 include `<stddef.h>`（本机因为包含顺序恰好先引入了 stdio.h 而侥幸通过）。
-2. `src/platform/platform_posix.c` 缺 `<fcntl.h>`：`open`/`O_WRONLY`/`O_CREAT` 未声明。
-3. macOS 的 `struct stat` 与 Linux 不同：顶部定义 `_POSIX_C_SOURCE` 会让 macOS SDK 把 `st_mtim` 与 `st_mtimespec` **一起收窄掉**，去掉该宏即可（CMake 用 `-std=gnu11`，不需要它）。
-4. Android 的 pthread 在 libc 里，`find_package(Threads REQUIRED)` 必然失败，要单独分支。
-5. 不带 Qt 构建时，CLI 里 `#else` 分支的 `return` 让后续代码变成 unreachable，MSVC `C4702` 在 `/WX` 下直接打挂（本机装了 Qt，走的是另一个分支，看不出来）。
-   > 2026-09-21 夜**已修**（`tools/sxcl-dl/main.c`，改动口径：**配置相关**，不是 pragma 静音）：
-   > `cmd_java_list/plan/preset` 与其专用辅助函数（`java_cli_ctx` / `java_cli_progress` / `java_human_mb`）
-   > 整体挪进 `#if defined(SXCL_HAVE_QT_TRANSPORT)` —— 无 Qt 配置里**整个 java 下载子系统都不编**，
-   > 所以不存在"return 之后的不可达代码"（顺带解决那些辅助函数在无 Qt 下没人引用、会被 `C4505` 打挂的问题）；
-   > 三个子命令在两种配置下都保留同名壳子（调用点一行不用改），无 Qt 时只回一条如实的错误。
-   > 复现：`build-norm` 口径（`-DSXCL_BUILD_QT_TRANSPORT=OFF`）与 Qt 口径各跑一次
-   > `cmake --build <dir> --target sxcl-dl --config Release`，两边 `rc=0`。
-
-另有一条是测试自身的跨平台缺陷：元数据层测试的"期望总字节"写死成 windows/linux 两种，漏了 macOS 的 `natives-osx` 大小不同，现已改成按平台分别计算。
+- `ctest` 覆盖核心 49 个用例、界面 55 个用例(下载、校验、版本清单、安装、启动参数、账户、界面几何)
+- `tools/` 下有 20 多个验收脚本,能自己跑出数字:窗口几何、像素级比对、控件是否被裁、界面是否卡顿、
+  崩溃与否、下载路径落点
+- 出问题有现场:崩溃落 `.txt` + minidump,界面卡住超过阈值落一份"卡在哪"的报告
 
 ## 许可
 
-AGPL-3.0 + SXCL 附加条款，与 Python 版一致（`LICENSE` 从 Python 版复制，勿改动条款）。
-PCL 素材的署名与不混淆规则见 Python 版 `assets/icons/NOTICE.md`；基岩 APK 不参与分发。
+[AGPL-3.0](LICENSE)。
+
+## 链接
+
+- 官网:<https://mc.silentstudio.cn>
+- 仓库:<https://github.com/Silent-Studio-CN/Silent-X-Craft-Launcher>
