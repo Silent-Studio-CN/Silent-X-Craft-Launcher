@@ -178,16 +178,6 @@ private:
     bool m_stacked = false;
 };
 
-QWidget *buildPlaceholderTab(const QString &title, const QString &body, QWidget *parent) {
-    auto *holder = new QWidget(parent);
-    auto *lay = new QVBoxLayout(holder);
-    lay->setContentsMargins(0, 0, 0, 0);
-    lay->setSpacing(12);
-    lay->addWidget(buildPlaceholderCard(title, body, holder));
-    lay->addStretch(1);
-    return holder;
-}
-
 } // namespace
 
 QWidget *createDownloadPage(QWidget *parent) {
