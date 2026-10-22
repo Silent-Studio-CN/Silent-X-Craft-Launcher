@@ -99,22 +99,19 @@ static int paths_home_dir(char *out, size_t out_len)
 #endif
 }
 
-/* APPDATA(Windows 专有;其它平台没有). */
+#if defined(_WIN32)
+/* APPDATA(Windows 专有;其它平台干脆不定义 —— 唯一调用点也在 _WIN32 里,
+ * 留着空壳会让 Clang 的 -Wunused-function 在 macOS 上挂掉)。 */
 static int paths_appdata_dir(char *out, size_t out_len)
 {
-#if defined(_WIN32)
     const char *appdata = env_value("APPDATA");
     if (appdata != NULL) {
         paths_copy(out, out_len, appdata);
         return 0;
     }
     return -1;
-#else
-    (void)out;
-    (void)out_len;
-    return -1;
-#endif
 }
+#endif
 
 int sxcl_paths_program_dir(char *out, size_t out_len, char *err, size_t err_len)
 {
