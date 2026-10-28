@@ -101,6 +101,8 @@ set(SXCL_UI_SOURCES
   flow_layout.cpp    flow_layout.h
   nav.cpp            nav.h
   main_window.cpp    main_window.h
+  #   mac_chrome.*  macOS 的红黄绿三枚圆点 + 屏幕顶部系统菜单栏(其它平台不编译那几个文件)
+  mac_chrome.cpp     mac_chrome.h
   #   tray.*       任务栏托盘图标:「最小化 = 隐藏窗口」后的恢复入口(新增设计,
   #                Python 版没有这套语义;三个动作只发信号,窗口状态仍由 main_window 独占)
   tray.cpp           tray.h

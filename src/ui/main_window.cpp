@@ -62,6 +62,9 @@
 
 #include "theme_bridge.h"
 #include "titlebar_account.h" // 顶栏"头像 + 玩家名"(点它进账户管理页)
+#if defined(Q_OS_MACOS)
+#  include "mac_chrome.h" // 红黄绿三枚圆点 + 屏幕顶部系统菜单栏(只在 macOS 编译)
+#endif
 #include "tray.h"             // 任务栏托盘(最小化=隐藏后的恢复入口;新增设计)
 #include "workers/install_worker.h" // 退出时主动取消安装(InstallWorker::cancel)要用它的类型
 #include "workers/ui_paths.h" // uiSettingsFilePath / uiTrace(与各页同口径)
@@ -555,6 +558,24 @@ void MainWindow::buildUi() {
     // 三键 normalColor=white / hover rgba(255,255,255,26) / close hover rgb(232,17,35)。
     FluentStyleSheet::apply(m_titleBar, FluentStyleSheet::FLUENT_WINDOW);
 
+#if defined(Q_OS_MACOS)
+    /* macOS:窗口按钮是**左上角那三枚红黄绿**,不是右上角这套 Windows 的自绘三键。
+     * 所以上面那三个按钮在这里**不建**(它们只属于 Windows/Linux 的形态),
+     * 点击语义仍然走同一个 requestClose / 最小化 / 缩放。 */
+    auto *lights = new MacTrafficLights(m_titleBar);
+    if (auto *lay = qobject_cast<QBoxLayout *>(m_titleBar->layout()))
+        lay->insertWidget(0, lights, 0, Qt::AlignLeft | Qt::AlignVCenter);
+    connect(lights, &MacTrafficLights::closeRequested, this, &MainWindow::requestClose);
+    connect(lights, &MacTrafficLights::minimizeRequested, this, &QWidget::showMinimized);
+    connect(lights, &MacTrafficLights::zoomRequested, this, [this] {
+        if (isFullScreen())
+            showNormal();
+        else
+            showFullScreen();
+    });
+    /* 屏幕顶部那条系统菜单栏(与苹果 logo 并排)。 */
+    createMacMenuBar(this);
+#else
     // 三键:把 libqf 原来的三个(46x37、26x12 图标)换成 qf 几何的同类,位置与顺序不变
     const QList<QAbstractButton *> oldButtons = m_titleBar->findChildren<QAbstractButton *>();
     for (QAbstractButton *b : oldButtons)
@@ -572,6 +593,7 @@ void MainWindow::buildUi() {
     const QList<QAbstractButton *> chromeButtons{minBtn, maxBtn, closeBtn};
     for (QAbstractButton *b : chromeButtons)
         FluentStyleSheet::apply(b, FluentStyleSheet::FLUENT_WINDOW);
+#endif /* Q_OS_MACOS */
 
     /* ── 顶栏那枚「玩家」:头像 + 玩家名,夹在标题与三键之间 ──
      * 用户 2026-09-27:「正版账户登录完的玩家,拉取他的模型头像……放到顶栏 SXCL 右侧、
@@ -580,8 +602,13 @@ void MainWindow::buildUi() {
      * 三键宽度将来变了它也跟着走)。*/
     m_accountChip = new TitlebarAccount(m_titleBar);
     if (auto *lay = qobject_cast<QBoxLayout *>(m_titleBar->layout())) {
+#if defined(Q_OS_MACOS)
+        /* macOS 上右边没有三键了,玩家信息就贴在布局末尾(标题栏右端)。 */
+        lay->addWidget(m_accountChip, 0, Qt::AlignVCenter);
+#else
         const int at = lay->indexOf(minBtn);
         lay->insertWidget(at >= 0 ? at : lay->count(), m_accountChip, 0, Qt::AlignVCenter);
+#endif
     }
     connect(m_accountChip, &TitlebarAccount::clicked, this,
             [this] { switchToRoute(QStringLiteral("account")); });
@@ -594,9 +621,11 @@ void MainWindow::buildUi() {
     //   关闭键   -> requestClose()   真关闭:先把任务状态落盘再退出
     // **视觉一个字节没动**:按钮仍是上面那三个 qf 几何的类(46x32 / 图标位置 / 悬停色),
     // 这里换的只是"点了之后发生什么"。
+#if !defined(Q_OS_MACOS)
     connect(minBtn, &QAbstractButton::clicked, this, &MainWindow::hideToTray);
     connect(maxBtn, &QAbstractButton::clicked, this, &MainWindow::toggleMaximize);
     connect(closeBtn, &QAbstractButton::clicked, this, &MainWindow::requestClose);
+#endif
 
     // 标题栏自己的三个信号也要接上:双击标题栏(FluentTitleBar::mouseDoubleClickEvent)
     // 发的就是 maximizeRequested —— 走这条路的"最大化"必须和点按钮完全同语义。
